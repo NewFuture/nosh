@@ -429,18 +429,29 @@ pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
     Ok(out.trim_end().to_string())
 }
 
-fn human(n: u64) -> String {
-    const U: &[&str] = &["bytes", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
+const SIZE_UNITS: &[&str] = &["bytes", "KB", "MB", "GB", "TB"];
+
+fn size_unit(n: u64) -> usize {
+    let mut v = n;
     let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
+    while v >= 1024 && i < SIZE_UNITS.len() - 1 {
+        v /= 1024;
         i += 1;
     }
-    if i == 0 {
-        format!("{n} bytes")
+    i
+}
+
+/// `n` expressed in `SIZE_UNITS[unit]`. One unit per listing lets a small model
+/// compare sizes directly (it ranked "781.2 KB" above "11.4 MB").
+fn size_in(n: u64, unit: usize) -> String {
+    if unit == 0 || n == 0 {
+        return format!("{n} bytes");
+    }
+    let v = n as f64 / 1024f64.powi(unit as i32);
+    if v < 0.05 {
+        format!("<0.1 {}", SIZE_UNITS[unit])
     } else {
-        format!("{v:.1} {}", U[i])
+        format!("{v:.1} {}", SIZE_UNITS[unit])
     }
 }
 
@@ -461,28 +472,34 @@ pub fn list_dir(call: &ToolCall, cwd: &Path) -> Result<String, String> {
         .sort_by_file_path(|a, b| a.cmp(b))
         .build();
     let mut out = format!("[{}]\n", root.display());
-    let mut count = 0usize;
+    let mut entries: Vec<(usize, String, Option<u64>)> = Vec::new();
     let mut more = 0usize;
     for entry in walker.flatten() {
         if entry.depth() == 0 {
             continue;
         }
-        if count >= LIST_DIR_ENTRIES {
+        if entries.len() >= LIST_DIR_ENTRIES {
             more += 1;
             continue;
         }
-        count += 1;
-        let indent = "  ".repeat(entry.depth() - 1);
-        let name = entry.file_name().to_string_lossy();
+        let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-        if is_dir {
-            let _ = writeln!(out, "{indent}{name}/");
-        } else {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let _ = writeln!(out, "{indent}{name}  ({})", human(size));
+        let size = (!is_dir).then(|| entry.metadata().map(|m| m.len()).unwrap_or(0));
+        entries.push((entry.depth(), name, size));
+    }
+    let unit = size_unit(entries.iter().filter_map(|e| e.2).max().unwrap_or(0));
+    for (depth, name, size) in &entries {
+        let indent = "  ".repeat(depth - 1);
+        match size {
+            None => {
+                let _ = writeln!(out, "{indent}{name}/");
+            }
+            Some(n) => {
+                let _ = writeln!(out, "{indent}{name}  ({})", size_in(*n, unit));
+            }
         }
     }
-    if count == 0 {
+    if entries.is_empty() {
         out.push_str("(empty)\n");
     }
     if more > 0 {
@@ -619,6 +636,30 @@ mod tests {
         assert!(l.contains("a.txt"));
         assert!(!l.contains("ignored.log"), "{l}");
         assert!(!l.contains(".git/"), "{l}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_dir_sizes_share_one_unit() {
+        let dir = std::env::temp_dir().join(format!("nosh-sizes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, len) in [
+            ("big", 21_000_000),
+            ("mid", 800_000),
+            ("tiny", 9),
+            ("empty", 0),
+        ] {
+            std::fs::write(dir.join(name), vec![b'x'; len]).unwrap();
+        }
+        let l = list_dir(&call("list_dir", json!({})), &dir).unwrap();
+        assert!(l.contains("big  (20.0 MB)"), "{l}");
+        assert!(l.contains("mid  (0.8 MB)"), "{l}");
+        assert!(l.contains("tiny  (<0.1 MB)"), "{l}");
+        assert!(l.contains("empty  (0 bytes)"), "{l}");
+        std::fs::remove_file(dir.join("big")).unwrap();
+        std::fs::remove_file(dir.join("mid")).unwrap();
+        let l = list_dir(&call("list_dir", json!({})), &dir).unwrap();
+        assert!(l.contains("tiny  (9 bytes)"), "{l}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
