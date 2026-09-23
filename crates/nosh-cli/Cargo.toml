@@ -15,10 +15,13 @@ path = "src/main.rs"
 [dependencies]
 candle-core.workspace = true
 clap.workspace = true
+nosh-core.workspace = true
 nosh-hub.workspace = true
 nosh-llm.workspace = true
+nosh-permissions.workspace = true
 nosh-shell.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

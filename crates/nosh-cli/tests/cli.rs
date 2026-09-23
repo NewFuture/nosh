@@ -67,3 +67,52 @@ fn commands_from_stdin() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "got:hello\n1\n2\n");
 }
+
+fn empty_home(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("nosh-cli-empty-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn agent_modes_without_a_model_exit_2() {
+    let home = empty_home("a");
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["--offline", "-s", "list files"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "stdout carries only a command");
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["--no-download", "-a", "what time is it"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .arg("-a")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "usage error");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn doctor_reports_missing_model() {
+    let home = empty_home("doctor");
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["--offline", "doctor"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("model"), "{err}");
+    let _ = std::fs::remove_dir_all(home);
+}

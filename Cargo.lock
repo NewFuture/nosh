@@ -1845,10 +1845,13 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "clap",
+ "nosh-core",
  "nosh-hub",
  "nosh-llm",
+ "nosh-permissions",
  "nosh-shell",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

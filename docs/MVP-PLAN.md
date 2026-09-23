@@ -145,10 +145,10 @@ nosh/
 - [x] 验证：用 MockChatEngine 跑完整的任务流测试（多步、拒绝、错误回灌、截断）。
 
 ### T6 CLI 与收尾（约 0.5 天）
-- [ ] `nosh`、`-c`、脚本、`-a`（stdin 作为附件）、`-s`（stdout 只输出命令）；`--auto`、`--yolo`、`--offline`、`--model-path`、`--no-download`、`--norc`、`--safe`；设计文档中的退出码约定。
-- [ ] 首次启动时的下载确认（默认 Y）；MVP 可以在前台下载，改成后台下载是加分项。
-- [ ] `nosh doctor`：检查 CPU 特性、内存、模型状态、下载源连通性和离线状态。
-- [ ] 配置文件 `~/.config/nosh/config.toml`：只支持 §11 中的常用项，未知项给出警告。
+- [x] `nosh`、`-c`、脚本、`-a`（stdin 作为附件）、`-s`（stdout 只输出命令）；`--auto`、`--yolo`、`--offline`、`--model-path`、`--no-download`、`--norc`、`--safe`；设计文档中的退出码约定。
+- [x] 首次启动时的下载确认（默认 Y）；MVP 可以在前台下载，改成后台下载是加分项。
+- [x] `nosh doctor`：检查 CPU 特性、内存、模型状态、下载源连通性和离线状态。
+- [x] 配置文件 `~/.config/nosh/config.toml`：只支持 §11 中的常用项，未知项给出警告。
 
 ### T7 端到端验证与报告（约 1 天）
 - [ ] 在 WSL 中用真实模型跑 10 个脚本化场景，至少覆盖：查找大文件、端口占用、统计代码行数、批量重命名（需要审批）、用中文提问、拼写纠错、执行失败后分析原因、管道总结 `git log`、`nosh -s` 生成命令、agent 执行 `cd` 后状态延续。

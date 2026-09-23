@@ -213,10 +213,10 @@ impl AgentUi for TermUi {
             style::bold(tool)
         );
         for (i, l) in detail.lines().enumerate() {
-            let p = if i == 0 && tool == "run_command" {
-                "$ "
-            } else {
-                "  "
+            let p = match (i, tool) {
+                (0, "run_command") => "$ ",
+                (_, "run_command") => "  ",
+                _ => "",
             };
             eprintln!("{}   {p}{l}", self.bar);
         }
