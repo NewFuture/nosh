@@ -39,6 +39,7 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "signal", "time", "
 # inference: pinned candle main rev (runtime AVX2/AVX-512 dispatch, tokenizers 0.23 + fancy-regex)
 candle-core = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
 candle-nn = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
+gemm = "0.19.0"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 
 # hub

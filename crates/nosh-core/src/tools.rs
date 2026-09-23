@@ -41,7 +41,8 @@ pub fn run_command_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: "read_file".into(),
-        description: "Read a text file with line numbers (at most 400 lines).".into(),
+        description: "Read a text file (not a directory) with line numbers, at most 400 lines."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -57,7 +58,7 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn list_dir_spec() -> ToolSpec {
     ToolSpec {
         name: "list_dir".into(),
-        description: "List files in a directory (respects .gitignore).".into(),
+        description: "List file names and sizes in a directory (respects .gitignore). For counting lines or searching, use run_command.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -336,7 +337,7 @@ pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
 }
 
 fn human(n: u64) -> String {
-    const U: &[&str] = &["B", "K", "M", "G", "T"];
+    const U: &[&str] = &["bytes", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024.0 && i < U.len() - 1 {
@@ -344,9 +345,9 @@ fn human(n: u64) -> String {
         i += 1;
     }
     if i == 0 {
-        format!("{n}B")
+        format!("{n} bytes")
     } else {
-        format!("{v:.1}{}", U[i])
+        format!("{v:.1} {}", U[i])
     }
 }
 
@@ -385,7 +386,7 @@ pub fn list_dir(call: &ToolCall, cwd: &Path) -> Result<String, String> {
             let _ = writeln!(out, "{indent}{name}/");
         } else {
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let _ = writeln!(out, "{indent}{name}  {}", human(size));
+            let _ = writeln!(out, "{indent}{name}  ({})", human(size));
         }
     }
     if count == 0 {

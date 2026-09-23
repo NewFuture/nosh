@@ -438,17 +438,23 @@ impl Agent {
             ui.notice(tr!("已取消", "cancelled"));
         }
         let tps = out.usage.decode_tps();
+        let u = &out.usage;
         ui.finish(&TaskSummary {
             status: out.status.as_str().into(),
             steps: out.steps,
             secs: started.elapsed().as_secs_f64(),
-            prompt_tokens: out.usage.prompt_tokens,
-            completion_tokens: out.usage.completion_tokens,
-            decode_tps: if out.usage.completion_tokens > 0 {
-                tps
+            prompt_tokens: u.prompt_tokens,
+            cached_tokens: u.cached_tokens,
+            completion_tokens: u.completion_tokens,
+            prefill_tps: if u.prompt_tokens > 0 {
+                u.prefill_tps()
             } else {
                 0.0
             },
+            decode_tps: if u.completion_tokens > 0 { tps } else { 0.0 },
+            ttft_secs: u.ttft_secs,
+            context_used: u.context_used,
+            context_max: u.context_max,
             note: match out.status {
                 TaskStatus::Incomplete if out.steps > self.cfg.max_steps => {
                     Some(tr!("达到步数上限", "step limit reached").into())

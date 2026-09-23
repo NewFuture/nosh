@@ -17,9 +17,39 @@ pub struct TaskSummary {
     pub steps: usize,
     pub secs: f64,
     pub prompt_tokens: usize,
+    pub cached_tokens: usize,
     pub completion_tokens: usize,
+    pub prefill_tps: f64,
     pub decode_tps: f64,
+    /// Time to the first token of the first step.
+    pub ttft_secs: f64,
+    pub context_used: usize,
+    pub context_max: usize,
     pub note: Option<String>,
+}
+
+impl TaskSummary {
+    /// One line of engine statistics (`NOSH_STATS=1`).
+    pub fn stats_line(&self) -> String {
+        let rss = nosh_llm::rss_mb()
+            .map(|(cur, peak)| format!(" · rss {cur:.0}/{peak:.0} MB"))
+            .unwrap_or_default();
+        format!(
+            "stats: prompt {} (+{} cached) tok @ {:.0} tok/s · gen {} tok @ {:.1} tok/s · ttft {:.2}s · ctx {}/{}{rss}",
+            self.prompt_tokens,
+            self.cached_tokens,
+            self.prefill_tps,
+            self.completion_tokens,
+            self.decode_tps,
+            self.ttft_secs,
+            self.context_used,
+            self.context_max
+        )
+    }
+}
+
+fn stats_enabled() -> bool {
+    std::env::var_os("NOSH_STATS").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 pub trait AgentUi {
@@ -295,6 +325,9 @@ impl AgentUi for TermUi {
             line = format!("{n} ({line})");
         }
         eprintln!("{} {mark} {}", self.bar, style::dim(&line));
+        if stats_enabled() {
+            eprintln!("{} {}", self.bar, style::dim(&s.stats_line()));
+        }
         self.text_started = false;
     }
 }
@@ -340,7 +373,10 @@ impl AgentUi for JsonUi {
     fn finish(&mut self, s: &TaskSummary) {
         emit(
             json!({"ev": "done", "status": s.status, "steps": s.steps, "secs": s.secs,
-            "usage": {"prompt": s.prompt_tokens, "completion": s.completion_tokens, "tok_s": s.decode_tps}}),
+            "usage": {"prompt": s.prompt_tokens, "cached": s.cached_tokens,
+                "completion": s.completion_tokens, "prefill_tok_s": s.prefill_tps,
+                "tok_s": s.decode_tps, "ttft_s": s.ttft_secs,
+                "context": s.context_used, "context_max": s.context_max}}),
         );
     }
 }
