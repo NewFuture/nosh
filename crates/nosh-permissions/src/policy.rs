@@ -251,8 +251,11 @@ pub fn decide(
             reason: format!("matches deny rule '{p}'"),
         };
     }
-    // Allow rules and session grants never skip the Dangerous confirmation.
-    if risk <= Risk::Mutating && (rules.allows(report) || session.covers(report)) {
+    // Allow rules cover everything but Forbidden (DESIGN §6.2), except when
+    // hidden characters make the line differ from what the user can read;
+    // session grants cover at most Mutating.
+    let hidden = command.chars().any(crate::analyze::hidden_char);
+    if (!hidden && rules.allows(report)) || session.covers(report) {
         return Decision::Allow;
     }
     match (risk, mode) {

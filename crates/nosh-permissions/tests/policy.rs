@@ -41,12 +41,18 @@ fn allow_rules_must_match_every_simple_command() {
         d("git add a.txt && git push", Confirm, &add, &none),
         Decision::Ask { .. }
     ));
-    // An allow rule never skips the Dangerous confirmation.
-    let rm = rules(&["rm *"], &[]);
-    assert_eq!(
-        d("rm -rf ~/Documents", Confirm, &rm, &none),
+    // Allow rules may approve Dangerous commands (DESIGN §6.2), never Forbidden
+    // ones, and not lines whose hidden characters could fool the glob.
+    let rm = rules(&["rm *", "ls*"], &[]);
+    assert_eq!(d("rm -rf build", Confirm, &rm, &none), Decision::Allow);
+    assert!(matches!(
+        d("rm -rf ~", Confirm, &rm, &none),
+        Decision::Deny { .. }
+    ));
+    assert!(matches!(
+        d("ls\u{200b}", Confirm, &rm, &none),
         Decision::Ask { strong: true }
-    );
+    ));
 }
 
 #[test]

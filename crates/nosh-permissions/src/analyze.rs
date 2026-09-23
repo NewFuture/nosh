@@ -51,7 +51,7 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
 
 /// Control characters (except newline and tab), bidirectional overrides and
 /// zero-width characters: they make a terminal show something else.
-fn hidden_char(c: char) -> bool {
+pub(crate) fn hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
             c as u32,
