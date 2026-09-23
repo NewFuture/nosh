@@ -352,3 +352,192 @@ fn pipeline_corrects_without_running() {
     assert!(ai.requests.is_empty());
     assert!(sh.recent_commands().is_empty(), "nothing may run");
 }
+
+/// A sink as slow as a terminal display: it must not hold up the timeout.
+struct SlowSink(usize);
+
+impl nosh_shell::OutputSink for SlowSink {
+    fn stdout(&mut self, chunk: &str) {
+        self.0 += chunk.len();
+        std::thread::sleep(Duration::from_micros(300));
+    }
+    fn stderr(&mut self, _: &str) {}
+}
+
+#[test]
+fn fast_output_does_not_block_the_timeout() {
+    let _g = serial();
+    let mut sh = shell();
+    let start = Instant::now();
+    let mut sink = SlowSink(0);
+    let r = sh
+        .run_agent_command(
+            "yes",
+            &AgentExecOpts {
+                timeout: Duration::from_secs(1),
+                capture_limit: 1 << 20,
+            },
+            &mut sink,
+        )
+        .unwrap();
+    assert!(r.timed_out);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(r.truncated);
+    assert!(r.stdout.len() <= 1 << 20);
+    assert!(
+        sink.0 <= 1 << 20,
+        "the display gets no more than the capture"
+    );
+}
+
+/// Processes whose command line contains `needle` (from /proc).
+fn processes_with(needle: &str) -> usize {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            std::fs::read(e.path().join("cmdline"))
+                .map(|c| {
+                    String::from_utf8_lossy(&c)
+                        .replace('\0', " ")
+                        .contains(needle)
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+#[test]
+fn timeout_stops_substitutions_and_pipeline_stages() {
+    let _g = serial();
+    let mut sh = shell();
+    for (cmd, needle) in [
+        ("x=$(sleep 31.25); echo done", "sleep 31.25"),
+        ("echo hi | sleep 32.25", "sleep 32.25"),
+    ] {
+        let r = sh
+            .run_agent_command(
+                cmd,
+                &AgentExecOpts {
+                    timeout: Duration::from_millis(500),
+                    ..AgentExecOpts::default()
+                },
+                &mut NullSink,
+            )
+            .unwrap();
+        assert!(r.timed_out, "{cmd}");
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while processes_with(needle) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(processes_with(needle), 0, "{cmd} left a process behind");
+    }
+}
+
+#[test]
+fn builtin_only_loops_time_out() {
+    let _g = serial();
+    // Agent shells (interactive or `nosh -a`) catch SIGINT and make builtins
+    // interruptible.
+    let mut sh = EmbeddedShell::new(ShellOptions {
+        catch_sigint: true,
+        ..ShellOptions::default()
+    })
+    .unwrap();
+    let start = Instant::now();
+    let r = sh
+        .run_agent_command(
+            "while :; do :; done",
+            &AgentExecOpts {
+                timeout: Duration::from_millis(500),
+                ..AgentExecOpts::default()
+            },
+            &mut NullSink,
+        )
+        .unwrap();
+    assert!(r.timed_out);
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(agent(&mut sh, "echo ok").stdout, "ok\n");
+}
+
+#[test]
+fn abandoned_functions_leave_no_variables_behind() {
+    let _g = serial();
+    let mut sh = shell();
+    let path = sh.var("PATH");
+    agent(
+        &mut sh,
+        "f() { sleep 30; }; outer() { local PATH=/nonexistent; inner; }; inner() { sleep 30; }",
+    );
+    let opts = AgentExecOpts {
+        timeout: Duration::from_millis(400),
+        ..AgentExecOpts::default()
+    };
+    assert!(
+        sh.run_agent_command("NOSH_LEAK=bar f", &opts, &mut NullSink)
+            .unwrap()
+            .timed_out
+    );
+    assert_eq!(sh.var("NOSH_LEAK"), None);
+    assert!(
+        sh.run_agent_command("outer", &opts, &mut NullSink)
+            .unwrap()
+            .timed_out
+    );
+    assert_eq!(sh.var("PATH"), path);
+    let r = agent(
+        &mut sh,
+        "echo ${NOSH_LEAK:-unset}; ls / >/dev/null && echo ls-ok",
+    );
+    assert_eq!(r.stdout, "unset\nls-ok\n");
+}
+
+#[test]
+fn background_jobs_keep_running_after_the_command_returns() {
+    let _g = serial();
+    let dir = tmpdir("bg");
+    let marker = dir.join("marker");
+    let mut sh = shell();
+    let cmd = format!(
+        "sh -c 'for i in 1 2 3 4 5 6; do echo tick; sleep 0.25; done; touch {}' &",
+        marker.display()
+    );
+    let r = agent(&mut sh, &cmd);
+    assert_eq!(r.exit_code, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(marker.exists(), "the background job was killed by SIGPIPE");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ctrl_c_ends_a_builtin_loop_typed_at_the_prompt() {
+    let _g = serial();
+    let mut sh = EmbeddedShell::new(ShellOptions {
+        interactive: true,
+        ..ShellOptions::default()
+    })
+    .unwrap();
+    sh.run_user_line("f() { local NOSH_LOCAL=1; while :; do :; done; }");
+    let ints = sh.interrupts();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        ints.fire();
+    });
+    let start = Instant::now();
+    let run = sh.run_user_line("f");
+    assert_eq!(run.exit_code, 130);
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(sh.var("NOSH_LOCAL"), None);
+    assert_eq!(sh.run_user_line("true").exit_code, 0);
+}

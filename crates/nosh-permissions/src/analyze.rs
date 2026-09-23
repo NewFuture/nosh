@@ -8,7 +8,7 @@ use brush_parser::ParserOptions;
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 
-use crate::paths::{PathClass, classify_path, resolve};
+use crate::paths::{PathClass, classify_path_real, resolve};
 use crate::rules::{self, Arg, Target, Verdict, has_flag, opt_value};
 use crate::{Context, Risk, RiskReport};
 
@@ -36,11 +36,27 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
     if compact.contains(":(){:|:&};:") || compact.contains("(){$0|$0&};") {
         a.report.add(Risk::Forbidden, "fork bomb");
     }
+    if cmd.chars().any(hidden_char) {
+        a.report.add(
+            Risk::Dangerous,
+            "contains control or invisible characters (what is shown may differ from what runs)",
+        );
+    }
     a.program_text(cmd, true);
     if !a.sudo_inserts.is_empty() {
         a.report.rewritten = Some(insert_sudo_n(cmd, &a.sudo_inserts));
     }
     a.report
+}
+
+/// Control characters (except newline and tab), bidirectional overrides and
+/// zero-width characters: they make a terminal show something else.
+fn hidden_char(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(
+            c as u32,
+            0x061c | 0x200b..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069 | 0xfeff
+        )
 }
 
 fn insert_sudo_n(cmd: &str, char_positions: &[usize]) -> String {
@@ -687,7 +703,7 @@ impl Analyzer<'_> {
         if a.dynamic {
             return None;
         }
-        Some(classify_path(&self.resolve(&a.value), self.ctx))
+        Some(classify_path_real(&self.resolve(&a.value), self.ctx, true).0)
     }
 
     fn resolve(&self, p: &str) -> PathBuf {
@@ -734,9 +750,11 @@ impl Analyzer<'_> {
                 None => ".".into(),
             };
         }
-        let resolved = self.resolve(&p);
+        let lexical = self.resolve(&p);
         let changes = if v.deletes { "deletes" } else { "modifies" };
-        match classify_path(&resolved, self.ctx) {
+        // `rm` removes a symlink itself; writes go through it.
+        let (class, resolved) = classify_path_real(&lexical, self.ctx, !v.deletes);
+        match class {
             PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
             PathClass::Protected(l) => {
                 if v.recursive && v.deletes && resolved.components().count() <= 2 {
@@ -804,7 +822,9 @@ impl Analyzer<'_> {
         if t.dynamic {
             return;
         }
-        if let PathClass::Protected(l) = classify_path(&self.resolve(&t.path), self.ctx) {
+        if let (PathClass::Protected(l), _) =
+            classify_path_real(&self.resolve(&t.path), self.ctx, true)
+        {
             self.add(Risk::Mutating, format!("reads protected path {l}"));
             self.report.reads_protected = true;
         }

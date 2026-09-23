@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub use analyze::assess_command;
-pub use paths::{PathClass, classify_path};
+pub use paths::{PathClass, classify_path, classify_path_real, real_path};
 pub use policy::{ApprovalMode, Decision, SessionAllowList, UserRules, decide, glob_match};
 
 /// Risk levels, ordered.

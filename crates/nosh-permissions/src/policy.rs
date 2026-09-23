@@ -78,23 +78,52 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 impl UserRules {
-    fn denies(&self, cmd: &str) -> Option<&str> {
+    /// A deny rule matching the whole line or any simple command in it, also
+    /// with leading words (wrappers such as `sudo`, `env X=1`) removed.
+    fn denies(&self, cmd: &str, report: &RiskReport) -> Option<&str> {
+        let mut texts: Vec<&str> = vec![cmd.trim()];
+        for c in &report.commands {
+            let mut rest = c.trim();
+            loop {
+                texts.push(rest);
+                match rest.find(char::is_whitespace) {
+                    Some(i) => rest = rest[i..].trim_start(),
+                    None => break,
+                }
+            }
+        }
         self.deny
             .iter()
-            .find(|p| glob_match(p, cmd.trim()))
+            .find(|p| texts.iter().any(|t| glob_match(p, t)))
             .map(String::as_str)
     }
 
-    fn allows(&self, cmd: &str) -> bool {
-        self.allow.iter().any(|p| glob_match(p, cmd.trim()))
+    /// Every simple command of the line matches an allow rule (a rule for
+    /// `git status*` must not cover `git status; rm -rf ~`).
+    fn allows(&self, report: &RiskReport) -> bool {
+        !report.commands.is_empty()
+            && report
+                .commands
+                .iter()
+                .all(|c| self.allow.iter().any(|p| glob_match(p, c.trim())))
     }
 }
 
-/// Grants from answering `a` on an approval card: exact command prefixes,
-/// only for commands whose risk is at most Mutating.
+/// Grants from answering `a` on an approval card: command prefixes, only for
+/// commands whose risk is at most Mutating, remembering whether the approved
+/// command used the network, wrote outside the workspace or changed the
+/// session; a later command needs a grant with the same properties.
 #[derive(Debug, Clone, Default)]
 pub struct SessionAllowList {
-    prefixes: Vec<String>,
+    grants: Vec<Grant>,
+}
+
+#[derive(Debug, Clone)]
+struct Grant {
+    prefix: String,
+    network: bool,
+    outside: bool,
+    session: bool,
 }
 
 const SUBCOMMAND_TOOLS: &[&str] = &[
@@ -153,23 +182,43 @@ impl SessionAllowList {
     pub fn grant(&mut self, report: &RiskReport) {
         for c in &report.commands {
             let p = Self::prefix_of(c);
-            if !p.is_empty() && !self.prefixes.contains(&p) {
-                self.prefixes.push(p);
+            if p.is_empty() {
+                continue;
+            }
+            match self.grants.iter_mut().find(|g| g.prefix == p) {
+                Some(g) => {
+                    g.network |= report.network;
+                    g.outside |= report.writes_outside_workspace;
+                    g.session |= report.changes_session;
+                }
+                None => self.grants.push(Grant {
+                    prefix: p,
+                    network: report.network,
+                    outside: report.writes_outside_workspace,
+                    session: report.changes_session,
+                }),
             }
         }
     }
 
+    /// Protected reads always ask again.
     pub fn covers(&self, report: &RiskReport) -> bool {
         report.risk() <= Risk::Mutating
+            && !report.reads_protected
             && !report.commands.is_empty()
-            && report
-                .commands
-                .iter()
-                .all(|c| self.prefixes.contains(&Self::prefix_of(c)))
+            && report.commands.iter().all(|c| {
+                let p = Self::prefix_of(c);
+                self.grants.iter().any(|g| {
+                    g.prefix == p
+                        && (!report.network || g.network)
+                        && (!report.writes_outside_workspace || g.outside)
+                        && (!report.changes_session || g.session)
+                })
+            })
     }
 
-    pub fn prefixes(&self) -> &[String] {
-        &self.prefixes
+    pub fn prefixes(&self) -> Vec<&str> {
+        self.grants.iter().map(|g| g.prefix.as_str()).collect()
     }
 }
 
@@ -197,12 +246,13 @@ pub fn decide(
             .unwrap_or_else(|| "forbidden".into());
         return Decision::Deny { reason: why };
     }
-    if let Some(p) = rules.denies(command) {
+    if let Some(p) = rules.denies(command, report) {
         return Decision::Deny {
             reason: format!("matches deny rule '{p}'"),
         };
     }
-    if rules.allows(command) || session.covers(report) {
+    // Allow rules and session grants never skip the Dangerous confirmation.
+    if risk <= Risk::Mutating && (rules.allows(report) || session.covers(report)) {
         return Decision::Allow;
     }
     match (risk, mode) {
@@ -338,7 +388,7 @@ mod tests {
 
         let mut grants = SessionAllowList::default();
         grants.grant(&report(Risk::Mutating));
-        assert_eq!(grants.prefixes(), &["git add".to_string()]);
+        assert_eq!(grants.prefixes(), vec!["git add"]);
         let none = UserRules::default();
         assert_eq!(
             decide(

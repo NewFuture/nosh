@@ -13,7 +13,7 @@ use nosh_llm::{
 };
 use nosh_permissions::{
     ApprovalMode, Context, Decision, Finding, PathClass, Risk, RiskReport, SessionAllowList,
-    UserRules, assess_command, classify_path, decide,
+    UserRules, assess_command, classify_path_real, decide,
 };
 use nosh_shell::{AgentExecOpts, EmbeddedShell};
 
@@ -278,7 +278,6 @@ impl Agent {
             ints.on_interrupt(move || c.cancel());
             self.hooked = true;
         }
-        let int0 = ints.count();
         let mut out = TaskOutcome::default();
         let sid = match self.ensure_session() {
             Ok(s) => s,
@@ -302,11 +301,6 @@ impl Agent {
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
         loop {
-            if ints.count() >= int0 + 2 {
-                out.status = TaskStatus::Cancelled;
-                self.carry = pending;
-                break;
-            }
             if out.steps >= self.cfg.max_steps && !summarizing {
                 summarizing = true;
                 pending.push(Message::User(SUMMARIZE.into()));
@@ -360,7 +354,7 @@ impl Agent {
                     ));
                     continue;
                 }
-                match self.exec_call(shell, call, approval, ui, int0) {
+                match self.exec_call(shell, call, approval, ui) {
                     Exec::Result(t) => {
                         proposed_only = false;
                         if call.name == "run_command" {
@@ -472,7 +466,6 @@ impl Agent {
         call: &ToolCall,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
-        int0: u64,
     ) -> Exec {
         let allowed: Vec<String> = tools::specs(self.tools)
             .into_iter()
@@ -486,7 +479,7 @@ impl Agent {
             ));
         }
         match call.name.as_str() {
-            "run_command" => self.run_command(shell, call, approval, ui, int0),
+            "run_command" => self.run_command(shell, call, approval, ui),
             "read_file" | "list_dir" => self.read_tool(shell, call, approval, ui),
             "propose_command" => {
                 let Some(cmd) = call
@@ -496,6 +489,11 @@ impl Agent {
                 else {
                     return Exec::Result("error: missing required parameter 'command'".into());
                 };
+                if cmd.chars().any(nosh_shell::style::is_hidden) {
+                    return Exec::Result(
+                        "error: the command contains control or invisible characters; propose plain text".into(),
+                    );
+                }
                 ui.proposed(cmd, call.str_arg("explanation"));
                 Exec::Proposed(
                     cmd.to_string(),
@@ -522,7 +520,6 @@ impl Agent {
         call: &ToolCall,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
-        int0: u64,
     ) -> Exec {
         let Some(original) = call
             .str_arg("command")
@@ -595,7 +592,7 @@ impl Agent {
                     }
                 }
             };
-            return self.execute(shell, &command, &report, &label, timeout, edited, ui, int0);
+            return self.execute(shell, &command, &report, &label, timeout, edited, ui);
         }
         Exec::Denied("[denied] too many edits".into())
     }
@@ -610,7 +607,6 @@ impl Agent {
         timeout: Duration,
         edited: bool,
         ui: &mut dyn AgentUi,
-        int0: u64,
     ) -> Exec {
         let to_run = report
             .rewritten
@@ -621,6 +617,9 @@ impl Agent {
             timeout,
             ..AgentExecOpts::default()
         };
+        // Ctrl-C interrupts the command; pressing it again during the same
+        // command aborts the task.
+        let ints_before = shell.interrupts().count();
         let r = match shell.run_agent_command(&to_run, &opts, &mut UiSink(ui)) {
             Ok(r) => r,
             Err(e) => {
@@ -659,7 +658,7 @@ impl Agent {
         if edited {
             text = format!("[note] the user edited the command to: {to_run}\n{text}");
         }
-        if shell.interrupts().count() >= int0 + 2 {
+        if shell.interrupts().count() >= ints_before + 2 {
             return Exec::Aborted(text);
         }
         Exec::Result(text)
@@ -678,7 +677,8 @@ impl Agent {
         let detail = path.display().to_string();
         let mut risk = Risk::Safe;
         let mut label = format!("{} · auto", Risk::Safe);
-        if let PathClass::Protected(what) = classify_path(&path, &ctx) {
+        // Also through symlinks: a link in the workspace to ~/.ssh is protected.
+        if let (PathClass::Protected(what), _) = classify_path_real(&path, &ctx, true) {
             risk = Risk::Mutating;
             let why = format!("reads a protected path ({what})");
             let report = RiskReport {

@@ -91,10 +91,19 @@ fn say(msg: &str) {
 impl AiHandler for ShellAi {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome {
         let show_think = self.cfg.thinking;
+        let ints = shell.interrupts().count();
         if self.agent(shell).is_none() {
             return AiOutcome {
                 prefill: None,
                 exit_code: 2,
+            };
+        }
+        // Ctrl-C while the model was downloading or loading: stop here.
+        if shell.interrupts().count() > ints {
+            eprintln!("{}", style::dim(tr!("已取消", "cancelled")));
+            return AiOutcome {
+                prefill: None,
+                exit_code: 130,
             };
         }
         let (Some(agent), approval) = (self.agent.as_mut(), self.approval.as_mut()) else {
@@ -204,7 +213,11 @@ impl AiHandler for ShellAi {
 
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String> {
         let sampling = self.cfg.sampling;
+        let ints = shell.interrupts().count();
         let agent = self.agent(shell)?;
+        if shell.interrupts().count() > ints {
+            return None;
+        }
         let env = agent.environment().clone();
         eprint!("{}", style::dim(tr!("… 生成命令中", "… suggesting")));
         let r = crate::suggest::suggest(

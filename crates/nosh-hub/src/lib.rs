@@ -31,6 +31,8 @@ pub use store::{FileState, ResolvedModel};
 pub enum HubError {
     #[error("offline mode is on; network access is disabled")]
     Offline,
+    #[error("download cancelled")]
+    Cancelled,
     #[error("unknown model '{0}' (see `nosh model list`)")]
     UnknownModel(String),
     #[error("model {0} is not installed; run `nosh model pull` or `nosh model import`")]
@@ -279,6 +281,7 @@ impl ModelHub {
         if net::is_offline() {
             return Err(HubError::Offline);
         }
+        net::clear_cancel();
         let dir = self.user_model_dir(&entry);
         paths::ensure_private_dir(&dir)?;
         let endpoints = sources::Endpoints::from_env();

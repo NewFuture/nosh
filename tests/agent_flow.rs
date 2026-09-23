@@ -397,6 +397,52 @@ fn propose_command_ends_the_task_with_a_prefill() {
 }
 
 #[test]
+fn reads_through_dotdot_or_symlinks_still_ask() {
+    let _g = setup();
+    let dir = tmpdir("dotdot");
+    std::os::unix::fs::symlink("/etc/hostname", dir.join("host")).unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    let up = "../".repeat(dir.components().count());
+    let engine = MockChatEngine::new(vec![
+        vec![call(
+            "read_file",
+            json!({"path": format!("{up}etc/hostname")}),
+        )],
+        vec![call("read_file", json!({"path": "host"}))],
+        vec![call(
+            "propose_command",
+            json!({"command": "rm -rf ~/x #\u{202e} sl"}),
+        )],
+        vec![text("ok")],
+    ]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    let mut approval = Scripted::new([
+        ApprovalResponse::Deny { reason: None },
+        ApprovalResponse::Deny { reason: None },
+    ]);
+    let out = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "read the host name"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(approval.seen.len(), 2, "both reads reach /etc");
+    assert_eq!(approval.seen[0].command, "read_file /etc/hostname");
+    let results = tool_results(&received.lock().unwrap());
+    assert!(results[0].contains("[denied by user]"), "{}", results[0]);
+    assert!(results[1].contains("[denied by user]"), "{}", results[1]);
+    assert!(
+        results[2].starts_with("error: the command contains"),
+        "{}",
+        results[2]
+    );
+    assert_eq!(out.proposed, None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn read_only_tools_and_protected_paths() {
     let _g = setup();
     let dir = tmpdir("read");
@@ -534,6 +580,7 @@ fn repl_pipeline_with_mock_engine() {
         panic!("expected a task message");
     };
     assert!(u.contains("trigger=not_found"), "{u}");
+    assert!(u.contains(" lang=zh]"), "{u}");
     assert!(u.contains("[recent] pwd >"), "{u}");
     drop(rec);
     let _ = std::fs::remove_dir_all(dir);

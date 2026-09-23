@@ -44,14 +44,17 @@ fn read_stdin() -> Option<Vec<u8>> {
 }
 
 fn open_shell() -> Result<EmbeddedShell, i32> {
-    EmbeddedShell::new(ShellOptions {
+    let shell = EmbeddedShell::new(ShellOptions {
         catch_sigint: true,
         ..ShellOptions::default()
     })
     .map_err(|e| {
         eprintln!("nosh: {e}");
         2
-    })
+    })?;
+    // Ctrl-C stops a model download (the partial file is kept).
+    shell.interrupts().on_interrupt(nosh_hub::net::cancel);
+    Ok(shell)
 }
 
 pub fn run_agent(
@@ -76,9 +79,16 @@ pub fn run_agent(
         Ok(l) => l,
         Err(e) => {
             eprintln!("nosh: {e}");
-            return 2;
+            return if shell.interrupts().count() > 0 {
+                130
+            } else {
+                2
+            };
         }
     };
+    if shell.interrupts().count() > 0 {
+        return 130;
+    }
     let (trigger, tools) = if stdin.is_some() {
         (Trigger::Pipe, ToolSet::ReadOnly)
     } else {
@@ -137,19 +147,32 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
         Ok(l) => l,
         Err(e) => {
             eprintln!("nosh: {e}");
-            return 2;
+            return if shell.interrupts().count() > 0 {
+                130
+            } else {
+                2
+            };
         }
     };
+    if shell.interrupts().count() > 0 {
+        return 130;
+    }
+    let cancel = loaded.engine.cancel_handle();
+    shell.interrupts().on_interrupt(move || cancel.cancel());
     let env = Environment::detect(&shell);
     let sampling = agent_config(cfg, ApprovalMode::Confirm, seed).sampling;
-    match nosh_core::suggest::suggest(
+    let r = nosh_core::suggest::suggest(
         loaded.engine.as_mut(),
         &env,
         &shell,
         &text,
         Trigger::Cli,
         sampling,
-    ) {
+    );
+    if shell.interrupts().count() > 0 {
+        return 130;
+    }
+    match r {
         Ok(Some(s)) => {
             println!("{}", s.command);
             if let Some(e) = s.explanation.filter(|e| !e.trim().is_empty()) {

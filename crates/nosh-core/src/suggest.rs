@@ -38,7 +38,7 @@ pub fn suggest(
     let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
     engine.close(sid);
     let out = res?;
-    if let Some(c) = out
+    let found = out
         .tool_calls
         .iter()
         .find(|c| c.name == "propose_command")
@@ -49,13 +49,14 @@ pub fn suggest(
                 explanation: c.str_arg("explanation").map(str::to_string),
             })
         })
-    {
-        return Ok(Some(c));
-    }
-    Ok(extract_command(&out.text).map(|command| Suggestion {
-        command,
-        explanation: None,
-    }))
+        .or_else(|| {
+            extract_command(&out.text).map(|command| Suggestion {
+                command,
+                explanation: None,
+            })
+        });
+    // Never hand the user a command whose text is not what it looks like.
+    Ok(found.filter(|s| !s.command.chars().any(nosh_shell::style::is_hidden)))
 }
 
 /// Falls back to a command in a code block or a `$ ` line of prose output.

@@ -9,6 +9,21 @@ use std::time::Duration;
 use crate::HubError;
 
 static FORCED_OFFLINE: AtomicBool = AtomicBool::new(false);
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Asks running downloads to stop (safe to call from a Ctrl-C hook); the
+/// partial file is kept for resuming.
+pub fn cancel() {
+    CANCELLED.store(true, Ordering::SeqCst);
+}
+
+pub fn clear_cancel() {
+    CANCELLED.store(false, Ordering::SeqCst);
+}
+
+pub fn is_cancelled() -> bool {
+    CANCELLED.load(Ordering::SeqCst)
+}
 
 /// Forces offline mode for the rest of the process (e.g. `--offline`).
 pub fn set_offline(offline: bool) {

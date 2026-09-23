@@ -141,6 +141,56 @@ pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
     PathClass::Outside
 }
 
+/// Resolves symlinks in the existing part of an absolute, normalized path
+/// (`follow_last`: also the final component, as opening a file does; `rm`
+/// removes a link itself). `None` when nothing changes or it cannot be read.
+pub fn real_path(p: &Path, follow_last: bool) -> Option<PathBuf> {
+    let (dir, last) = if follow_last {
+        (p, None)
+    } else {
+        (p.parent()?, Some(p.file_name()?))
+    };
+    // Longest existing prefix, then the missing tail.
+    let mut existing = dir;
+    let mut tail = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        tail.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+    let mut real = match std::fs::canonicalize(existing) {
+        Ok(r) => r,
+        // A dangling link: take its target lexically.
+        Err(_) => {
+            let target = std::fs::read_link(existing).ok()?;
+            let base = existing.parent().unwrap_or(Path::new("/"));
+            resolve(&target.to_string_lossy(), base, None)
+        }
+    };
+    for c in tail.iter().rev() {
+        real.push(c);
+    }
+    if let Some(l) = last {
+        real.push(l);
+    }
+    (real != p).then_some(real)
+}
+
+/// [`classify_path`], upgraded to `Protected` when the path reaches a
+/// protected location through a symlink. Returns the class and the path it
+/// applies to.
+pub fn classify_path_real(p: &Path, ctx: &Context, follow_last: bool) -> (PathClass, PathBuf) {
+    let lexical = classify_path(p, ctx);
+    if matches!(lexical, PathClass::Protected(_) | PathClass::Null) {
+        return (lexical, p.to_path_buf());
+    }
+    if let Some(real) = real_path(p, follow_last)
+        && let c @ PathClass::Protected(_) = classify_path(&real, ctx)
+    {
+        return (c, real);
+    }
+    (lexical, p.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

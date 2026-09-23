@@ -183,7 +183,12 @@ pub fn git_state(cwd: &Path) -> Option<String> {
 
 fn git_dirty(cwd: &Path) -> Option<bool> {
     let mut child = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -248,7 +253,17 @@ pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str
     if let Some(g) = git_state(&st.cwd) {
         header.push_str(&format!(" git={g}"));
     }
-    header.push_str(&format!(" time={}]", local_time()));
+    header.push_str(&format!(" time={}", local_time()));
+    // A hint for the small model to answer in the user's language.
+    let cjk = nosh_shell::trigger::contains_cjk(&input.text)
+        || input
+            .failed
+            .as_ref()
+            .is_some_and(|f| nosh_shell::trigger::contains_cjk(&f.line));
+    if cjk {
+        header.push_str(" lang=zh");
+    }
+    header.push(']');
     let mut msg = header;
     let recent: Vec<String> = shell
         .recent_commands()

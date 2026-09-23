@@ -126,14 +126,14 @@ impl TerminalApproval {
         );
         for (i, line) in req.command.lines().enumerate() {
             let p = if i == 0 { "$ " } else { "  " };
-            let _ = writeln!(err, "{b} {} {p}{line}", style::dim("│"));
+            let _ = writeln!(err, "{b} {} {p}{}", style::dim("│"), style::visible(line));
         }
         for r in req.reasons.iter().take(3) {
             let _ = writeln!(
                 err,
                 "{b} {} {}",
                 style::dim("│"),
-                style::dim(&format!("! {r}"))
+                style::dim(&format!("! {}", style::visible(r)))
             );
         }
     }

@@ -4,10 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use brush_builtins::ShellBuilderExt as _;
 use brush_core::openfiles::{self, OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, ShellVariable, SourceInfo};
 
@@ -37,7 +36,8 @@ pub struct ShellOptions {
     /// `-c` mode.
     pub command_string_mode: bool,
     pub working_dir: Option<PathBuf>,
-    /// Turn SIGINT into [`Interrupts`] instead of dying (implied by `interactive`).
+    /// Turn SIGINT into [`Interrupts`] instead of dying, and let builtin-only
+    /// loops be interrupted (implied by `interactive`; set for agent shells).
     pub catch_sigint: bool,
     /// `-e`, `-x`, `-u`.
     pub errexit: bool,
@@ -330,6 +330,10 @@ impl EmbeddedShell {
         let name = opts.name.clone().unwrap_or_else(|| "nosh".to_string());
         let histfile = (opts.interactive && std::env::var_os("HISTFILE").is_none())
             .then(|| nosh_hub::paths::state_dir().join("shell_history"));
+        let mut builtins = brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        if opts.interactive || opts.catch_sigint {
+            crate::yielding::wrap(&mut builtins);
+        }
         let shell = rt.block_on(async {
             let mut builder = brush_core::Shell::builder()
                 .interactive(opts.interactive)
@@ -346,7 +350,7 @@ impl EmbeddedShell {
                 .exit_on_nonzero_command_exit(opts.errexit)
                 .print_commands_and_arguments(opts.xtrace)
                 .treat_unset_variables_as_error(opts.nounset)
-                .default_builtins(brush_builtins::BuiltinSet::BashMode);
+                .builtins(builtins);
             if let Some(h) = histfile {
                 if let Some(parent) = h.parent() {
                     let _ = nosh_hub::paths::ensure_private_dir(parent);
@@ -573,6 +577,8 @@ impl EmbeddedShell {
     fn run_line(&mut self, line: &str, stdin: Option<OpenFile>) -> UserRun {
         let start = Instant::now();
         let rt = self.rt.clone();
+        let ints = self.interrupts.clone();
+        let interactive = self.interactive;
         let (code, exit_shell) = {
             let mut sh = self.lock();
             let _ = sh.check_for_completed_jobs();
@@ -580,17 +586,48 @@ impl EmbeddedShell {
             if let Some(f) = stdin {
                 params.set_fd(OpenFiles::STDIN_FD, f);
             }
-            let res =
-                rt.block_on(sh.run_string(line.to_string(), &SourceInfo::from("main"), &params));
+            let source = SourceInfo::from("main");
+            let res = if interactive {
+                // SIGINT only reaches nosh while it runs builtins itself (a
+                // foreground child gets its own); give up on the line then,
+                // like bash does on Ctrl-C.
+                let scopes = scope_depth(sh.env());
+                let ints0 = ints.count();
+                let r = rt.block_on(async {
+                    let fut = sh.run_string(line.to_string(), &source, &params);
+                    tokio::pin!(fut);
+                    let mut tick = tokio::time::interval(Duration::from_millis(50));
+                    loop {
+                        tokio::select! {
+                            r = &mut fut => break Some(r),
+                            _ = tick.tick() => if ints.count() > ints0 {
+                                break None;
+                            },
+                        }
+                    }
+                });
+                if r.is_none() {
+                    truncate_scopes(&mut sh, scopes);
+                }
+                r
+            } else {
+                Some(rt.block_on(sh.run_string(line.to_string(), &source, &params)))
+            };
+            drop(params);
             sh.increment_interactive_line_offset(line.lines().count().max(1));
             match res {
-                Ok(r) => (
+                Some(Ok(r)) => (
                     i32::from(u8::from(r.exit_code)),
                     matches!(r.next_control_flow, ExecutionControlFlow::ExitShell),
                 ),
-                Err(e) => {
+                Some(Err(e)) => {
                     let _ = sh.display_error(&mut std::io::stderr(), &e);
                     (1, false)
+                }
+                None => {
+                    eprintln!();
+                    sh.set_last_exit_status(130);
+                    (130, false)
                 }
             }
         };
@@ -795,32 +832,21 @@ impl EmbeddedShell {
 
         let (out_r, out_w) = std::io::pipe()?;
         let (err_r, err_w) = std::io::pipe()?;
-        let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
-        let reader =
-            |mut r: std::io::PipeReader, is_err: bool, tx: mpsc::Sender<(bool, Vec<u8>)>| {
-                std::thread::spawn(move || {
-                    let mut buf = vec![0u8; 16 * 1024];
-                    loop {
-                        match r.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                if tx.send((is_err, buf[..n].to_vec())).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                })
-            };
-        let h1 = reader(out_r, false, tx.clone());
-        let h2 = reader(err_r, true, tx);
+        // Bounded: a fast writer is held back by the pipe instead of growing
+        // memory, and the loop below keeps getting to check the clock.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
+        spawn_reader(out_r, false, tx.clone());
+        spawn_reader(err_r, true, tx);
+        // The command is in the background, so Ctrl-Z would stop nosh itself
+        // (and brush would take the command for stopped).
+        let _no_suspend = NoSuspend::new(self.interactive);
 
         let mut cap = Capture::new(opts.capture_limit);
         let mut result = CommandResult::default();
-        let job_ids_before: HashSet<usize>;
         let exit_code = {
             let mut sh = self.lock();
-            job_ids_before = sh.jobs().jobs.iter().map(|j| j.id).collect();
+            let job_ids_before: HashSet<usize> = sh.jobs().jobs.iter().map(|j| j.id).collect();
+            let scopes = scope_depth(sh.env());
             let saved = apply_anti_hang_env(&mut sh);
             let mut params = sh.default_exec_params();
             params.process_group_policy = brush_core::ProcessGroupPolicy::NewProcessGroup;
@@ -830,8 +856,7 @@ impl EmbeddedShell {
             let ints_start = ints.count();
             let deadline = start + opts.timeout;
             let source = SourceInfo::from("agent");
-            let funcs_before = sh.call_stack().iter_function_calls().count();
-            let mut stragglers: Vec<i32> = Vec::new();
+            let mut stop_signal = None;
             let res = rt.block_on(async {
                 let fut = sh.run_string(cmd.to_string(), &source, &params);
                 tokio::pin!(fut);
@@ -839,24 +864,16 @@ impl EmbeddedShell {
                 loop {
                     tokio::select! {
                         r = &mut fut => break Some(r),
+                        Some((is_err, bytes)) = rx.recv() => cap.push(is_err, &bytes, out),
                         _ = tick.tick() => {
-                            while let Ok((is_err, bytes)) = rx.try_recv() {
-                                cap.push(is_err, &bytes, out);
-                            }
-                            let mut stop = None;
                             if ints.count() > ints_start {
                                 result.interrupted = true;
-                                stop = Some(libc::SIGINT);
-                            } else if Instant::now() >= deadline {
-                                result.timed_out = true;
-                                stop = Some(libc::SIGTERM);
+                                stop_signal = Some(libc::SIGINT);
+                                break None;
                             }
-                            if let Some(sig) = stop {
-                                // Stop the whole command line (like bash on Ctrl-C),
-                                // not just the running process: signal it and
-                                // abandon the rest of the list.
-                                stragglers = procs::new_groups(&before_children);
-                                procs::signal_groups(&stragglers, sig);
+                            if Instant::now() >= deadline {
+                                result.timed_out = true;
+                                stop_signal = Some(libc::SIGTERM);
                                 break None;
                             }
                         }
@@ -865,21 +882,18 @@ impl EmbeddedShell {
             });
             drop(params);
             if res.is_none() {
-                let leaked = sh
-                    .call_stack()
-                    .iter_function_calls()
-                    .count()
-                    .saturating_sub(funcs_before);
-                for _ in 0..leaked {
-                    let _ = sh
-                        .env_mut()
-                        .pop_scope(brush_core::env::EnvironmentScope::Local);
+                // The whole command line is abandoned (like bash on Ctrl-C):
+                // drop what brush left on its scope stack, stop everything the
+                // command started, and escalate to SIGKILL.
+                truncate_scopes(&mut sh, scopes);
+                let targets = procs::new_targets(&before_children);
+                if let Some(sig) = stop_signal {
+                    procs::signal(&targets, sig);
                 }
-                if !stragglers.is_empty() {
-                    let groups = stragglers.clone();
+                if !targets.is_empty() {
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(2));
-                        procs::signal_groups(&groups, libc::SIGKILL);
+                        procs::signal(&targets, libc::SIGKILL);
                     });
                 }
             }
@@ -918,24 +932,14 @@ impl EmbeddedShell {
                 None => 130,
             }
         };
-        // Drain remaining output; background children may keep the pipes open.
-        let drain_deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            let left = drain_deadline.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(left.max(Duration::from_millis(1))) {
-                Ok((is_err, bytes)) => cap.push(is_err, &bytes, out),
-                Err(_) => break,
+        // Drain what is left; background children may keep the pipes open.
+        rt.block_on(async {
+            let until = tokio::time::Instant::now() + Duration::from_millis(300);
+            while let Ok(Some((is_err, bytes))) = tokio::time::timeout_at(until, rx.recv()).await {
+                cap.push(is_err, &bytes, out);
             }
-            if Instant::now() >= drain_deadline {
-                break;
-            }
-        }
-        if h1.is_finished() {
-            let _ = h1.join();
-        }
-        if h2.is_finished() {
-            let _ = h2.join();
-        }
+        });
+        drop(rx);
         cap.flush(out);
         result.exit_code = exit_code;
         result.duration = start.elapsed();
@@ -945,6 +949,99 @@ impl EmbeddedShell {
         let after = self.snapshot();
         result.diff = StateDiff::between(&before, &after);
         Ok(result)
+    }
+}
+
+/// Reads one output pipe of an agent command into the channel. Once nobody
+/// listens (the command returned but a background job it started still
+/// writes), it keeps reading and discarding so the job does not get SIGPIPE.
+fn spawn_reader(
+    mut r: std::io::PipeReader,
+    is_err: bool,
+    tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("nosh-agent-io".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut tx = Some(tx);
+            loop {
+                match r.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Some(t) = &tx
+                            && t.blocking_send((is_err, buf[..n].to_vec())).is_err()
+                        {
+                            tx = None;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        });
+}
+
+/// Disables the terminal's suspend character (Ctrl-Z) while alive.
+struct NoSuspend(Option<libc::termios>);
+
+impl NoSuspend {
+    fn new(active: bool) -> Self {
+        if !active {
+            return Self(None);
+        }
+        // SAFETY: termios calls on fd 0 with a struct they fill in.
+        unsafe {
+            if libc::isatty(0) != 1 {
+                return Self(None);
+            }
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) != 0 {
+                return Self(None);
+            }
+            let saved = t;
+            t.c_cc[libc::VSUSP] = 0; // _POSIX_VDISABLE
+            if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
+                return Self(None);
+            }
+            Self(Some(saved))
+        }
+    }
+}
+
+impl Drop for NoSuspend {
+    fn drop(&mut self) {
+        if let Some(t) = &self.0 {
+            // SAFETY: restores the attributes read in `new`.
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, t);
+            }
+        }
+    }
+}
+
+/// Number of variable scopes (global, function locals, per-command overrides).
+fn scope_depth(env: &brush_core::env::ShellEnvironment) -> usize {
+    use brush_core::env::EnvironmentScope;
+    let mut e = env.clone();
+    let mut n = 0;
+    // `pop_scope` pops whatever is on top; it only reports a type mismatch.
+    while !matches!(
+        e.pop_scope(EnvironmentScope::Global),
+        Err(ref err) if matches!(err.kind(), brush_core::ErrorKind::MissingScope)
+    ) {
+        n += 1;
+    }
+    n
+}
+
+/// Pops scopes an abandoned command left behind (a function's locals and
+/// `VAR=x cmd` overrides would otherwise leak into the session).
+fn truncate_scopes(sh: &mut BrushShell, depth: usize) {
+    for _ in depth..scope_depth(sh.env()) {
+        let _ = sh
+            .env_mut()
+            .pop_scope(brush_core::env::EnvironmentScope::Local);
     }
 }
 
@@ -1063,11 +1160,17 @@ impl Capture {
         } else {
             (&mut self.out, &mut self.pend_out)
         };
+        // Past the limit nothing is kept or shown (the display is slower
+        // than a pipe and would otherwise fall behind without bound).
         let room = self.limit.saturating_sub(store.len());
         if room < bytes.len() {
             self.truncated = true;
         }
-        store.extend_from_slice(&bytes[..room.min(bytes.len())]);
+        let bytes = &bytes[..room.min(bytes.len())];
+        if bytes.is_empty() {
+            return;
+        }
+        store.extend_from_slice(bytes);
         pend.extend_from_slice(bytes);
         let valid = match std::str::from_utf8(pend) {
             Ok(_) => pend.len(),

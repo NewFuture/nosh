@@ -81,6 +81,17 @@ impl OutputSink for UiSink<'_> {
 }
 
 const LIVE_LINES: usize = 8;
+/// Longest partial output line kept for display.
+const MAX_PARTIAL: usize = 4096;
+
+/// Largest char boundary of `s` at or below `n`.
+fn floor_boundary(s: &str, n: usize) -> usize {
+    let mut i = n.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
 
 /// Terminal renderer (stderr; the answer can go to stdout for `nosh -a`).
 pub struct TermUi {
@@ -170,18 +181,23 @@ impl TermUi {
         }
     }
 
-    fn out_line(&mut self, line: &str, is_err: bool) {
+    fn clip(&self, line: &str) -> String {
+        let line = style::safe_output_line(line);
         let max = self.width.saturating_sub(6);
-        let shown: String = if line.chars().count() > max {
+        if line.chars().count() > max {
             line.chars()
                 .take(max.saturating_sub(1))
                 .chain("…".chars())
                 .collect()
         } else {
-            line.to_string()
-        };
+            line
+        }
+    }
+
+    fn out_line(&mut self, line: &str, is_err: bool) {
         if self.shown < LIVE_LINES {
             self.shown += 1;
+            let shown = self.clip(line);
             let s = if is_err {
                 style::red(&shown)
             } else {
@@ -189,11 +205,16 @@ impl TermUi {
             };
             eprintln!("{}   {s}", self.bar);
         } else {
+            // Only the count and the last two lines are kept (cheap per line).
             self.hidden += 1;
-            self.tail.push(shown);
-            if self.tail.len() > 2 {
-                self.tail.remove(0);
-            }
+            let mut keep = if self.tail.len() >= 2 {
+                self.tail.remove(0)
+            } else {
+                String::new()
+            };
+            keep.clear();
+            keep.push_str(&line[..floor_boundary(line, 1024)]);
+            self.tail.push(keep);
         }
     }
 }
@@ -217,13 +238,13 @@ impl AgentUi for TermUi {
 
     fn text(&mut self, s: &str) {
         self.clear_status();
-        self.write_prefixed(s, false);
+        self.write_prefixed(&style::visible(s), false);
     }
 
     fn think(&mut self, s: &str) {
         if self.show_think {
             self.clear_status();
-            self.write_prefixed(s, true);
+            self.write_prefixed(&style::visible(s), true);
         }
     }
 
@@ -248,7 +269,7 @@ impl AgentUi for TermUi {
                 (_, "run_command") => "  ",
                 _ => "",
             };
-            eprintln!("{}   {p}{l}", self.bar);
+            eprintln!("{}   {p}{}", self.bar, style::visible(l));
         }
         self.shown = 0;
         self.hidden = 0;
@@ -257,11 +278,23 @@ impl AgentUi for TermUi {
     }
 
     fn output(&mut self, chunk: &str, is_err: bool) {
-        self.line_buf.push_str(chunk);
-        while let Some(i) = self.line_buf.find('\n') {
-            let line: String = self.line_buf.drain(..=i).collect();
-            self.out_line(line.trim_end_matches(['\n', '\r']), is_err);
+        let mut rest = chunk;
+        while let Some(i) = rest.find('\n') {
+            let line = &rest[..i];
+            rest = &rest[i + 1..];
+            if self.line_buf.is_empty() {
+                self.out_line(line, is_err);
+            } else {
+                let mut full = std::mem::take(&mut self.line_buf);
+                full.push_str(
+                    &line[..floor_boundary(line, MAX_PARTIAL.saturating_sub(full.len()))],
+                );
+                self.out_line(&full, is_err);
+            }
         }
+        // A line without a newline is kept only up to a bound.
+        let room = MAX_PARTIAL.saturating_sub(self.line_buf.len());
+        self.line_buf.push_str(&rest[..floor_boundary(rest, room)]);
     }
 
     fn tool_end(&mut self, summary: &str) {
@@ -279,7 +312,7 @@ impl AgentUi for TermUi {
                 );
             }
             for l in std::mem::take(&mut self.tail) {
-                eprintln!("{}   {}", self.bar, style::dim(&l));
+                eprintln!("{}   {}", self.bar, style::dim(&self.clip(&l)));
             }
         }
         if !summary.is_empty() {
@@ -303,9 +336,14 @@ impl AgentUi for TermUi {
     fn proposed(&mut self, cmd: &str, explanation: Option<&str>) {
         self.clear_status();
         self.end_text_line();
-        eprintln!("{} {} {}", self.bar, style::cyan("↳"), style::bold(cmd));
+        eprintln!(
+            "{} {} {}",
+            self.bar,
+            style::cyan("↳"),
+            style::bold(&style::visible(cmd))
+        );
         if let Some(e) = explanation.filter(|e| !e.trim().is_empty()) {
-            eprintln!("{}   {}", self.bar, style::dim(e.trim()));
+            eprintln!("{}   {}", self.bar, style::dim(&style::visible(e.trim())));
         }
     }
 

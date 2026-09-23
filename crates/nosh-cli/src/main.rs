@@ -216,6 +216,8 @@ fn run_shell(cli: &Cli, argv0_login: bool) -> i32 {
         Ok(s) => s,
         Err(c) => return c,
     };
+    // Ctrl-C stops a model download (the partial file is kept).
+    shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);
     let repl_cfg = nosh_shell::ReplConfig {
         trigger: nosh_shell::TriggerConfig {

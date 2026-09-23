@@ -10,6 +10,7 @@ pub mod spell;
 pub mod style;
 pub mod term;
 pub mod trigger;
+mod yielding;
 
 pub use backend::{
     AgentExecOpts, CommandResult, EmbeddedShell, Interrupts, NullSink, OutputSink, Resolution,

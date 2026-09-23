@@ -192,42 +192,119 @@ pub fn redact(s: &str) -> String {
             continue;
         }
         let mut l = line.to_string();
-        for prefix in [
-            "ghp_",
-            "gho_",
-            "ghs_",
-            "github_pat_",
-            "AKIA",
-            "xoxb-",
-            "xoxp-",
-            "sk-",
-        ] {
-            while let Some(i) = l.find(prefix) {
-                let end = l[i..]
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-                    .map_or(l.len(), |e| i + e);
-                if end - i < prefix.len() + 8 {
-                    break;
-                }
-                l.replace_range(i..end, "[REDACTED]");
-            }
-        }
-        let lower = l.to_ascii_lowercase();
-        for key in ["password=", "passwd=", "token=", "secret=", "api_key="] {
-            if let Some(i) = lower.find(key) {
-                let start = i + key.len();
-                let end = l[start..]
-                    .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'')
-                    .map_or(l.len(), |e| start + e);
-                if end > start {
-                    l.replace_range(start..end, "[REDACTED]");
-                }
-                break;
-            }
-        }
+        mask_tokens(&mut l);
+        mask_assignments(&mut l);
         out.push_str(&l);
     }
     out
+}
+
+const REDACTED: &str = "[REDACTED]";
+const TOKEN_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "AKIA",
+    "ASIA",
+    "xoxb-",
+    "xoxp-",
+    "sk-",
+];
+const SECRET_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "secret",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "authorization",
+];
+
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Well-known token formats anywhere on the line.
+fn mask_tokens(l: &mut String) {
+    let mut from = 0;
+    while from < l.len() {
+        let Some((at, plen)) = TOKEN_PREFIXES
+            .iter()
+            .filter_map(|p| l[from..].find(p).map(|i| (from + i, p.len())))
+            .min()
+        else {
+            break;
+        };
+        let starts_token = l[..at].chars().next_back().is_none_or(|c| !token_char(c));
+        let end = l[at..]
+            .find(|c: char| !token_char(c))
+            .map_or(l.len(), |e| at + e);
+        if starts_token && end - at >= plen + 8 {
+            l.replace_range(at..end, REDACTED);
+            from = at + REDACTED.len();
+        } else {
+            from = at + plen;
+        }
+    }
+}
+
+/// Values of `password=…`, `token: …`, `"api_key": "…"` and the like.
+fn mask_assignments(l: &mut String) {
+    let lower = l.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for key in SECRET_KEYS {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(key) {
+            let k = from + i;
+            from = k + key.len();
+            // Whole words only: `tokens=3` and `tokenizer:` are not secrets.
+            let before_ok = lower[..k]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+            let mut v = k + key.len();
+            while v < b.len() && matches!(b[v], b'"' | b'\'' | b' ') {
+                v += 1;
+            }
+            if !before_ok || v >= b.len() || !matches!(b[v], b'=' | b':') {
+                continue;
+            }
+            v += 1;
+            while v < b.len() && matches!(b[v], b'"' | b'\'' | b' ') {
+                v += 1;
+            }
+            for scheme in ["bearer ", "basic ", "token "] {
+                if lower[v..].starts_with(scheme) {
+                    v += scheme.len();
+                }
+            }
+            let end = lower[v..]
+                .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';'))
+                .map_or(lower.len(), |e| v + e);
+            if end > v {
+                spans.push((v, end));
+            }
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    for (s, e) in merged.into_iter().rev() {
+        if l.get(s..e).is_some_and(|v| v != REDACTED) {
+            l.replace_range(s..e, REDACTED);
+        }
+    }
 }
 
 /// Saves the full output of a truncated command under `state/outputs/`.
@@ -253,6 +330,8 @@ pub fn save_output(id: usize, command: &str, r: &CommandResult) -> Option<PathBu
     Some(path)
 }
 
+/// `~`-expanded, absolute and lexically normalized (`a/../b` → `b`), so the
+/// path that is checked is the path that is opened.
 fn resolve(cwd: &Path, p: &str) -> PathBuf {
     let expanded = if p == "~" || p.starts_with("~/") {
         match std::env::var_os("HOME") {
@@ -262,11 +341,22 @@ fn resolve(cwd: &Path, p: &str) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    if expanded.is_absolute() {
+    let abs = if expanded.is_absolute() {
         expanded
     } else {
         cwd.join(expanded)
+    };
+    let mut out = PathBuf::from("/");
+    for c in abs.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(n) => out.push(n),
+            _ => {}
+        }
     }
+    out
 }
 
 pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
@@ -296,6 +386,9 @@ pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
         .int_arg("end_line")
         .map(|e| e.max(1) as usize)
         .unwrap_or(start + READ_FILE_LINES - 1);
+    if end_req < start {
+        return Err(format!("end_line {end_req} is before start_line {start}"));
+    }
     let end = end_req.min(start + READ_FILE_LINES - 1).min(total);
     let mut out = format!("[{} · {} lines]\n", path.display(), total);
     if total == 0 {
@@ -455,6 +548,27 @@ mod tests {
         assert!(!s.contains("ghp_ABCDEFGH"));
         assert!(!s.contains("xyz"));
         assert!(s.contains("after"));
+        // A short look-alike earlier on the line must not hide a real key.
+        let s = redact("task-1 done; key sk-live0123456789abcdef and task-2\n");
+        assert!(!s.contains("sk-live0123456789abcdef"), "{s}");
+        assert!(s.contains("task-1") && s.contains("task-2"), "{s}");
+        // Every assignment on a line, in several syntaxes.
+        let s = redact(
+            "password=p1 GITHUB_TOKEN=t2 \"api_key\": \"k3\" Authorization: Bearer b4 tokens=5\n",
+        );
+        for secret in ["p1", "t2", "k3", "b4"] {
+            assert!(!s.contains(secret), "{secret} in {s}");
+        }
+        assert!(s.contains("tokens=5"), "{s}");
+    }
+
+    #[test]
+    fn paths_are_normalized() {
+        let c = call("read_file", json!({"path": "src/../../etc/./passwd"}));
+        assert_eq!(
+            tool_path(&c, Path::new("/home/u/proj")),
+            PathBuf::from("/home/u/etc/passwd")
+        );
     }
 
     #[test]
@@ -479,6 +593,26 @@ mod tests {
         let b = read_file(&call("read_file", json!({"path": "bin.dat"})), &dir).unwrap();
         assert!(b.starts_with("[binary file"));
         assert!(read_file(&call("read_file", json!({"path": "nope"})), &dir).is_err());
+        assert!(
+            read_file(
+                &call(
+                    "read_file",
+                    json!({"path": "a.txt", "start_line": 3, "end_line": 1})
+                ),
+                &dir
+            )
+            .is_err()
+        );
+        let one = read_file(
+            &call(
+                "read_file",
+                json!({"path": "a.txt", "start_line": 2, "end_line": 2}),
+            ),
+            &dir,
+        )
+        .unwrap();
+        assert!(one.contains("    2  two\n[showing lines 2-2;"), "{one}");
+        assert!(!one.contains("three"), "{one}");
 
         let l = list_dir(&call("list_dir", json!({"depth": 2})), &dir).unwrap();
         assert!(l.contains("src/\n  main.rs"), "{l}");

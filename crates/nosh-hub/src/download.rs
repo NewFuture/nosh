@@ -186,9 +186,9 @@ pub fn download_file(
             progress,
         ) {
             Ok(()) => used_hub = Some(c.hub),
-            Err(HubError::Offline) => {
+            Err(e @ (HubError::Offline | HubError::Cancelled)) => {
                 progress.finish(false);
-                return Err(HubError::Offline);
+                return Err(e);
             }
             Err(e) => {
                 if offset == before {
@@ -267,6 +267,9 @@ fn fetch_chunk(
     let mut reader = resp.reader;
     let mut buf = vec![0u8; 256 * 1024];
     while *offset < limit {
+        if net::is_cancelled() {
+            return Err(HubError::Cancelled);
+        }
         let want = ((limit - *offset) as usize).min(buf.len());
         let n = reader.read(&mut buf[..want]).map_err(|e| {
             HubError::Network(format!("{}: read failed at {}: {e}", c.hub, *offset))
