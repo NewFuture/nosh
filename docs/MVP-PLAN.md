@@ -106,8 +106,8 @@ nosh/
   - `#[ignore]` 测试：真实模型能输出连贯的中英文，并在工具场景中产生可以解析的调用。
 
 ### T3 nosh-permissions：权限（约 1 天）
-- [ ] 用 brush-parser 遍历 AST，拆出所有简单命令：管道、列表、子 shell、`$(…)`、重定向，并展开 `sudo`/`env`/`xargs`/`nohup`/`timeout`/`bash -c`/`eval` 这类包装器；别名和函数用会话表展开（由调用方传入）。
-- [ ] 规则表：
+- [x] 用 brush-parser 遍历 AST，拆出所有简单命令：管道、列表、子 shell、`$(…)`、重定向，并展开 `sudo`/`env`/`xargs`/`nohup`/`timeout`/`bash -c`/`eval` 这类包装器；别名和函数用会话表展开（由调用方传入）。
+- [x] 规则表：
   - 四个等级；
   - 网络命令至少按 Mutating 处理；
   - `find -delete/-exec`、`rm` 的参数、`sed -i`、`chmod/chown -R`、git 子命令；
@@ -115,8 +115,8 @@ nosh/
   - 解码后执行和变量拼接出的命令名；
   - 把 sudo 改写成 `sudo -n`；
   - agent 执行 `exit`/`exec` 判为 Forbidden。
-- [ ] 决策矩阵（confirm/auto/yolo）；用户的 allow/deny 规则；"本会话放行"。
-- [ ] 验证：≥ 200 条表驱动用例（覆盖四个等级、混淆写法和包装器）；Dangerous 的召回率为 100%。
+- [x] 决策矩阵（confirm/auto/yolo）；用户的 allow/deny 规则；"本会话放行"。
+- [x] 验证：≥ 200 条表驱动用例（覆盖四个等级、混淆写法和包装器）；Dangerous 的召回率为 100%。
 
 ### T4 nosh-shell：shell 核心（约 2–3 天）
 - [ ] 嵌入 brush-core：交互模式，加载 rc；用 reedline 写 REPL，包括历史文件、显示 cwd 和审批模式的提示符、Ctrl-C/Ctrl-D。

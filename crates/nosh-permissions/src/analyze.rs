@@ -1,0 +1,1502 @@
+//! AST walk: finds every simple command (and wrapper-inner command) in a
+//! command line and applies the per-command rules plus path policy.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+use brush_parser::ParserOptions;
+use brush_parser::ast;
+use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
+
+use crate::paths::{PathClass, classify_path, resolve};
+use crate::rules::{self, Arg, Target, Verdict, has_flag, opt_value};
+use crate::{Context, Risk, RiskReport};
+
+const MAX_DEPTH: usize = 8;
+
+/// Analyzes an agent-issued command line.
+pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
+    let mut a = Analyzer {
+        ctx,
+        report: RiskReport::default(),
+        depth: 0,
+        top: false,
+        cwd: ctx.cwd.clone(),
+        cwd_unknown: false,
+        expanding: HashSet::new(),
+        local_funcs: HashMap::new(),
+        sudo_inserts: Vec::new(),
+        opts: ParserOptions::default(),
+    };
+    if cmd.trim().is_empty() {
+        a.report.add(Risk::Safe, "empty command");
+        return a.report;
+    }
+    let compact: String = cmd.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains(":(){:|:&};:") || compact.contains("(){$0|$0&};") {
+        a.report.add(Risk::Forbidden, "fork bomb");
+    }
+    a.program_text(cmd, true);
+    if !a.sudo_inserts.is_empty() {
+        a.report.rewritten = Some(insert_sudo_n(cmd, &a.sudo_inserts));
+    }
+    a.report
+}
+
+fn insert_sudo_n(cmd: &str, char_positions: &[usize]) -> String {
+    let mut byte_pos: Vec<usize> = char_positions
+        .iter()
+        .filter_map(|&c| {
+            if c == cmd.chars().count() {
+                Some(cmd.len())
+            } else {
+                cmd.char_indices().nth(c).map(|(b, _)| b)
+            }
+        })
+        .collect();
+    byte_pos.sort_unstable();
+    byte_pos.dedup();
+    let mut out = cmd.to_string();
+    for p in byte_pos.into_iter().rev() {
+        out.insert_str(p, " -n");
+    }
+    out
+}
+
+struct Analyzer<'a> {
+    ctx: &'a Context,
+    report: RiskReport,
+    depth: usize,
+    /// Positions in the current text refer to the original command line.
+    top: bool,
+    cwd: PathBuf,
+    cwd_unknown: bool,
+    expanding: HashSet<String>,
+    local_funcs: HashMap<String, ()>,
+    sudo_inserts: Vec<usize>,
+    opts: ParserOptions,
+}
+
+const INTERPRETERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "ash",
+    "mksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "php",
+    "lua",
+    "pwsh",
+    "Rscript",
+    "osascript",
+    "deno",
+    "bun",
+];
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcsh",
+];
+
+fn basename(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
+}
+
+fn has_escape_obfuscation(src: &str) -> bool {
+    let b = src.as_bytes();
+    b.windows(2)
+        .any(|w| w[0] == b'\\' && matches!(w[1], b'x' | b'u' | b'U' | b'0'..=b'7' | b'c'))
+}
+
+fn decode_ansi_c(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('e') | Some('E') => out.push('\x1b'),
+            Some('a') => out.push('\x07'),
+            Some('b') => out.push('\x08'),
+            Some('f') => out.push('\x0c'),
+            Some('v') => out.push('\x0b'),
+            Some('x') => {
+                let mut h = String::new();
+                while h.len() < 2 && it.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                    h.push(it.next().unwrap());
+                }
+                if let Some(ch) = u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(d @ '0'..='7') => {
+                let mut o = String::from(d);
+                while o.len() < 3 && it.peek().is_some_and(|c| ('0'..='7').contains(c)) {
+                    o.push(it.next().unwrap());
+                }
+                if let Some(ch) = u32::from_str_radix(&o, 8).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn param_name(src: &str) -> Option<&str> {
+    let s = src.strip_prefix('$')?;
+    let s = s.strip_prefix('{').unwrap_or(s);
+    let first = s.chars().next()?;
+    if matches!(first, '$' | '?' | '#' | '!' | '@' | '*' | '-' | '0'..='9') {
+        return Some(&s[..first.len_utf8()]);
+    }
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_'))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    if end == 0 { None } else { Some(&s[..end]) }
+}
+
+fn shell_join(args: &[Arg]) -> String {
+    args.iter()
+        .map(|a| a.value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const INLINE_CODE_DANGER: &[&str] = &[
+    "os.system",
+    "subprocess",
+    "rmtree",
+    "os.remove",
+    "os.unlink",
+    "unlink(",
+    "unlink ",
+    "system(",
+    "exec(",
+    "popen",
+    "child_process",
+    "fs.rm",
+    "rm -rf",
+    "`",
+    "shutil.move",
+    "os.rename",
+    "eval(",
+    "Runtime.getRuntime",
+    "File.delete",
+];
+
+impl Analyzer<'_> {
+    fn add(&mut self, risk: Risk, reason: impl Into<String>) {
+        self.report.add(risk, reason);
+    }
+
+    fn parse(&self, text: &str) -> Result<ast::Program, String> {
+        let mut p = brush_parser::Parser::new(std::io::BufReader::new(text.as_bytes()), &self.opts);
+        p.parse_program().map_err(|e| e.to_string())
+    }
+
+    fn program_text(&mut self, text: &str, top: bool) {
+        if self.depth >= MAX_DEPTH {
+            self.add(Risk::Mutating, "command nesting too deep to analyze");
+            return;
+        }
+        match self.parse(text) {
+            Ok(prog) => {
+                let prev = self.top;
+                self.top = top;
+                self.depth += 1;
+                for cl in &prog.complete_commands {
+                    self.compound_list(cl);
+                }
+                self.depth -= 1;
+                self.top = prev;
+            }
+            Err(e) => self.add(Risk::Mutating, format!("could not parse the command ({e})")),
+        }
+    }
+
+    fn compound_list(&mut self, cl: &ast::CompoundList) {
+        for ast::CompoundListItem(aol, sep) in &cl.0 {
+            if matches!(sep, ast::SeparatorOperator::Async) {
+                self.add(Risk::Mutating, "starts a background job");
+            }
+            self.pipeline(&aol.first);
+            for next in &aol.additional {
+                match next {
+                    ast::AndOr::And(p) | ast::AndOr::Or(p) => self.pipeline(p),
+                }
+            }
+        }
+    }
+
+    fn pipeline(&mut self, p: &ast::Pipeline) {
+        for (i, c) in p.seq.iter().enumerate() {
+            if i > 0 && self.is_stdin_interpreter(c) {
+                self.add(
+                    Risk::Dangerous,
+                    "pipes data into an interpreter (e.g. curl … | sh)",
+                );
+            }
+            self.command(c);
+        }
+    }
+
+    fn static_word(&self, w: &ast::Word) -> Option<String> {
+        let pieces = word::parse(&w.value, &self.opts).ok()?;
+        let mut s = String::new();
+        fn walk(pieces: &[WordPieceWithSource], s: &mut String) -> bool {
+            for p in pieces {
+                match &p.piece {
+                    WordPiece::Text(t) | WordPiece::SingleQuotedText(t) => s.push_str(t),
+                    WordPiece::EscapeSequence(t) => s.push_str(t.strip_prefix('\\').unwrap_or(t)),
+                    WordPiece::DoubleQuotedSequence(inner) => {
+                        if !walk(inner, s) {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            true
+        }
+        walk(&pieces, &mut s).then_some(s)
+    }
+
+    fn is_stdin_interpreter(&self, c: &ast::Command) -> bool {
+        let ast::Command::Simple(sc) = c else {
+            return false;
+        };
+        let mut words: Vec<String> = Vec::new();
+        if let Some(w) = &sc.word_or_name {
+            words.push(self.static_word(w).unwrap_or_default());
+        }
+        if let Some(suffix) = &sc.suffix {
+            for item in &suffix.0 {
+                if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
+                    words.push(self.static_word(w).unwrap_or_else(|| "$dyn".into()));
+                }
+            }
+        }
+        let mut i = 0;
+        while i < words.len()
+            && matches!(
+                basename(&words[i]),
+                "sudo" | "doas" | "env" | "nohup" | "command" | "exec" | "time" | "nice"
+            )
+        {
+            i += 1;
+            while i < words.len() && (words[i].starts_with('-') || words[i].contains('=')) {
+                i += 1;
+            }
+        }
+        let Some(name) = words.get(i) else {
+            return false;
+        };
+        let base = basename(name);
+        let is_interp =
+            INTERPRETERS.contains(&base) || base.starts_with("python3.") || base == "busybox";
+        if !is_interp {
+            return false;
+        }
+        let rest = &words[i + 1..];
+        if rest.iter().any(|a| {
+            a == "-c"
+                || a == "-e"
+                || a == "-m"
+                || a == "--command"
+                || (a.starts_with('-')
+                    && !a.starts_with("--")
+                    && a.contains('c')
+                    && SHELLS.contains(&base))
+        }) {
+            return false;
+        }
+        match rest.iter().find(|a| !a.starts_with('-')) {
+            None => true,
+            Some(first) => first == "-" || (base == "busybox" && SHELLS.contains(&first.as_str())),
+        }
+    }
+
+    fn command(&mut self, c: &ast::Command) {
+        match c {
+            ast::Command::Simple(sc) => self.simple(sc),
+            ast::Command::Compound(cc, redirs) => {
+                self.compound(cc);
+                if let Some(r) = redirs {
+                    for x in &r.0 {
+                        self.redirect(x);
+                    }
+                }
+            }
+            ast::Command::Function(fd) => self.function_def(fd),
+            ast::Command::ExtendedTest(e, redirs) => {
+                self.ext_test(&e.expr);
+                if let Some(r) = redirs {
+                    for x in &r.0 {
+                        self.redirect(x);
+                    }
+                }
+            }
+        }
+    }
+
+    fn compound(&mut self, cc: &ast::CompoundCommand) {
+        use ast::CompoundCommand as C;
+        match cc {
+            C::Arithmetic(a) => self.text_substitutions(&a.expr.value),
+            C::ArithmeticForClause(f) => {
+                for e in [&f.initializer, &f.condition, &f.updater]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.text_substitutions(&e.value);
+                }
+                self.compound_list(&f.body.list);
+            }
+            C::BraceGroup(b) => self.compound_list(&b.list),
+            C::Subshell(s) => {
+                let (cwd, unk) = (self.cwd.clone(), self.cwd_unknown);
+                self.compound_list(&s.list);
+                self.cwd = cwd;
+                self.cwd_unknown = unk;
+            }
+            C::ForClause(f) => {
+                if let Some(vals) = &f.values {
+                    for w in vals {
+                        self.word(w);
+                    }
+                }
+                self.compound_list(&f.body.list);
+            }
+            C::CaseClause(c) => {
+                self.word(&c.value);
+                for item in &c.cases {
+                    for p in &item.patterns {
+                        self.word(p);
+                    }
+                    if let Some(cmd) = &item.cmd {
+                        self.compound_list(cmd);
+                    }
+                }
+            }
+            C::IfClause(i) => {
+                self.compound_list(&i.condition);
+                self.compound_list(&i.then);
+                if let Some(elses) = &i.elses {
+                    for e in elses {
+                        if let Some(c) = &e.condition {
+                            self.compound_list(c);
+                        }
+                        self.compound_list(&e.body);
+                    }
+                }
+            }
+            C::WhileClause(w) | C::UntilClause(w) => {
+                self.compound_list(&w.0);
+                self.compound_list(&w.1.list);
+            }
+            C::Coprocess(c) => {
+                self.add(Risk::Mutating, "starts a coprocess");
+                self.command(&c.body);
+            }
+        }
+    }
+
+    fn ext_test(&mut self, e: &ast::ExtendedTestExpr) {
+        use ast::ExtendedTestExpr as E;
+        match e {
+            E::And(a, b) | E::Or(a, b) => {
+                self.ext_test(a);
+                self.ext_test(b);
+            }
+            E::Not(a) | E::Parenthesized(a) => self.ext_test(a),
+            E::UnaryTest(_, w) => {
+                self.word(w);
+            }
+            E::BinaryTest(_, a, b) => {
+                self.word(a);
+                self.word(b);
+            }
+        }
+    }
+
+    fn text_substitutions(&mut self, s: &str) {
+        if s.contains("$(") || s.contains('`') {
+            let _ = self.word_text(s);
+        }
+    }
+
+    fn word(&mut self, w: &ast::Word) -> Arg {
+        self.word_text(&w.value)
+    }
+
+    fn word_text(&mut self, raw: &str) -> Arg {
+        match word::parse(raw, &self.opts) {
+            Ok(pieces) => {
+                let mut arg = Arg {
+                    value: String::new(),
+                    dynamic: false,
+                    glob: false,
+                };
+                self.pieces(raw, &pieces, &mut arg, false);
+                arg
+            }
+            Err(_) => Arg {
+                value: raw.to_string(),
+                dynamic: true,
+                glob: false,
+            },
+        }
+    }
+
+    fn pieces(&mut self, raw: &str, pieces: &[WordPieceWithSource], arg: &mut Arg, quoted: bool) {
+        for p in pieces {
+            let src = raw.get(p.start_index..p.end_index).unwrap_or("");
+            match &p.piece {
+                WordPiece::Text(s) => {
+                    if !quoted && s.contains(['*', '?', '[']) {
+                        arg.glob = true;
+                    }
+                    arg.value.push_str(s);
+                }
+                WordPiece::SingleQuotedText(s) => arg.value.push_str(s),
+                WordPiece::AnsiCQuotedText(s) => {
+                    if has_escape_obfuscation(src) || has_escape_obfuscation(s) {
+                        self.add(
+                            Risk::Dangerous,
+                            "uses $'\\x..' escape sequences that can hide the real command",
+                        );
+                    }
+                    arg.value.push_str(&decode_ansi_c(s));
+                }
+                WordPiece::DoubleQuotedSequence(inner)
+                | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                    self.pieces(raw, inner, arg, true);
+                }
+                WordPiece::TildeExpansion(t) => match t {
+                    TildeExpr::Home => arg.value.push('~'),
+                    TildeExpr::UserHome(u) => {
+                        arg.dynamic = true;
+                        arg.value.push('~');
+                        arg.value.push_str(u);
+                    }
+                    _ => {
+                        arg.dynamic = true;
+                        arg.value.push_str("~+");
+                    }
+                },
+                WordPiece::ParameterExpansion(_) => {
+                    if src.contains("$(") || src.contains('`') {
+                        self.add(
+                            Risk::Dangerous,
+                            "command substitution hidden inside a parameter expansion",
+                        );
+                    }
+                    match param_name(src) {
+                        Some("HOME") if src == "$HOME" || src == "${HOME}" => arg.value.push('~'),
+                        Some("PWD") if src == "$PWD" || src == "${PWD}" => {
+                            arg.value.push_str(&self.cwd.to_string_lossy())
+                        }
+                        _ => {
+                            arg.dynamic = true;
+                            arg.value.push_str(src);
+                        }
+                    }
+                }
+                WordPiece::CommandSubstitution(s) | WordPiece::BackquotedCommandSubstitution(s) => {
+                    arg.dynamic = true;
+                    arg.value.push_str("$(…)");
+                    let prev = self.top;
+                    self.program_text(s, false);
+                    self.top = prev;
+                }
+                WordPiece::EscapeSequence(s) => {
+                    arg.value.push_str(s.strip_prefix('\\').unwrap_or(s));
+                }
+                WordPiece::ArithmeticExpression(e) => {
+                    arg.dynamic = true;
+                    arg.value.push_str("$((…))");
+                    self.text_substitutions(&e.value);
+                }
+            }
+        }
+    }
+
+    fn simple(&mut self, sc: &ast::SimpleCommand) {
+        let mut assigns: Vec<String> = Vec::new();
+        let mut redirects: Vec<&ast::IoRedirect> = Vec::new();
+        if let Some(prefix) = &sc.prefix {
+            for item in &prefix.0 {
+                match item {
+                    ast::CommandPrefixOrSuffixItem::IoRedirect(r) => redirects.push(r),
+                    ast::CommandPrefixOrSuffixItem::AssignmentWord(a, _) => {
+                        let name = match &a.name {
+                            ast::AssignmentName::VariableName(n) => n.clone(),
+                            ast::AssignmentName::ArrayElementName(n, _) => n.clone(),
+                        };
+                        match &a.value {
+                            ast::AssignmentValue::Scalar(w) => {
+                                self.word(w);
+                            }
+                            ast::AssignmentValue::Array(items) => {
+                                for (k, v) in items {
+                                    if let Some(k) = k {
+                                        self.word(k);
+                                    }
+                                    self.word(v);
+                                }
+                            }
+                        }
+                        assigns.push(name);
+                    }
+                    ast::CommandPrefixOrSuffixItem::Word(w) => {
+                        self.word(w);
+                    }
+                    ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
+                        self.compound_list(&sub.list)
+                    }
+                }
+            }
+        }
+        let mut argv: Vec<Arg> = Vec::new();
+        let mut name_end: Option<usize> = None;
+        if let Some(w) = &sc.word_or_name {
+            name_end = w.loc.as_ref().map(|l| l.end.index);
+            argv.push(self.word(w));
+        }
+        if let Some(suffix) = &sc.suffix {
+            for item in &suffix.0 {
+                match item {
+                    ast::CommandPrefixOrSuffixItem::Word(w) => argv.push(self.word(w)),
+                    ast::CommandPrefixOrSuffixItem::IoRedirect(r) => redirects.push(r),
+                    ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => argv.push(self.word(w)),
+                    ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
+                        self.compound_list(&sub.list);
+                        argv.push(Arg {
+                            value: "/dev/fd/63".into(),
+                            dynamic: false,
+                            glob: false,
+                        });
+                    }
+                }
+            }
+        }
+        for r in redirects {
+            self.redirect(r);
+        }
+        if argv.is_empty() {
+            for n in &assigns {
+                if let Some((risk, why)) = rules::var_assignment_risk(n) {
+                    self.add(risk, why);
+                    self.report.changes_session = true;
+                }
+            }
+            if !assigns.is_empty() {
+                self.report
+                    .commands
+                    .push(format!("{}=…", assigns.join("=… ")));
+            }
+            return;
+        }
+        for n in &assigns {
+            if matches!(n.as_str(), "LD_PRELOAD" | "LD_AUDIT" | "BASH_ENV" | "ENV") {
+                self.add(
+                    Risk::Dangerous,
+                    format!("runs a command with {n} set (code injection)"),
+                );
+            }
+        }
+        self.report.commands.push(shell_join(&argv));
+        let name_end = if self.top && self.depth == 1 {
+            name_end
+        } else {
+            None
+        };
+        self.exec(argv, name_end);
+    }
+
+    fn redirect(&mut self, r: &ast::IoRedirect) {
+        use ast::IoFileRedirectKind as K;
+        use ast::IoFileRedirectTarget as T;
+        match r {
+            ast::IoRedirect::File(_, kind, target) => {
+                let t = match target {
+                    T::Filename(w) => Some(self.word(w)),
+                    T::ProcessSubstitution(_, sub) => {
+                        self.compound_list(&sub.list);
+                        None
+                    }
+                    T::Duplicate(w) => {
+                        self.word(w);
+                        None
+                    }
+                    T::Fd(_) => None,
+                };
+                if let Some(t) = t {
+                    match kind {
+                        K::Write | K::Append | K::Clobber | K::ReadAndWrite => {
+                            let v = Verdict::new(Risk::Mutating, "redirects output to a file");
+                            self.write_effect(&target_of(&t), &v);
+                            let class = self.class_of(&t);
+                            if !matches!(class, Some(PathClass::Null)) {
+                                self.add(Risk::Mutating, format!("writes {}", t.value));
+                            }
+                        }
+                        K::Read => self.read_effect(&target_of(&t)),
+                        K::DuplicateInput | K::DuplicateOutput => {}
+                    }
+                }
+            }
+            ast::IoRedirect::HereDocument(_, doc) => {
+                if doc.requires_expansion {
+                    self.text_substitutions(&doc.doc.value);
+                }
+            }
+            ast::IoRedirect::HereString(_, w) => {
+                self.word(w);
+            }
+            ast::IoRedirect::OutputAndError(w, _) => {
+                let t = self.word(w);
+                let v = Verdict::new(Risk::Mutating, "redirects output to a file");
+                self.write_effect(&target_of(&t), &v);
+                if !matches!(self.class_of(&t), Some(PathClass::Null)) {
+                    self.add(Risk::Mutating, format!("writes {}", t.value));
+                }
+            }
+        }
+    }
+
+    fn class_of(&self, a: &Arg) -> Option<PathClass> {
+        if a.dynamic {
+            return None;
+        }
+        Some(classify_path(&self.resolve(&a.value), self.ctx))
+    }
+
+    fn resolve(&self, p: &str) -> PathBuf {
+        resolve(p, &self.cwd, self.ctx.home_dir())
+    }
+
+    fn function_def(&mut self, fd: &ast::FunctionDefinition) {
+        let name = self
+            .static_word(&fd.fname)
+            .unwrap_or_else(|| fd.fname.value.clone());
+        self.add(Risk::Mutating, format!("defines shell function {name}"));
+        self.report.changes_session = true;
+        let mut calls = 0usize;
+        let mut async_calls = false;
+        count_calls(&fd.body.0, &name, &mut calls, &mut async_calls, self);
+        if calls >= 2 || (calls >= 1 && async_calls) {
+            self.add(
+                Risk::Forbidden,
+                format!("fork bomb (function {name} spawns itself)"),
+            );
+        }
+        self.local_funcs.insert(name, ());
+        self.compound(&fd.body.0);
+    }
+
+    fn write_effect(&mut self, t: &Target, v: &Verdict) {
+        if t.dynamic || self.cwd_unknown && !t.path.starts_with('/') && !t.path.starts_with('~') {
+            let why = if v.deletes {
+                "deletes files chosen at runtime"
+            } else {
+                "writes to a path computed at runtime"
+            };
+            self.add(v.risk.max(Risk::Mutating).bump(), why);
+            self.report.writes_outside_workspace = true;
+            return;
+        }
+        let mut p = t.path.clone();
+        if t.glob {
+            // Classify the directory part before the first glob.
+            let cut = p.find(['*', '?', '[']).unwrap_or(p.len());
+            p = match p[..cut].rfind('/') {
+                Some(0) => "/".into(),
+                Some(i) => p[..i].to_string(),
+                None => ".".into(),
+            };
+        }
+        let resolved = self.resolve(&p);
+        let changes = if v.deletes { "deletes" } else { "modifies" };
+        match classify_path(&resolved, self.ctx) {
+            PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
+            PathClass::Protected(l) => {
+                if v.recursive && v.deletes && resolved.components().count() <= 2 {
+                    self.add(
+                        Risk::Forbidden,
+                        format!("recursively deletes system directory {l}"),
+                    );
+                } else {
+                    self.add(Risk::Dangerous, format!("{changes} protected path {l}"));
+                }
+            }
+            PathClass::Root => {
+                if v.recursive && v.deletes {
+                    self.add(Risk::Forbidden, "recursively deletes the root filesystem");
+                } else if v.recursive {
+                    self.add(Risk::Dangerous, "recursively changes the root filesystem");
+                } else {
+                    self.add(Risk::Dangerous, format!("{changes} /"));
+                }
+                self.report.writes_outside_workspace = true;
+            }
+            PathClass::Home => {
+                if v.recursive && v.deletes {
+                    self.add(Risk::Forbidden, "recursively deletes the home directory");
+                } else {
+                    self.add(
+                        Risk::Dangerous,
+                        format!("{changes} the home directory itself"),
+                    );
+                }
+                self.report.writes_outside_workspace = true;
+            }
+            PathClass::System => {
+                let top_level = resolved.components().count() <= 2;
+                if v.recursive && v.deletes && top_level {
+                    self.add(
+                        Risk::Forbidden,
+                        format!(
+                            "recursively deletes system directory {}",
+                            resolved.display()
+                        ),
+                    );
+                } else {
+                    self.add(
+                        Risk::Dangerous,
+                        format!("{changes} system path {}", resolved.display()),
+                    );
+                }
+                self.report.writes_outside_workspace = true;
+            }
+            PathClass::Outside => {
+                self.add(
+                    v.risk.max(Risk::Mutating).bump(),
+                    format!(
+                        "{changes} files outside the workspace ({})",
+                        resolved.display()
+                    ),
+                );
+                self.report.writes_outside_workspace = true;
+            }
+        }
+    }
+
+    fn read_effect(&mut self, t: &Target) {
+        if t.dynamic {
+            return;
+        }
+        if let PathClass::Protected(l) = classify_path(&self.resolve(&t.path), self.ctx) {
+            self.add(Risk::Mutating, format!("reads protected path {l}"));
+            self.report.reads_protected = true;
+        }
+    }
+
+    fn apply(&mut self, v: Verdict) {
+        self.add(v.risk, v.reason.clone());
+        if v.network {
+            self.report.network = true;
+        }
+        if v.session {
+            self.report.changes_session = true;
+        }
+        for w in &v.writes {
+            self.write_effect(w, &v);
+        }
+        for r in &v.reads {
+            self.read_effect(r);
+        }
+    }
+
+    /// Dispatches one simple command (`argv[0]` is the command name).
+    fn exec(&mut self, argv: Vec<Arg>, name_end: Option<usize>) {
+        let Some(name_arg) = argv.first() else {
+            return;
+        };
+        if name_arg.dynamic {
+            self.add(
+                Risk::Dangerous,
+                format!("command name is computed at runtime ({})", name_arg.value),
+            );
+            return;
+        }
+        let name = name_arg.value.clone();
+        let args: Vec<Arg> = argv[1..].to_vec();
+
+        if !name.contains('/') {
+            if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
+                let key = format!("alias:{name}");
+                if !self.expanding.contains(&key) {
+                    self.expanding.insert(key.clone());
+                    self.expand_alias(&alias, args);
+                    self.expanding.remove(&key);
+                    return;
+                }
+            }
+            if self.local_funcs.contains_key(&name) {
+                return;
+            }
+            if let Some(body) = self.ctx.functions.get(&name).cloned() {
+                let key = format!("fn:{name}");
+                if self.expanding.contains(&key) {
+                    self.add(Risk::Mutating, format!("recursive function {name}"));
+                } else {
+                    self.expanding.insert(key.clone());
+                    self.program_text(&body, false);
+                    self.expanding.remove(&key);
+                }
+                return;
+            }
+        }
+
+        let base = basename(&name).to_string();
+        if name.contains('/') && !name.starts_with('/') && !name.starts_with('~') {
+            self.add(Risk::Mutating, format!("runs local program {name}"));
+            return;
+        }
+        match base.as_str() {
+            "exec" => self.add(
+                Risk::Forbidden,
+                "agent may not use exec (it replaces the shell session)",
+            ),
+            "exit" | "logout" => self.add(Risk::Forbidden, "agent may not exit the shell session"),
+            "sudo" => self.sudo(&args, name_end),
+            "doas" | "pkexec" | "run0" => {
+                self.add(
+                    Risk::Dangerous,
+                    format!("runs a command with elevated privileges ({base})"),
+                );
+                self.exec_after_options(&args, &["-u", "-C", "--user"]);
+            }
+            "su" => {
+                self.add(Risk::Dangerous, "switches to another user (su)");
+                if let Some(c) = opt_value(&args, Some('c'), &["command"]).first() {
+                    if c.dynamic {
+                        self.add(Risk::Dangerous, "su -c with a command built at runtime");
+                    } else {
+                        let s = c.value.clone();
+                        self.program_text(&s, false);
+                    }
+                }
+            }
+            "env" => self.env(&args),
+            "command" => {
+                if has_flag(&args, &['v', 'V'], &[]) {
+                    self.add(Risk::Safe, "command lookup");
+                } else {
+                    self.exec_after_options(&args, &[]);
+                }
+            }
+            "builtin" | "nohup" | "setsid" | "unbuffer" | "time" | "caffeinate" | "catchsegv"
+            | "xvfb-run" | "firejail" | "proxychains" | "proxychains4" | "tsocks" | "torsocks"
+            | "numactl" | "nocache" | "chronic" => {
+                self.exec_after_options(&args, &["-o", "--output", "-f", "--format"]);
+            }
+            "nice" | "renice_run" => self.exec_after_options(&args, &["-n", "--adjustment"]),
+            "ionice" => self.exec_after_options(&args, &["-c", "-n", "--class", "--classdata"]),
+            "stdbuf" => self
+                .exec_after_options(&args, &["-i", "-o", "-e", "--input", "--output", "--error"]),
+            "timeout" => {
+                let rest = skip_options(&args, &["-s", "--signal", "-k", "--kill-after"]);
+                if rest.len() > 1 {
+                    self.exec(rest[1..].to_vec(), None);
+                }
+            }
+            "chrt" | "taskset" => {
+                let rest = skip_options(&args, &["-c", "--cpu-list"]);
+                let skip = usize::from(rest.first().is_some_and(|a| {
+                    a.value
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ',' || c == '-' || c == 'x')
+                }));
+                if rest.len() > skip {
+                    self.exec(rest[skip..].to_vec(), None);
+                }
+            }
+            "flock" => {
+                if let Some(c) = opt_value(&args, Some('c'), &["command"]).first() {
+                    let s = c.value.clone();
+                    self.program_text(&s, false);
+                } else {
+                    let rest =
+                        skip_options(&args, &["-w", "--timeout", "-E", "--conflict-exit-code"]);
+                    if rest.len() > 1 {
+                        self.exec(rest[1..].to_vec(), None);
+                    }
+                }
+            }
+            "watch" => {
+                self.add(
+                    Risk::Mutating,
+                    "repeats a command until interrupted (watch)",
+                );
+                let rest = skip_options(&args, &["-n", "--interval", "-d", "--differences"]);
+                if !rest.is_empty() {
+                    let s = shell_join(&rest);
+                    self.program_text(&s, false);
+                }
+            }
+            "strace" | "ltrace" | "valgrind" | "perf" | "gdb" | "lldb" => {
+                self.add(Risk::Mutating, format!("runs a program under {base}"));
+                let rest = skip_options(&args, &["-o", "-p", "-e", "-s", "-u", "--output"]);
+                let rest = if base == "perf" {
+                    rest.into_iter().skip(1).collect()
+                } else {
+                    rest
+                };
+                if !rest.is_empty() {
+                    self.exec(rest, None);
+                }
+            }
+            "systemd-run" | "script" => {
+                self.add(Risk::Mutating, format!("runs a command via {base}"));
+                if let Some(c) = opt_value(&args, Some('c'), &["command"]).first() {
+                    let s = c.value.clone();
+                    self.program_text(&s, false);
+                } else if base == "systemd-run" {
+                    self.exec_after_options(
+                        &args,
+                        &[
+                            "-u",
+                            "--unit",
+                            "-p",
+                            "--property",
+                            "--uid",
+                            "--gid",
+                            "-E",
+                            "--setenv",
+                        ],
+                    );
+                }
+            }
+            "xargs" | "parallel" => self.xargs(&args),
+            "find" => self.find(&args),
+            "eval" => {
+                if args.iter().any(|a| a.dynamic) {
+                    self.add(Risk::Dangerous, "eval of a string built at runtime");
+                } else {
+                    let s = shell_join(&args);
+                    self.program_text(&s, false);
+                }
+            }
+            b if SHELLS.contains(&b) || b == "busybox" => self.shell_c(b, &args),
+            "python" | "python2" | "python3" | "perl" | "ruby" | "node" | "php" | "lua"
+            | "deno" | "bun" | "Rscript" | "julia" => {
+                let code = opt_value(&args, Some('c'), &[])
+                    .into_iter()
+                    .chain(opt_value(&args, Some('e'), &["eval"]))
+                    .next()
+                    .map(|a| a.value.clone());
+                if let Some(code) = code {
+                    if INLINE_CODE_DANGER.iter().any(|p| code.contains(p)) {
+                        self.add(
+                            Risk::Dangerous,
+                            format!("inline {base} code runs commands or deletes files"),
+                        );
+                    } else {
+                        self.add(Risk::Mutating, format!("runs inline {base} code"));
+                    }
+                } else {
+                    self.apply(rules::classify(&base, &args));
+                }
+            }
+            "ulimit" => {
+                let set = rules::operands(&args)
+                    .iter()
+                    .any(|a| a.value.chars().all(|c| c.is_ascii_digit()) || a.value == "unlimited");
+                self.apply(rules::classify(
+                    if set { "ulimit_set" } else { "ulimit" },
+                    &args,
+                ));
+            }
+            "umask" => {
+                let set = !rules::operands(&args).is_empty();
+                self.apply(rules::classify(
+                    if set { "umask_set" } else { "umask" },
+                    &args,
+                ));
+            }
+            "export" | "declare" | "typeset" | "local" | "readonly" => self.declare(&base, &args),
+            "unset" => self.unset(&args),
+            "cd" | "pushd" => self.cd(&args),
+            "popd" => self.cwd_unknown = true,
+            _ => self.apply(rules::classify(&base, &args)),
+        }
+    }
+
+    fn expand_alias(&mut self, alias: &str, args: Vec<Arg>) {
+        match self.single_simple_argv(alias) {
+            Some(mut argv) => {
+                argv.extend(args);
+                self.exec(argv, None);
+            }
+            None => {
+                self.program_text(alias, false);
+                if !args.is_empty() {
+                    self.add(
+                        Risk::Mutating,
+                        "alias with a compound body receives arguments",
+                    );
+                }
+            }
+        }
+    }
+
+    /// argv of `text` if it is exactly one plain simple command.
+    fn single_simple_argv(&mut self, text: &str) -> Option<Vec<Arg>> {
+        let prog = self.parse(text).ok()?;
+        let [cl] = prog.complete_commands.as_slice() else {
+            return None;
+        };
+        let [ast::CompoundListItem(aol, ast::SeparatorOperator::Sequence)] = cl.0.as_slice() else {
+            return None;
+        };
+        if !aol.additional.is_empty() || aol.first.seq.len() != 1 {
+            return None;
+        }
+        let ast::Command::Simple(sc) = &aol.first.seq[0] else {
+            return None;
+        };
+        if sc.prefix.is_some() {
+            return None;
+        }
+        let mut argv = vec![self.word(sc.word_or_name.as_ref()?)];
+        if let Some(suffix) = &sc.suffix {
+            for item in &suffix.0 {
+                match item {
+                    ast::CommandPrefixOrSuffixItem::Word(w) => argv.push(self.word(w)),
+                    _ => return None,
+                }
+            }
+        }
+        Some(argv)
+    }
+
+    fn exec_after_options(&mut self, args: &[Arg], with_value: &[&str]) {
+        let rest = skip_options(args, with_value);
+        if !rest.is_empty() {
+            self.exec(rest, None);
+        }
+    }
+
+    fn sudo(&mut self, args: &[Arg], name_end: Option<usize>) {
+        self.add(
+            Risk::Dangerous,
+            "runs with root privileges (sudo, rewritten to sudo -n)",
+        );
+        let already_n = args
+            .iter()
+            .take_while(|a| a.value.starts_with('-'))
+            .any(|a| {
+                a.value == "-n"
+                    || a.value == "--non-interactive"
+                    || (!a.value.starts_with("--") && a.value.contains('n'))
+            });
+        match name_end {
+            Some(p) if !already_n => self.sudo_inserts.push(p),
+            None if !already_n => self.add(
+                Risk::Dangerous,
+                "nested sudo cannot be rewritten to sudo -n",
+            ),
+            _ => {}
+        }
+        let mut i = 0;
+        while i < args.len() {
+            let v = args[i].value.as_str();
+            match v {
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                "-u" | "-g" | "-h" | "-p" | "-C" | "-D" | "-r" | "-t" | "-T" | "-U" | "--user"
+                | "--group" | "--host" | "--prompt" | "--close-from" | "--chdir" | "--role"
+                | "--type" | "--command-timeout" | "--other-user" => i += 2,
+                "-e" | "--edit" => {
+                    self.add(Risk::Dangerous, "edits files as root (sudoedit)");
+                    return;
+                }
+                "-s" | "-i" | "--shell" | "--login" if args.len() == i + 1 => {
+                    self.add(Risk::Dangerous, "opens a root shell");
+                    return;
+                }
+                x if x.starts_with('-') => i += 1,
+                _ => break,
+            }
+        }
+        if i < args.len() {
+            self.exec(args[i..].to_vec(), None);
+        }
+    }
+
+    fn env(&mut self, args: &[Arg]) {
+        let mut i = 0;
+        while i < args.len() {
+            let v = args[i].value.clone();
+            match v.as_str() {
+                "-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug" | "-" => i += 1,
+                "-u" | "--unset" | "-C" | "--chdir" => i += 2,
+                "-S" | "--split-string" => {
+                    if let Some(s) = args.get(i + 1) {
+                        if s.dynamic {
+                            self.add(Risk::Dangerous, "env -S with a string built at runtime");
+                        } else {
+                            let s = s.value.clone();
+                            self.program_text(&s, false);
+                        }
+                    }
+                    return;
+                }
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                x if x.starts_with('-') => i += 1,
+                x if x.contains('=') && !x.starts_with('=') => {
+                    let name = x.split('=').next().unwrap_or("");
+                    if matches!(name, "LD_PRELOAD" | "LD_AUDIT" | "BASH_ENV" | "ENV") {
+                        self.add(
+                            Risk::Dangerous,
+                            format!("runs a command with {name} set (code injection)"),
+                        );
+                    }
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        if i >= args.len() {
+            self.add(Risk::Safe, "prints the environment");
+        } else {
+            self.exec(args[i..].to_vec(), None);
+        }
+    }
+
+    fn xargs(&mut self, args: &[Arg]) {
+        let with_value = [
+            "-a",
+            "--arg-file",
+            "-d",
+            "--delimiter",
+            "-E",
+            "-e",
+            "-I",
+            "-i",
+            "-L",
+            "-l",
+            "-n",
+            "--max-args",
+            "-P",
+            "--max-procs",
+            "-s",
+            "--max-chars",
+            "--process-slot-var",
+            "-j",
+            "--jobs",
+        ];
+        let rest = skip_options(args, &with_value);
+        if rest.is_empty() {
+            self.add(Risk::Safe, "xargs echo");
+            return;
+        }
+        let mut argv = rest;
+        argv.push(Arg {
+            value: "<stdin items>".into(),
+            dynamic: true,
+            glob: false,
+        });
+        self.exec(argv, None);
+    }
+
+    fn find(&mut self, args: &[Arg]) {
+        self.apply(rules::classify("find", args));
+        if args.iter().any(|a| a.value == "-delete") {
+            let mut v = Verdict::new(Risk::Dangerous, "deletes matching files (find -delete)");
+            v.recursive = true;
+            v.deletes = true;
+            self.add(v.risk, v.reason.clone());
+            let starts: Vec<Target> = args
+                .iter()
+                .take_while(|a| !a.value.starts_with('-') && a.value != "(" && a.value != "!")
+                .map(target_of)
+                .collect();
+            let starts = if starts.is_empty() {
+                vec![target_of(&Arg::lit("."))]
+            } else {
+                starts
+            };
+            for t in &starts {
+                self.write_effect(t, &v);
+            }
+        }
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].value.as_str() {
+                "-exec" | "-execdir" | "-ok" | "-okdir" => {
+                    let mut inner = Vec::new();
+                    i += 1;
+                    while i < args.len() && args[i].value != ";" && args[i].value != "+" {
+                        let a = &args[i];
+                        inner.push(if a.value.contains("{}") {
+                            Arg {
+                                value: a.value.clone(),
+                                dynamic: true,
+                                glob: false,
+                            }
+                        } else {
+                            a.clone()
+                        });
+                        i += 1;
+                    }
+                    self.exec(inner, None);
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn shell_c(&mut self, base: &str, args: &[Arg]) {
+        if base == "busybox" {
+            if !args.is_empty() {
+                self.exec(args.to_vec(), None);
+            }
+            return;
+        }
+        let c_idx = args.iter().position(|a| {
+            let v = a.value.as_str();
+            v == "-c"
+                || (v.starts_with('-')
+                    && !v.starts_with("--")
+                    && v.len() > 1
+                    && v[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && v.contains('c'))
+        });
+        if let Some(ci) = c_idx {
+            match args[ci + 1..].iter().find(|a| !rules::is_opt(a)) {
+                Some(s) if s.dynamic => self.add(
+                    Risk::Dangerous,
+                    format!("{base} -c with a command string built at runtime"),
+                ),
+                Some(s) => {
+                    let s = s.value.clone();
+                    self.program_text(&s, false);
+                }
+                None => {}
+            }
+            return;
+        }
+        let ops = rules::operands(args);
+        match ops.first() {
+            Some(script) if script.value != "-" => {
+                self.add(
+                    Risk::Mutating,
+                    format!("runs shell script {}", script.value),
+                );
+                self.read_effect(&target_of(script));
+            }
+            _ => self.add(Risk::Mutating, format!("starts {base}")),
+        }
+    }
+
+    fn declare(&mut self, base: &str, args: &[Arg]) {
+        let flags: Vec<&str> = args
+            .iter()
+            .filter(|a| a.value.starts_with('-') || a.value.starts_with('+'))
+            .map(|a| a.value.as_str())
+            .collect();
+        let assigns: Vec<&Arg> = args
+            .iter()
+            .filter(|a| !a.value.starts_with('-') && !a.value.starts_with('+'))
+            .collect();
+        if base == "readonly" && !assigns.is_empty() {
+            self.add(Risk::Mutating, "marks variables read-only");
+            self.report.changes_session = true;
+        }
+        if base == "export" && flags.iter().any(|f| f.contains('f') || f.contains('n')) {
+            self.add(
+                Risk::Mutating,
+                "exports or un-exports shell functions/variables",
+            );
+            self.report.changes_session = true;
+        }
+        let mut any = false;
+        for a in &assigns {
+            let name = a.value.split('=').next().unwrap_or("");
+            if let Some((risk, why)) = rules::var_assignment_risk(name) {
+                self.add(risk, why);
+                self.report.changes_session = true;
+                any = true;
+            }
+        }
+        if !any {
+            self.add(Risk::Safe, format!("{base} (variables)"));
+        }
+    }
+
+    fn unset(&mut self, args: &[Arg]) {
+        if has_flag(args, &['f'], &[]) {
+            self.add(Risk::Mutating, "removes shell functions");
+            self.report.changes_session = true;
+        }
+        for a in rules::operands(args) {
+            if rules::KEY_VARS.contains(&a.value.as_str()) || a.dynamic {
+                self.add(Risk::Mutating, format!("unsets key variable {}", a.value));
+                self.report.changes_session = true;
+            }
+        }
+        self.add(Risk::Safe, "unset");
+    }
+
+    fn cd(&mut self, args: &[Arg]) {
+        self.add(Risk::Safe, "changes directory");
+        match rules::operands(args).first() {
+            None => {
+                if let Some(h) = self.ctx.home_dir() {
+                    self.cwd = h.to_path_buf();
+                }
+            }
+            Some(a) if a.dynamic || a.value == "-" => self.cwd_unknown = true,
+            Some(a) => {
+                self.cwd = self.resolve(&a.value);
+            }
+        }
+    }
+}
+
+fn target_of(a: &Arg) -> Target {
+    Target {
+        path: a.value.clone(),
+        dynamic: a.dynamic,
+        glob: a.glob,
+    }
+}
+
+/// Skips leading options (consuming values of `with_value` options).
+fn skip_options(args: &[Arg], with_value: &[&str]) -> Vec<Arg> {
+    let mut i = 0;
+    while i < args.len() {
+        let v = args[i].value.as_str();
+        if v == "--" {
+            i += 1;
+            break;
+        }
+        if !v.starts_with('-') || v == "-" || args[i].dynamic {
+            break;
+        }
+        if with_value.contains(&v) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    args.get(i..).map(<[Arg]>::to_vec).unwrap_or_default()
+}
+
+/// Counts calls to `name` inside a function body (for fork-bomb detection).
+fn count_calls(
+    cc: &ast::CompoundCommand,
+    name: &str,
+    calls: &mut usize,
+    async_calls: &mut bool,
+    a: &Analyzer,
+) {
+    fn list(
+        cl: &ast::CompoundList,
+        name: &str,
+        calls: &mut usize,
+        async_calls: &mut bool,
+        a: &Analyzer,
+    ) {
+        for ast::CompoundListItem(aol, sep) in &cl.0 {
+            let is_async = matches!(sep, ast::SeparatorOperator::Async);
+            let mut pipes = vec![&aol.first];
+            for x in &aol.additional {
+                match x {
+                    ast::AndOr::And(p) | ast::AndOr::Or(p) => pipes.push(p),
+                }
+            }
+            for p in pipes {
+                for c in &p.seq {
+                    match c {
+                        ast::Command::Simple(sc) => {
+                            if sc
+                                .word_or_name
+                                .as_ref()
+                                .and_then(|w| a.static_word(w))
+                                .as_deref()
+                                == Some(name)
+                            {
+                                *calls += 1;
+                                if is_async {
+                                    *async_calls = true;
+                                }
+                            }
+                        }
+                        ast::Command::Compound(inner, _) => {
+                            count_calls(inner, name, calls, async_calls, a)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    match cc {
+        ast::CompoundCommand::BraceGroup(b) => list(&b.list, name, calls, async_calls, a),
+        ast::CompoundCommand::Subshell(s) => list(&s.list, name, calls, async_calls, a),
+        ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
+            list(&w.0, name, calls, async_calls, a);
+            list(&w.1.list, name, calls, async_calls, a);
+        }
+        ast::CompoundCommand::IfClause(i) => {
+            list(&i.then, name, calls, async_calls, a);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn param_names() {
+        assert_eq!(param_name("$HOME"), Some("HOME"));
+        assert_eq!(param_name("${HOME:-x}"), Some("HOME"));
+        assert_eq!(param_name("$$"), Some("$"));
+        assert_eq!(param_name("$1"), Some("1"));
+    }
+
+    #[test]
+    fn ansi_c_decoding() {
+        assert_eq!(decode_ansi_c(r"\x72\x6d"), "rm");
+        assert_eq!(decode_ansi_c(r"a\nb"), "a\nb");
+        assert_eq!(decode_ansi_c(r"\162\155"), "rm");
+        assert!(has_escape_obfuscation(r"$'\x72'"));
+        assert!(!has_escape_obfuscation(r"$'a\nb'"));
+    }
+
+    #[test]
+    fn sudo_rewrite_positions() {
+        assert_eq!(insert_sudo_n("sudo ls", &[4]), "sudo -n ls");
+        assert_eq!(insert_sudo_n("中 && sudo ls", &[9]), "中 && sudo -n ls");
+    }
+}
