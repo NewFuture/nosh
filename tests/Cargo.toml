@@ -1,0 +1,16 @@
+[package]
+name = "nosh-tests"
+description = "Workspace-level integration tests for nosh (MockChatEngine, no model required)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

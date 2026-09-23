@@ -1,0 +1,18 @@
+[package]
+name = "nosh-cli"
+description = "nosh: a bash-compatible AI shell with an offline local LLM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nosh"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
