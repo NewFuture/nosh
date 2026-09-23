@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.gguf
+*.partial
+/models/
+.DS_Store
+.idea/
+.vscode/
