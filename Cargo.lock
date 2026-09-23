@@ -1027,8 +1027,11 @@ dependencies = [
 name = "nosh-cli"
 version = "0.1.0"
 dependencies = [
+ "candle-core",
  "clap",
  "nosh-hub",
+ "nosh-llm",
+ "serde_json",
 ]
 
 [[package]]
@@ -1057,6 +1060,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "nosh-hub",
+ "num_cpus",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

@@ -83,25 +83,25 @@ nosh/
 - [x] 验证：单元测试（校验、续传偏移、选源逻辑用 mock HTTP）；在 WSL 中真实下载 Q4_K_M 和 tokenizer，SHA-256 与 registry 一致。
 
 ### T2 nosh-llm：推理（约 2–3 天）
-- [ ] `model/llama.rs`（fork 自 quantized_llama）：
+- [x] `model/llama.rs`（fork 自 quantized_llama）：
   - RoPE 表按 `context_length` 计算（默认 8K）；
   - embedding 保持量化，按行反量化；
   - 预先分配 KV，支持 `truncate`；
   - 分块 prefill（512 token/块，块与块之间检查取消标志）；
   - 只计算最后一个位置的 logits；
   - 线程数等于物理核心数。
-- [ ] tokenizer 加载；EOG 为 {1, 130073}；分段编码（模板骨架允许 special token，不可信内容开启 `encode_special_tokens`）；增量 UTF-8 解码。
-- [ ] MiniCPM5 渲染器：
+- [x] tokenizer 加载；EOG 为 {1, 130073}；分段编码（模板骨架允许 special token，不可信内容开启 `encode_special_tokens`）；增量 UTF-8 解码。
+- [x] MiniCPM5 渲染器：
   - system 通过 `<tool_def_sep>` 插入工具定义，工具 JSON 使用 Python `json.dumps` 风格的分隔符；
   - user；
   - assistant 直接拼接原始 token ids；
   - 连续的 tool 结果合并进一个 user 轮；
   - generation prompt 预填空的 think 块。
-- [ ] 采样：temperature、top-p、min-p；检测到复读时启用 repetition penalty 1.05；在 `<function` 区间把温度降到 0.3；支持 `--seed`。
-- [ ] 流式状态机：TEXT/THINK/CALL 由 token ID 8/9/18/19 驱动，DONE 由 1/130073 驱动。解析 `<function name=..><param name=..>..</param></function>`，支持 CDATA 和实体反转义，按 schema 转换类型。
-- [ ] `LocalChatEngine`：token 级对话日志，基于最长公共前缀复用 KV，支持取消。
-- [ ] 调试命令：`nosh debug gen "<prompt>"`，输出生成结果和 prefill/decode 的 tok/s。
-- [ ] 验证：
+- [x] 采样：temperature、top-p、min-p；检测到复读时启用 repetition penalty 1.05；在 `<function` 区间把温度降到 0.3；支持 `--seed`。
+- [x] 流式状态机：TEXT/THINK/CALL 由 token ID 8/9/18/19 驱动，DONE 由 1/130073 驱动。解析 `<function name=..><param name=..>..</param></function>`，支持 CDATA 和实体反转义，按 schema 转换类型。
+- [x] `LocalChatEngine`：token 级对话日志，基于最长公共前缀复用 KV，支持取消。
+- [x] 调试命令：`nosh debug gen "<prompt>"`，输出生成结果和 prefill/decode 的 tok/s。
+- [x] 验证：
   - 单元测试：模板渲染与官方模板逐字节对比（期望字符串按 `chat_template.jinja` 手工推导并提交为 fixture）、工具调用解析（含 CDATA、截断）、采样；
   - `#[ignore]` 测试：真实模型能输出连贯的中英文，并在工具场景中产生可以解析的调用。
 

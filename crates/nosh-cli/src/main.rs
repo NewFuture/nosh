@@ -2,6 +2,7 @@
 //! execution, one-shot agent tasks (`-a`), suggestions (`-s`) and management
 //! subcommands.
 
+mod debug_cmd;
 mod model_cmd;
 
 use clap::{Parser, Subcommand};
@@ -83,6 +84,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: model_cmd::ModelCmd,
     },
+    /// Developer utilities.
+    Debug {
+        #[command(subcommand)]
+        cmd: debug_cmd::DebugCmd,
+    },
 }
 
 fn main() {
@@ -92,6 +98,12 @@ fn main() {
     }
     let code = match cli.cmd {
         Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
+        Some(Cmd::Debug { cmd }) => debug_cmd::run(
+            cmd,
+            cli.global.model_path.as_deref(),
+            cli.global.model.as_deref(),
+            cli.global.seed,
+        ),
         None => {
             eprintln!("nosh: shell mode is not implemented yet");
             2
