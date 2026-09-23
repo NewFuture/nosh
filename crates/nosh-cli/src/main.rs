@@ -4,6 +4,7 @@
 
 mod debug_cmd;
 mod model_cmd;
+mod shell_cmd;
 
 use clap::{Parser, Subcommand};
 
@@ -33,6 +34,22 @@ struct Cli {
     /// Login shell.
     #[arg(short = 'l', long = "login")]
     login: bool,
+
+    /// Force an interactive shell.
+    #[arg(short = 'i')]
+    interactive: bool,
+
+    /// Exit on the first failing command (bash -e).
+    #[arg(short = 'e')]
+    errexit: bool,
+
+    /// Trace commands (bash -x).
+    #[arg(short = 'x')]
+    xtrace: bool,
+
+    /// Treat unset variables as errors (bash -u).
+    #[arg(short = 'u')]
+    nounset: bool,
 
     /// Emit JSON Lines events (with -a).
     #[arg(long)]
@@ -92,6 +109,9 @@ enum Cmd {
 }
 
 fn main() {
+    let argv0_login = std::env::args_os()
+        .next()
+        .is_some_and(|a| a.to_string_lossy().starts_with('-'));
     let cli = Cli::parse();
     if cli.global.offline {
         nosh_hub::net::set_offline(true);
@@ -104,10 +124,39 @@ fn main() {
             cli.global.model.as_deref(),
             cli.global.seed,
         ),
-        None => {
-            eprintln!("nosh: shell mode is not implemented yet");
-            2
-        }
+        None => run_shell(&cli, argv0_login),
     };
     std::process::exit(code);
+}
+
+fn run_shell(cli: &Cli, argv0_login: bool) -> i32 {
+    let args = shell_cmd::ShellArgs {
+        command: cli.command.as_deref(),
+        rest: &cli.rest,
+        login: cli.login || argv0_login,
+        interactive: cli.interactive,
+        norc: cli.global.norc || cli.global.safe,
+        errexit: cli.errexit,
+        xtrace: cli.xtrace,
+        nounset: cli.nounset,
+    };
+    if cli.agent || cli.suggest {
+        eprintln!("nosh: -a/-s are not implemented yet");
+        return 2;
+    }
+    if let Some(code) = shell_cmd::run_noninteractive(&args) {
+        return code;
+    }
+    let mut shell = match shell_cmd::open_interactive(&args) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let cfg = nosh_shell::ReplConfig {
+        trigger: nosh_shell::TriggerConfig {
+            ai_enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, cfg)
 }

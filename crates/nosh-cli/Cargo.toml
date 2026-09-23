@@ -17,6 +17,7 @@ candle-core.workspace = true
 clap.workspace = true
 nosh-hub.workspace = true
 nosh-llm.workspace = true
+nosh-shell.workspace = true
 serde_json.workspace = true
 
 [lints]

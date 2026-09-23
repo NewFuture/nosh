@@ -33,6 +33,7 @@ brush-parser = "0.4.0"
 brush-builtins = "0.2.0"
 reedline = "0.51.0"
 crossterm = "0.29.0"
+nu-ansi-term = "0.50.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "signal", "time", "macros", "sync"] }
 
 # inference: pinned candle main rev (runtime AVX2/AVX-512 dispatch, tokenizers 0.23 + fancy-regex)

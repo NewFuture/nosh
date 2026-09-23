@@ -119,20 +119,20 @@ nosh/
 - [x] 验证：≥ 200 条表驱动用例（覆盖四个等级、混淆写法和包装器）；Dangerous 的召回率为 100%。
 
 ### T4 nosh-shell：shell 核心（约 2–3 天）
-- [ ] 嵌入 brush-core：交互模式，加载 rc；用 reedline 写 REPL，包括历史文件、显示 cwd 和审批模式的提示符、Ctrl-C/Ctrl-D。
-- [ ] 输入流水线：
+- [x] 嵌入 brush-core：交互模式，加载 rc；用 reedline 写 REPL，包括历史文件、显示 cwd 和审批模式的提示符、Ctrl-C/Ctrl-D。
+- [x] 输入流水线：
   - `#` 前缀 → AI；
   - 解析失败 → 判断是否为不完整输入（单词内撇号 → AI；否则显示续行提示）；
   - 整行静态解析命令名 → 有不存在的就先做本地模糊匹配（编辑距离 ≤ 2），匹配不上再交给 AI；
   - 安全网：破坏性命令带自然语言样式的参数时拦截；
   - 其余情况交给 brush 执行；非零退出时给出提示，这一行含中文时直接交给 AI。
-- [ ] `run_agent_command`：
+- [x] `run_agent_command`：
   - 在同一个 `Shell` 中执行，stdin 接 `null()`，stdout/stderr 接 `std::io::pipe()`；
   - 用线程读取管道，实时显示并采集（有上限）；
   - 超时后中断；
   - 执行前后对比 cwd、PATH 和变量，计算状态差异；
   - 防卡住的环境变量只作用于单次执行。
-- [ ] `nosh -c` 和脚本：纯 brush 执行，不加载模型，也不输出额外内容。
+- [x] `nosh -c` 和脚本：纯 brush 执行，不加载模型，也不输出额外内容。
 - [ ] 验证：
   - 集成测试（MockChatEngine）：`#` 能触发 AI；`gti status` 能纠正为 `git status`；agent 执行 `cd /tmp` 后，用户命令里的 `pwd` 输出为 `/tmp`；状态保护能拦下 `exec`；
   - `nosh -c 'echo hi'` 的输出恰好是 `hi\n`。
