@@ -329,7 +329,7 @@ impl EmbeddedShell {
         );
         let name = opts.name.clone().unwrap_or_else(|| "nosh".to_string());
         let histfile = (opts.interactive && std::env::var_os("HISTFILE").is_none())
-            .then(|| nosh_hub::paths::data_dir().join("history"));
+            .then(|| nosh_hub::paths::state_dir().join("shell_history"));
         let shell = rt.block_on(async {
             let mut builder = brush_core::Shell::builder()
                 .interactive(opts.interactive)

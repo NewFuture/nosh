@@ -133,16 +133,16 @@ nosh/
   - 执行前后对比 cwd、PATH 和变量，计算状态差异；
   - 防卡住的环境变量只作用于单次执行。
 - [x] `nosh -c` 和脚本：纯 brush 执行，不加载模型，也不输出额外内容。
-- [ ] 验证：
+- [x] 验证：
   - 集成测试（MockChatEngine）：`#` 能触发 AI；`gti status` 能纠正为 `git status`；agent 执行 `cd /tmp` 后，用户命令里的 `pwd` 输出为 `/tmp`；状态保护能拦下 `exec`；
   - `nosh -c 'echo hi'` 的输出恰好是 `hi\n`。
 
 ### T5 nosh-core：harness 与工具（约 1.5 天）
-- [ ] system prompt（静态）和任务头 `[task trigger=… cwd=… …]`、`[recent]`。
-- [ ] 工具注册与 schema；`run_command`、`read_file`（带行号，最多 400 行，识别二进制文件）、`list_dir`（遵循 .gitignore，深度 ≤ 3）、`propose_command`（把命令预填进下一次输入；reedline 不支持时，就打印出来并写入历史）。
-- [ ] 输出截断（头 60% + 尾 40%，最多 6,000 字符，完整输出落盘）；错误回灌（同一种错误最多重试 2 次）；拒绝理由；`max_steps`；达到上限时要求模型总结。
-- [ ] 终端审批卡片：`y`/`n`/`e`/`a`，Dangerous 需要键入 `yes`，Ctrl-C 视为拒绝；没有 TTY 时拒绝（除非传入 `--auto`/`--yolo`）。
-- [ ] 验证：用 MockChatEngine 跑完整的任务流测试（多步、拒绝、错误回灌、截断）。
+- [x] system prompt（静态）和任务头 `[task trigger=… cwd=… …]`、`[recent]`。
+- [x] 工具注册与 schema；`run_command`、`read_file`（带行号，最多 400 行，识别二进制文件）、`list_dir`（遵循 .gitignore，深度 ≤ 3）、`propose_command`（把命令预填进下一次输入；reedline 不支持时，就打印出来并写入历史）。
+- [x] 输出截断（头 60% + 尾 40%，最多 6,000 字符，完整输出落盘）；错误回灌（同一种错误最多重试 2 次）；拒绝理由；`max_steps`；达到上限时要求模型总结。
+- [x] 终端审批卡片：`y`/`n`/`e`/`a`，Dangerous 需要键入 `yes`，Ctrl-C 视为拒绝；没有 TTY 时拒绝（除非传入 `--auto`/`--yolo`）。
+- [x] 验证：用 MockChatEngine 跑完整的任务流测试（多步、拒绝、错误回灌、截断）。
 
 ### T6 CLI 与收尾（约 0.5 天）
 - [ ] `nosh`、`-c`、脚本、`-a`（stdin 作为附件）、`-s`（stdout 只输出命令）；`--auto`、`--yolo`、`--offline`、`--model-path`、`--no-download`、`--norc`、`--safe`；设计文档中的退出码约定。

@@ -10,7 +10,16 @@ publish.workspace = true
 [lib]
 path = "lib.rs"
 
-[dependencies]
+[[test]]
+name = "agent_flow"
+path = "agent_flow.rs"
+
+[dev-dependencies]
+nosh-core.workspace = true
+nosh-llm.workspace = true
+nosh-permissions.workspace = true
+nosh-shell.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
