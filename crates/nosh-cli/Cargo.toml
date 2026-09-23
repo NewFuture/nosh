@@ -13,6 +13,8 @@ name = "nosh"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
+nosh-hub.workspace = true
 
 [lints]
 workspace = true

@@ -68,19 +68,19 @@ nosh/
 每个任务结束时都要通过：`cargo fmt`、`clippy -D warnings`，以及该任务的测试。任务完成后在本节勾选。
 
 ### T0 基础设施（约 0.5 天）
-- [ ] 建立 workspace 骨架和各个 crate，统一 lint 配置，加上 `.gitattributes`（LF）和 CI 工作流。
-- [ ] 验证：WSL 中 `cargo build` 和 `cargo test` 通过；CI 变绿。
+- [x] 建立 workspace 骨架和各个 crate，统一 lint 配置，加上 `.gitattributes`（LF）和 CI 工作流。
+- [x] 验证：WSL 中 `cargo build` 和 `cargo test` 通过；CI 变绿。
 
 ### T1 nosh-hub：模型管理（约 1–1.5 天）
-- [ ] 内置 `registry.toml`，记录 2B Q4_K_M/Q8_0、1B Q4_K_M 和 tokenizer，含 SHA-256、大小和 revision。
-- [ ] 下载器（`ureq` + `rustls`）：
+- [x] 内置 `registry.toml`，记录 2B Q4_K_M/Q8_0、1B Q4_K_M 和 tokenizer，含 SHA-256、大小和 revision。
+- [x] 下载器（`ureq` + `rustls`）：
   - 选源：只用 locale/时区推断地区；并行发送 HEAD，再下载 2 MB 测速；
   - 可靠性：`Range` 续传（`*.partial`）；流式计算 SHA-256；原子 rename；`fs4` 文件锁；`indicatif` 进度条；
   - 切换与重试：某个源失败时切换到下一个源，从已下载的偏移处继续；
   - 下载前检查磁盘空间。
-- [ ] 离线开关：`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`。开启后，任何代码路径都不访问网络。
-- [ ] CLI：`nosh model pull [id]`、`list`、`verify`、`import <gguf> [--tokenizer]`、`path`。
-- [ ] 验证：单元测试（校验、续传偏移、选源逻辑用 mock HTTP）；在 WSL 中真实下载 Q4_K_M 和 tokenizer，SHA-256 与 registry 一致。
+- [x] 离线开关：`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`。开启后，任何代码路径都不访问网络。
+- [x] CLI：`nosh model pull [id]`、`list`、`verify`、`import <gguf> [--tokenizer]`、`path`。
+- [x] 验证：单元测试（校验、续传偏移、选源逻辑用 mock HTTP）；在 WSL 中真实下载 Q4_K_M 和 tokenizer，SHA-256 与 registry 一致。
 
 ### T2 nosh-llm：推理（约 2–3 天）
 - [ ] `model/llama.rs`（fork 自 quantized_llama）：

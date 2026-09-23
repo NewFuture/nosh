@@ -1,0 +1,98 @@
+# Built-in model registry (design doc appendix B).
+# Files are pinned by size + SHA-256; any mismatch is rejected before loading.
+
+schema = 1
+
+[[model]]
+id = "minicpm5-2b:q4_k_m"
+default = true
+display = "MiniCPM5-2B Q4_K_M"
+arch = "llama"
+chat_format = "minicpm5"
+context_max = 131072
+min_memory_mb = 2600
+eog_ids = [1, 130073]
+license = "Apache-2.0"
+sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+
+  [[model.files]]
+  role = "weights"
+  name = "MiniCPM5-2B-Q4_K_M.gguf"
+  size = 1561318368
+  sha256 = "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-2B-GGUF", revision = "2079a22f3beaa4e306449978533478fe0522f4b3" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B-GGUF", revision = "master" },
+  ]
+
+  [[model.files]]
+  role = "tokenizer"
+  name = "tokenizer.json"
+  size = 9894271
+  sha256 = "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-2B", revision = "12a3808a956f869c767195e9266b59c4d21d92e2" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B", revision = "master" },
+  ]
+
+[[model]]
+id = "minicpm5-2b:q8_0"
+display = "MiniCPM5-2B Q8_0"
+arch = "llama"
+chat_format = "minicpm5"
+context_max = 131072
+min_memory_mb = 3800
+eog_ids = [1, 130073]
+license = "Apache-2.0"
+sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+
+  [[model.files]]
+  role = "weights"
+  name = "MiniCPM5-2B-Q8_0.gguf"
+  size = 2679710688
+  sha256 = "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-2B-GGUF", revision = "2079a22f3beaa4e306449978533478fe0522f4b3" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B-GGUF", revision = "master" },
+  ]
+
+  [[model.files]]
+  role = "tokenizer"
+  name = "tokenizer.json"
+  size = 9894271
+  sha256 = "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-2B", revision = "12a3808a956f869c767195e9266b59c4d21d92e2" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B", revision = "master" },
+  ]
+
+[[model]]
+id = "minicpm5-1b:q4_k_m"
+display = "MiniCPM5-1B Q4_K_M"
+arch = "llama"
+chat_format = "minicpm5"
+context_max = 131072
+min_memory_mb = 1400
+eog_ids = [1, 130073]
+license = "Apache-2.0"
+sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+
+  [[model.files]]
+  role = "weights"
+  name = "MiniCPM5-1B-Q4_K_M.gguf"
+  size = 688065920
+  sha256 = "81b64d05a23b17b34c475f42b3e72fbde62d4b92cc34541f7a8031d0752deafa"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-1B-GGUF", revision = "3d55fac80935ae6456986ad2384b5cbcc4d6c948" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-1B-GGUF", revision = "master" },
+  ]
+
+  [[model.files]]
+  role = "tokenizer"
+  name = "tokenizer.json"
+  size = 9894271
+  sha256 = "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+  sources = [
+    { hub = "hf", repo = "openbmb/MiniCPM5-1B", revision = "87179e5c1f455ef22e6223592d2d61351b525bfc" },
+    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-1B", revision = "master" },
+  ]

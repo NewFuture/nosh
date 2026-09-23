@@ -1,0 +1,453 @@
+//! Resumable, verified, multi-source file download.
+//!
+//! Bytes go to `<name>.partial` with a streaming SHA-256; the file is renamed
+//! into place only after size and hash match the registry. Requests are made in
+//! ranged chunks so a stalled or failing source can be swapped for the next one
+//! while keeping the downloaded offset.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
+
+use crate::HubError;
+use crate::hash;
+use crate::net;
+use crate::progress::Progress;
+use crate::registry::FileEntry;
+use crate::sources::{Candidate, Hub};
+
+#[derive(Debug, Clone)]
+pub struct DownloadOptions {
+    /// Bytes per ranged request.
+    pub chunk_size: u64,
+    /// How many times each source may fail without progress before giving up.
+    pub max_rounds: usize,
+    pub per_call_timeout: Duration,
+    pub backoff: Duration,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            chunk_size: 64 * 1024 * 1024,
+            max_rounds: 3,
+            per_call_timeout: Duration::from_secs(240),
+            backoff: Duration::from_millis(500),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadOutcome {
+    pub path: PathBuf,
+    pub hub: Option<Hub>,
+    pub resumed_from: u64,
+    pub downloaded: u64,
+}
+
+pub fn partial_path(dir: &Path, file: &FileEntry) -> PathBuf {
+    dir.join(format!("{}.partial", file.name))
+}
+
+/// Bytes needed on disk to finish downloading `file` into `dir`.
+pub fn remaining_bytes(dir: &Path, file: &FileEntry) -> u64 {
+    let have = fs::metadata(partial_path(dir, file))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    file.size.saturating_sub(have.min(file.size))
+}
+
+struct Lock {
+    _file: File,
+}
+
+fn acquire_lock(dir: &Path, file: &FileEntry, progress: &dyn Progress) -> Result<Lock, HubError> {
+    let lock_path = dir.join(format!("{}.lock", file.name));
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    match f.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            progress.note(&crate::tr!(
+                format!("另一个进程正在下载 {}，等待其完成…", file.name),
+                format!("another process is downloading {}; waiting…", file.name)
+            ));
+            f.lock()?;
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    Ok(Lock { _file: f })
+}
+
+/// Downloads `file` into `dir` trying `cands` in order, failing over on error.
+pub fn download_file(
+    file: &FileEntry,
+    dir: &Path,
+    cands: &[Candidate],
+    opts: &DownloadOptions,
+    progress: &dyn Progress,
+) -> Result<DownloadOutcome, HubError> {
+    if cands.is_empty() {
+        return Err(HubError::Network(format!(
+            "no download source for {}",
+            file.name
+        )));
+    }
+    fs::create_dir_all(dir)?;
+    let _lock = acquire_lock(dir, file, progress)?;
+    let final_path = dir.join(&file.name);
+
+    // Another process may have finished while we waited for the lock.
+    if let Ok(m) = fs::metadata(&final_path)
+        && m.len() == file.size
+    {
+        let sha = hash::sha256_file(&final_path, |_| {})?;
+        if sha.eq_ignore_ascii_case(&file.sha256) {
+            return Ok(DownloadOutcome {
+                path: final_path,
+                hub: None,
+                resumed_from: file.size,
+                downloaded: 0,
+            });
+        }
+    }
+
+    let part_path = partial_path(dir, file);
+    let mut part = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&part_path)?;
+    let mut offset = part.metadata()?.len();
+    if offset > file.size {
+        part.set_len(0)?;
+        offset = 0;
+    }
+
+    let mut hasher = Sha256::new();
+    if offset > 0 {
+        let mb = offset as f64 / 1e6;
+        progress.note(&crate::tr!(
+            format!("从 {mb:.1} MB 处续传 {}（校验已下载部分）", file.name),
+            format!(
+                "resuming {} from {mb:.1} MB (verifying existing part)",
+                file.name
+            )
+        ));
+        part.seek(SeekFrom::Start(0))?;
+        hash::hash_reader(&mut part, &mut hasher, Some(offset), |_| {})?;
+    }
+
+    let need = file.size - offset;
+    if let Ok(avail) = fs4::available_space(dir) {
+        let margin = 64 * 1024 * 1024;
+        if avail < need + margin {
+            return Err(HubError::InsufficientSpace {
+                needed: need + margin,
+                available: avail,
+            });
+        }
+    }
+
+    let resumed_from = offset;
+    part.seek(SeekFrom::Start(offset))?;
+    progress.start(&file.name, file.size, offset);
+
+    let mut idx = 0usize;
+    let mut failures = 0usize;
+    let max_failures = cands.len() * opts.max_rounds.max(1);
+    let mut last_err: Option<HubError> = None;
+    let mut used_hub = None;
+    while offset < file.size {
+        if failures >= max_failures {
+            progress.finish(false);
+            return Err(HubError::AllSourcesFailed(
+                last_err.map(|e| e.to_string()).unwrap_or_default(),
+            ));
+        }
+        let c = &cands[idx % cands.len()];
+        let before = offset;
+        let end = (offset + opts.chunk_size).min(file.size) - 1;
+        match fetch_chunk(
+            c,
+            end,
+            file.size,
+            opts,
+            &mut part,
+            &mut hasher,
+            &mut offset,
+            progress,
+        ) {
+            Ok(()) => used_hub = Some(c.hub),
+            Err(HubError::Offline) => {
+                progress.finish(false);
+                return Err(HubError::Offline);
+            }
+            Err(e) => {
+                if offset == before {
+                    failures += 1;
+                }
+                let next = &cands[(idx + 1) % cands.len()];
+                progress.note(&crate::tr!(
+                    format!("{} 失败：{e}；切换到 {}", c.hub, next.hub),
+                    format!("{} failed: {e}; switching to {}", c.hub, next.hub)
+                ));
+                last_err = Some(e);
+                idx += 1;
+                let exp = failures.min(4) as u32;
+                std::thread::sleep(opts.backoff * 2u32.pow(exp));
+            }
+        }
+    }
+
+    part.flush()?;
+    part.sync_all()?;
+    drop(part);
+    let actual = hash::finalize_hex(hasher);
+    if !actual.eq_ignore_ascii_case(&file.sha256) {
+        progress.finish(false);
+        let _ = fs::remove_file(&part_path);
+        return Err(HubError::ChecksumMismatch {
+            file: file.name.clone(),
+            expected: file.sha256.clone(),
+            actual,
+        });
+    }
+    fs::rename(&part_path, &final_path)?;
+    progress.finish(true);
+    Ok(DownloadOutcome {
+        path: final_path,
+        hub: used_hub,
+        resumed_from,
+        downloaded: file.size - resumed_from,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_chunk(
+    c: &Candidate,
+    end: u64,
+    size: u64,
+    opts: &DownloadOptions,
+    part: &mut File,
+    hasher: &mut Sha256,
+    offset: &mut u64,
+    progress: &dyn Progress,
+) -> Result<(), HubError> {
+    let resp = net::get_range(&c.url, *offset, Some(end), opts.per_call_timeout)?;
+    let limit = if resp.status == 200 {
+        if *offset > 0 {
+            // Server ignored the Range header: restart from zero.
+            part.set_len(0)?;
+            part.seek(SeekFrom::Start(0))?;
+            *hasher = Sha256::new();
+            *offset = 0;
+            progress.note(&crate::tr!(
+                format!("{} 不支持断点续传，从头下载", c.hub),
+                format!("{} ignores Range; restarting from zero", c.hub)
+            ));
+        }
+        size
+    } else {
+        if resp.start != *offset {
+            return Err(HubError::Network(format!(
+                "{}: unexpected range start {} (wanted {})",
+                c.hub, resp.start, *offset
+            )));
+        }
+        end + 1
+    };
+    let mut reader = resp.reader;
+    let mut buf = vec![0u8; 256 * 1024];
+    while *offset < limit {
+        let want = ((limit - *offset) as usize).min(buf.len());
+        let n = reader.read(&mut buf[..want]).map_err(|e| {
+            HubError::Network(format!("{}: read failed at {}: {e}", c.hub, *offset))
+        })?;
+        if n == 0 {
+            return Err(HubError::Network(format!(
+                "{}: connection closed at {}",
+                c.hub, *offset
+            )));
+        }
+        part.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
+        *offset += n as u64;
+        progress.advance(*offset);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress::NoProgress;
+    use crate::registry::{FileRole, SourceRef};
+    use crate::testserver::{Behavior, TestServer, tempdir};
+
+    fn entry(data: &[u8], name: &str) -> FileEntry {
+        let mut h = Sha256::new();
+        h.update(data);
+        FileEntry {
+            role: FileRole::Weights,
+            name: name.to_string(),
+            size: data.len() as u64,
+            sha256: hash::finalize_hex(h),
+            sources: vec![SourceRef {
+                hub: "hf".into(),
+                repo: "x/y".into(),
+                revision: "main".into(),
+            }],
+        }
+    }
+
+    fn cand(hub: Hub, url: String) -> Candidate {
+        Candidate {
+            hub,
+            url,
+            revision: "main".into(),
+        }
+    }
+
+    fn opts() -> DownloadOptions {
+        DownloadOptions {
+            chunk_size: 1000,
+            max_rounds: 2,
+            per_call_timeout: Duration::from_secs(5),
+            backoff: Duration::from_millis(1),
+        }
+    }
+
+    fn data(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i * 7 % 251) as u8).collect()
+    }
+
+    #[test]
+    fn downloads_and_verifies_in_chunks() {
+        let body = data(4500);
+        let srv = TestServer::start(body.clone(), Behavior::Normal);
+        let dir = tempdir("dl-ok");
+        let f = entry(&body, "model.bin");
+        let out = download_file(
+            &f,
+            &dir,
+            &[cand(Hub::HuggingFace, srv.url("model.bin"))],
+            &opts(),
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&out.path).unwrap(), body);
+        assert!(!partial_path(&dir, &f).exists());
+        assert_eq!(out.resumed_from, 0);
+        assert!(srv.requests() >= 5, "chunked: {} requests", srv.requests());
+    }
+
+    #[test]
+    fn resumes_from_partial_offset() {
+        let body = data(3000);
+        let srv = TestServer::start(body.clone(), Behavior::Normal);
+        let dir = tempdir("dl-resume");
+        let f = entry(&body, "m.gguf");
+        fs::write(partial_path(&dir, &f), &body[..1234]).unwrap();
+        let out = download_file(
+            &f,
+            &dir,
+            &[cand(Hub::ModelScope, srv.url("m.gguf"))],
+            &opts(),
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(out.resumed_from, 1234);
+        assert_eq!(out.downloaded, 3000 - 1234);
+        assert_eq!(srv.first_range_start(), Some(1234));
+        assert_eq!(fs::read(&out.path).unwrap(), body);
+    }
+
+    #[test]
+    fn fails_over_to_next_source_keeping_offset() {
+        let body = data(5000);
+        let bad = TestServer::start(body.clone(), Behavior::DropAfter(1500));
+        let good = TestServer::start(body.clone(), Behavior::Normal);
+        let dir = tempdir("dl-failover");
+        let f = entry(&body, "w.gguf");
+        let mut o = opts();
+        o.chunk_size = 10_000;
+        let out = download_file(
+            &f,
+            &dir,
+            &[
+                cand(Hub::HuggingFace, bad.url("w.gguf")),
+                cand(Hub::ModelScope, good.url("w.gguf")),
+            ],
+            &o,
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&out.path).unwrap(), body);
+        assert_eq!(out.hub, Some(Hub::ModelScope));
+        assert_eq!(good.first_range_start(), Some(1500));
+    }
+
+    #[test]
+    fn rejects_checksum_mismatch() {
+        let body = data(2000);
+        let mut tampered = body.clone();
+        tampered[100] ^= 0xff;
+        let srv = TestServer::start(tampered, Behavior::Normal);
+        let dir = tempdir("dl-bad-sha");
+        let f = entry(&body, "t.bin");
+        let err = download_file(
+            &f,
+            &dir,
+            &[cand(Hub::HuggingFace, srv.url("t.bin"))],
+            &opts(),
+            &NoProgress,
+        )
+        .unwrap_err();
+        assert!(matches!(err, HubError::ChecksumMismatch { .. }), "{err}");
+        assert!(!dir.join("t.bin").exists());
+        assert!(!partial_path(&dir, &f).exists());
+    }
+
+    #[test]
+    fn restarts_when_range_is_ignored() {
+        let body = data(2500);
+        let srv = TestServer::start(body.clone(), Behavior::IgnoreRange);
+        let dir = tempdir("dl-norange");
+        let f = entry(&body, "n.bin");
+        fs::write(partial_path(&dir, &f), &body[..700]).unwrap();
+        let out = download_file(
+            &f,
+            &dir,
+            &[cand(Hub::HfMirror, srv.url("n.bin"))],
+            &opts(),
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&out.path).unwrap(), body);
+    }
+
+    #[test]
+    fn gives_up_after_all_sources_fail() {
+        let body = data(1000);
+        let srv = TestServer::start(body.clone(), Behavior::Status(500));
+        let dir = tempdir("dl-500");
+        let f = entry(&body, "e.bin");
+        let err = download_file(
+            &f,
+            &dir,
+            &[cand(Hub::HuggingFace, srv.url("e.bin"))],
+            &opts(),
+            &NoProgress,
+        )
+        .unwrap_err();
+        assert!(matches!(err, HubError::AllSourcesFailed(_)), "{err}");
+    }
+}
