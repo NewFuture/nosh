@@ -128,6 +128,12 @@ fn short(p: &Path) -> Cow<'_, Path> {
     Cow::Borrowed(p)
 }
 
+/// `/` or a directory right under it, such as `/etc`; on macOS also the real
+/// `/private/etc` and `/private/var` behind the `/etc` and `/var` symlinks.
+pub(crate) fn is_top_level(p: &Path) -> bool {
+    short(p).components().count() <= 2
+}
+
 pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
     let p = &*short(p);
     let s = p.to_string_lossy();
@@ -275,6 +281,17 @@ mod tests {
         assert_eq!(a("/private/etcetera"), None);
         assert_eq!(a("/private/xarts/f"), None);
         assert_eq!(a("/etc/hosts"), None);
+    }
+
+    #[test]
+    fn top_level_directories() {
+        let top = |p: &str| is_top_level(Path::new(p));
+        assert!(top("/") && top("/etc") && top("/private"));
+        assert!(!top("/etc/ssh") && !top("/private/var/db"));
+        // The real directories behind macOS's /etc and /var symlinks.
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(top("/private/etc"), macos);
+        assert_eq!(top("/private/var"), macos);
     }
 
     /// `/etc`, `/tmp` and `/var` are symlinks into `/private` on macOS.

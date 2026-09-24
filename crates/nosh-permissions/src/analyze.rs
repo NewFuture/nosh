@@ -9,7 +9,7 @@ use brush_parser::ParserOptions;
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 
-use crate::paths::{PathClass, classify_path_real, resolve};
+use crate::paths::{PathClass, classify_path_real, is_top_level, resolve};
 use crate::rules::{self, Arg, Target, Verdict, has_flag, opt_value};
 use crate::{Context, Risk, RiskReport};
 
@@ -1151,7 +1151,7 @@ impl Analyzer<'_> {
         match class {
             PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
             PathClass::Protected(l) => {
-                if v.recursive && v.deletes && resolved.components().count() <= 2 {
+                if v.recursive && v.deletes && is_top_level(&resolved) {
                     self.add(
                         Risk::Forbidden,
                         format!("recursively deletes system directory {l}"),
@@ -1182,7 +1182,7 @@ impl Analyzer<'_> {
                 self.report.writes_outside_workspace = true;
             }
             PathClass::System => {
-                let top_level = resolved.components().count() <= 2;
+                let top_level = is_top_level(&resolved);
                 if v.recursive && v.deletes && top_level {
                     self.add(
                         Risk::Forbidden,
