@@ -43,6 +43,10 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def source_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+
+
 def digest(value: object) -> str:
     data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode()).hexdigest()
@@ -171,6 +175,9 @@ class Workspace:
         if self.root.resolve() != self.root:
             raise ValueError(f"workspace must not traverse symlinks: {self.root}")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stat = self.root.stat()
+        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise ValueError(f"workspace must belong to the current user and be private (0700): {self.root}")
         marker = self.root / ".owner"
         if not marker.exists():
             if any(self.root.iterdir()):

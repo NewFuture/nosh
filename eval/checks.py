@@ -301,13 +301,18 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
     if kind == "largest":
-        names = mentioned_files(answer, facts["before"])
+        ranked = [
+            line for line in answer.splitlines()
+            if re.match(r"^\s*(?:\d+[.)]\s+|[-*]\s+|\|)", line.replace("**", ""))
+            and FILE_NAME.search(line)
+        ]
+        names = mentioned_files("\n".join(ranked) if ranked else answer, facts["before"])
         if names != facts["largest"]:
             reasons.append(f"expected ordered top three {facts['largest']}, found {names}")
     elif kind == "port":
         if not re.search(rf"(?<!\d){facts['listener']['pid']}(?!\d)", answer):
             reasons.append("answer does not identify the fixture PID")
-        if not re.search(r"\bpython3(?:\.\d+)?\b", answer, re.I):
+        if not re.search(r"\bpython[ \t]*3(?:\.\d+)?\b", answer, re.I):
             reasons.append("answer does not identify the Python listener")
     elif kind == "lines":
         reasons.extend(line_counts(answer, facts))
@@ -322,7 +327,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
         python_section = True
         incorrectly_classified = []
         for line in answer.splitlines():
-            if re.search(r"non[- ]python|非\s*python|其他.*文件|other.*files", line, re.I):
+            if re.search(r"non[- ]python|(?:非|不是|不属于)\s*python|(?:其他|其余).*文件|other.*files", line, re.I):
                 python_section = False
             elif re.search(r"python\s*文件|python\s*files|个\s*python", line, re.I):
                 python_section = True
@@ -335,6 +340,10 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                 reasons.append(f"non-Python files classified as Python: {incorrectly_classified}")
         if not re.search(r"[\u4e00-\u9fff]", answer):
             reasons.append("answer is not in Chinese")
+        counts = re.findall(r"(\d+)\s*(?:个\s*)?python\s*(?:文件|files?\b)",
+                            answer.replace("**", "").replace("`", ""), re.I)
+        if any(int(count) != len(facts["python"]) for count in counts):
+            reasons.append(f"incorrect Python file count: {counts}")
     elif kind == "typos":
         expected = scenario["corrections"]
         if len(result.turns) != len(expected) or any(

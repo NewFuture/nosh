@@ -59,7 +59,7 @@ python3 -m eval.run --model-path MODEL_DIR --binary OLD_NOSH --legacy \
 
 ## 隔离与复现口径
 
-每个场景/seed 是新进程，只有场景内部共享会话；这是冷会话而不是 MVP 连续交互的热缓存评测。设置独立 HOME/NOSH_HOME、固定 locale/TZ/PATH、终端大小、模型上下文和线程配置；显式使用 `--norc --offline --no-download --seed`。工作目录默认为系统临时目录中的 `nosh-eval-<uid>`，通过所有权标记和独占锁防止并发覆盖。自定义 `--work-dir` 必须位于现有仓库和 NOSH.md 祖先之外，且不能包含二进制、模型或报告。
+每个场景/seed 是新进程，只有场景内部共享会话；这是冷会话/KV 缓存，不保证操作系统页缓存也是冷的，不与 MVP 连续交互的热会话混比。设置独立 HOME/NOSH_HOME、固定 locale/TZ/PATH、终端大小、模型上下文和线程配置；显式使用 `--norc --offline --no-download --seed`。工作目录默认为系统临时目录中的 `nosh-eval-<uid>`，通过所有权标记和独占锁防止并发覆盖。自定义 `--work-dir` 必须在支持 Unix 私有权限的文件系统上（WSL 建议使用 Linux 的临时目录），属于当前用户且权限为 0700，位于现有仓库和 NOSH.md 祖先之外，不能包含二进制、模型或报告。
 
 每次重建文件内容、大小、权限和 mtime，git 历史固定作者、时间和提交顺序。端口夹具只监听 loopback 8080，等到实际绑定成功才开始测试；已有服务占用该端口时明确报错，绝不替换或终止该服务。只回收本次创建的进程、监听器和工作子目录。
 
@@ -69,7 +69,7 @@ python3 -m eval.run --model-path MODEL_DIR --binary OLD_NOSH --legacy \
 
 ## 指标与观测协议
 
-运行器显式设置 `NOSH_EVAL_TRACE=<私有文件>`，在 CLI 装配处包装实际 ChatEngine，记录版本化 JSONL：session 参数、追加输入、生成结果、工具调用及原始 Usage。三个入口均可观测，`-s` 的 stdout 仍只有命令。没有设置该变量时，不新增日志、不改变采样或任务行为；文件创建/写入失败会暴露为错误。日志只接受普通私有文件（Unix 不跟随符号链接，权限不得向组/其他用户开放），写入位于引擎 Usage 计时之外。它是接口层记录，不是完整 token 流。
+运行器显式设置 `NOSH_EVAL_TRACE=<私有文件>`，在 CLI 装配处包装实际 ChatEngine，记录版本化 JSONL：session 参数、追加输入、生成结果、工具调用及原始 Usage。三个入口均可观测，`-s` 的 stdout 仍只有命令。没有设置该变量时，不新增日志、不改变采样或任务行为；文件创建/写入失败会暴露为错误。日志只接受普通私有文件（Unix 不跟随符号链接，权限不得向组/其他用户开放），写入位于引擎 Usage 计时之外。它是接口层记录，不是完整 token 流；未包含所有内部保留的 assistant token，所以 `inputs_changed=false` 不证明完整 token prompt 相同。
 
 | 指标 | 口径 |
 |---|---|
@@ -84,7 +84,7 @@ Markdown 的步数/确认为均值，延迟/耗时为中位数，RSS 为最大�
 
 显式 `--legacy` 用于未改动的旧 main：REPL 复用 NOSH_STATS，`-a` 复用 JSONL；成功的 `-s` 按其单步 CLI 契约记一步，真实 TTFT 不可测，写 `null` 和原因。旧 REPL 的 TTFT/任务耗时分别只有 0.01/0.1 秒显示精度，完整引擎输入/工具轨迹也不可观测。新模式缺失事件时不会静默降级。
 
-每份报告记录二进制/模型/tokenizer/场景/运行器哈希、主机、工具版本、有效设置、seed、回答原文及证据。`--build-info` 接受 `schema_version: 1`、`source_revision`（完整 SHA）、`binary_sha256` 的构建记录，二进制哈希必须匹配；可附 `source_ref`、`source_clean`、源码归档哈希、构建命令和工具链版本。来源是该构建记录的声明，不是运行器用当前 checkout HEAD 猜出来的；未提供时明确标注来源未验证。
+每份报告记录二进制/模型/tokenizer/场景/运行器哈希、主机、工具版本、有效设置、seed、回答原文及证据。运行器同时保留物理文件哈希和统一 UTF-8/LF 的源文件内容哈希，比较时优先用后者，避免 Windows 工作树的 CRLF 制造代码差异；若追加 `harness_revision`，需先将运行时源码指纹与该提交核对。`--build-info` 接受 `schema_version: 1`、`source_revision`（完整 SHA）、`binary_sha256` 的构建记录，二进制哈希必须匹配；可附 `source_ref`、`source_clean`、源码归档哈希、构建命令和工具链版本。来源是该构建记录的声明，不是运行器用当前 checkout HEAD 猜出来的；未提供时明确标注来源未验证。
 
 版本比较检查数据集、判定器、模型、参数、环境和观测模式。不同条件仍显示配对原始差值，但明确警告不是受控的回归结论，不跨缺失指标造数。JSON 保留全部配对项和未配对计数。
 

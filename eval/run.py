@@ -175,10 +175,13 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         if not trace.is_file():
             raise ValueError("native engine trace is missing; use --legacy explicitly for an older binary")
         events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
-        if not events or any(e.get("schema_version") != 1 for e in events):
+        if not events or any(not isinstance(e, dict) or e.get("schema_version") != 1 for e in events):
             raise ValueError("invalid engine trace schema")
         if "evaluation trace:" in result.stderr or "evaluation trace:" in result.transcript:
             raise ValueError("nosh reported an evaluation trace failure")
+        errors = [e["error"] for e in events if e.get("ev") == "step_error"]
+        if errors:
+            raise RuntimeError("model engine failed: " + "; ".join(errors))
         starts = [e for e in events if e["ev"] == "step_start"]
         ends = [e for e in events if e["ev"] == "step_end"]
         opens = [e for e in events if e["ev"] == "open"]
@@ -256,6 +259,8 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path) ->
                   "tokenizer_sha256": fixtures.file_hash(tokenizer)},
         "suite_sha256": fixtures.digest(suite),
         "harness_sha256": fixtures.digest({p.name: fixtures.file_hash(p) for p in sorted(HERE.glob("*.py"))}),
+        "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
+        "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),
         "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",
@@ -301,9 +306,9 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         row.update(fixture_sha256=fixtures.digest({k: v for k, v in facts.items() if k != "listener"}),
                    facts=facts, final_state={"files": after, "cwd": result.pwd},
                    approvals=result.approvals, turns=result.turns, exit_code=result.exit_code)
+        row["metrics"].update(total_s=result.total_s, peak_rss_mib=result.peak_rss_mib,
+                              confirmations=len(result.approvals))
         if result.error:
-            row["metrics"].update(total_s=result.total_s, peak_rss_mib=result.peak_rss_mib,
-                                  confirmations=len(result.approvals))
             raise driver.DriverError(result.error)
         observed = observe(result, scenario, trace, args.legacy, seed)
         row.update(observed)

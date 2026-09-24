@@ -58,9 +58,11 @@ def compare(current: dict, previous: dict) -> dict:
     validate(previous)
     a, b = current["metadata"], previous["metadata"]
     warnings = []
-    for key in ("suite_sha256", "harness_sha256", "model", "settings", "machine", "tools", "observation"):
+    for key in ("suite_sha256", "grading_content_sha256", "model", "settings", "machine", "tools", "observation"):
         if a.get(key) != b.get(key):
             warnings.append(f"{key} differs; paired deltas are descriptive, not a controlled regression")
+    if a.get("harness_content_sha256", a.get("harness_sha256")) != b.get("harness_content_sha256", b.get("harness_sha256")):
+        warnings.append("harness sources differ; paired deltas are descriptive, not a controlled regression")
     old = {trial_key(t): t for t in previous["trials"]}
     changes = []
     for trial in current["trials"]:
@@ -150,6 +152,8 @@ def markdown(report: dict) -> str:
         f"Source: `{build.get('source_revision') or 'unverified'}`. "
         f"Binary SHA-256: `{build['binary_sha256']}`.",
         "",
+        f"Harness source: `{meta.get('harness_revision') or meta.get('harness_content_sha256') or meta.get('harness_sha256', 'unverified')}`.",
+        "",
         f"Seeds: `{meta['seeds']}`; repeats: {meta['repeat']}. "
         "Each scenario/seed starts a new process. The typo scenario does not load a model.",
         "",
@@ -167,6 +171,7 @@ def markdown(report: dict) -> str:
         "",
         "TTFT is the engine's first-step time to its first sampled token, excluding model loading. "
         "Process time includes loading, terminal interactions, and shutdown, but excludes fixture setup. "
+        "A fresh process has a cold conversation/KV cache, not necessarily a cold OS page cache. "
         "RSS is Linux wait4 ru_maxrss for each nosh process (including the kernel's accounting of waited-for descendants, "
         "not a sum of a process tree); the listener/verifier are separate. "
         "Timing aggregates include failed executions with available measurements. JSON contains sample counts and all raw values.",
@@ -178,6 +183,12 @@ def markdown(report: dict) -> str:
         rows.extend(["", "**Provisional original-main measurement, not the complete post-merge baseline.** "
                      "Legacy -s has no observable true TTFT. Legacy engine inputs and exact tool traces are unavailable; "
                      "N/A is not zero. A successful -s has one step by its CLI contract."])
+    if meta.get("regrade"):
+        rows.extend(["", "## Grading provenance",
+                     meta["regrade"]["note"],
+                     f"Grader: `{meta['regrade']['revision']}`. "
+                     f"Changed verdicts: {meta['regrade']['changed_verdicts']}. "
+                     "Original verdicts/reasons remain in each JSON trial; model outputs, seeds, timings and captured states were not replaced."])
     comparison = report.get("comparison")
     if comparison:
         rows.extend(["", "## Previous run",
@@ -206,7 +217,9 @@ def markdown(report: dict) -> str:
     else:
         rows.append("Not measured: this run has no repeated scenario/seed pairs. Use --repeat 2; do not infer repeatability from fixed seeds alone.")
     rows.extend(["", "Dynamic prompt time, tool/recent-command durations, and live PIDs can change model inputs. "
-                 "Answer/trace differences are not automatically inference nondeterminism. See per-trial interface inputs where available.",
+                 "Answer/trace differences are not automatically inference nondeterminism. Interface inputs do not include "
+                 "all internally retained assistant tokens: unchanged interface records are not proof of identical token prompts. "
+                 "See per-trial interface inputs where available.",
                  "", "## Per-trial answers and evidence"])
     for trial in report["trials"]:
         rows.extend(["", f"### {trial['scenario_id']} / seed {trial['seed']} / repeat {trial['repeat']}: {trial['status']}", ""])

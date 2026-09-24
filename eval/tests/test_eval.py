@@ -15,6 +15,14 @@ from eval import checks, driver, fixtures, report, run
 
 
 class ContractTests(unittest.TestCase):
+    def test_source_fingerprint_ignores_platform_line_endings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            a, b = Path(temporary) / "a.py", Path(temporary) / "b.py"
+            a.write_bytes(b"print(1)\r\n")
+            b.write_bytes(b"print(1)\n")
+            self.assertEqual(fixtures.source_hash(a), fixtures.source_hash(b))
+            self.assertNotEqual(fixtures.file_hash(a), fixtures.file_hash(b))
+
     def test_default_suite_and_seeds(self):
         suite = run.load_suite(run.HERE / "scenarios.json")
         self.assertEqual(len(suite["scenarios"]), 10)
@@ -60,6 +68,9 @@ class ContractTests(unittest.TestCase):
             self.assertIsNone(legacy["inputs"])
             with self.assertRaises(ValueError):
                 run.observe(result, scenario, trace, False, 5)
+            trace.write_text(json.dumps({"schema_version": 1, "ev": "step_error", "error": "context full"}) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "context full"):
+                run.observe(result, scenario, trace, False, 4)
             trace.unlink()
             with self.assertRaises(ValueError):
                 run.observe(result, scenario, trace, False, 4)
@@ -133,6 +144,11 @@ class FixtureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             with fixtures.Workspace(outsider):
                 pass
+        public = self.base / "public"
+        public.mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, "private"):
+            with fixtures.Workspace(public):
+                pass
         with fixtures.Workspace(self.base / "work") as workspace:
             with self.assertRaises(RuntimeError):
                 with fixtures.Workspace(workspace.root):
@@ -185,6 +201,8 @@ class CheckTests(unittest.TestCase):
         def verdict(answer):
             return checks.judge({"check": "largest"}, answer, facts, root, facts["before"], self.result, self.metrics)
         self.assertTrue(verdict("1. data/dump.bin\n2. video.bin\n3. cache/archive.bin").passed)
+        self.assertTrue(verdict("1. data/dump.bin\n2. video.bin\n3. cache/archive.bin\n\n"
+                                "These exclude notes.txt, which is only 100 bytes.").passed)
         self.assertFalse(verdict("dump.bin, archive.bin, video.bin").passed)
         self.assertFalse(verdict("Done.").passed)
 
@@ -216,6 +234,18 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(verdict("main.py, lib/maths.py, tools/report.py").passed)
         self.assertTrue(verdict(good + "\n另外还有一些非 Python 文件：\n- scripts/check.sh\n- src/main.rs\n- web/app.js").passed)
         self.assertFalse(verdict(good + " web/app.js").passed)
+        self.assertFalse(verdict(good + "\n共 **4个** Python 文件。").passed)
+
+    def test_port_identity_allows_a_spelled_out_python_version_but_requires_pid(self):
+        root = self.base / "port"
+        facts = fixtures.create(root, "port")
+        facts["listener"] = {"pid": 12345, "port": 8080, "process": "python3"}
+        def verdict(answer):
+            return checks.judge({"check": "port"}, answer, facts, root, facts["before"], self.result, self.metrics)
+        self.assertTrue(verdict("A Python 3 process (PID 12345).").passed)
+        self.assertTrue(verdict("python3.14, PID 12345").passed)
+        self.assertFalse(verdict("python3, PID 23456").passed)
+        self.assertFalse(verdict("python3 -m http.server 8080").passed)
 
     def test_rename_contents_and_approval(self):
         root = self.base / "rename"
@@ -398,6 +428,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(comparison["pairs"][0]["metric_delta"]["total_s"], 1)
         self.assertIsNone(comparison["pairs"][0]["metric_delta"]["ttft_s"])
         self.assertTrue(comparison["warnings"])
+        before["metadata"].update(harness_sha256="raw-crlf", harness_content_sha256="same-content")
+        after = copy.deepcopy(before)
+        after["metadata"]["harness_sha256"] = "raw-lf"
+        self.assertEqual(report.compare(after, before)["warnings"], [])
 
     def test_repeatability_does_not_require_identical_answers_or_timings(self):
         first = self.sample()["trials"][0]
