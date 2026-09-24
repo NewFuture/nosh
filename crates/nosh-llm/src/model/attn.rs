@@ -167,6 +167,50 @@ enum KvView<'a> {
     },
 }
 
+/// f16 → f32 for `rows` rows of `len` values; row `j` of `src` starts at
+/// `j * stride`, row `j` of `dst` at `j * len`.
+fn widen_rows(src: &[f16], stride: usize, len: usize, rows: usize, dst: &mut [f32]) {
+    if rows == 0 {
+        return;
+    }
+    assert!((rows - 1) * stride + len <= src.len() && rows * len <= dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::sync::OnceLock;
+        static F16C: OnceLock<bool> = OnceLock::new();
+        if *F16C.get_or_init(|| is_x86_feature_detected!("avx") && is_x86_feature_detected!("f16c"))
+        {
+            // SAFETY: the CPU has AVX and F16C (checked above).
+            unsafe { widen_rows_f16c(src, stride, len, rows, dst) };
+            return;
+        }
+    }
+    for j in 0..rows {
+        src[j * stride..][..len].convert_to_f32_slice(&mut dst[j * len..][..len]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,f16c")]
+unsafe fn widen_rows_f16c(src: &[f16], stride: usize, len: usize, rows: usize, dst: &mut [f32]) {
+    use std::arch::x86_64::{__m128i, _mm_loadu_si128, _mm256_cvtph_ps, _mm256_storeu_ps};
+    let body = len / 8 * 8;
+    for j in 0..rows {
+        let s = &src[j * stride..][..len];
+        let d = &mut dst[j * len..][..len];
+        for i in (0..body).step_by(8) {
+            // SAFETY: `i + 8 <= len`, the length of both row slices.
+            unsafe {
+                let h = _mm_loadu_si128(s.as_ptr().add(i).cast::<__m128i>());
+                _mm256_storeu_ps(d.as_mut_ptr().add(i), _mm256_cvtph_ps(h));
+            }
+        }
+        for i in body..len {
+            d[i] = s[i].to_f32();
+        }
+    }
+}
+
 /// `dst[..src.len()] = src` as f32, split across the barrier pool.
 fn widen_into(src: &[f16], dst: &mut Vec<f32>) {
     const CHUNK: usize = 1 << 16;
@@ -175,7 +219,7 @@ fn widen_into(src: &[f16], dst: &mut Vec<f32>) {
     }
     let n = src.len().div_ceil(CHUNK);
     if n <= 1 {
-        src.convert_to_f32_slice(&mut dst[..src.len()]);
+        widen_rows(src, 0, src.len(), 1, dst);
         return;
     }
     let out = dst.as_mut_ptr() as usize;
@@ -186,7 +230,7 @@ fn widen_into(src: &[f16], dst: &mut Vec<f32>) {
             // SAFETY: chunk `c` writes only `dst[lo..hi]`, disjoint from every
             // other chunk and inside `dst`, which outlives the pool call.
             let d = unsafe { std::slice::from_raw_parts_mut((out as *mut f32).add(lo), hi - lo) };
-            src[lo..hi].convert_to_f32_slice(d);
+            widen_rows(&src[lo..hi], 0, hi - lo, 1, d);
         }
     });
 }
@@ -262,7 +306,8 @@ struct Plan {
     kv_row: usize,
 }
 
-/// Single-threaded `dst = lhs · rhs` with explicit (row, column) strides.
+/// Single-threaded `dst = lhs · rhs` (or `dst += lhs · rhs` with `accumulate`)
+/// with explicit (row, column) strides.
 #[allow(clippy::too_many_arguments)]
 fn matmul(
     m: usize,
@@ -276,6 +321,7 @@ fn matmul(
     rhs: &[f32],
     rhs_rs: usize,
     rhs_cs: usize,
+    accumulate: bool,
 ) {
     if m == 0 || n == 0 || k == 0 {
         return;
@@ -293,14 +339,14 @@ fn matmul(
             dst.as_mut_ptr(),
             1,
             dst_rs as isize,
-            false,
+            accumulate,
             lhs.as_ptr(),
             lhs_cs as isize,
             lhs_rs as isize,
             rhs.as_ptr(),
             rhs_cs as isize,
             rhs_rs as isize,
-            0.0,
+            if accumulate { 1.0 } else { 0.0 },
             1.0,
             false,
             false,
@@ -310,13 +356,15 @@ fn matmul(
     }
 }
 
+/// Keys widened from f16 per step inside a unit, so the f32 copies stay in cache.
+const KEY_BLOCK: usize = 256;
+
 /// Per-thread buffers of the work units.
 #[derive(Default)]
 struct UnitBufs {
     q: Vec<f32>,
     scores: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
+    kv: Vec<f32>,
 }
 
 /// One unit: KV head `g`, query tokens `t0..t1`, keys `k0..` of split `c`.
@@ -354,38 +402,48 @@ fn attend_unit(
         let base = (t * p.n_head + g * n_rep) * hd;
         b.q.extend(q[base..base + n_rep * hd].iter().map(|x| x * scale));
     }
-    // Keys k0..k_end of KV head g as f32 rows, and the stride between keys.
-    let kbase = k0 * p.kv_row + g * hd;
-    let (keys, vals, stride): (&[f32], &[f32], usize) = match kv {
-        KvView::F32 { k, v } => (&k[kbase..], &v[kbase..], p.kv_row),
-        KvView::F16 { k, v } => {
-            b.k.resize(width * hd, 0.0);
-            b.v.resize(width * hd, 0.0);
-            for j in 0..width {
-                let src = kbase + j * p.kv_row;
-                let dst = j * hd..(j + 1) * hd;
-                k[src..src + hd].convert_to_f32_slice(&mut b.k[dst.clone()]);
-                v[src..src + hd].convert_to_f32_slice(&mut b.v[dst]);
-            }
-            (&b.k[..], &b.v[..], hd)
-        }
-    };
+    // Key j of this unit is row `kbase + j * stride` of K and V.
+    let (stride, kbase) = (p.kv_row, k0 * p.kv_row + g * hd);
     // S = Q · Kᵀ, row-major `[nrows][width]`.
     b.scores.clear();
     b.scores.resize(nrows * width, 0.0);
-    matmul(
-        nrows,
-        width,
-        hd,
-        &mut b.scores,
-        width,
-        &b.q,
-        hd,
-        1,
-        keys,
-        1,
-        stride,
-    );
+    match kv {
+        KvView::F32 { k, .. } => matmul(
+            nrows,
+            width,
+            hd,
+            &mut b.scores,
+            width,
+            &b.q,
+            hd,
+            1,
+            &k[kbase..],
+            1,
+            stride,
+            false,
+        ),
+        KvView::F16 { k, .. } => {
+            for j0 in (0..width).step_by(KEY_BLOCK) {
+                let w = (width - j0).min(KEY_BLOCK);
+                b.kv.resize(w * hd, 0.0);
+                widen_rows(&k[kbase + j0 * stride..], stride, hd, w, &mut b.kv);
+                matmul(
+                    nrows,
+                    w,
+                    hd,
+                    &mut b.scores[j0..],
+                    width,
+                    &b.q,
+                    hd,
+                    1,
+                    &b.kv,
+                    1,
+                    hd,
+                    false,
+                );
+            }
+        }
+    }
     for r in 0..nrows {
         let t = t0 + r / n_rep;
         let row = &mut b.scores[r * width..(r + 1) * width];
@@ -407,9 +465,43 @@ fn attend_unit(
         l[r] = sum;
     }
     // O = P · V, row-major `[nrows][hd]`.
-    matmul(
-        nrows, hd, width, acc, hd, &b.scores, width, 1, vals, stride, 1,
-    );
+    match kv {
+        KvView::F32 { v, .. } => matmul(
+            nrows,
+            hd,
+            width,
+            acc,
+            hd,
+            &b.scores,
+            width,
+            1,
+            &v[kbase..],
+            stride,
+            1,
+            false,
+        ),
+        KvView::F16 { v, .. } => {
+            for j0 in (0..width).step_by(KEY_BLOCK) {
+                let w = (width - j0).min(KEY_BLOCK);
+                b.kv.resize(w * hd, 0.0);
+                widen_rows(&v[kbase + j0 * stride..], stride, hd, w, &mut b.kv);
+                matmul(
+                    nrows,
+                    hd,
+                    w,
+                    acc,
+                    hd,
+                    &b.scores[j0..],
+                    width,
+                    1,
+                    &b.kv,
+                    hd,
+                    1,
+                    j0 > 0,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -664,6 +756,8 @@ mod tests {
                     (700, 3),
                     (0, 130),
                     (300, 37),
+                    // Decode over several KEY_BLOCKs per unit.
+                    (4000, 1),
                 ] {
                     let total = pos + s;
                     let k = pseudo(total * n_kv * hd, 1);
@@ -753,6 +847,32 @@ mod tests {
             let (a, b) = (exp_neg(x), x.exp());
             assert!((a - b).abs() <= b * 1e-5 + 1e-37, "x={x} {a} vs {b}");
             x += 0.013;
+        }
+    }
+
+    #[test]
+    fn widen_rows_matches_scalar() {
+        let src: Vec<f16> = pseudo(7 * 40 + 13, 5)
+            .iter()
+            .map(|x| f16::from_f32(x * 300.0))
+            .collect();
+        for (stride, len, rows) in [
+            (40usize, 37usize, 7usize),
+            (40, 40, 7),
+            (0, 293, 1),
+            (40, 5, 3),
+        ] {
+            let mut dst = vec![0f32; rows * len];
+            widen_rows(&src, stride, len, rows, &mut dst);
+            for j in 0..rows {
+                for i in 0..len {
+                    assert_eq!(
+                        dst[j * len + i],
+                        src[j * stride + i].to_f32(),
+                        "{stride}/{len}/{rows}"
+                    );
+                }
+            }
         }
     }
 
