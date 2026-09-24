@@ -107,11 +107,17 @@ pub struct SharedProgress {
 }
 
 impl Progress for SharedProgress {
+    /// A new transfer: earlier completion or failure no longer applies.
     fn start(&self, name: &str, total: u64, already: u64) {
         let mut s = self.state.lock().unwrap();
-        s.file = name.to_string();
-        s.total = total;
-        s.pos = already;
+        *s = DownloadStatus {
+            file: name.to_string(),
+            total,
+            pos: already,
+            last_note: std::mem::take(&mut s.last_note),
+            done: false,
+            failed: false,
+        };
     }
     fn advance(&self, pos: u64) {
         self.state.lock().unwrap().pos = pos;
@@ -119,10 +125,45 @@ impl Progress for SharedProgress {
     fn note(&self, msg: &str) {
         self.state.lock().unwrap().last_note = msg.to_string();
     }
+    /// The transfer ended: `done` either way, `failed` unless it succeeded.
     fn finish(&self, ok: bool) {
         let mut s = self.state.lock().unwrap();
-        if !ok {
-            s.failed = true;
+        s.done = true;
+        s.failed = !ok;
+        if ok {
+            s.pos = s.total;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_progress_records_each_transfer_lifecycle() {
+        let p = SharedProgress::default();
+        let snap = || p.state.lock().unwrap().clone();
+        p.start("tokenizer.json", 100, 0);
+        p.advance(40);
+        assert_eq!(snap().percent(), 40);
+        assert!(!snap().done);
+        p.finish(true);
+        let s = snap();
+        assert!(s.done && !s.failed, "{s:?}");
+        assert_eq!(s.percent(), 100);
+        // The next file starts clean, and a failure is also completion.
+        p.note("switching to modelscope.cn");
+        p.start("model.gguf", 1000, 250);
+        let s = snap();
+        assert!(!s.done && !s.failed, "{s:?}");
+        assert_eq!((s.file.as_str(), s.pos, s.total), ("model.gguf", 250, 1000));
+        assert_eq!(s.last_note, "switching to modelscope.cn");
+        p.finish(false);
+        let s = snap();
+        assert!(s.done && s.failed, "{s:?}");
+        assert_eq!(s.pos, 250, "a failed transfer keeps its position");
+        p.start("model.gguf", 1000, 250);
+        assert!(!snap().failed, "a retry clears the failure");
     }
 }
