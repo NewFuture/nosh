@@ -113,6 +113,11 @@ pub struct RiskReport {
     pub writes_outside_workspace: bool,
     pub changes_session: bool,
     pub reads_protected: bool,
+    /// Runs code whose effects the analysis cannot see: a command missing
+    /// from the rule table, a program given by path outside the system bin
+    /// directories, or an interpreter running a script or inline code. Such
+    /// commands are not Dangerous by themselves, but auto mode asks first.
+    pub unknown_effect: bool,
 }
 
 impl RiskReport {

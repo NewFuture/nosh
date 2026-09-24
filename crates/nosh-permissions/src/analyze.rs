@@ -126,6 +126,27 @@ fn basename(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
+/// Directories whose programs are taken to be the ones the rule table knows
+/// by name (`/usr/bin/git` is git; `/tmp/git` is not).
+const SYSTEM_BIN_DIRS: &[&str] = &[
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/snap/bin",
+    "/run/current-system/sw/bin",
+];
+
+fn in_system_bin_dir(name: &str) -> bool {
+    name.rsplit_once('/')
+        .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
+}
+
 fn has_escape_obfuscation(src: &str) -> bool {
     let b = src.as_bytes();
     b.windows(2)
@@ -838,12 +859,21 @@ impl Analyzer<'_> {
         if v.session {
             self.report.changes_session = true;
         }
+        if v.unknown {
+            self.report.unknown_effect = true;
+        }
         for w in &v.writes {
             self.write_effect(w, &v);
         }
         for r in &v.reads {
             self.read_effect(r);
         }
+    }
+
+    /// Code whose effects the analysis cannot see (auto mode asks first).
+    fn unknown(&mut self, reason: impl Into<String>) {
+        self.add(Risk::Mutating, reason);
+        self.report.unknown_effect = true;
     }
 
     /// Dispatches one simple command (`argv[0]` is the command name).
@@ -888,8 +918,15 @@ impl Analyzer<'_> {
         }
 
         let base = basename(&name).to_string();
-        if name.contains('/') && !name.starts_with('/') && !name.starts_with('~') {
-            self.add(Risk::Mutating, format!("runs local program {name}"));
+        if name.contains('/') && !in_system_bin_dir(&name) {
+            // `./gen.sh`, `bin/tool`, `/tmp/x`, `~/bin/x`: whatever it is, it is
+            // not the program the rule table knows by that name. A matching
+            // name's rule still applies on top (`./rm -rf x` stays Dangerous).
+            self.unknown(format!("runs local program {name} (effects unknown)"));
+            let v = rules::classify(&base, &args);
+            if !v.unknown {
+                self.apply(v);
+            }
             return;
         }
         match base.as_str() {
@@ -1031,9 +1068,8 @@ impl Analyzer<'_> {
                             Risk::Dangerous,
                             format!("inline {base} code runs commands or deletes files"),
                         );
-                    } else {
-                        self.add(Risk::Mutating, format!("runs inline {base} code"));
                     }
+                    self.unknown(format!("runs inline {base} code (effects unknown)"));
                 } else {
                     self.apply(rules::classify(&base, &args));
                 }
@@ -1326,13 +1362,14 @@ impl Analyzer<'_> {
         let ops = rules::operands(args);
         match ops.first() {
             Some(script) if script.value != "-" => {
-                self.add(
-                    Risk::Mutating,
-                    format!("runs shell script {}", script.value),
-                );
+                self.unknown(format!(
+                    "runs shell script {} (effects unknown)",
+                    script.value
+                ));
                 self.read_effect(&target_of(script));
             }
-            _ => self.add(Risk::Mutating, format!("starts {base}")),
+            // Reads commands from stdin (or a `<` redirect).
+            _ => self.unknown(format!("starts {base} (effects unknown)")),
         }
     }
 

@@ -112,7 +112,9 @@ impl UserRules {
 /// Grants from answering `a` on an approval card: command prefixes, only for
 /// commands whose risk is at most Mutating, remembering whether the approved
 /// command used the network, wrote outside the workspace or changed the
-/// session; a later command needs a grant with the same properties.
+/// session; a later command needs a grant with the same properties. A line
+/// with unknown effects only grants its exact simple commands (approving
+/// `./build.sh` or `python3 test.py` says nothing about other scripts).
 #[derive(Debug, Clone, Default)]
 pub struct SessionAllowList {
     grants: Vec<Grant>,
@@ -121,9 +123,12 @@ pub struct SessionAllowList {
 #[derive(Debug, Clone)]
 struct Grant {
     prefix: String,
+    /// `prefix` is a whole simple command, matched exactly.
+    exact: bool,
     network: bool,
     outside: bool,
     session: bool,
+    unknown: bool,
 }
 
 const SUBCOMMAND_TOOLS: &[&str] = &[
@@ -180,22 +185,34 @@ impl SessionAllowList {
     }
 
     pub fn grant(&mut self, report: &RiskReport) {
+        let exact = report.unknown_effect;
         for c in &report.commands {
-            let p = Self::prefix_of(c);
+            let p = if exact {
+                c.trim().to_string()
+            } else {
+                Self::prefix_of(c)
+            };
             if p.is_empty() {
                 continue;
             }
-            match self.grants.iter_mut().find(|g| g.prefix == p) {
+            match self
+                .grants
+                .iter_mut()
+                .find(|g| g.prefix == p && g.exact == exact)
+            {
                 Some(g) => {
                     g.network |= report.network;
                     g.outside |= report.writes_outside_workspace;
                     g.session |= report.changes_session;
+                    g.unknown |= report.unknown_effect;
                 }
                 None => self.grants.push(Grant {
                     prefix: p,
+                    exact,
                     network: report.network,
                     outside: report.writes_outside_workspace,
                     session: report.changes_session,
+                    unknown: report.unknown_effect,
                 }),
             }
         }
@@ -209,10 +226,14 @@ impl SessionAllowList {
             && report.commands.iter().all(|c| {
                 let p = Self::prefix_of(c);
                 self.grants.iter().any(|g| {
-                    g.prefix == p
-                        && (!report.network || g.network)
+                    (if g.exact {
+                        g.prefix == c.trim()
+                    } else {
+                        g.prefix == p
+                    }) && (!report.network || g.network)
                         && (!report.writes_outside_workspace || g.outside)
                         && (!report.changes_session || g.session)
+                        && (!report.unknown_effect || g.unknown)
                 })
             })
     }
@@ -227,8 +248,11 @@ impl SessionAllowList {
 /// | mode    | Safe  | Mutating                          | Dangerous | Forbidden |
 /// |---------|-------|-----------------------------------|-----------|-----------|
 /// | confirm | allow | ask                               | ask (yes) | deny      |
-/// | auto    | allow | allow in workspace, else ask      | ask (yes) | deny      |
+/// | auto    | allow | allow in workspace, else ask (1)  | ask (yes) | deny      |
 /// | yolo    | allow | allow                             | ask       | deny      |
+///
+/// (1) Also asks when the effects are unknown (unlisted command, program
+/// given by path, script or inline code for an interpreter).
 pub fn decide(
     report: &RiskReport,
     command: &str,
@@ -262,10 +286,13 @@ pub fn decide(
         (Risk::Safe, _) => Decision::Allow,
         (Risk::Mutating, ApprovalMode::Yolo) => Decision::Allow,
         (Risk::Mutating, ApprovalMode::Auto) => {
+            // Workspace writes run unasked; anything that reaches further, or
+            // whose effects cannot be seen from the command line, asks.
             if report.writes_outside_workspace
                 || report.network
                 || report.changes_session
                 || report.reads_protected
+                || report.unknown_effect
             {
                 Decision::Ask { strong: false }
             } else {

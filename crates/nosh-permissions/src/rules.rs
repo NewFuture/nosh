@@ -49,6 +49,8 @@ pub struct Verdict {
     pub reads: Vec<Target>,
     pub network: bool,
     pub session: bool,
+    /// Runs code the rules cannot see into (see `RiskReport::unknown_effect`).
+    pub unknown: bool,
     /// Recursive delete/permission change: root/home/system targets become Forbidden/Dangerous.
     pub recursive: bool,
     pub deletes: bool,
@@ -63,6 +65,7 @@ impl Verdict {
             reads: vec![],
             network: false,
             session: false,
+            unknown: false,
             recursive: false,
             deletes: false,
         }
@@ -90,6 +93,15 @@ impl Verdict {
 
     fn session(mut self) -> Self {
         self.session = true;
+        self
+    }
+
+    /// Effects unknown: at least Mutating, and auto mode asks.
+    fn unknown(mut self) -> Self {
+        self.unknown = true;
+        if self.risk < Risk::Mutating {
+            self.risk = Risk::Mutating;
+        }
         self
     }
 
@@ -923,7 +935,9 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             package_manager(name, args)
         }
         "npm" | "pnpm" | "yarn" | "bun" => js_pm(args),
-        "npx" | "pnpx" | "bunx" => Verdict::mutating("downloads and runs a package").net(),
+        "npx" | "pnpx" | "bunx" => Verdict::mutating("downloads and runs a package")
+            .net()
+            .unknown(),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"
         | "composer" => py_pm(args),
         "cargo" => match first_word(args) {
@@ -967,14 +981,14 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             {
                 Verdict::safe("prints version")
             } else {
-                Verdict::mutating(format!("runs a {name} program"))
+                Verdict::mutating(format!("runs a {name} program (effects unknown)")).unknown()
             }
         }
         n if n.starts_with("python3.") || n.starts_with("python2.") => {
             if args.len() == 1 && matches!(args[0].value.as_str(), "--version" | "-V") {
                 Verdict::safe("prints version")
             } else {
-                Verdict::mutating("runs a python program")
+                Verdict::mutating("runs a python program (effects unknown)").unknown()
             }
         }
         "vi" | "vim" | "nvim" | "nano" | "emacs" | "ed" | "ex" | "code" | "gedit" | "micro"
@@ -1055,8 +1069,9 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         "fg" | "bg" | "disown" | "suspend" => {
             Verdict::mutating("changes job control state").session()
         }
-        "source" | "." => Verdict::mutating("sources a script into the session")
+        "source" | "." => Verdict::mutating("sources a script into the session (effects unknown)")
             .session()
+            .unknown()
             .reads(targets(ops().into_iter().take(1).collect())),
         "env" | "printenv" => Verdict::safe("prints the environment"),
         n if READERS.contains(&n) => {
@@ -1070,7 +1085,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         }
         n if INFO.contains(&n) => Verdict::safe("read-only"),
         n if NETWORK.contains(&n) => network_tool(n, args),
-        _ => Verdict::mutating(format!("unknown command '{name}'; assumed to modify state")),
+        _ => Verdict::mutating(format!("unknown command '{name}' (effects unknown)")).unknown(),
     }
 }
 
