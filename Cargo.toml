@@ -55,6 +55,9 @@ indicatif = "0.18.6"
 # tools
 ignore = "0.4.33"
 
+# tests
+tempfile = "3.27.0"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"

@@ -124,6 +124,67 @@ struct SimpleCmd {
     argv: Vec<String>,
 }
 
+/// Only used for unresolved names: question words can otherwise look like
+/// typos (`can` -> `cat`, `is` -> `ls`, `why` -> `who`).
+fn looks_like_question(argv: &[String]) -> bool {
+    let [first, second, third, ..] = argv else {
+        return false;
+    };
+    let auxiliary = |word: &str| {
+        matches!(
+            word,
+            "am" | "is"
+                | "are"
+                | "was"
+                | "were"
+                | "do"
+                | "does"
+                | "did"
+                | "can"
+                | "could"
+                | "will"
+                | "would"
+                | "should"
+                | "may"
+                | "might"
+                | "must"
+                | "have"
+                | "has"
+                | "had"
+        )
+    };
+    let second = second.to_ascii_lowercase();
+    match first.to_ascii_lowercase().as_str() {
+        "why" | "where" | "when" => auxiliary(&second),
+        "how" => auxiliary(&second) || matches!(second.as_str(), "many" | "much"),
+        "what" | "which" | "whose" => auxiliary(&second) || auxiliary(&third.to_ascii_lowercase()),
+        word if auxiliary(word) => matches!(
+            second.as_str(),
+            "i" | "you"
+                | "he"
+                | "she"
+                | "it"
+                | "we"
+                | "they"
+                | "there"
+                | "this"
+                | "that"
+                | "these"
+                | "those"
+                | "my"
+                | "your"
+                | "his"
+                | "her"
+                | "our"
+                | "their"
+                | "the"
+                | "a"
+                | "an"
+        ),
+        _ => false,
+    }
+}
+
 fn static_word(w: &ast::Word) -> Option<String> {
     let opts = brush_parser::ParserOptions::default();
     let pieces = brush_parser::word::parse(&w.value, &opts).ok()?;
@@ -292,6 +353,10 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
         let mut edits = Vec::new();
         let mut first = None;
         for m in &missing {
+            if looks_like_question(&m.argv) {
+                edits.clear();
+                break;
+            }
             let fix = spell::ranked_matches(&m.name, &names)
                 .into_iter()
                 .find(|c| shell.resolve(c) != Resolution::NotFound);
