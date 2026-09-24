@@ -87,7 +87,7 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 - **模型**：`nosh model list`；`nosh model use minicpm5-1b:q4_k_m`（适合低内存设备）；`nosh model verify`；`nosh model update`。
 - **配置**：配置文件是 `~/.config/nosh/config.toml`，常用项见 §11，例如 `approval = "auto"`、`on_failure = "auto"`。
 - **排障**：
-  - `nosh doctor`：检查 CPU、内存、模型和下载源；
+  - `nosh doctor`：检查 CPU、内存（按所选模型的 `min_memory_mb` 另加 512 MiB 余量）、模型和下载源；
   - `nosh doctor --rc`：检查 rc 的兼容性；
   - `nosh --safe`：不加载 rc，也不启用 AI；
   - `NOSH_DISABLE_AI=1`：只关闭 AI。
@@ -390,6 +390,10 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
   - nosh 通过 `waitpid(WUNTRACED)` 发现后，会终止该命令并告诉模型；模型改用 `propose_command`，把命令交给用户执行。
   - 这种做法不需要维护命令名单。
 - **分工**：用户命令的作业控制完全交给 brush；agent 命令通过执行参数指定后台进程组和重定向。如果 brush 不支持这些参数，就向上游贡献。
+- **超时和中止时的清理**：
+  - brush 不提供子进程的 pid，所以 Linux 上从 `/proc` 读取进程树：命令开始后新出现的后代进程都会被清理；命令开始前就已存在的子进程（用户的后台作业）及其后代不受影响。
+  - double-fork 或 `setsid` 之后脱离进程树的进程，靠环境变量找回：每次 agent 命令都设置唯一的 `NOSH_AGENT_RUN=<pid>.<序号>`，带有这个值的进程一并清理。没有采用 subreaper。
+  - 局限：既清空环境、又脱离进程树的进程（如 `env -i setsid …`）找不到。
 - **窗口大小和 SIGHUP**：按 bash 的规则处理。远程版中，按键、窗口变化和 Ctrl-C 都通过 `pty` 通道转发；客户端断开不算终端关闭。
 
 ### 4.5 CLI 模式与非交互约定
@@ -600,7 +604,7 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | 等级 | 示例 | confirm 模式下 |
 |---|---|---|
 | **Safe**（只读，且不联网） | `ls` `cat` `grep` `rg` `find`（不带 `-delete`/`-exec`）`du` `ps` `ss` `git status/log/diff` | 自动执行 |
-| **Mutating**（可恢复的写入、联网、修改会话状态） | `mkdir` `cp` `mv`、写入重定向、`sed -i`、`git commit`、安装软件包；`curl` `wget` `ssh` `scp` `rsync`；修改 `PATH`、`trap`、`alias` | 单键确认 |
+| **Mutating**（可恢复的写入、联网、修改会话状态） | `mkdir` `cp` `mv`、写入重定向、`sed -i`、`git commit`、安装软件包；`curl` `wget` `ssh` `scp` `rsync`；修改 `PATH`、`trap`、`alias`，以及 `read`、`hash`、`fc`、`stty` 等会修改会话或终端状态的用法 | 单键确认 |
 | **Dangerous**（破坏性、不可逆、提权、远程代码执行） | `rm -r/-f`、`find -delete`、`dd` `mkfs`、对系统目录或家目录执行 `chmod/chown -R`、`sudo`、把下载的内容交给 shell 执行、`git push --force`、`git reset --hard`、`shutdown` | 说明影响，要求键入 `yes` |
 | **Forbidden**（任何模式下都拒绝） | `rm -rf /`、`rm -rf ~`、fork bomb、对系统盘执行 `mkfs` 或 `dd`；agent 执行 `exit`/`exec` | 拒绝，并把原因告诉模型 |
 
@@ -608,7 +612,10 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 - **子命令和参数级的规则表**：覆盖 git、find、sed、awk、xargs、docker、kubectl、systemctl、npm、pip、apt 等常用命令。
 - **路径**：
   - 在工作区（会话开始时的 cwd，或者它所在的 git 根目录）之外写入时，风险升一级。
-  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`）读取需要确认，写入按 Dangerous 处理。
+  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`）读取需要确认，写入按 Dangerous 处理。shell 脚本里的读取同样检查。
+  - 读取目标来自变量或参数时（如 `cat "$KEY_PATH"`），用分析时能确定的值解析：会话变量、行内赋值、会话中或行内定义的函数的参数、脚本和 `bash -c` 的参数；子进程只继承导出的变量。解析出受保护路径时，与字面路径一样需要确认。
+  - 确定不了的值（`$(…)`、glob、未知变量）不改变分级，也不额外确认（方便优先）。
+  - 已知的值只用来增加确认，不用来放宽：分析不考虑执行顺序，经过分支或循环后值可能已经变了。所以用变量拼出的写入目标、删除目标和命令名，仍按原有规则处理（见下方的反混淆和运行时才确定的写入目标）。
 - **反混淆**：把 `eval`、`bash -c`、`$(…)` 的内容展开后再分析。以下情况直接判为 Dangerous：
   - 解码后执行（如 `base64 -d | sh`）；
   - 十六进制转义；
@@ -702,7 +709,7 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
   - 分块 prefill，每块 512 个 token，用来限制峰值内存，块与块之间可以取消；
   - 只计算最后一个位置的 logits；
   - llama 布局的 GGUF 使用交错式 RoPE；
-  - **只保留一个计算线程池**：`CANDLE_NUM_THREADS` 设为物理核心数，`RAYON_NUM_THREADS=1`，而且只作用于 nosh 进程，在 shell 子进程中还原。两个线程池争抢核心时，MVP 的 decode 只有 6.5 tok/s，调整后约 20 tok/s；
+  - **只保留一个计算线程池**：`CANDLE_NUM_THREADS` 设为物理核心数，`RAYON_NUM_THREADS=1`，而且只作用于 nosh 进程，在 shell 子进程中还原。这两个变量在 `main` 开头、任何线程启动之前设置，以免与其他线程读取环境变量时发生竞争。两个线程池争抢核心时，MVP 的 decode 只有 6.5 tok/s，调整后约 20 tok/s；
   - 权重重排发生在进程内第一次前向时，约 2.5 s，常驻 engine 可以避免每次冷启动都重排一遍；
   - 加载时自检架构、层数、量化类型以及词表是否一致。
 
@@ -786,6 +793,8 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 4. 用户模型库：`<data_dir>/nosh/models/<id>/`；
 5. 系统模型库：`/usr/share/nosh/models/<id>/`（多用户主机共用）；
 6. 都找不到时，自动下载。
+
+显式指定的路径（第 1、2 项）解析失败时直接报错，不再往后查找，也不会下载。如果指定的是目录、里面有多个 GGUF，就按所请求模型（未指定时为默认模型）在 registry 中的文件名选择；没有匹配的文件时报错，并列出候选文件。
 
 registry 随 nosh 版本一起发布，固定了 revision 和 SHA-256。nosh 不会自动更新模型；`nosh model update` 会显式检查更新，旧文件要确认后才删除。
 
@@ -1211,6 +1220,7 @@ default = true
 arch = "llama"
 chat_format = "minicpm5"
 context_max = 131072
+min_memory_mb = 2600
 eog_ids = [1, 130073]
 license = "Apache-2.0"
 sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
@@ -1275,4 +1285,4 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.5 | 根据 MVP 实测修订。**内存**：§2.3 改为完整的内存模型，补上 x86 重排副本（约 1.6 GB）和 KV 类型，说明实测 3.2–3.8 GB 的原因以及如何回到 ≤ 2.3 GB；§7.6 的自适应阈值改为按公式计算。**推理**：candle 固定到 main 分支的原因；fork 新增分块 GQA 注意力（#5）和释放原始权重（#6）；KV 按 1024 token 分段增长；单一计算线程池。**实测数据**：§7.5 和 §13.1 增加 MVP 实测列。**细化**：审批卡片出现时清空预输入；allow/deny 按简单命令逐条匹配；隐藏字符判为 Dangerous；运行时才确定的写入目标；任务头中的 `lang=zh`；`list_dir` 统一大小单位并逐层检查受保护路径；64 MiB 分块下载。**计划**：M1 标记为已完成；M2 补充内存优化、多会话 KV、可靠性评测和 brush 上游事项；补充相应的风险和待定事项 |
 | v0.6 | **修正 v0.5 的内存估算**：重排布局比原始权重更大（Q4K 约 1.33 倍，Q6K 约 1.52 倍），而且 Q6K 在 decode 时仍用原始权重，所以只能释放 Q4K 的原始权重（约 0.9 GB），"回到 2.2 GB"不成立。§2.3 补充了按 GGUF 张量解析出的各类权重体积。**决策**（§16 #12）：优先保证速度，只做"重排后释放 Q4K 原始权重"加 KV f16，内存目标调整为约 2.9 GB（≤ 3.0 GB），并同步更新 G8、§7.1、§7.5、§14、§15 和 §17 |
 | v0.7 | **内存优化已实现**（PR #1 追加的提交）：8K 上下文实测 2.69 GiB（约 2.88 GB），场景中 2.29–2.46 GiB，速度没有回退，长上下文反而更快；更新 §2.3、§7.1（vendored candle 补丁、f16 KV 的实现方式）、§7.5、§13.1 的实测数据和 §14 的里程碑。**决策**（§16 #13）：数值验收改用分布类指标（高置信 top-1、KL、NLL、余弦中位数 > 0.995、top-5 重合度），§13.2 同步修改。**补充**：残留风险（非 x86 平台、AMX 未实测、补丁维护），以及待定事项（Q8_0 模型、非 x86 平台） |
-| v0.8 | 根据 PR #1 的 Copilot 代码审查，以及用户"方便优先、避免过度确认"的要求（§16 #14）：§6 开头增加"方便优先"原则（只针对审批确认，shell 交互提示照常保留）；§6.2 新增"效果未知的命令"，按 Mutating 处理、不额外要求确认，shell 脚本会分析其内容；工作区内运行时才确定的写入目标，从 Dangerous 降为 Mutating；§8.2 的校验缓存改用纳秒级 mtime 加文件身份。**脱敏**（§16 #15）：本地 agent 受信任，不再脱敏，只保留扩展接口 `Redactor`（§3.4），接入远程 agent 时再实现 |
+| v0.8 | 根据 PR #1 的 Copilot 代码审查，以及用户"方便优先、避免过度确认"的要求（§16 #14）：§6 开头增加"方便优先"原则（只针对审批确认，shell 交互提示照常保留）；§6.2 新增"效果未知的命令"，按 Mutating 处理、不额外要求确认，shell 脚本会分析其内容；工作区内运行时才确定的写入目标，从 Dangerous 降为 Mutating；§8.2 的校验缓存改用纳秒级 mtime 加文件身份。**脱敏**（§16 #15）：本地 agent 受信任，不再脱敏，只保留扩展接口 `Redactor`（§3.4），接入远程 agent 时再实现。**第二至四轮审查的跟进**：§4.4 超时和中止时，按 `NOSH_AGENT_RUN` 找回脱离进程树的进程；§6.2 受保护路径的读取会解析分析时能确定的变量和参数，`read`、`hash` 等修改会话的用法算 Mutating；§7.1 线程变量在任何线程启动前设置；§8.1 显式指定的模型路径出错时直接报错，不回退到下载；`nosh doctor` 按模型的 `min_memory_mb` 检查内存 |
