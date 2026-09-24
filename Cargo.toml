@@ -73,6 +73,15 @@ print_stderr = "allow"
 [patch."https://github.com/huggingface/candle"]
 candle-core = { path = "third_party/candle-core" }
 
+# gemm-f16's aarch64 kernels are `#[target_feature(enable = "fp16")]` functions
+# calling `#[inline]` helpers whose asm (`fmla v.8h`) needs fp16. Unoptimized,
+# the helpers are compiled on their own, without the feature, and the
+# assembler rejects them where the target baseline lacks fp16 (aarch64 Linux;
+# Apple's baseline has it). Optimized they are inlined into their callers;
+# the CPU is still checked at runtime. sarah-quinones/gemm#31.
+[profile.dev.package.gemm-f16]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
