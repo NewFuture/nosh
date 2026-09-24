@@ -21,7 +21,7 @@
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 167 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 169 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -83,6 +83,8 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 5 | `net::head` 对 5 s 以内的超时一律用共享 agent 的固定 5 s 超时，测速传入的 3 s 预算不起作用，`probe_all` 结束后探测线程还可能继续发请求 | 仍用共享 agent 复用连接，但每个请求设置调用方的超时（整次请求含重定向），长短超时都生效 | `a45e274` |
 
 每项都有回归测试。之后再次请求审查，唯一的新意见是"加载时每个 Q4K 张量开一个线程重排，会同时创建数百个线程"：实际上 `prepack_q4k` 按层调用、每层 7 个矩阵，线程在进入下一层之前全部 join，同时最多 7 个线程，因此只在注释里写明了这一点（`8254d10`）。
+
+第五次审查的 4 条按最小改动修复：`check_dir` 和 `nosh model verify` 遇到哈希期间文件有变化（拿不到初始 stamp，或 `record_verified_as` 返回 `Ok(false)`）时算作校验失败，只读库写不了 manifest 仍然忽略（`8c0f37f`）；识别不出来的 GGUF 显式给了未知的 `--model` 时报错，不再换成默认模型（`b2bbcdf`）；integer 参数的 float 回退只接受有限、整数值且在 i64 范围内的值（`53fa89f`）。
 
 ## 3. 端到端场景（真实模型）
 
