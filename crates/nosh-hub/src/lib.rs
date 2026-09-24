@@ -165,17 +165,50 @@ impl ModelHub {
         Ok(None)
     }
 
+    /// The weights file in `dir`: its only `.gguf`, or with several, the one
+    /// named like the requested model's registry file (the default model
+    /// when none is requested). Anything else is ambiguous and an error that
+    /// lists the candidates.
+    fn pick_gguf(&self, dir: &Path, id: Option<&str>) -> Result<PathBuf, HubError> {
+        let mut ggufs: Vec<PathBuf> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
+            })
+            .collect();
+        ggufs.sort();
+        match ggufs.len() {
+            0 => Err(HubError::Import(format!("no .gguf in {}", dir.display()))),
+            1 => Ok(ggufs.remove(0)),
+            _ => {
+                let entry = self.registry.lookup(id)?;
+                let wanted = &entry.weights().name;
+                if let Some(p) = ggufs
+                    .iter()
+                    .find(|p| p.file_name().is_some_and(|n| n == wanted.as_str()))
+                {
+                    return Ok(p.clone());
+                }
+                let names: Vec<String> = ggufs
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .collect();
+                Err(HubError::Import(format!(
+                    "{} holds several .gguf files and none is {wanted} ({}); pass the file itself to --model-path, or --model for one of: {}",
+                    dir.display(),
+                    entry.id,
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
     /// Resolves an explicit `.gguf` path (or a directory holding one).
     pub fn resolve_path(&self, path: &Path, id: Option<&str>) -> Result<ResolvedModel, HubError> {
         let (dir, weights) = if path.is_dir() {
-            let gguf = fs::read_dir(path)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .find(|p| {
-                    p.extension()
-                        .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
-                })
-                .ok_or_else(|| HubError::Import(format!("no .gguf in {}", path.display())))?;
-            (path.to_path_buf(), gguf)
+            (path.to_path_buf(), self.pick_gguf(path, id)?)
         } else if path.is_file() {
             (
                 path.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -531,6 +564,46 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
             hub.import(&src.join("other.gguf"), None, &NoProgress),
             Err(HubError::Import(_))
         ));
+    }
+
+    #[test]
+    fn model_path_directories_pick_the_requested_models_file() {
+        let root = tempdir("hub-pick");
+        let dir = tempdir("hub-pick-dir");
+        let hub = ModelHub::with_root(&root, Registry::builtin());
+        let q4 = hub.registry().lookup(None).unwrap().weights().name.clone();
+        let q8 = hub
+            .registry()
+            .lookup(Some("minicpm5-2b:q8_0"))
+            .unwrap()
+            .weights()
+            .name
+            .clone();
+        fs::write(dir.join(&q4), b"q4").unwrap();
+        fs::write(dir.join(&q8), b"q8").unwrap();
+        fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        // The requested model's file, and the default model's without --model.
+        let r = hub.resolve_path(&dir, Some("minicpm5-2b:q8_0")).unwrap();
+        assert_eq!(r.weights, dir.join(&q8));
+        assert_eq!(hub.resolve_path(&dir, None).unwrap().weights, dir.join(&q4));
+        // Several files, none named for the request: an error naming them.
+        let err = hub
+            .resolve_path(&dir, Some("minicpm5-1b:q4_k_m"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&q4) && err.contains(&q8), "{err}");
+        let other = tempdir("hub-pick-other");
+        fs::write(other.join("a.gguf"), b"a").unwrap();
+        fs::write(other.join("b.gguf"), b"b").unwrap();
+        fs::write(other.join("tokenizer.json"), b"{}").unwrap();
+        let err = hub.resolve_path(&other, None).unwrap_err().to_string();
+        assert!(err.contains("a.gguf, b.gguf"), "{err}");
+        // A single file is unambiguous whatever its name.
+        fs::remove_file(other.join("b.gguf")).unwrap();
+        assert_eq!(
+            hub.resolve_path(&other, None).unwrap().weights,
+            other.join("a.gguf")
+        );
     }
 
     #[test]
