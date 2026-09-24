@@ -227,18 +227,17 @@ impl ModelHub {
         let fname = weights
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
-        let entry = self
+        let entry = match self
             .registry
             .models
             .iter()
             .find(|m| m.weights().size == size && Some(&m.weights().name) == fname.as_ref())
-            .cloned()
-            .unwrap_or_else(|| {
-                self.registry
-                    .lookup(id)
-                    .cloned()
-                    .unwrap_or_else(|_| self.registry.default_model().clone())
-            });
+        {
+            Some(m) => m.clone(),
+            // Not recognizable: the requested model (an unknown id is an
+            // error), or the default one.
+            None => self.registry.lookup(id)?.clone(),
+        };
         let tokenizer = if dir.join("tokenizer.json").is_file() {
             dir.join("tokenizer.json")
         } else if let Some(found) = self.find(Some(&entry.id)).ok().flatten() {
@@ -618,6 +617,24 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
             hub.resolve_path(&other, None).unwrap().weights,
             other.join("a.gguf")
         );
+    }
+
+    #[test]
+    fn unrecognized_ggufs_take_the_requested_model_or_fail() {
+        let root = tempdir("hub-custom");
+        let dir = tempdir("hub-custom-dir");
+        let hub = ModelHub::with_root(&root, Registry::builtin());
+        let gguf = dir.join("custom.gguf");
+        fs::write(&gguf, b"custom").unwrap();
+        fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        assert!(matches!(
+            hub.resolve_path(&gguf, Some("no-such-model")),
+            Err(HubError::UnknownModel(_))
+        ));
+        let r = hub.resolve_path(&gguf, Some("minicpm5-1b")).unwrap();
+        assert_eq!(r.entry.id, "minicpm5-1b:q4_k_m");
+        let r = hub.resolve_path(&gguf, None).unwrap();
+        assert_eq!(r.entry.id, hub.registry().default_model().id);
     }
 
     #[cfg(unix)]
