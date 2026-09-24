@@ -252,6 +252,11 @@ impl Agent {
             ctx.variables.insert(name, value);
         }
         ctx.protected = self.cfg.protected.clone();
+        // nosh's own settings and state wherever they are (macOS keeps them
+        // under ~/Library/Application Support; NOSH_HOME, XDG_CONFIG_HOME),
+        // besides the XDG defaults the analysis always protects.
+        ctx.protected.push(nosh_hub::paths::config_dir());
+        ctx.protected.push(nosh_hub::paths::state_dir());
         ctx
     }
 
