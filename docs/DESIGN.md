@@ -1,10 +1,10 @@
 # nosh：纯 Rust 原生离线 AI Shell 设计文档
 
-> **代号**：nosh（Native Offline SHell，可以改名）　**版本**：v0.4　**日期**：2026-09-23　**默认模型**：MiniCPM5-2B（Apache-2.0）
+> **代号**：nosh（Native Offline SHell，可以改名）　**版本**：v0.5　**日期**：2026-09-24　**默认模型**：MiniCPM5-2B（Apache-2.0）
 >
-> nosh 是一个兼容 Bash、内置本地小模型、可以断网运行的 AI shell。v0.4 在 v0.3 的基础上精简了结构，也简化了部分设计，修订记录见附录 E，产品决策见 §16。
+> nosh 是一个兼容 Bash、内置本地小模型、可以断网运行的 AI shell。v0.5 根据 MVP 的实测结果，补充了内存模型、性能数据和实现要点。修订记录见附录 E，产品决策见 §16。
 >
-> 标注"已核实"的数据来自 HF 模型卡、config.json、tokenizer.json、GGUF 头部实测，以及 candle 和 brush 的源码；标注"目标"或"估算"的数据还需要跑基准验证。
+> 标注"已核实"的数据来自 HF 模型卡、config.json、tokenizer.json、GGUF 头部实测，以及 candle 和 brush 的源码；标注"MVP 实测"的数据来自 `docs/MVP-REPORT.md`；标注"目标"或"估算"的数据还需要跑基准验证。
 
 ## 0. 概述
 
@@ -114,7 +114,7 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 | G5 | 两个版本共用核心 | 同一套权限测试，在本地版和远程版两种装配下结果一致 |
 | G6 | 自动下载，断网运行 | 首次使用时自动下载并校验；就绪后运行期间不访问网络；支持气隙导入和远程推送 |
 | G7 | 安全可控 | 风险分四级；默认执行前确认；YOLO 可以写进配置（风险由用户自己承担）；有硬拒绝清单和审计 |
-| G8 | 低资源 | 8K 上下文时，推理进程约占 2.2 GB；纯 CPU 下目标速度 ≥ 12 tok/s；多个终端共用一份模型 |
+| G8 | 低资源 | 8K 上下文时，推理进程 ≤ 2.3 GB（MVP 实测 3.2–3.8 GB，M2 优化，见 §2.3）；纯 CPU 下目标速度 ≥ 12 tok/s；多个终端共用一份模型 |
 
 **非目标**：
 - 自研推理框架、训练模型、接入云端模型；
@@ -159,15 +159,25 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 
 SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由 `xtask gen-registry` 从 HF 和 ModelScope 的 API 生成。校验失败时拒绝加载。
 
-### 2.3 内存（估算）
+### 2.3 内存
 
-- **KV cache**：每个 token 占 42 层 × 2 × 2 个 KV 头 × 128 × 2 B（f16），约 42 KB。
-- **合计**：权重 1.56 GB，加上工作区约 0.3 GB，再加上 KV：
-  - 4K 上下文约 2.0 GB；
-  - **8K（默认）约 2.2 GB**；
-  - 32K 上下文约 3.3 GB。
+常驻内存 ≈ 量化权重 + 重排副本 + KV + 工作区：
 
-> 上游 candle 的 `quantized_llama` 会把整张 embedding 表反量化成 f32，多占约 1.07 GB，我们的实现必须去掉这部分开销（见 §7.1）。
+| 组成 | 计算方式 | 大小 |
+|---|---|---|
+| 量化权重 | Q4_K_M 文件，以量化形式加载 | 1.56 GB |
+| x86 重排副本 | candle main 的 AVX2/AVX-512 VNNI 内核会把 Q4K/Q6K 权重另存一份分块布局；如果不释放原始权重，就相当于权重存了两份 | 约 1.6 GB（重排后释放原始权重则为 0） |
+| KV cache | 42 层 × 2（K、V）× 2 个 KV 头 × 128 维 × 元素字节数：f16 每 token 约 42 KB，f32 约 86 KB；按 1024 token 分段增长 | 8K 上下文：f16 为 352 MB，f32 为 704 MB |
+| 工作区 | 激活、分块 prefill 的注意力矩阵、logits、tokenizer 等 | 约 0.3 GB |
+
+| 配置 | 常驻内存 | 说明 |
+|---|---|---|
+| **目标（M2）**：权重只保留一份，KV 用 f16，8K 上下文 | 约 2.2 GB（目标 ≤ 2.3 GB） | 需要在重排完成后释放原始权重，KV 从 f32 改为 f16 |
+| **MVP 实测**：原始权重与重排副本并存，KV 用 f32，场景中 1–3K 上下文 | RSS 峰值 3.2–3.8 GB | 与公式吻合：1.56 + 1.6 + KV + 工作区 ≈ 3.5 GB |
+| **兜底**：candle 无法只保留重排布局时，关闭重排，KV 用 f16 | 约 2.2 GB | 可以省下重排副本，但 Q4K GEMV 会变慢（MVP 中重排内核比 candle 0.11 快约 2.3 倍），具体降速需要实测 |
+
+> - **v0.4 之前的估算为什么偏低**：只算了"权重 + KV + 工作区"，没有考虑重排副本，而且默认 KV 为 f16。MVP 里这两点都不成立，所以实测超标。
+> - **embedding 整表反量化**：上游 candle 的 `quantized_llama` 会把整张 embedding 表反量化成 f32，多占约 1.07 GB，fork 时必须去掉（见 §7.1）。
 
 ## 3. 架构
 
@@ -347,7 +357,7 @@ pub trait ChatEngine {                   // 实现：进程内 / 本地 IPC / �
 - **用户活动**：最近几条用户命令的命令行、退出码和耗时会写进任务头（见 §5.4），不含输出。
   - 可以开启 `capture_user_output = "last"`（M2）：通过中转 PTY，在内存里保留最近一条非全屏命令输出的末尾部分（不超过 4 KB）。
   - 远程版的服务端本来就在中转 PTY，借助 OSC 133 标记就能切出这段输出。
-- **并发**：同一个会话同一时刻只运行一个任务；agent 运行期间，用户的输入先缓冲起来。
+- **并发**：同一个会话同一时刻只运行一个任务。agent 运行期间，用户的输入先缓冲；但弹出审批卡片时会清空缓冲，防止提前敲下的按键被当成审批的回答。
 
 ### 4.4 终端与信号
 
@@ -474,6 +484,7 @@ Available: {git, docker, python3, ...}
 ```
 
 - **`trigger` 的取值**：`hash`、`parse_error`、`not_found`、`failed`、`ai`、`cli`、`pipe`。`failed` 时会附上 `exit=`，如果有采集到的输出，还会附上 `[output-tail]` 块。
+- **`lang=zh`**：输入或者失败的命令里含有中文时，任务头追加 `lang=zh`，提醒 2B 模型用中文回答（MVP 中模型偶尔会用英文回答中文问题）。这只改动任务消息，system 保持不变。
 - **动态信息不放进 system**：对话会跨任务延续，system 里任何一点变化都会让整段对话的 KV 失效。把动态信息放在任务头里，prompt 就始终只往后追加。
 - **保持简短**：2B 模型和 CPU 上的 prefill 都要求 prompt 精简。指令用英文写，回答用用户使用的语言。不放 few-shot 示例，依靠模型原生的工具调用能力和约束解码。
 - **建议模式**：只带 `propose_command` 一个工具，prompt 约 400 个 token，单独缓存。
@@ -485,7 +496,7 @@ Available: {git, docker, python3, ...}
 |---|---|---|---|
 | `run_command` | `command`、`timeout_sec?`（默认 60，上限 600） | 按命令内容分析 | 在共享会话中执行（见 §4.3、§4.4） |
 | `read_file` | `path`、`start_line?`、`end_line?` | Safe（受保护路径除外） | 带行号，默认最多读 400 行 |
-| `list_dir` | `path?`、`depth?`（≤ 3） | Safe | 遵循 .gitignore |
+| `list_dir` | `path?`、`depth?`（≤ 3） | Safe | 树形列表，遵循 .gitignore。同一次列表里的文件大小统一使用最大文件的单位，因为 2B 模型会把 781.2 KB 排在 11.4 MB 前面。递归时每一层都检查受保护路径 |
 | `search` | `pattern`、`path?`、`glob?` | Safe | 使用 ripgrep 的内核（`grep-searcher`） |
 | `write_file` | `path`、`content` | Mutating | 先展示 diff，写入前先备份，可以用 `ai undo` 撤销 |
 | `propose_command` | `command`、`explanation?` | 不执行 | 把命令放进输入行，由用户执行。用于建议、纠错，以及需要终端或密码的命令 |
@@ -583,7 +594,11 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
   - 用变量拼接出命令名。
 - **sudo**：agent 执行的 sudo 一律改写成 `sudo -n`，并按 Dangerous 处理。需要输入密码时，`sudo -n` 会立即失败，此时模型改用 `propose_command`，让用户自己执行。nosh 不接触用户的密码。
 - **本会话放行**（审批时选 `a`）：只对完全相同的命令前缀生效，而且风险不能高于 Mutating。
-- **自定义规则**：在 `[safety] allow/deny` 中配置 glob 规则；allow 不能覆盖 Forbidden。
+- **自定义规则**：`[safety] allow/deny` 按简单命令逐条匹配 glob。
+  - 一行里的**每一条**简单命令都匹配 allow，才会放行（可以放行 Dangerous）；只要有一条匹配 deny，就拒绝。这样 `ls; rm -rf x` 就不能借 `ls*` 这条规则被放行。
+  - allow 不能覆盖 Forbidden；含隐藏字符的命令不适用 allow。
+- **隐藏字符**：含有控制字符、双向控制符或零宽字符的命令，评为 Dangerous，并在审批卡片上以转义形式显示，防止显示的内容与实际执行的不一致。
+- **运行时才确定的写入目标**（例如 `for f in *.txt; do mv …`、`find -exec cp {} …`）：MVP 一律按 Dangerous 处理。M2 考虑先展开通配符，预览实际的目标，再按真实路径分级。
 
 ### 6.3 审批模式与策略
 
@@ -637,25 +652,28 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 
 ### 7.1 选型与模型实现
 
-- **candle**（`candle-core` 0.11）：
-  - CPU 后端由 `gemm` 加手写 SIMD 实现，支持 Q4_K、Q6_K、Q8_0 等量化格式。
-  - 主干分支已经在运行时检测 AVX2 和 FMA，有 x86 AVX512-VNNI 和 aarch64 NEON 的 repack 路径，还有融合 GEMV（`gemv_fused_shared_lhs`）。因此一个发行版二进制在新旧 CPU 上都能走较优的路径。
-  - 这些优化还没进入正式版之前，先锁定 git rev。
+- **candle**（固定到 main 分支的某个 git rev）：
+  - 不用 0.11.0 正式版：它只在编译期启用 AVX2，而且依赖带 onig（C 库）的 tokenizers 0.22。main 分支支持运行时的 AVX2/AVX-512 VNNI 分派和 x86 重排内核，MVP 实测 Q4K GEMV 快约 2.3 倍。
+  - CPU 后端由 `gemm` 加手写 SIMD 实现，支持 Q4_K、Q6_K、Q8_0 等格式。
+  - 重排内核会另存一份权重布局，需要在重排完成后释放原始量化权重（见 §2.3）。candle 不支持时，就 patch 或者向上游提议。
   - mistral.rs 作为参考；llama.cpp 绑定不符合纯 Rust 的要求，排除。
-- **fork `quantized_llama.rs`**：fork 成 `nosh_llm::model::llama`（约 600 行），做 4 处改造：
+- **fork `quantized_llama.rs`**：fork 成 `nosh_llm::model::llama`，做以下改造：
 
 | # | 上游现状 | 改造 |
 |---|---|---|
 | 1 | `MAX_SEQ_LEN = 4096` 是写死的 | RoPE 表按 `context_length`（默认 8K，上限 128K）计算，按需扩容 |
 | 2 | 整张 embedding 表被反量化成 f32（约 1.07 GB） | 保持量化，用 `QTensor::embedding` 按行反量化 |
-| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 预先分配 KV，支持 `truncate` / `snapshot` / `restore` |
-| 4 | Q/K/V 和 gate/up 各自做一次 matmul | 使用融合 GEMV |
+| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 使用自有 KV，按 1024 token 分段增长，支持 `truncate` / `snapshot` / `restore`；默认用 f16（MVP 用的是 f32，M2 切换） |
+| 4 | Q/K/V 和 gate/up 各自做一次 matmul | 使用融合 GEMV（M2） |
+| 5 | 注意力按"每个 token × 每个 head"逐行计算，每一行都要重新读一遍 K/V（MVP 在 1.5K 位置实测只有 57 GFLOP/s） | 使用自有的分块 GQA 内核：按"KV head × 一块 query token"划分工作，同组 head 共用一次 K/V 读取；decode 时按 key 区间切分，再合并局部 softmax。MVP 中 2K prompt 的 prefill 从 79 tok/s 提升到 124–140 tok/s |
+| 6 | 重排完成后，原始权重仍然常驻内存 | 重排完成后释放原始权重（M2） |
 
 - **其他要点**：
   - 分块 prefill，每块 512 个 token，用来限制峰值内存，块与块之间可以取消；
   - 只计算最后一个位置的 logits；
   - llama 布局的 GGUF 使用交错式 RoPE；
-  - 线程数默认等于物理核心数；
+  - **只保留一个计算线程池**：`CANDLE_NUM_THREADS` 设为物理核心数，`RAYON_NUM_THREADS=1`，而且只作用于 nosh 进程，在 shell 子进程中还原。两个线程池争抢核心时，MVP 的 decode 只有 6.5 tok/s，调整后约 20 tok/s；
+  - 权重重排发生在进程内第一次前向时，约 2.5 s，常驻 engine 可以避免每次冷启动都重排一遍；
   - 加载时自检架构、层数、量化类型以及词表是否一致。
 
 ### 7.2 分词与模板
@@ -689,23 +707,28 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
    - 约 50 MB，加载不到 100 ms；
    - 采用 LRU 淘汰，上限 1 GB。
 
-### 7.5 性能目标
+### 7.5 性能目标与实测
 
-| 指标 | 目标（8 核 AVX2/AVX-512 或 Apple M 系列，Q4_K_M，需要实测） |
-|---|---|
-| decode | CPU ≥ 12 tok/s；Metal ≥ 40 tok/s；CUDA ≥ 60 tok/s |
-| prefill | CPU ≥ 100 tok/s |
-| engine 常驻内存（8K） | ≤ 2.3 GB |
+| 指标 | 目标（8 核 AVX2/AVX-512 或 Apple M 系列，Q4_K_M） | MVP 实测（WSL2，8 核 AVX-512 VNNI） |
+|---|---|---|
+| decode | CPU ≥ 12 tok/s；Metal ≥ 40 tok/s；CUDA ≥ 60 tok/s | 19–25 tok/s（1–3K 上下文）；16 tok/s（4.4K 上下文） |
+| prefill | CPU ≥ 100 tok/s | 102–147 tok/s |
+| engine 常驻内存（8K） | ≤ 2.3 GB | 3.2–3.8 GB，原因和改进方法见 §2.3 |
+| 模型加载 | — | 2.2–3.1 s（页缓存已热），另外首次前向时重排约 2.5 s |
 
 **加速手段**：
-- **M1**：量化、运行时 SIMD 分派、预先分配 KV。
-- **M2**：共享 engine、磁盘前缀缓存、融合 GEMV，以及 Prompt Lookup Decoding。Prompt Lookup Decoding 从上下文中的 n-gram 猜测后续 token，再批量验证；shell 场景里经常复制路径和命令输出，所以收益明显。
+- **M1（已实现）**：量化；运行时 SIMD 分派和重排内核；分块 GQA 注意力；单一计算线程池。
+- **M2**：
+  - 共享 engine 和磁盘前缀缓存：消除模型加载、重排和静态前缀的 prefill；
+  - 释放原始权重，KV 改为 f16；
+  - 融合 GEMV；
+  - Prompt Lookup Decoding：从上下文中的 n-gram 猜测后续 token，再批量验证。shell 场景里经常复制路径和命令输出，收益明显。
 
 交互延迟的指标见 §13.1。
 
 ### 7.6 资源自适应与调度
 
-**加载前自适应**（用户显式配置的值优先）：
+**加载前自适应**（用户显式配置的值优先）：阈值不写死，而是按 §2.3 的公式估算所需内存，再与可用内存比较。估算时要考虑三点：是否保留重排副本、KV 的类型、上下文长度。下表是 M2 内存优化后 2B 模型的结果：
 
 | 可用内存 | 选择 |
 |---|---|
@@ -713,6 +736,8 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | 4–6 GB | 2B Q4_K_M，4K |
 | 2.5–4 GB | 提示用户换成 1B Q4_K_M（不会自动下载），4K |
 | < 2.5 GB | 不加载，并说明原因；shell 照常可用 |
+
+在内存优化完成之前（MVP 的实际占用约 3.5 GB），同一个公式会自动把阈值上调。
 
 - **电池与空闲**：使用电池时可以减半线程数（`engine.battery_saver`）；engine 空闲超时后退出，释放内存，重新加载时依靠磁盘前缀缓存。
 - **多会话调度**：
@@ -753,12 +778,12 @@ registry 随 nosh 版本一起发布，固定了 revision 和 SHA-256。nosh 不
   已实测：HF 和 ModelScope 都会 302 跳转到 CDN，支持 `Range`，并在 `X-Linked-Etag` 中给出 SHA-256。
 - **选源**：
   - 地区只用本地信息推断，包括安装包的地区标记、locale 和时区，不调用外部的 IP 定位服务；
-  - 并行发送 HEAD 请求，并下载 2 MB 测速（总共不超过 3 s），按吞吐选择；
+  - 并行发送 HEAD 请求，并下载 2 MB 测速（总共不超过 3 s），按吞吐选择；吞吐从收到第一个字节开始计时，排除 TLS 握手和重定向的影响；
   - 各个源的内容相同，所以分段下载时可以同时从多个源拉取；
   - 某个源的吞吐连续 10 s 低于最佳探测值的 30% 时，把它剩下的区间改派给其他源；
   - 记住上次的最佳源。
 - **可靠性**：
-  - 先写入 `*.partial`，支持断点续传；
+  - 先写入 `*.partial`，按 64 MiB 分块发送 Range 请求，每块单独设置超时，便于及时发现卡顿，并从断点处换源；
   - 边下载边计算 SHA-256，校验通过后再原子地 rename；
   - 用文件锁防止并发下载；
   - 下载前检查磁盘空间；
@@ -1011,18 +1036,18 @@ nosh/
 
 ## 13. 测试与评估
 
-### 13.1 体验指标（P95，需要实测）
+### 13.1 体验指标（P95）
 
-| 交互 | 目标 |
-|---|---|
-| shell 启动到出现提示符（不含用户 rc） | ≤ 50 ms |
-| 按键回显、重绘 | ≤ 16 ms |
-| `nosh -c` 相对 bash 的额外开销 | ≤ 10 ms |
-| 命令不存在 → 本地拼写建议 | ≤ 50 ms |
-| 命令不存在 → 模型建议（engine 已加载） | ≤ 1.5 s |
-| `#` 任务的首个 token（engine 已加载、同一对话） | ≤ 0.8 s |
-| `#` 任务的首个 token（engine 冷启动、磁盘缓存命中） | ≤ 3 s |
-| 审批卡片出现 | ≤ 50 ms |
+| 交互 | 目标 | MVP 实测 |
+|---|---|---|
+| shell 启动到出现提示符（不含用户 rc） | ≤ 50 ms | 中位数 8 ms |
+| 按键回显、重绘 | ≤ 16 ms | 没有单独测量 |
+| `nosh -c` 相对 bash 的额外开销 | ≤ 10 ms | 比 bash 更快：3.0 ms，bash 为 5.1 ms |
+| 命令不存在 → 本地拼写建议 | ≤ 50 ms | 4 ms。WSL 默认 PATH 下为 79 ms：PATH 中的 `/mnt/c` 目录要经 9p 访问，需要缓存 |
+| 命令不存在 → 模型建议（engine 已加载） | ≤ 1.5 s | 没有单独测量 |
+| `#` 任务的首个 token（engine 已加载、同一对话） | ≤ 0.8 s | 0.48–0.95 s，中位数 0.75 s |
+| `#` 任务的首个 token（engine 冷启动、磁盘缓存命中） | ≤ 3 s | 6.2–7.0 s，另外还有 2–3 s 的模型加载。MVP 没有磁盘前缀缓存，也没有常驻 engine |
+| 审批卡片出现 | ≤ 50 ms | 没有单独测量 |
 
 ### 13.2 测试矩阵
 
@@ -1043,8 +1068,8 @@ nosh/
 | 阶段 | 周期（估算） | 交付内容 |
 |---|---|---|
 | **M0 验证** | 1–2 周 | 用 30–50 个任务评测 2B 模型处理 shell 任务的能力；实测 candle 的速度，并与 llama.cpp 对比；做一个 brush-core 嵌入的 PoC（在共享会话中执行 agent 命令，放在后台进程组并 tee 输出，验证它能与用户的前台作业共存） |
-| **M1 本地版 MVP** | 6 周 | **nosh shell**：AI 触发、安全网、本地纠错、登录 shell 兼容；终端与信号模型；故障隔离。**harness**：任务头。**权限** v1。**工具**：`run_command`、`read_file`、`list_dir`、`propose_command`。**推理**：fork 改造 #1–#3、模板、采样、对话内前缀复用、资源自适应。**下载与离线导入**。**CLI**：`-a`、`-s`、管道。**平台**：Linux 与 macOS |
-| **M2 完善 + 远程基础** | 5 周 | **推理**：共享 engine 与调度、磁盘前缀缓存、约束解码、PLD、融合 GEMV。**交互**：Ctrl+G（nosh 内，以及嵌入其他 shell）、AI 输出块、上下文压缩、输出采集（中转 PTY）。**工具**：`search`、`write_file`、`ai undo`。**Windows**：托管 pwsh。**安全**：数据保留与脱敏、管理员策略。**远程**：`nosh server` + `nosh connect`（SSH、pty/control 通道、带外审批、自动部署） |
+| **M1 本地版 MVP**（✔ 已完成，见 PR #1 与 `docs/MVP-REPORT.md`） | 6 周 | **nosh shell**：AI 触发、安全网、本地纠错、登录 shell 兼容；终端与信号模型；故障隔离。**harness**：任务头。**权限** v1。**工具**：`run_command`、`read_file`、`list_dir`、`propose_command`。**推理**：fork 改造 #1–#3 和 #5、模板、采样、对话内前缀复用、资源自适应。**下载与离线导入**。**CLI**：`-a`、`-s`、管道。**平台**：Linux 与 macOS |
+| **M2 完善 + 远程基础** | 5 周 | **推理**：共享 engine 与多会话 KV（修复 Ctrl+G 冲掉主对话缓存的问题）、磁盘前缀缓存、**内存优化（重排后释放原始权重、KV 改为 f16）**、约束解码、PLD、融合 GEMV。**可靠性**：固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式的 temperature（0.6–0.7 与 1.0 对比）；为小模型优化工具输出。**交互**：Ctrl+G（nosh 内，以及嵌入其他 shell）、AI 输出块、上下文压缩、输出采集（中转 PTY）、后台下载、缓存 WSL 下 `/mnt/*` 的 PATH。**工具**：`search`、`write_file`、`ai undo`。**Windows**：托管 pwsh。**安全**：数据保留与脱敏、管理员策略、运行时写入目标的预览。**brush 上游**：异步作业的 pid、可取消的执行接口、子进程放入独立进程组、SIGINT 中止循环、`read` 响应中断、进程创建钩子。**远程**：`nosh server` + `nosh connect`（SSH、pty/control 通道、带外审批、自动部署） |
 | **M3 远程完善与生态** | 4 周以上 | 断线保持与重连、多端附着、文件与模型推送；系统级共享 engine；CUDA 版；Landlock/seccomp 沙箱；自定义工具、钩子、MCP |
 
 ## 15. 风险与对策
@@ -1060,6 +1085,9 @@ nosh/
 | candle 的关键优化还没发版 | 锁定 git rev；CI 设置性能回归门禁 |
 | 下载源不可达，或文件被替换 | 测速选源、多源并行、固定 SHA-256、离线导入与推送 |
 | Windows 的原生 shell 支持不成熟 | Windows 以 CLI（托管 pwsh）和远程客户端为主 |
+| candle 的重排内核让权重在内存里存两份 | 重排后释放原始权重；做不到时 patch candle 或者向上游提议；兜底方案是关闭重排（见 §2.3） |
+| brush 的作业控制与中断存在缺口（后台作业没有 pid、部分 Ctrl-C 场景无法中断） | 向上游贡献相关修复（见 §14 M2）；agent 命令用超时加信号兜底 |
+| 2B 模型的结果波动大（temperature 1.0 下，三个构建各跑 3 轮，每轮 10 个场景，完全正确的次数为 27、20、25） | 建立固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式采用更低的 temperature |
 
 ## 16. 决策记录（2026-09-23）
 
@@ -1089,6 +1117,8 @@ nosh/
 | 6 | 是否支持第三方模型（需要通用的 Jinja 模板渲染，以及从 GGUF 内嵌词表构建分词器） | 不支持 | M3 之后 |
 | 7 | 客户端侧推理（用于服务器资源不足的场景） | 不做 | M3 之后 |
 | 8 | OpenAI 兼容的本地 API、GUI 客户端 | 不做 | M3 之后 |
+| 9 | agent 模式默认的 temperature（官方推荐 1.0，候选 0.6–0.7） | 1.0 | M2 评测后 |
+| 10 | candle 无法只保留重排布局时，是否关闭重排来换取内存 | 保留重排 | M2 |
 
 ## 附录 A：prompt 示例（token 视角）
 
@@ -1208,3 +1238,4 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.2 | 按产品决策改为"本身就是 shell"；拆成本地版和远程版，共用核心；共享会话；YOLO 可以写进配置；下载默认同意，按地区和测速选源；CUDA 单独构建；移除 DSpark 和分词验证；`#` 或出错时触发 AI |
 | v0.3 | 细化设计：术语、流程、故障隔离、终端与信号、判定细节、非交互约定、修正 prompt 布局、对话生命周期、扩展、数据保留、资源调度、多用户主机、SLO、待定事项 |
 | v0.4 | **精简结构**：合并重复的章节（部署形态、Windows、构建版本、性能指标、审计与数据），篇幅减少约 35%。**简化设计**：①审批模式从 4 个减为 3 个，去掉 suggest，只要建议时用 Ctrl+G 或 `nosh -s`；②shell 后端只保留 brush 和 Windows 上的托管 pwsh，去掉托管 bash，rc 不兼容时用自己的 bash 加 `nosh init bash`；③分词器与模型一起下载，去掉从 GGUF 词表构建分词器的回退；④M1 只做 MiniCPM5 模板，第三方模型移入待定事项；⑤crate 从 10 个合并为 7 个；⑥`nosh -a` 的退出码精简为 0/1/2/130；⑦客户端侧推理移入待定事项。**修正**：engine 并发的描述前后不一致、脱敏说明的错字、`history.jsonl` 的描述不一致。**新增**：§0.1 使用方式；nosh shell 首次启动时改为后台下载模型 |
+| v0.5 | 根据 MVP 实测修订。**内存**：§2.3 改为完整的内存模型，补上 x86 重排副本（约 1.6 GB）和 KV 类型，说明实测 3.2–3.8 GB 的原因以及如何回到 ≤ 2.3 GB；§7.6 的自适应阈值改为按公式计算。**推理**：candle 固定到 main 分支的原因；fork 新增分块 GQA 注意力（#5）和释放原始权重（#6）；KV 按 1024 token 分段增长；单一计算线程池。**实测数据**：§7.5 和 §13.1 增加 MVP 实测列。**细化**：审批卡片出现时清空预输入；allow/deny 按简单命令逐条匹配；隐藏字符判为 Dangerous；运行时才确定的写入目标；任务头中的 `lang=zh`；`list_dir` 统一大小单位并逐层检查受保护路径；64 MiB 分块下载。**计划**：M1 标记为已完成；M2 补充内存优化、多会话 KV、可靠性评测和 brush 上游事项；补充相应的风险和待定事项 |
