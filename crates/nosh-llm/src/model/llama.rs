@@ -194,43 +194,49 @@ fn prepack_q4k(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
     Ok(())
 }
 
-impl Llama {
-    /// Loads a llama-architecture GGUF; `context_length` bounds the KV cache.
-    pub fn load(
-        path: &Path,
-        context_length: usize,
-        opts: LoadOptions,
-        device: &Device,
-    ) -> Result<Self> {
-        let mut file = File::open(path)?;
-        let ct = gguf_file::Content::read(&mut file)?;
-        let arch = md(&ct, "general.architecture")?.to_string()?.clone();
+impl LlamaConfig {
+    /// Reads and checks the hyper-parameters; malformed values (zero or
+    /// non-dividing head counts, inconsistent sizes) are load errors, checked
+    /// before anything divides by them.
+    pub fn from_gguf(ct: &gguf_file::Content) -> Result<Self> {
+        let arch = md(ct, "general.architecture")?.to_string()?.clone();
         if arch != "llama" {
             candle_core::bail!("unsupported GGUF architecture '{arch}' (expected llama)");
         }
-        let u = |k: &str| -> Result<usize> { Ok(md(&ct, k)?.to_u32()? as usize) };
+        let u = |k: &str| -> Result<usize> { Ok(md(ct, k)?.to_u32()? as usize) };
         let n_head = u("llama.attention.head_count")?;
         let n_kv_head = u("llama.attention.head_count_kv")?;
         let n_layer = u("llama.block_count")?;
         let hidden = u("llama.embedding_length")?;
         let ffn = u("llama.feed_forward_length")?;
+        let bad = |what: String| -> Result<Self> { candle_core::bail!("malformed GGUF: {what}") };
+        if n_head == 0 || n_kv_head == 0 || n_head % n_kv_head != 0 {
+            return bad(format!(
+                "{n_head} attention heads and {n_kv_head} kv heads (both must be > 0, heads a multiple of kv heads)"
+            ));
+        }
+        if n_layer == 0 || hidden == 0 || ffn == 0 {
+            return bad(format!(
+                "{n_layer} layers, embedding length {hidden}, feed-forward length {ffn}"
+            ));
+        }
         let head_dim = u("llama.rope.dimension_count").unwrap_or(hidden / n_head);
+        if head_dim == 0 || head_dim % 2 != 0 || head_dim.checked_mul(n_head) != Some(hidden) {
+            return bad(format!(
+                "inconsistent attention shape: {n_head} heads x head_dim {head_dim} != hidden {hidden}"
+            ));
+        }
         let native_context = u("llama.context_length").unwrap_or(4096);
-        let rms_eps = md(&ct, "llama.attention.layer_norm_rms_epsilon")?.to_f32()?;
-        let rope_theta = md(&ct, "llama.rope.freq_base")
+        let rms_eps = md(ct, "llama.attention.layer_norm_rms_epsilon")?.to_f32()?;
+        let rope_theta = md(ct, "llama.rope.freq_base")
             .and_then(|v| v.to_f32())
             .unwrap_or(10_000.0);
-        let file_type = md(&ct, "general.file_type").and_then(|v| v.to_u32()).ok();
+        let file_type = md(ct, "general.file_type").and_then(|v| v.to_u32()).ok();
         let vocab = match u("llama.vocab_size") {
             Ok(v) => v,
-            Err(_) => md(&ct, "tokenizer.ggml.tokens")?.to_vec()?.len(),
+            Err(_) => md(ct, "tokenizer.ggml.tokens")?.to_vec()?.len(),
         };
-        if n_head % n_kv_head != 0 || head_dim * n_head != hidden || head_dim % 2 != 0 {
-            candle_core::bail!(
-                "inconsistent attention shape: {n_head} heads, {n_kv_head} kv heads, head_dim {head_dim}, hidden {hidden}"
-            );
-        }
-        let cfg = LlamaConfig {
+        Ok(Self {
             arch,
             file_type,
             n_layer,
@@ -243,8 +249,24 @@ impl Llama {
             rope_theta,
             rms_eps,
             native_context,
-        };
+        })
+    }
+}
 
+impl Llama {
+    /// Loads a llama-architecture GGUF; `context_length` bounds the KV cache.
+    pub fn load(
+        path: &Path,
+        context_length: usize,
+        opts: LoadOptions,
+        device: &Device,
+    ) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let ct = gguf_file::Content::read(&mut file)?;
+        let cfg = LlamaConfig::from_gguf(&ct)?;
+        let (vocab, hidden, rms_eps) = (cfg.vocab, cfg.hidden, cfg.rms_eps);
+        let (n_layer, n_kv_head, head_dim) = (cfg.n_layer, cfg.n_kv_head, cfg.head_dim);
+        let rope_theta = cfg.rope_theta;
         let mut tensor = |name: &str| ct.tensor(&mut file, name, device);
         let tok_embd = tensor("token_embd.weight")?;
         if tok_embd.shape().dims2()? != (vocab, hidden) {
@@ -488,6 +510,62 @@ impl Prof {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gguf_bytes(meta: &[(&str, gguf_file::Value)]) -> Vec<u8> {
+        let refs: Vec<(&str, &gguf_file::Value)> = meta.iter().map(|(k, v)| (*k, v)).collect();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &refs, &[]).unwrap();
+        buf.into_inner()
+    }
+
+    fn header(heads: u32, kv: u32, head_dim: Option<u32>) -> Vec<u8> {
+        use gguf_file::Value as V;
+        let mut meta = vec![
+            ("general.architecture", V::String("llama".into())),
+            ("llama.attention.head_count", V::U32(heads)),
+            ("llama.attention.head_count_kv", V::U32(kv)),
+            ("llama.block_count", V::U32(2)),
+            ("llama.embedding_length", V::U32(64)),
+            ("llama.feed_forward_length", V::U32(128)),
+            ("llama.attention.layer_norm_rms_epsilon", V::F32(1e-5)),
+            ("llama.vocab_size", V::U32(10)),
+        ];
+        if let Some(d) = head_dim {
+            meta.push(("llama.rope.dimension_count", V::U32(d)));
+        }
+        gguf_bytes(&meta)
+    }
+
+    #[test]
+    fn malformed_head_counts_are_load_errors_not_panics() {
+        for (heads, kv, dim) in [
+            (0, 0, None),
+            (0, 2, None),
+            (4, 0, None),
+            (4, 3, None),
+            (3, 3, None),
+            (8, 2, Some(16)),
+        ] {
+            let bytes = header(heads, kv, dim);
+            let ct = gguf_file::Content::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+            let err = LlamaConfig::from_gguf(&ct).unwrap_err().to_string();
+            assert!(
+                err.contains("malformed GGUF"),
+                "{heads}/{kv}/{dim:?}: {err}"
+            );
+        }
+        let bytes = header(8, 2, None);
+        let ct = gguf_file::Content::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let cfg = LlamaConfig::from_gguf(&ct).unwrap();
+        assert_eq!((cfg.n_head, cfg.n_kv_head, cfg.head_dim), (8, 2, 8));
+        // Through the loader (as with --model-path): an error, not a panic.
+        let path = std::env::temp_dir().join(format!("nosh-bad-heads-{}.gguf", std::process::id()));
+        std::fs::write(&path, header(0, 0, None)).unwrap();
+        let r = Llama::load(&path, 1024, LoadOptions::default(), &Device::Cpu);
+        let _ = std::fs::remove_file(&path);
+        let err = r.err().expect("load fails").to_string();
+        assert!(err.contains("malformed GGUF"), "{err}");
+    }
 
     #[test]
     fn rope_table_values() {
