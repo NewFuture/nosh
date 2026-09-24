@@ -318,9 +318,18 @@ pub fn parse_call(raw: &str, tools: &[ToolSpec]) -> Result<ToolCall, CallError> 
             Some("integer") => v
                 .trim()
                 .parse::<i64>()
+                .ok()
+                .or_else(|| {
+                    // `60.0` is an integer; `1.9`, NaN, infinities and values
+                    // out of range are not.
+                    let f = v.trim().parse::<f64>().ok()?;
+                    (f.is_finite()
+                        && f.fract() == 0.0
+                        && (i64::MIN as f64..i64::MAX as f64).contains(&f))
+                    .then_some(f as i64)
+                })
                 .map(Value::from)
-                .or_else(|_| v.trim().parse::<f64>().map(|f| Value::from(f as i64)))
-                .map_err(|_| {
+                .ok_or_else(|| {
                     err(
                         CallErrorKind::BadType,
                         Some(&name),
@@ -458,6 +467,28 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.kind, CallErrorKind::BadType);
+
+        // Integers written as floats are accepted only when they are whole
+        // numbers in range.
+        let timeout = |v: &str| {
+            parse_call(
+                &format!(
+                    r#"<function name="run_command"><param name="command">x</param><param name="timeout_sec">{v}</param></function>"#
+                ),
+                &tools(),
+            )
+        };
+        assert_eq!(timeout("60.0").unwrap().int_arg("timeout_sec"), Some(60));
+        assert_eq!(timeout("1e2").unwrap().int_arg("timeout_sec"), Some(100));
+        for bad in ["1.9", "-0.5", "NaN", "inf", "-infinity", "1e19", "-1e30"] {
+            let e = timeout(bad).unwrap_err();
+            assert_eq!(e.kind, CallErrorKind::BadType, "{bad}");
+            assert!(
+                e.message.contains("must be an integer"),
+                "{bad}: {}",
+                e.message
+            );
+        }
 
         let e = parse_call(r#"<function name="rm_rf"></function>"#, &tools()).unwrap_err();
         assert_eq!(e.kind, CallErrorKind::UnknownTool);
