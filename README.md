@@ -6,7 +6,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 
 - **本身就是 shell**：兼容 Bash（内核为 brush-core）。合法的命令照常执行；以 `#` 开头或者命令出错时，交给 AI 处理。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。
-- **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。
+- **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。默认模型在 8K 上下文下常驻内存约 2.7 GiB（x86 AVX2/VNNI；详见 [MVP 报告 §5.3](docs/MVP-REPORT.md)）。
 - **安全**：agent 发起的命令要经过风险分级和审批。
 
 ```bash
@@ -35,4 +35,4 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 
 ## 许可
 
-Apache-2.0
+Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。

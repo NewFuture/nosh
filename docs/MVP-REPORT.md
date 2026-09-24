@@ -1,11 +1,12 @@
 # nosh MVP 报告
 
-> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
+> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
 
 ## 1. 结论
 
-- MVP 范围内的 9 项能力全部实现，验收标准 7 条全部满足（逐条结果见 §4），只有两项性能指标未达标：常驻内存（3.5 GB，目标 ≤ 2.3 GB）和冷启动首 token 延迟（6–7 s，目标 ≤ 3 s，依赖 M2 的磁盘前缀缓存）。
-- 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。
+- MVP 范围内的 9 项能力全部实现，验收标准 7 条全部满足（逐条结果见 §4）。MVP 构建有两项性能指标未达标：常驻内存（3.2–3.8 GB）和冷启动首 token 延迟（6–7 s，目标 ≤ 3 s，依赖 M2 的磁盘前缀缓存）。
+- **内存优化（§5.3）之后**：加载时预先重排 Q4K 权重并释放其原始数据（给 candle 打的补丁见 `third_party/candle-core`），KV 改为 f16。8K 上下文的 RSS 峰值从 4,150 MiB 降到 2,737–2,751 MiB（2.69 GiB），达到 v0.6 的目标（约 2.9 GB，≤ 3.0 GB）；场景中（1–3K 上下文）从 3,450–3,650 MiB 降到 2,342–2,520 MiB。速度没有回退：decode 在长上下文变快（7.9K 时 11.9–12.4 → 13.1–13.8 tok/s），prefill 持平或更快；冷启动首 token 从 6–7 s 降到 4.7–5.5 s。
+- 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。内存优化后的构建再跑 3 轮：26/4/0。
 - 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等。
 - 性能（WSL2，Xeon 8370C 8 核，Q4_K_M，release 构建）：decode 19–25 tok/s，prefill 102–147 tok/s，热对话首 token 0.5–1.0 s，无 rc 启动到提示符约 8 ms。
 
@@ -14,13 +15,13 @@
 | crate | 内容 |
 |---|---|
 | `nosh-hub` | 内置 registry（2B Q4_K_M/Q8_0、1B Q4_K_M + tokenizer，固定 revision 和 SHA-256）；按地区（locale/时区）+ 并行 HEAD/2 MB 测速选源（HF / hf-mirror / ModelScope）；64 MiB 分块 Range 下载、`.partial` 断点续传、文件锁、磁盘空间检查、失败换源与退避、边下边算 SHA-256、原子 rename；离线开关（`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`，全部网络访问经过唯一出口 `net`）；`nosh model pull/list/verify/import/path`。 |
-| `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`。 |
+| `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核；KV 默认 f16，加载时预先重排 Q4K 权重并释放原始数据，见 §5.3）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`（`--kv f16/f32`、`--no-prepack` 用于对比）。 |
 | `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"。247 条表驱动用例，Dangerous 召回率 100%。 |
 | `nosh-shell` | 嵌入 brush-core：交互/登录/`-c`/脚本/stdin 模式，rc 与 profile 加载；reedline REPL（brush 历史桥接、补全、续行校验、hinter、PS1 或 `cwd ❯` 提示符 + 右侧审批模式/YOLO 标记、Ctrl-C/Ctrl-D、Ctrl+G）；输入流水线（`#`、解析失败与单词内撇号判定、整行静态命令名检查、本地拼写纠错、破坏性命令安全网、失败提示与含中文时自动交给 AI、`ai` 内建命令）；`run_agent_command`（同一 `Shell`、stdin 为 `/dev/null`、管道采集 10 MB 上限、后台进程组、防卡住环境变量只作用于单次执行、超时与 Ctrl-C、SIGTTIN 识别、状态差异）。 |
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出脱敏后存入 `state/outputs/`）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 134 个测试（权限的 247 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C。另有 5 个 `#[ignore]` 测试：3 个需要真实模型（本地已通过），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 138 个测试（权限的 247 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -87,6 +88,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | `3e66f8b` | 代码审查之前 | 27 / 2 / 1 |
 | `b60e727` | 审查修复之后；模型可见的变化只有脱敏规则、中文任务头的 `lang=zh` 和规范化的工具路径 | 20 / 7 / 3（场景 1 只对 1 轮，场景 3 没有一轮完全正确） |
 | `56d11d3` | `list_dir` 大小改为同一单位（最终构建） | 25 / 3 / 2 |
+| `ed81c8d` | 内存优化（§5.3：Q4K 预重排并释放原始数据、KV f16） | 26 / 4 / 0（小错：场景 3 三轮总数都算错，场景 5 有一轮说错文件位置） |
 
 `b60e727` 相对 `3e66f8b` 在这些英文场景里几乎没有改变模型看到的内容（脱敏规则对这些输出不起作用，只有工具路径的写法可能不同），差异主要来自 temperature 1.0 下的采样波动；3 轮样本太少，不能据此比较构建之间的优劣。
 
@@ -116,22 +118,22 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 
 ### 5.1 与设计目标对比
 
-8 个推理线程（物理核心数），Q4_K_M，上下文 8K。decode/prefill 的基准数据来自 release 构建（`nosh debug gen`）；场景中的数据和延迟数据来自最终 3 轮使用的 `fastrel` 构建（继承 release，thin LTO、16 个 codegen unit）：
+8 个推理线程（物理核心数），Q4_K_M，上下文 8K。decode/prefill 的基准数据来自 release 构建（`nosh debug gen`）；场景中的数据和延迟数据来自最终 3 轮使用的 `fastrel` 构建（继承 release，thin LTO、16 个 codegen unit）。除内存和冷启动两行外，表中是 MVP 构建的数据；内存优化后的构建速度持平或更快，对比见 §5.3：
 
 | 指标 | 目标 | 实测 | |
 |---|---|---|---|
 | decode | ≥ 12 tok/s | 24.6–25.7 tok/s（短上下文）；19.4–23.1 tok/s（场景中，1.1–3.0K 上下文）；16.4 tok/s（4.4K 上下文） | ✔ |
 | prefill | ≥ 100 tok/s | 131–147 tok/s（短增量）；130–140 tok/s（场景首个任务约 1K token）；135–140 tok/s（场景 8 的 2.5K token 冷 prompt）；102 tok/s（2.2K→4.3K 上下文） | ✔ |
-| engine 常驻内存（8K） | ≤ 2.3 GB | 3.2–3.8 GB（RSS 峰值；最终 3 轮中 3.45–3.65 GB） | ✘ 见 §6 |
+| engine 常驻内存（8K） | v0.4：≤ 2.3 GB；v0.6 修正为约 2.9 GB（≤ 3.0 GB） | MVP：3.2–3.8 GB（RSS 峰值，8K 时 4,150 MiB）。内存优化后：8K 时 2,737–2,751 MiB（2.69 GiB），场景中 2,342–2,520 MiB | ✔（v0.6）见 §5.3 |
 | 启动到提示符（不含用户 rc） | ≤ 50 ms | 中位数 8 ms（5–11 ms）；加载 Ubuntu 默认 `~/.bashrc` 时约 60 ms | ✔ |
 | `nosh -c` 相对 bash 的额外开销 | ≤ 10 ms | `nosh -c true` 3.0 ms/次，`bash -c true` 5.1 ms/次 | ✔ |
 | 命令不存在 → 本地拼写建议 | ≤ 50 ms | 4 ms；WSL 默认 PATH（42 项中 32 项在 `/mnt/c`，经 9p 访问）下为 79 ms | ✔（WSL 下 ✘） |
 | `#` 任务首 token（engine 已加载、同一对话） | ≤ 0.8 s | 0.48–0.95 s，中位数 0.75 s | ✔ |
-| `#` 任务首 token（engine 冷启动） | ≤ 3 s（依赖磁盘前缀缓存） | 6.2–7.0 s（另加模型加载 2–3 s） | ✘ 需 M2 |
+| `#` 任务首 token（engine 冷启动） | ≤ 3 s（依赖磁盘前缀缓存） | MVP：6.2–7.0 s；内存优化后：4.7–5.5 s（另加模型加载约 2 s） | ✘ 需 M2 |
 
 说明：
 
-- 冷启动的首 token 包括两部分：约 1K token 的静态前缀（system prompt 和工具定义）的 prefill，以及进程内第一次前向时 candle 对权重做的一次性 x86 重排（约 2.5 s，短 prompt 首次 TTFT 2.6–3.0 s 主要就是这部分）。M2 的磁盘前缀缓存和常驻 engine 可以消除这两部分。
+- 冷启动的首 token 包括两部分：约 1K token 的静态前缀（system prompt 和工具定义）的 prefill，以及进程内第一次前向时 candle 对权重做的一次性 x86 重排（MVP 中约 2.5 s，短 prompt 首次 TTFT 2.8–3.1 s 主要就是这部分）。内存优化后，Q4K 的重排挪到加载阶段并按层并行（约 0.5–0.9 s），首次前向只剩 Q6K 的 prefill 重排，短 prompt 首次 TTFT 降到 0.72–0.86 s（§5.3）。M2 的磁盘前缀缓存和常驻 engine 可以消除剩下的部分。
 - 模型加载 2.2–3.1 s（页缓存已热）。
 
 ### 5.2 注意力内核优化（T7 中完成）
@@ -147,30 +149,102 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 2.1K token prompt 的 prefill | 79 tok/s | 124–140 tok/s |
 | 4.2K 上下文的 decode | 10.9 tok/s | 16.3 tok/s |
 
+### 5.3 内存优化（设计 v0.6 §2.3、§16 #12）
+
+**做法**：
+
+1. **加载时预先重排 Q4K，释放原始数据**。candle 在 x86 上把量化权重重排成 16 行一组的 tile，缓存在原始数据旁边，原始数据一直保留。MiniCPM5-2B Q4_K_M 的 252 个 Q4K 层矩阵原始 915 MiB、tile 1,221 MiB，而 Q4K 的矩阵乘法在任何 m 下都只读 tile。给锁定的 candle rev 打了一个补丁（`third_party/candle-core`，说明与 diff 见其中的 `NOSH_PATCH.md`、`nosh.patch`），只新增一个公开 API `QTensor::prepack_x86_and_release_storage()`：
+   - 只有当 `repack_x86::select` 在所有 m 下都接受该张量时（x86_64、AVX2/VNNI、2D、n % 16 == 0、k % 256 == 0，且 dtype 的 tile 也服务 m == 1）才构建 tile 并释放原始数据，否则什么都不做（非 x86 或老 CPU 保留原始权重）；
+   - 有 AMX 时，Q4K 在 m ≥ 32 时用另一种 tile，一并提前构建；
+   - 释放后，`dequantize`、`embedding`、`data`、f16 输入的矩阵乘法等需要原始数据的路径都返回明确的错误。
+   
+   nosh 只对 Q4K 层矩阵调用它；`token_embd`、`output` 和所有 Q6K 权重不动（Q6K 的 decode 用原始数据，prefill tile 仍然懒加载）。每层的 5 个 Q4K 矩阵并行重排，用时 0.5–0.9 s。
+2. **KV 改为 f16**（`half` crate），仍按 1024 token 分段增长。注意力内核把 f16 转成 f32 再做 GEMM：decode 时每个工作单元按 256 个 key 一块转换（F16C，每条指令 8 个值），转换结果留在 L2 里；prefill 时所有 token 块读同一段 key，所以每次调用把用到的范围整体转换一次，放进可复用的 scratch（8K 时 16 MiB）。
+
+**为什么没有自己实现 PackedQ4K**：tile 的 AVX-512 VNNI / AVX-VNNI / AVX2 / AMX 内核和 candle 的线程池、激活量化都在 candle 内部（crate 私有），自己实现等于复制约 600 行 SIMD 内核；补丁约 80 行（含注释），内核仍然跟随上游。代价是要维护一个 vendored 的 candle-core，升级 rev 时要重新打补丁。
+
+**内存**（RSS，单位 MiB，`/proc/self/status`；MVP 与优化后都是 release 构建，同一台机器、同一个脚本）：
+
+| 情况 | MVP | 优化后 |
+|---|---|---|
+| 加载完成（首次前向之前；MVP 列用 `--no-prepack --kv f32` 测） | 1,606 | 1,910 |
+| 短 prompt（上下文约 40 token） | 3,219–3,221 | 2,291–2,292 |
+| 2.1K prompt + 128 token | 3,544–3,545 | 2,351–2,436（峰值 2,379–2,441） |
+| 4.4K 上下文 | 3,805–3,806（峰值 3,849–3,850） | 2,494–2,622（峰值 2,553–2,622） |
+| **8K 上下文**（7,884 token prompt + 81–85 token，ctx 7,966–7,970） | 4,149（峰值 4,150） | 2,692–2,706（**峰值 2,737–2,751，即 2.69 GiB / 2.88 GB**） |
+| 场景中（10 个场景各 3 轮，1–3K 上下文，`fastrel`） | 3,450–3,590（峰值 3,650） | 2,342–2,423（峰值 2,520） |
+
+8K 时的构成与 v0.6 的公式吻合：保留的原始权重 567 MiB（token_embd 143 + output 209 + Q6K 215）+ Q4K tile 1,221 MiB + Q6K prefill tile 328 MiB + KV（f16，8 段）336 MiB + prefill scratch 16 MiB + 其余（tokenizer、激活、分配器）约 280 MiB ≈ 2,750 MiB。
+
+**速度**（release，tok/s；MVP 3 次、优化后 2 次，这台 WSL 主机本身有 ±5% 的波动）：
+
+| 情况 | MVP | 优化后 |
+|---|---|---|
+| decode，短上下文 | 22.6–26.6 | 23.6–25.6 |
+| decode，约 2.1K | 19.0–19.8 | 19.5–19.9 |
+| decode，约 4.4K | 15.5–16.7 | 17.0–17.7 |
+| decode，约 7.9K | 11.9–12.4（80–86 ms/token） | 13.1–13.8（74–82 ms/token） |
+| prefill，2.1K 冷 prompt | 125–130 | 136–156 |
+| prefill，2.2K→4.3K | 94–99 | 95–104 |
+| prefill，7.9K 冷 prompt | 85–89 | 89–92 |
+| 场景中 decode / 首个任务 prefill（`fastrel`） | 19.4–23.1 / 130–140 | 19.0–22.5 / 151–170 |
+
+长上下文 decode 变快，是因为 KV 的读取量减半。冷 prompt 的 prefill 变快，是因为 MVP 的首次前向里包含 Q4K 重排。
+
+**冷启动**（页缓存已热，短 prompt，进程启动到第一个 token，两个二进制交替各跑 4 次）：
+
+| | MVP | 优化后 |
+|---|---|---|
+| 模型加载 | 1.55–1.62 s（第一次 3.02 s） | 1.83–2.10 s（含并行重排 0.5–0.9 s） |
+| 首个 token（加载之后） | 2.79–3.09 s | 0.72–0.86 s |
+| 合计（wall） | 4.53–4.70 s（第一次 6.29 s） | 2.84–2.96 s |
+| 场景中 `#` 首个任务的首 token（约 1K token prompt，`fastrel`） | 6.2–7.0 s | 4.7–5.5 s |
+
+**正确性**：
+
+- tile 路径：`crates/nosh-llm/tests/prepack.rs` 在随机权重上比较 m = 1、2、3、4、5、17、32、33、64：预重排并释放后的输出与懒加载 tile 的输出逐位相同；与 candle 读原始权重的内核（行数不是 16 的倍数时 candle 走这条路）相比，Q4K 的最大相对误差 2.0e-7–3.7e-7。另外检查了释放后 `dequantize`/`data`/`embedding`/f16 输入都报错，Q6K 和不满足条件的形状不释放。
+- KV f16 与 f32：真实模型、3,329 token 的 prompt 加 48 步 decode（teacher forcing，用文档本身的后续 token），共 49 个位置：
+
+  | 对比 | logits 余弦（prompt 末尾 / 中位数 / 最小） | 平均 KL（nats） | 真实后续 token 的 NLL | top-5 集合一致 | 高置信（p > 0.5）top-1 一致 |
+  |---|---|---|---|---|---|
+  | f16 KV | 0.99774 / 0.99824 / 0.99606 | 0.0106 | 2.7680 → 2.7502 | 38/49（顺序一致 20/49） | 30/30 |
+  | 对照：f32 KV 取整到 22 位尾数（1 ULP） | 0.99822 / 0.99818 / 0.99623 | 0.0110 | → 2.7514 | 39/49 | 30/30 |
+  | 对照：取整到 14 位尾数 | 0.99819 / 0.99829 / 0.99636 | 0.0076 | → 2.7568 | 35/49 | 30/30 |
+  | 对照：取整到 10 位尾数（与 f16 相同的精度，没有指数范围限制） | 0.99811 / 0.99833 / 0.99600 | 0.0094 | → 2.7596 | 39/49 | 30/30 |
+
+  原计划的验收条件是"top-5 一致、余弦 > 0.999"，这在本流水线里对任何改变 KV 数值的做法都达不到：每个量化矩阵乘法都会把激活重新量化到 8 位，哪怕 1 ULP 的差异也会翻转一部分舍入并逐层扩散，余弦就稳定在 0.998 左右（对照组与 f16 没有区别；只改 prefill 分块则逐位相同，说明计算本身是确定的）。对照组用临时加入的取整代码测得，没有提交。因此 `f16_kv_matches_f32_kv` 改为检查 f16 不应改变的东西：高置信的 top-1 全部一致、平均 KL < 0.03、NLL 变化 < 0.05、余弦中位数和 prompt 末尾 > 0.995、top-5 集合一致的比例 ≥ 60%。
+- 场景：内存优化后的构建再跑 3 轮 10 个场景，26 次完全正确、4 次小错、0 次失败（§3），回答质量与之前的构建在同一波动范围内。
+
+**调优记录**：第一版 f16 decode 用 `half` 的切片转换（每次调用 4 个值），并把整个 key 区间（8K 时 1 MB）一次转换出来，超出 L2，注意力内核慢 40–68%，7.9K 上下文的 decode 从 85 变成 88–90 ms/token；改为 F16C 转换、按 256 个 key 分块后，内核与 f32 持平，端到端反而更快。
+
 ## 6. 已知问题
 
-1. **内存超标**（3.2–3.8 GB，目标 2.3 GB）：candle main 的 x86 重排内核为 Q4K/Q6K 权重另存一份分块布局，原始权重也仍然保留（约多占 1.6 GB）；KV 使用 f32（每 token 86 KB）。
-2. **冷启动首 token 6–7 s**：没有磁盘前缀缓存，每个新进程都要重新 prefill 约 1K token 的静态前缀，并做一次性权重重排。
-3. **2B 模型的可靠性**：偶尔写错命令（排序字段、`sort -h -n` 混用）、算错总数、先给出错误的中间结果、自相矛盾；偶尔声称做了实际没做的事（场景 10 说已切换目录），或者在该发起命令时反问用户（场景 4）；偶尔模仿任务头的格式输出 `[task …]` 之类的行。倾向于用 `list_dir`/`read_file` 逐个查看，而不是一条 `find`/`wc` 命令，因此步数偏多。temperature 1.0（官方推荐的设计默认值）放大了结果的波动：三个构建各跑 3 轮，完全正确的次数分别是 27、20、25。
-4. **brush 后台作业**：`cmd &` 显示 `[1]+ <pid unknown>`，`kill %1` 失败。brush-core 0.5 把异步命令当作任务运行，没有 pid；需要向上游修复。
-5. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
-6. **nosh 进程组内的子进程**：brush 在 nosh 自己的进程组中运行 `$(…)` 和 builtin 之后的管道阶段。agent 命令超时或中断时这些进程会被逐个清理，但它们可以直接读写终端，不会触发 SIGTTIN 识别（例如 `$(ssh host …)` 会直接在终端上询问密码，而不是被识别为需要终端的命令并交给 `propose_command`）。
-7. **提示符下 Ctrl-C 的覆盖范围**：循环体里运行外部命令时（`while true; do sleep 1; done`），Ctrl-C 只结束当前子进程，brush 会继续循环；只含 `[[ ]]`/`(( ))` 而没有其他命令的循环无法中断；`read` 内建命令等待输入时不响应 Ctrl-C。这些都需要 brush 上游支持中断。agent 命令不受影响（超时和 Ctrl-C 会放弃整条命令行）。
-8. **WSL 特有**：PATH 中的 `/mnt/c` 目录经 9p 访问很慢，"命令不存在"的判定约 79 ms；首次列 PATH 约 0.4 s（在后台预热）。
-9. **Ctrl+G 建议使用独立会话**：`LocalChatEngine` 只维护一份 KV，切换会话时从最长公共前缀开始重算，所以 Ctrl+G 之后的下一个 `#` 任务要重新 prefill 主对话。
-10. **保守的风险分级**：写入目标是运行时计算的路径（`for f in *.txt; do mv …`、`find -exec cp {} {}.bak`）一律评为 Dangerous，需要键入 `yes`。
-11. **审批卡片出现时会丢弃预输入**：为防止之前缓冲的按键误答审批，出现卡片时清空终端输入缓冲；设计文档里写的是"agent 运行期间用户的输入先缓冲"。
-12. **`list_dir` 只检查起始目录**：`list_dir ~/.ssh` 需要审批，但 `list_dir ~`（depth ≥ 2）会列出 `~/.ssh` 里的文件名和大小（不含内容）。
-13. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
+1. **内存**（已按 v0.6 优化，§5.3）：8K 上下文 2.69 GiB，达到 v0.6 的目标（≤ 3.0 GB），但达不到 v0.4 的 2.3 GB，原因见 v0.6 §2.3（tile 比原始数据大，Q6K 的原始数据要留给 decode）。只在 x86 AVX2/VNNI 上释放 Q4K 原始数据；其他 CPU 和 Apple Silicon 仍保留原始数据（多约 0.9 GB）。AMX 的提前重排没有在带 AMX 的机器上实测。`minicpm5-2b:q8_0` 的 Q8_0 矩阵也满足释放条件（tile 与原始同样大小，可再省约 2 GB），但 nosh 目前只对 Q4K 调用，未测。
+2. **冷启动首 token 4.7–5.5 s**（MVP 6–7 s）：没有磁盘前缀缓存，每个新进程都要重新 prefill 约 1K token 的静态前缀；Q4K 重排已挪到加载阶段（加载多 0.3–0.5 s），首次前向仍有 Q6K prefill 的懒加载重排。
+3. **f16 KV 的 logits 与 f32 KV 余弦约 0.998**：低于原计划的 0.999，但 1 ULP 的扰动也是这个水平（§5.3），NLL、KL 与高置信预测不受影响。
+4. **2B 模型的可靠性**：偶尔写错命令（排序字段、`sort -h -n` 混用）、算错总数、先给出错误的中间结果、自相矛盾；偶尔声称做了实际没做的事（场景 10 说已切换目录），或者在该发起命令时反问用户（场景 4）；偶尔模仿任务头的格式输出 `[task …]` 之类的行。倾向于用 `list_dir`/`read_file` 逐个查看，而不是一条 `find`/`wc` 命令，因此步数偏多。temperature 1.0（官方推荐的设计默认值）放大了结果的波动：四个构建各跑 3 轮，完全正确的次数分别是 27、20、25、26。
+5. **brush 后台作业**：`cmd &` 显示 `[1]+ <pid unknown>`，`kill %1` 失败。brush-core 0.5 把异步命令当作任务运行，没有 pid；需要向上游修复。
+6. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
+7. **nosh 进程组内的子进程**：brush 在 nosh 自己的进程组中运行 `$(…)` 和 builtin 之后的管道阶段。agent 命令超时或中断时这些进程会被逐个清理，但它们可以直接读写终端，不会触发 SIGTTIN 识别（例如 `$(ssh host …)` 会直接在终端上询问密码，而不是被识别为需要终端的命令并交给 `propose_command`）。
+8. **提示符下 Ctrl-C 的覆盖范围**：循环体里运行外部命令时（`while true; do sleep 1; done`），Ctrl-C 只结束当前子进程，brush 会继续循环；只含 `[[ ]]`/`(( ))` 而没有其他命令的循环无法中断；`read` 内建命令等待输入时不响应 Ctrl-C。这些都需要 brush 上游支持中断。agent 命令不受影响（超时和 Ctrl-C 会放弃整条命令行）。
+9. **WSL 特有**：PATH 中的 `/mnt/c` 目录经 9p 访问很慢，"命令不存在"的判定约 79 ms；首次列 PATH 约 0.4 s（在后台预热）。
+10. **Ctrl+G 建议使用独立会话**：`LocalChatEngine` 只维护一份 KV，切换会话时从最长公共前缀开始重算，所以 Ctrl+G 之后的下一个 `#` 任务要重新 prefill 主对话。
+11. **保守的风险分级**：写入目标是运行时计算的路径（`for f in *.txt; do mv …`、`find -exec cp {} {}.bak`）一律评为 Dangerous，需要键入 `yes`。
+12. **审批卡片出现时会丢弃预输入**：为防止之前缓冲的按键误答审批，出现卡片时清空终端输入缓冲；设计文档里写的是"agent 运行期间用户的输入先缓冲"。
+13. **`list_dir` 只检查起始目录**：`list_dir ~/.ssh` 需要审批，但 `list_dir ~`（depth ≥ 2）会列出 `~/.ssh` 里的文件名和大小（不含内容）。
+14. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
+15. **vendored candle-core**：`third_party/candle-core` 是锁定 rev 的副本加补丁；升级 candle 时要按 `NOSH_PATCH.md` 重新打补丁、重新生成 manifest。上游提供释放原始数据的选项后即可删除。
 
 ## 7. 偏离设计之处与决策
 
 | 事项 | 设计 | 实现 | 原因 |
 |---|---|---|---|
-| candle 版本 | `candle-core` 0.11 | 固定 git rev `9b1be4a`（main） | 0.11.0 只有编译期 AVX2，并且依赖带 onig（C 库）的 tokenizers 0.22；main 支持运行时 AVX2/AVX-512 VNNI 分派和 x86 重排内核，Q4K GEMV 快 2.3 倍 |
+| candle 版本 | `candle-core` 0.11 | 固定 git rev `9b1be4a`（main）；candle-core 以 vendored 副本 + 补丁的形式放在 `third_party/candle-core`，通过 `[patch]` 替换（candle-nn 仍来自同一 rev） | 0.11.0 只有编译期 AVX2，并且依赖带 onig（C 库）的 tokenizers 0.22；main 支持运行时 AVX2/AVX-512 VNNI 分派和 x86 重排内核，Q4K GEMV 快 2.3 倍。补丁见 §5.3：上游没有在重排后释放原始数据的方法 |
 | 推理线程 | — | `RAYON_NUM_THREADS=1`、`CANDLE_NUM_THREADS=物理核心数`，只作用于 nosh 进程，在 shell 子进程中还原 | rayon 线程池与 candle 的 barrier pool 争抢核心，decode 只有 6.5 tok/s；调整后达到 20 tok/s |
 | 注意力 | candle 算子 | 自有分块 GQA 内核（直接调用 candle 已依赖的 `gemm` crate），decode 按 key 切分 | 见 §5.2 |
-| KV | 预先分配 8K | f32，按 1024 token 增长 | 降低短对话的内存占用 |
+| KV | 预先分配 8K（v0.6：默认 f16） | f16（`half`），按 1024 token 增长；decode 按 256 个 key 分块转成 f32，prefill 每次调用整段转换到可复用的 scratch；`LoadOptions`/`nosh debug gen --kv f32` 可切回 f32 | 降低短对话的内存占用；转换方式见 §5.3 |
+| Q4K 权重 | v0.6：加载时提前重排并释放原始数据 | 加载时每层的 Q4K 矩阵各用一个线程重排；只在 candle 的 tile 服务所有 m 时释放，否则保留原始数据；`--no-prepack` 可关闭 | 把重排从首次前向挪到加载阶段并行完成，冷启动更快 |
+| f16 KV 的验收 | top-5 一致、logits 余弦 > 0.999 | 检查高置信 top-1 一致、KL、NLL、余弦中位数 > 0.995、top-5 集合重合 | 任何 KV 改动（包括 1 ULP）都使余弦停在约 0.998（§5.3） |
 | 下载 | 单连接流式 | 64 MiB 分块 Range 请求，每块有超时 | 便于检测卡顿、从断点换源 |
 | 文件锁 | fs4 | std `File::try_lock`（fs4 只用来查询磁盘空间） | MSRV 1.89 |
 | 选源 | 地区 + 测速 | 地区只根据 locale/时区推断；吞吐从收到第一个字节开始计时 | 排除 TLS 握手和重定向的影响 |
@@ -190,8 +264,8 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 
 ## 8. 对 M2 的建议
 
-1. **常驻 engine + 磁盘前缀缓存**：把静态前缀的 KV 落盘（约 50 MB），冷启动首 token 可以从 6–7 s 降到 1 s 以内；常驻进程还能省掉每次 2–3 s 的加载和 2.5 s 的权重重排。
-2. **降低内存**：重排后释放原始量化权重（或向 candle 上游提议）；KV 改用 f16 或 q8；这样才有可能达到 2.3 GB。
+1. **常驻 engine + 磁盘前缀缓存**：把静态前缀的 KV 落盘（f16 约 50 MB），冷启动首 token 可以从 4.7–5.5 s 降到 1 s 以内；常驻进程还能省掉每次约 2 s 的加载（含 Q4K 重排）和首次前向的 Q6K 重排。
+2. **内存的后续工作**：Q4K 原始数据释放和 KV f16 已完成（§5.3，8K 时 2.69 GiB）；向 candle 上游提议"重排后释放原始数据"的选项，以便删除 vendored 副本；`q8_0` 模型的 Q8_0 矩阵也可以同样释放（约 2 GB）；若要再低，需要更紧凑的重排格式或不重排的低内存档（v0.6 §16 #12 暂不做）。
 3. **提高 2B 模型的可靠性**：约束解码（工具名、参数名）；工具输出按小模型的特点设计（`list_dir` 统一单位对场景 1 有明显效果，而在工具描述里加提示没有效果）；agent 模式试用较低的 temperature（例如 0.6–0.7），与官方推荐值 1.0 对比成功率；建立评测集（大文件、端口、行数、改名、`cd` 等）并固定 seed 做回归，每个场景至少跑 10 次，3 次的样本不足以比较不同构建。
 4. **多会话 KV**：按会话保留 KV（或至少为建议模式单独保留一份），避免 Ctrl+G 冲掉主对话的缓存。
 5. **brush 上游**：异步作业的 pid 与 `kill %n`；可取消的执行接口（agent 超时时不必丢弃 future）；子进程统一放入独立进程组（`$(…)`、builtin 之后的管道阶段）；子进程因 SIGINT 退出时中止循环（与 bash 一致）；`read` 等内建命令响应中断；进程创建钩子（为 Landlock/seccomp 沙箱做准备）。
