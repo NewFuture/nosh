@@ -15,6 +15,8 @@ pub struct ProbeResult {
     pub latency: Option<Duration>,
     /// Bytes per second observed while fetching up to [`PROBE_BYTES`].
     pub throughput: Option<f64>,
+    /// Body bytes received by the speed probe.
+    pub bytes: u64,
     pub error: Option<String>,
 }
 
@@ -29,12 +31,16 @@ fn probe_one(c: &Candidate, deadline: Instant) -> ProbeResult {
         hub: c.hub,
         latency: None,
         throughput: None,
+        bytes: 0,
         error: None,
     };
     let remaining = |d: Instant| d.saturating_duration_since(Instant::now());
     let t0 = Instant::now();
-    match net::head(&c.url, remaining(deadline).max(Duration::from_millis(200))) {
-        Ok(h) if (200..400).contains(&h.status) => res.latency = Some(t0.elapsed()),
+    let size = match net::head(&c.url, remaining(deadline).max(Duration::from_millis(200))) {
+        Ok(h) if (200..400).contains(&h.status) => {
+            res.latency = Some(t0.elapsed());
+            h.content_length
+        }
         Ok(h) => {
             res.error = Some(format!("HTTP {}", h.status));
             return res;
@@ -43,7 +49,7 @@ fn probe_one(c: &Candidate, deadline: Instant) -> ProbeResult {
             res.error = Some(e.to_string());
             return res;
         }
-    }
+    };
     let t1 = Instant::now();
     let resp = match net::get_range(
         &c.url,
@@ -57,46 +63,56 @@ fn probe_one(c: &Candidate, deadline: Instant) -> ProbeResult {
             return res;
         }
     };
+    // A complete probe is PROBE_BYTES, or the whole file if it is smaller.
+    let expected = size.map_or(PROBE_BYTES, |s| s.min(PROBE_BYTES));
     let mut reader = resp.reader.take(PROBE_BYTES);
     let mut buf = vec![0u8; 64 * 1024];
     let mut got = 0u64;
-    // Throughput is measured from the first body byte so TLS/redirect setup does not dominate.
+    let mut reads = 0u32;
+    // Timed from the first body byte so TLS/redirect setup does not dominate.
     let mut first_byte: Option<Instant> = None;
+    let mut ended = false;
     while Instant::now() < deadline {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                ended = true;
+                break;
+            }
             Ok(n) => {
                 if first_byte.is_none() {
                     first_byte = Some(Instant::now());
-                    if n as u64 >= PROBE_BYTES {
-                        got += n as u64;
-                        break;
-                    }
-                    continue;
                 }
                 got += n as u64;
+                reads += 1;
             }
             Err(e) => {
                 if got == 0 {
                     res.error = Some(e.to_string());
                     return res;
                 }
+                // Cut off mid-body (the response is shorter than its length).
+                ended = true;
                 break;
             }
         }
     }
-    let secs = first_byte
-        .map(|t| t.elapsed())
-        .unwrap_or_else(|| t1.elapsed())
-        .as_secs_f64()
-        .max(1e-3);
-    if got > 0 {
-        res.throughput = Some(got as f64 / secs);
-    } else if first_byte.is_some() {
-        res.throughput = Some(PROBE_BYTES as f64 / t1.elapsed().as_secs_f64().max(1e-3));
-    } else {
+    res.bytes = got;
+    if got == 0 {
         res.error = Some("no data".into());
+        return res;
     }
+    if ended && got < expected {
+        res.error = Some(format!("connection closed after {got} of {expected} bytes"));
+        return res;
+    }
+    // One read gives no interval after the first byte; then time the whole request.
+    let secs = match first_byte {
+        Some(t) if reads > 1 => t.elapsed(),
+        _ => t1.elapsed(),
+    }
+    .as_secs_f64()
+    .max(1e-3);
+    res.throughput = Some(got as f64 / secs);
     res
 }
 
@@ -127,6 +143,7 @@ pub fn probe_all(cands: &[Candidate], budget: Duration) -> Vec<ProbeResult> {
                 hub: c.hub,
                 latency: None,
                 throughput: None,
+                bytes: 0,
                 error: Some("timed out".into()),
             });
         }
@@ -203,6 +220,7 @@ mod tests {
             hub,
             latency: tput.map(|_| Duration::from_millis(50)),
             throughput: tput,
+            bytes: if tput.is_some() { PROBE_BYTES } else { 0 },
             error: if tput.is_none() {
                 Some("fail".into())
             } else {
@@ -275,10 +293,56 @@ mod tests {
         assert_eq!(probes.len(), 2);
         let ms = probes.iter().find(|p| p.hub == Hub::ModelScope).unwrap();
         assert!(ms.ok(), "{ms:?}");
+        // Every read counts, including the first one.
+        assert_eq!(ms.bytes, PROBE_BYTES, "{ms:?}");
         let hf = probes.iter().find(|p| p.hub == Hub::HuggingFace).unwrap();
         assert!(!hf.ok());
         let ranked = rank(&cands, &probes, &[Hub::HuggingFace, Hub::ModelScope]);
         assert_eq!(ranked[0].hub, Hub::ModelScope);
+    }
+
+    #[test]
+    fn a_source_that_closes_early_is_not_a_full_probe() {
+        use crate::testserver::{Behavior, TestServer};
+        let body: Vec<u8> = (0..(PROBE_BYTES as usize + 10))
+            .map(|i| (i % 256) as u8)
+            .collect();
+        // Sends one read's worth and hangs up.
+        let broken = TestServer::start(body.clone(), Behavior::DropAfter(16 * 1024));
+        let good = TestServer::start(body, Behavior::Normal);
+        let cands = vec![
+            Candidate {
+                hub: Hub::HuggingFace,
+                url: broken.url("f"),
+                revision: "main".into(),
+            },
+            Candidate {
+                hub: Hub::HfMirror,
+                url: good.url("f"),
+                revision: "main".into(),
+            },
+        ];
+        let probes = probe_all(&cands, Duration::from_secs(3));
+        let hf = probes.iter().find(|p| p.hub == Hub::HuggingFace).unwrap();
+        assert!(!hf.ok(), "{hf:?}");
+        assert_eq!(hf.bytes, 16 * 1024);
+        assert!(hf.error.as_deref().unwrap().contains("closed"), "{hf:?}");
+        let ranked = rank(&cands, &probes, &[Hub::HuggingFace, Hub::HfMirror]);
+        assert_eq!(ranked[0].hub, Hub::HfMirror);
+    }
+
+    #[test]
+    fn a_small_file_is_a_complete_probe() {
+        use crate::testserver::{Behavior, TestServer};
+        let srv = TestServer::start(vec![7u8; 5000], Behavior::Normal);
+        let c = Candidate {
+            hub: Hub::ModelScope,
+            url: srv.url("tok"),
+            revision: "main".into(),
+        };
+        let p = probe_one(&c, Instant::now() + Duration::from_secs(3));
+        assert!(p.ok(), "{p:?}");
+        assert_eq!(p.bytes, 5000);
     }
 
     #[test]
