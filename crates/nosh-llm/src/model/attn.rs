@@ -1,12 +1,85 @@
-//! Causal grouped-query attention over a plain `Vec<f32>` KV store, run on
-//! candle's CPU barrier pool (the same threads as the quantized matmuls, so no
-//! second thread pool competes for cores). Also RoPE (interleaved) on raw rows.
+//! Causal grouped-query attention over a plain KV store (f16 by default), run
+//! on candle's CPU barrier pool (the same threads as the quantized matmuls, so
+//! no second thread pool competes for cores). Also RoPE (interleaved) on raw rows.
+
+use half::f16;
+use half::slice::HalfFloatSliceExt;
+
+/// Element type of the KV cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KvDtype {
+    /// Half the memory of f32; attention widens blocks to f32 before the GEMMs.
+    #[default]
+    F16,
+    F32,
+}
+
+#[derive(Debug)]
+enum KvBuf {
+    F16(Vec<f16>),
+    F32(Vec<f32>),
+}
+
+impl KvBuf {
+    fn new(dtype: KvDtype) -> Self {
+        match dtype {
+            KvDtype::F16 => Self::F16(Vec::new()),
+            KvDtype::F32 => Self::F32(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::F16(v) => v.len(),
+            Self::F32(v) => v.len(),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Self::F16(v) => v.capacity(),
+            Self::F32(v) => v.capacity(),
+        }
+    }
+
+    fn truncate(&mut self, n: usize) {
+        match self {
+            Self::F16(v) => v.truncate(n),
+            Self::F32(v) => v.truncate(n),
+        }
+    }
+
+    fn reserve_exact(&mut self, additional: usize) {
+        match self {
+            Self::F16(v) => v.reserve_exact(additional),
+            Self::F32(v) => v.reserve_exact(additional),
+        }
+    }
+
+    fn extend(&mut self, x: &[f32]) {
+        match self {
+            Self::F16(v) => {
+                let start = v.len();
+                v.resize(start + x.len(), f16::ZERO);
+                v[start..].convert_from_f32_slice(x);
+            }
+            Self::F32(v) => v.extend_from_slice(x),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::F16(v) => v.capacity() * std::mem::size_of::<f16>(),
+            Self::F32(v) => v.capacity() * std::mem::size_of::<f32>(),
+        }
+    }
+}
 
 /// Per-layer KV store, layout `[token][kv_head][head_dim]` (append-friendly).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KvStore {
-    k: Vec<f32>,
-    v: Vec<f32>,
+    k: KvBuf,
+    v: KvBuf,
     row: usize,
     len: usize,
 }
@@ -15,10 +88,19 @@ pub struct KvStore {
 const GROW_TOKENS: usize = 1024;
 
 impl KvStore {
-    pub fn new(n_kv: usize, head_dim: usize) -> Self {
+    pub fn new(n_kv: usize, head_dim: usize, dtype: KvDtype) -> Self {
         Self {
+            k: KvBuf::new(dtype),
+            v: KvBuf::new(dtype),
             row: n_kv * head_dim,
-            ..Self::default()
+            len: 0,
+        }
+    }
+
+    pub fn dtype(&self) -> KvDtype {
+        match self.k {
+            KvBuf::F16(_) => KvDtype::F16,
+            KvBuf::F32(_) => KvDtype::F32,
         }
     }
 
@@ -47,14 +129,66 @@ impl KvStore {
             self.k.reserve_exact(target - self.k.len());
             self.v.reserve_exact(target - self.v.len());
         }
-        self.k.extend_from_slice(k);
-        self.v.extend_from_slice(v);
+        self.k.extend(k);
+        self.v.extend(v);
         self.len += k.len() / self.row;
     }
 
     pub fn bytes(&self) -> usize {
+        self.k.bytes() + self.v.bytes()
+    }
+}
+
+/// Reusable f32 copies of f16 K/V for prefill chunks (see [`attention`]).
+#[derive(Debug, Default)]
+pub struct AttnScratch {
+    k: Vec<f32>,
+    v: Vec<f32>,
+}
+
+impl AttnScratch {
+    pub fn bytes(&self) -> usize {
         (self.k.capacity() + self.v.capacity()) * std::mem::size_of::<f32>()
     }
+}
+
+/// K/V rows `[token][kv_head][head_dim]` as one attention call reads them.
+#[derive(Clone, Copy)]
+enum KvView<'a> {
+    F32 {
+        k: &'a [f32],
+        v: &'a [f32],
+    },
+    /// Widened to f32 inside each work unit; used when every key belongs to
+    /// exactly one unit (a single query-token block, i.e. decode).
+    F16 {
+        k: &'a [f16],
+        v: &'a [f16],
+    },
+}
+
+/// `dst[..src.len()] = src` as f32, split across the barrier pool.
+fn widen_into(src: &[f16], dst: &mut Vec<f32>) {
+    const CHUNK: usize = 1 << 16;
+    if dst.len() < src.len() {
+        dst.resize(src.len(), 0.0);
+    }
+    let n = src.len().div_ceil(CHUNK);
+    if n <= 1 {
+        src.convert_to_f32_slice(&mut dst[..src.len()]);
+        return;
+    }
+    let out = dst.as_mut_ptr() as usize;
+    candle_core::utils::barrier_pool().execute_chunked(n, |range| {
+        for c in range {
+            let lo = c * CHUNK;
+            let hi = (lo + CHUNK).min(src.len());
+            // SAFETY: chunk `c` writes only `dst[lo..hi]`, disjoint from every
+            // other chunk and inside `dst`, which outlives the pool call.
+            let d = unsafe { std::slice::from_raw_parts_mut((out as *mut f32).add(lo), hi - lo) };
+            src[lo..hi].convert_to_f32_slice(d);
+        }
+    });
 }
 
 /// Applies interleaved RoPE in place to rows `[s][n_heads][head_dim]`, the
@@ -124,6 +258,8 @@ struct Plan {
     splits: usize,
     span: usize,
     rows: usize,
+    /// Elements per token in the KV rows (`n_kv * hd`).
+    kv_row: usize,
 }
 
 /// Single-threaded `dst = lhs · rhs` with explicit (row, column) strides.
@@ -174,17 +310,24 @@ fn matmul(
     }
 }
 
+/// Per-thread buffers of the work units.
+#[derive(Default)]
+struct UnitBufs {
+    q: Vec<f32>,
+    scores: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+}
+
 /// One unit: KV head `g`, query tokens `t0..t1`, keys `k0..` of split `c`.
 /// Writes the unnormalized output rows to `acc` and `(max, sum)` to `ml`.
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn attend_unit(
     p: &Plan,
     q: &[f32],
-    kv: &KvStore,
+    kv: KvView,
     u: usize,
-    qbuf: &mut Vec<f32>,
-    scores: &mut Vec<f32>,
+    b: &mut UnitBufs,
     acc: &mut [f32],
     ml: &mut [f32],
 ) {
@@ -206,31 +349,46 @@ fn attend_unit(
         return;
     }
     let scale = 1.0 / (hd as f32).sqrt();
-    qbuf.clear();
+    b.q.clear();
     for t in t0..t1 {
         let base = (t * p.n_head + g * n_rep) * hd;
-        qbuf.extend(q[base..base + n_rep * hd].iter().map(|x| x * scale));
+        b.q.extend(q[base..base + n_rep * hd].iter().map(|x| x * scale));
     }
+    // Keys k0..k_end of KV head g as f32 rows, and the stride between keys.
+    let kbase = k0 * p.kv_row + g * hd;
+    let (keys, vals, stride): (&[f32], &[f32], usize) = match kv {
+        KvView::F32 { k, v } => (&k[kbase..], &v[kbase..], p.kv_row),
+        KvView::F16 { k, v } => {
+            b.k.resize(width * hd, 0.0);
+            b.v.resize(width * hd, 0.0);
+            for j in 0..width {
+                let src = kbase + j * p.kv_row;
+                let dst = j * hd..(j + 1) * hd;
+                k[src..src + hd].convert_to_f32_slice(&mut b.k[dst.clone()]);
+                v[src..src + hd].convert_to_f32_slice(&mut b.v[dst]);
+            }
+            (&b.k[..], &b.v[..], hd)
+        }
+    };
     // S = Q · Kᵀ, row-major `[nrows][width]`.
-    scores.clear();
-    scores.resize(nrows * width, 0.0);
-    let kbase = k0 * kv.row + g * hd;
+    b.scores.clear();
+    b.scores.resize(nrows * width, 0.0);
     matmul(
         nrows,
         width,
         hd,
-        scores,
+        &mut b.scores,
         width,
-        qbuf,
+        &b.q,
         hd,
         1,
-        &kv.k[kbase..],
+        keys,
         1,
-        kv.row,
+        stride,
     );
     for r in 0..nrows {
         let t = t0 + r / n_rep;
-        let row = &mut scores[r * width..(r + 1) * width];
+        let row = &mut b.scores[r * width..(r + 1) * width];
         // Causal: token t sees keys 0..=pos+t.
         let visible = (p.pos + t + 1).saturating_sub(k0).min(width);
         row[visible..].fill(f32::NEG_INFINITY);
@@ -250,44 +408,30 @@ fn attend_unit(
     }
     // O = P · V, row-major `[nrows][hd]`.
     matmul(
-        nrows,
-        hd,
-        width,
-        acc,
-        hd,
-        scores,
-        width,
-        1,
-        &kv.v[kbase..],
-        kv.row,
-        1,
+        nrows, hd, width, acc, hd, &b.scores, width, 1, vals, stride, 1,
     );
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-#[allow(clippy::too_many_arguments)]
 unsafe fn attend_unit_avx2(
     p: &Plan,
     q: &[f32],
-    kv: &KvStore,
+    kv: KvView,
     u: usize,
-    qbuf: &mut Vec<f32>,
-    scores: &mut Vec<f32>,
+    b: &mut UnitBufs,
     acc: &mut [f32],
     ml: &mut [f32],
 ) {
-    attend_unit(p, q, kv, u, qbuf, scores, acc, ml)
+    attend_unit(p, q, kv, u, b, acc, ml)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_unit(
     p: &Plan,
     q: &[f32],
-    kv: &KvStore,
+    kv: KvView,
     u: usize,
-    qbuf: &mut Vec<f32>,
-    scores: &mut Vec<f32>,
+    b: &mut UnitBufs,
     acc: &mut [f32],
     ml: &mut [f32],
 ) {
@@ -298,11 +442,11 @@ fn run_unit(
         if *AVX2.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
         {
             // SAFETY: the CPU supports AVX2 and FMA (checked above).
-            unsafe { attend_unit_avx2(p, q, kv, u, qbuf, scores, acc, ml) };
+            unsafe { attend_unit_avx2(p, q, kv, u, b, acc, ml) };
             return;
         }
     }
-    attend_unit(p, q, kv, u, qbuf, scores, acc, ml)
+    attend_unit(p, q, kv, u, b, acc, ml)
 }
 
 /// Causal GQA. `q` is `[s][n_head][hd]` for tokens at positions `pos..pos+s`
@@ -311,6 +455,11 @@ fn run_unit(
 /// Work is split by KV head and blocks of query tokens; when that gives too
 /// few units to occupy the pool (decode), the key range is split as well and
 /// the partial softmax results are merged afterwards.
+///
+/// An f16 cache is widened to f32 per unit when there is a single block of
+/// query tokens (every key is read by one unit), and otherwise once for the
+/// whole call into `scratch`, since all token blocks read the same keys.
+#[allow(clippy::too_many_arguments)]
 pub fn attention(
     q: &[f32],
     kv: &KvStore,
@@ -319,6 +468,7 @@ pub fn attention(
     n_kv: usize,
     hd: usize,
     pos: usize,
+    scratch: &mut AttnScratch,
 ) -> Vec<f32> {
     let n_rep = n_head / n_kv;
     let bt = if s >= 2 * TOKEN_BLOCK { TOKEN_BLOCK } else { 1 };
@@ -346,6 +496,27 @@ pub fn attention(
         splits,
         span: total_keys.div_ceil(splits),
         rows: bt * n_rep,
+        kv_row: kv.row,
+    };
+    let used = total_keys * kv.row;
+    let view = match (&kv.k, &kv.v) {
+        (KvBuf::F32(k), KvBuf::F32(v)) => KvView::F32 {
+            k: &k[..used],
+            v: &v[..used],
+        },
+        (KvBuf::F16(k), KvBuf::F16(v)) if n_tb == 1 => KvView::F16 {
+            k: &k[..used],
+            v: &v[..used],
+        },
+        (KvBuf::F16(k), KvBuf::F16(v)) => {
+            widen_into(&k[..used], &mut scratch.k);
+            widen_into(&v[..used], &mut scratch.v);
+            KvView::F32 {
+                k: &scratch.k[..used],
+                v: &scratch.v[..used],
+            }
+        }
+        _ => unreachable!("K and V share one dtype"),
     };
     let units = base * splits;
     let mut part_o = vec![0f32; units * plan.rows * hd];
@@ -353,8 +524,7 @@ pub fn attention(
     let po = part_o.as_mut_ptr() as usize;
     let pml = part_ml.as_mut_ptr() as usize;
     let work = |range: std::ops::Range<usize>| {
-        let mut qbuf = Vec::new();
-        let mut scores = Vec::new();
+        let mut bufs = UnitBufs::default();
         for u in range {
             // SAFETY: unit `u` owns the disjoint slices `[u * rows * hd ..][.. rows * hd]`
             // and `[u * rows * 2 ..][.. rows * 2]`, which outlive the pool call.
@@ -370,7 +540,7 @@ pub fn attention(
                     ),
                 )
             };
-            run_unit(&plan, q, kv, u, &mut qbuf, &mut scores, acc, ml);
+            run_unit(&plan, q, view, u, &mut bufs, acc, ml);
         }
     };
     if units * total_keys * plan.rows < 1 << 14 {
@@ -475,36 +645,56 @@ mod tests {
             .collect()
     }
 
+    fn round_f16(x: &[f32]) -> Vec<f32> {
+        x.iter().map(|v| f16::from_f32(*v).to_f32()).collect()
+    }
+
     #[test]
     fn matches_naive_causal_gqa() {
-        for (n_head, n_kv, hd) in [(4, 2, 32), (16, 2, 128), (8, 8, 20)] {
-            for (pos, s) in [
-                (0usize, 5usize),
-                (7, 1),
-                (3, 60),
-                (0, 9),
-                (1500, 1),
-                (700, 3),
-                (0, 130),
-                (300, 37),
-            ] {
-                let total = pos + s;
-                let k = pseudo(total * n_kv * hd, 1);
-                let v = pseudo(total * n_kv * hd, 2);
-                let q = pseudo(s * n_head * hd, 3);
-                let mut kv = KvStore::new(n_kv, hd);
-                kv.append(&k, &v);
-                let got = attention(&q, &kv, s, n_head, n_kv, hd, pos);
-                let want = naive(&q, &k, &v, s, n_head, n_kv, hd, pos);
-                let err = got
-                    .iter()
-                    .zip(&want)
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
-                assert!(
-                    err < 1e-4,
-                    "heads={n_head}/{n_kv} hd={hd} pos={pos} s={s} err={err}"
-                );
+        // One scratch for all calls, so later (smaller) calls see a stale, larger one.
+        let mut scratch = AttnScratch::default();
+        for dtype in [KvDtype::F32, KvDtype::F16] {
+            for (n_head, n_kv, hd) in [(4, 2, 32), (16, 2, 128), (8, 8, 20)] {
+                for (pos, s) in [
+                    (0usize, 5usize),
+                    (7, 1),
+                    (3, 60),
+                    (0, 9),
+                    (1500, 1),
+                    (700, 3),
+                    (0, 130),
+                    (300, 37),
+                ] {
+                    let total = pos + s;
+                    let k = pseudo(total * n_kv * hd, 1);
+                    let v = pseudo(total * n_kv * hd, 2);
+                    let q = pseudo(s * n_head * hd, 3);
+                    let mut kv = KvStore::new(n_kv, hd, dtype);
+                    kv.append(&k, &v);
+                    let got = attention(&q, &kv, s, n_head, n_kv, hd, pos, &mut scratch);
+                    let max_err = |want: &[f32]| {
+                        got.iter()
+                            .zip(want)
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0f32, f32::max)
+                    };
+                    let exact = naive(&q, &k, &v, s, n_head, n_kv, hd, pos);
+                    let what = format!("{dtype:?} heads={n_head}/{n_kv} hd={hd} pos={pos} s={s}");
+                    match dtype {
+                        KvDtype::F32 => {
+                            let err = max_err(&exact);
+                            assert!(err < 1e-4, "{what} err={err}");
+                        }
+                        KvDtype::F16 => {
+                            // Exact on the values the cache holds, close to the f32 result.
+                            let (kh, vh) = (round_f16(&k), round_f16(&v));
+                            let err = max_err(&naive(&q, &kh, &vh, s, n_head, n_kv, hd, pos));
+                            assert!(err < 1e-4, "{what} err={err}");
+                            let err = max_err(&exact);
+                            assert!(err < 2e-3, "{what} vs f32 err={err}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -513,26 +703,44 @@ mod tests {
     #[ignore = "benchmark; run with --release --ignored --nocapture"]
     fn attn_bench() {
         let (n_head, n_kv, hd) = (16, 2, 128);
-        for (pos, s) in [(1536usize, 512usize), (2048, 1), (4096, 1)] {
-            let total = pos + s;
-            let k = pseudo(total * n_kv * hd, 1);
-            let v = pseudo(total * n_kv * hd, 2);
-            let q = pseudo(s * n_head * hd, 3);
-            let mut kv = KvStore::new(n_kv, hd);
-            kv.append(&k, &v);
-            let _ = attention(&q, &kv, s, n_head, n_kv, hd, pos);
-            let n = if s > 1 { 5 } else { 200 };
-            let t = std::time::Instant::now();
-            for _ in 0..n {
-                std::hint::black_box(attention(&q, &kv, s, n_head, n_kv, hd, pos));
+        let mut scratch = AttnScratch::default();
+        for dtype in [KvDtype::F32, KvDtype::F16] {
+            for (pos, s) in [
+                (1536usize, 512usize),
+                (7680, 512),
+                (2048, 1),
+                (4096, 1),
+                (8000, 1),
+            ] {
+                let total = pos + s;
+                let k = pseudo(total * n_kv * hd, 1);
+                let v = pseudo(total * n_kv * hd, 2);
+                let q = pseudo(s * n_head * hd, 3);
+                let mut kv = KvStore::new(n_kv, hd, dtype);
+                kv.append(&k, &v);
+                let _ = attention(&q, &kv, s, n_head, n_kv, hd, pos, &mut scratch);
+                let n = if s > 1 { 5 } else { 200 };
+                let t = std::time::Instant::now();
+                for _ in 0..n {
+                    std::hint::black_box(attention(
+                        &q,
+                        &kv,
+                        s,
+                        n_head,
+                        n_kv,
+                        hd,
+                        pos,
+                        &mut scratch,
+                    ));
+                }
+                let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+                let flops = 4.0 * (s * n_head * hd) as f64 * (pos as f64 + s as f64 / 2.0);
+                println!(
+                    "{dtype:?} pos={pos} s={s}: {ms:.3} ms/layer, {:.1} GFLOP/s, threads={}",
+                    flops / ms / 1e6,
+                    candle_core::utils::barrier_pool().n_workers() + 1
+                );
             }
-            let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
-            let flops = 4.0 * (s * n_head * hd) as f64 * (pos as f64 + s as f64 / 2.0);
-            println!(
-                "pos={pos} s={s}: {ms:.3} ms/layer, {:.1} GFLOP/s, threads={}",
-                flops / ms / 1e6,
-                candle_core::utils::barrier_pool().n_workers() + 1
-            );
         }
     }
 
@@ -550,15 +758,23 @@ mod tests {
 
     #[test]
     fn kv_store_append_truncate() {
-        let mut kv = KvStore::new(2, 4);
-        kv.append(&[1.0; 16], &[2.0; 16]);
-        assert_eq!(kv.len(), 2);
-        kv.truncate(1);
-        assert_eq!(kv.len(), 1);
-        kv.append(&[3.0; 8], &[4.0; 8]);
-        assert_eq!(kv.len(), 2);
-        assert_eq!(&kv.k[8..], &[3.0; 8]);
-        assert!(kv.bytes() >= 2 * GROW_TOKENS * 8 * 4);
+        for dtype in [KvDtype::F32, KvDtype::F16] {
+            let mut kv = KvStore::new(2, 4, dtype);
+            assert_eq!(kv.dtype(), dtype);
+            kv.append(&[1.0; 16], &[2.0; 16]);
+            assert_eq!(kv.len(), 2);
+            kv.truncate(1);
+            assert_eq!(kv.len(), 1);
+            kv.append(&[3.0; 8], &[4.0; 8]);
+            assert_eq!(kv.len(), 2);
+            let tail: Vec<f32> = match &kv.k {
+                KvBuf::F32(k) => k[8..].to_vec(),
+                KvBuf::F16(k) => k[8..].iter().map(|x| x.to_f32()).collect(),
+            };
+            assert_eq!(tail, [3.0; 8]);
+            let elem = if dtype == KvDtype::F16 { 2 } else { 4 };
+            assert_eq!(kv.bytes(), 2 * GROW_TOKENS * 8 * elem);
+        }
     }
 
     #[test]

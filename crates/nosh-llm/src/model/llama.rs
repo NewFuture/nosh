@@ -6,7 +6,10 @@
 //! 2. The token embedding stays quantized; rows are dequantized per lookup
 //!    (`QTensor::embedding`) instead of materializing ~1 GB of f32.
 //! 3. The KV cache is an append-only per-layer store grown in large steps, with
-//!    `truncate` for prefix reuse, instead of `Tensor::cat` per token.
+//!    `truncate` for prefix reuse, instead of `Tensor::cat` per token. It holds
+//!    f16 by default (design §2.3).
+//! 4. Q4K layer matrices get their x86 tile layout while loading and drop their
+//!    raw blocks (design §2.3, vendored candle patch); upstream keeps both.
 //!
 //! Attention (causal GQA, no repeated K/V) and RoPE run on raw rows on candle's
 //! barrier pool; see [`super::attn`]. Only the last position's logits are
@@ -15,10 +18,10 @@
 use std::fs::File;
 use std::path::Path;
 
-use candle_core::quantized::{QMatMul, QTensor, gguf_file};
+use candle_core::quantized::{GgmlDType, QMatMul, QTensor, gguf_file};
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
 
-use super::attn::{KvStore, attention, rope_interleaved};
+use super::attn::{AttnScratch, KvDtype, KvStore, attention, rope_interleaved};
 
 /// Hyper-parameters read from GGUF metadata.
 #[derive(Debug, Clone)]
@@ -35,6 +38,34 @@ pub struct LlamaConfig {
     pub rope_theta: f32,
     pub rms_eps: f32,
     pub native_context: usize,
+}
+
+/// How [`Llama::load`] lays out weights and the KV cache.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOptions {
+    pub kv_dtype: KvDtype,
+    /// Build the x86 tile layout of Q4K layer matrices while loading and drop
+    /// their raw blocks, where candle's tiles serve every batch size. The token
+    /// embedding, lm_head and Q6K matrices keep their raw data either way.
+    pub prepack_q4k: bool,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            kv_dtype: KvDtype::F16,
+            prepack_q4k: true,
+        }
+    }
+}
+
+/// What prepacking did while loading.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrepackStats {
+    pub tensors: usize,
+    /// Raw quantized bytes released.
+    pub released_bytes: usize,
+    pub secs: f64,
 }
 
 struct RmsNorm {
@@ -120,6 +151,8 @@ pub struct Llama {
     device: Device,
     max_context: usize,
     pos: usize,
+    scratch: AttnScratch,
+    prepack: PrepackStats,
 }
 
 fn md<'a>(ct: &'a gguf_file::Content, key: &str) -> Result<&'a gguf_file::Value> {
@@ -128,9 +161,47 @@ fn md<'a>(ct: &'a gguf_file::Content, key: &str) -> Result<&'a gguf_file::Value>
         .ok_or_else(|| candle_core::Error::Msg(format!("GGUF metadata {key} missing")))
 }
 
+/// Prepacks the Q4K matrices among `ts`, one thread each (see
+/// [`LoadOptions::prepack_q4k`]); other dtypes keep their raw data.
+fn prepack_q4k(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let done: Vec<Result<Option<usize>>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = ts
+            .iter_mut()
+            .filter(|t| t.dtype() == GgmlDType::Q4K)
+            .map(|t| {
+                s.spawn(move || -> Result<Option<usize>> {
+                    let bytes = t.storage_size_in_bytes();
+                    Ok(t.prepack_x86_and_release_storage()?.then_some(bytes))
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| {
+                j.join().unwrap_or_else(|_| {
+                    Err(candle_core::Error::Msg("prepack thread panicked".into()))
+                })
+            })
+            .collect()
+    });
+    for r in done {
+        if let Some(bytes) = r? {
+            stats.tensors += 1;
+            stats.released_bytes += bytes;
+        }
+    }
+    stats.secs += t0.elapsed().as_secs_f64();
+    Ok(())
+}
+
 impl Llama {
     /// Loads a llama-architecture GGUF; `context_length` bounds the KV cache.
-    pub fn load(path: &Path, context_length: usize, device: &Device) -> Result<Self> {
+    pub fn load(
+        path: &Path,
+        context_length: usize,
+        opts: LoadOptions,
+        device: &Device,
+    ) -> Result<Self> {
         let mut file = File::open(path)?;
         let ct = gguf_file::Content::read(&mut file)?;
         let arch = md(&ct, "general.architecture")?.to_string()?.clone();
@@ -191,18 +262,25 @@ impl Llama {
             Err(_) => QMatMul::from_qtensor(tensor("token_embd.weight")?)?,
         };
         let mut layers = Vec::with_capacity(n_layer);
+        let mut prepack = PrepackStats::default();
         for i in 0..n_layer {
             let p = format!("blk.{i}");
-            let mut q = |n: &str| -> Result<QMatMul> {
-                QMatMul::from_qtensor(tensor(&format!("{p}.{n}.weight"))?)
-            };
-            let wq = q("attn_q")?;
-            let wk = q("attn_k")?;
-            let wv = q("attn_v")?;
-            let wo = q("attn_output")?;
-            let w_gate = q("ffn_gate")?;
-            let w_up = q("ffn_up")?;
-            let w_down = q("ffn_down")?;
+            let mut read = |n: &str| tensor(&format!("{p}.{n}.weight"));
+            let mut m = [
+                read("attn_q")?,
+                read("attn_k")?,
+                read("attn_v")?,
+                read("attn_output")?,
+                read("ffn_gate")?,
+                read("ffn_up")?,
+                read("ffn_down")?,
+            ];
+            if opts.prepack_q4k {
+                prepack_q4k(&mut m, &mut prepack)?;
+            }
+            let [wq, wk, wv, wo, w_gate, w_up, w_down] = m.map(QMatMul::from_qtensor);
+            let (wq, wk, wv, wo) = (wq?, wk?, wv?, wo?);
+            let (w_gate, w_up, w_down) = (w_gate?, w_up?, w_down?);
             let attn_norm = RmsNorm {
                 weight: tensor(&format!("{p}.attn_norm.weight"))?.dequantize(device)?,
                 eps: rms_eps,
@@ -221,7 +299,7 @@ impl Llama {
                 w_up,
                 w_down,
                 ffn_norm,
-                kv: KvStore::new(n_kv_head, head_dim),
+                kv: KvStore::new(n_kv_head, head_dim, opts.kv_dtype),
             });
         }
         let max_context = context_length.max(16);
@@ -236,11 +314,32 @@ impl Llama {
             device: device.clone(),
             max_context,
             pos: 0,
+            scratch: AttnScratch::default(),
+            prepack,
         })
     }
 
     pub fn config(&self) -> &LlamaConfig {
         &self.cfg
+    }
+
+    pub fn prepack_stats(&self) -> PrepackStats {
+        self.prepack
+    }
+
+    pub fn kv_dtype(&self) -> KvDtype {
+        self.layers
+            .first()
+            .map_or(KvDtype::default(), |l| l.kv.dtype())
+    }
+
+    /// Switches the KV cache element type; drops everything cached.
+    pub fn set_kv_dtype(&mut self, dtype: KvDtype) {
+        self.pos = 0;
+        let (n_kv, hd) = (self.cfg.n_kv_head, self.cfg.head_dim);
+        for l in &mut self.layers {
+            l.kv = KvStore::new(n_kv, hd, dtype);
+        }
     }
 
     pub fn max_context(&self) -> usize {
@@ -261,9 +360,9 @@ impl Llama {
         }
     }
 
-    /// Bytes currently reserved for KV caches.
+    /// Bytes currently reserved for KV caches (and the f32 prefill scratch).
     pub fn kv_bytes(&self) -> usize {
-        self.layers.iter().map(|l| l.kv.bytes()).sum()
+        self.layers.iter().map(|l| l.kv.bytes()).sum::<usize>() + self.scratch.bytes()
     }
 
     /// Runs `ids` at the current position and returns f32 logits for the last one.
@@ -301,7 +400,7 @@ impl Llama {
             rope_interleaved(&mut k, s, n_kv, hd, pos, &self.rope.cos, &self.rope.sin);
             layer.kv.append(&k, &v);
             prof.lap(3);
-            let y = attention(&q, &layer.kv, s, n_head, n_kv, hd, pos);
+            let y = attention(&q, &layer.kv, s, n_head, n_kv, hd, pos, &mut self.scratch);
             let y = Tensor::from_vec(y, (1, s, n_head * hd), &self.device)?;
             prof.lap(4);
             x = (x + layer.wo.forward(&y)?)?;

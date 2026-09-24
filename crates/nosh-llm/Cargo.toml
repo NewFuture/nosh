@@ -12,6 +12,7 @@ publish.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
 gemm.workspace = true
+half.workspace = true
 nosh-hub.workspace = true
 num_cpus = "1.17.0"
 serde.workspace = true

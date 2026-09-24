@@ -5,8 +5,15 @@ use std::io::Write;
 use clap::Subcommand;
 use nosh_hub::ModelHub;
 use nosh_llm::{
-    ChatEngine, Event, LocalChatEngine, LocalEngineOptions, Message, SessionSpec, ToolSpec, rss_mb,
+    ChatEngine, Event, KvDtype, LocalChatEngine, LocalEngineOptions, Message, SessionSpec,
+    ToolSpec, rss_mb,
 };
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum KvArg {
+    F16,
+    F32,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum DebugCmd {
@@ -30,6 +37,12 @@ pub enum DebugCmd {
         /// Run the same prompt this many times in one conversation (tests KV reuse).
         #[arg(long, default_value_t = 1)]
         repeat: usize,
+        /// KV cache element type.
+        #[arg(long, value_enum, default_value = "f16")]
+        kv: KvArg,
+        /// Keep the raw Q4K weights instead of prepacking them at load.
+        #[arg(long)]
+        no_prepack: bool,
     },
 }
 
@@ -49,6 +62,8 @@ pub fn run(
             ctx,
             temp,
             repeat,
+            kv,
+            no_prepack,
         } => {
             let hub = ModelHub::new();
             let resolved = match model_path {
@@ -71,6 +86,11 @@ pub fn run(
                 LocalEngineOptions {
                     context_length: ctx,
                     seed,
+                    kv_dtype: match kv {
+                        KvArg::F16 => KvDtype::F16,
+                        KvArg::F32 => KvDtype::F32,
+                    },
+                    prepack_q4k: !no_prepack,
                     ..LocalEngineOptions::default()
                 },
             ) {
@@ -82,8 +102,17 @@ pub fn run(
             };
             let info = engine.info().clone();
             eprintln!(
-                "[{} | {} layers | ctx {} | {} threads | load {:.2}s]",
-                info.model_id, info.layers, info.context, info.threads, info.load_secs
+                "[{} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} Q4K matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
+                info.model_id,
+                info.layers,
+                info.context,
+                info.threads,
+                info.load_secs,
+                info.kv_dtype,
+                info.prepack.tensors,
+                info.prepack.released_bytes as f64 / (1024.0 * 1024.0),
+                info.prepack.secs,
+                rss_mb().map_or(0.0, |r| r.0)
             );
             let mut sampling = engine.default_sampling();
             if let Some(t) = temp {

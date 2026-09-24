@@ -18,6 +18,7 @@ pub use engine::{
 };
 pub use local::{EngineInfo, LocalChatEngine, LocalEngineOptions, rss_mb};
 pub use mock::MockChatEngine;
+pub use model::attn::KvDtype;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

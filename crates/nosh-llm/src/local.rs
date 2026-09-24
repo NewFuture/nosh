@@ -17,7 +17,8 @@ use crate::engine::{
     CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId, SessionSpec, StepOutcome,
     StopReason, Usage,
 };
-use crate::model::llama::Llama;
+use crate::model::attn::KvDtype;
+use crate::model::llama::{Llama, LoadOptions, PrepackStats};
 use crate::sampling::Sampler;
 use crate::template;
 use crate::tokenizer::Tok;
@@ -32,14 +33,20 @@ pub struct LocalEngineOptions {
     pub context_length: usize,
     pub prefill_chunk: usize,
     pub seed: Option<u64>,
+    pub kv_dtype: KvDtype,
+    /// See [`LoadOptions::prepack_q4k`].
+    pub prepack_q4k: bool,
 }
 
 impl Default for LocalEngineOptions {
     fn default() -> Self {
+        let load = LoadOptions::default();
         Self {
             context_length: 8192,
             prefill_chunk: 512,
             seed: None,
+            kv_dtype: load.kv_dtype,
+            prepack_q4k: load.prepack_q4k,
         }
     }
 }
@@ -53,6 +60,8 @@ pub struct EngineInfo {
     pub context: usize,
     pub threads: usize,
     pub load_secs: f64,
+    pub kv_dtype: KvDtype,
+    pub prepack: PrepackStats,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +126,15 @@ impl LocalChatEngine {
         let threads = configure_threads();
         let device = Device::Cpu;
         let mut tok = Tok::load(&model.tokenizer)?;
-        let llama = Llama::load(&model.weights, opts.context_length, &device)?;
+        let llama = Llama::load(
+            &model.weights,
+            opts.context_length,
+            LoadOptions {
+                kv_dtype: opts.kv_dtype,
+                prepack_q4k: opts.prepack_q4k,
+            },
+            &device,
+        )?;
         let cfg = llama.config().clone();
         if cfg.arch != model.entry.arch {
             return Err(LlmError::Config(format!(
@@ -149,6 +166,8 @@ impl LocalChatEngine {
             context: llama.max_context(),
             threads,
             load_secs: t0.elapsed().as_secs_f64(),
+            kv_dtype: llama.kv_dtype(),
+            prepack: llama.prepack_stats(),
         };
         Ok(Self {
             model: llama,
