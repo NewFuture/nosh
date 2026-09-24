@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nosh_hub::tr;
@@ -19,7 +20,7 @@ use nosh_shell::{AgentExecOpts, EmbeddedShell};
 
 use crate::approval::{ApprovalChannel, ApprovalRequest, ApprovalResponse};
 use crate::prompt::{self, Environment, TaskInput};
-use crate::tools::{self, ToolSet};
+use crate::tools::{self, NoRedact, Redactor, ToolSet};
 use crate::ui::{AgentUi, TaskSummary, UiSink};
 
 #[derive(Debug, Clone)]
@@ -128,6 +129,8 @@ pub struct Agent {
     next_output: usize,
     notes_seen: HashSet<PathBuf>,
     hooked: bool,
+    /// Filters what the agent writes to disk (see [`tools::Redactor`]).
+    redactor: Arc<dyn Redactor>,
 }
 
 const SUMMARIZE: &str = "[system] Step limit reached. Do not call any more tools. Summarize what you found in the user's language and suggest the next step.";
@@ -152,7 +155,15 @@ impl Agent {
             next_output: 1,
             notes_seen: HashSet::new(),
             hooked: false,
+            redactor: Arc::new(NoRedact),
         }
+    }
+
+    /// Replaces the filter for what the agent writes to disk; the local agent
+    /// is trusted and keeps [`NoRedact`].
+    pub fn with_redactor(mut self, redactor: Arc<dyn Redactor>) -> Self {
+        self.redactor = redactor;
+        self
     }
 
     pub fn engine_mut(&mut self) -> &mut dyn ChatEngine {
@@ -631,7 +642,7 @@ impl Agent {
         self.next_output += 1;
         let big = r.truncated || r.stdout.len() + r.stderr.len() > tools::OUTPUT_CHARS;
         let log = if big {
-            tools::save_output(id, &to_run, &r)
+            tools::save_output(id, &to_run, &r, self.redactor.as_ref())
         } else {
             None
         };

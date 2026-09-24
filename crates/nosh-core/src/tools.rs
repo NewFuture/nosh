@@ -1,5 +1,6 @@
 //! Tool definitions and the built-in read-only tools (design §5.5).
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -175,142 +176,48 @@ pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> Stri
     s
 }
 
-/// Masks common secrets before anything is written to disk.
-pub fn redact(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_pem = false;
-    for line in s.split_inclusive('\n') {
-        if line.contains("-----BEGIN") && line.contains("PRIVATE KEY") {
-            in_pem = true;
-            out.push_str("[REDACTED PRIVATE KEY]\n");
-            continue;
-        }
-        if in_pem {
-            if line.contains("-----END") {
-                in_pem = false;
-            }
-            continue;
-        }
-        let mut l = line.to_string();
-        mask_tokens(&mut l);
-        mask_assignments(&mut l);
-        out.push_str(&l);
-    }
-    out
+/// Filters text on its way to disk (full command output under
+/// `state/outputs/`, and later history and audit logs). The local agent is
+/// trusted, so nosh uses [`NoRedact`]; a remote agent can supply its own
+/// rules through [`crate::Agent::with_redactor`].
+pub trait Redactor: Send + Sync {
+    fn redact<'a>(&self, text: &'a str) -> Cow<'a, str>;
 }
 
-const REDACTED: &str = "[REDACTED]";
-const TOKEN_PREFIXES: &[&str] = &[
-    "ghp_",
-    "gho_",
-    "ghs_",
-    "ghu_",
-    "github_pat_",
-    "AKIA",
-    "ASIA",
-    "xoxb-",
-    "xoxp-",
-    "sk-",
-];
-const SECRET_KEYS: &[&str] = &[
-    "password",
-    "passwd",
-    "passphrase",
-    "token",
-    "secret",
-    "api_key",
-    "apikey",
-    "access_key",
-    "private_key",
-    "authorization",
-];
+/// Writes text unchanged, without copying it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoRedact;
 
-fn token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
-}
-
-/// Well-known token formats anywhere on the line.
-fn mask_tokens(l: &mut String) {
-    let mut from = 0;
-    while from < l.len() {
-        let Some((at, plen)) = TOKEN_PREFIXES
-            .iter()
-            .filter_map(|p| l[from..].find(p).map(|i| (from + i, p.len())))
-            .min()
-        else {
-            break;
-        };
-        let starts_token = l[..at].chars().next_back().is_none_or(|c| !token_char(c));
-        let end = l[at..]
-            .find(|c: char| !token_char(c))
-            .map_or(l.len(), |e| at + e);
-        if starts_token && end - at >= plen + 8 {
-            l.replace_range(at..end, REDACTED);
-            from = at + REDACTED.len();
-        } else {
-            from = at + plen;
-        }
-    }
-}
-
-/// Values of `password=…`, `token: …`, `"api_key": "…"` and the like.
-fn mask_assignments(l: &mut String) {
-    let lower = l.to_ascii_lowercase();
-    let b = lower.as_bytes();
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for key in SECRET_KEYS {
-        let mut from = 0;
-        while let Some(i) = lower[from..].find(key) {
-            let k = from + i;
-            from = k + key.len();
-            // Whole words only: `tokens=3` and `tokenizer:` are not secrets.
-            let before_ok = lower[..k]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !c.is_ascii_alphanumeric());
-            let mut v = k + key.len();
-            while v < b.len() && matches!(b[v], b'"' | b'\'' | b' ') {
-                v += 1;
-            }
-            if !before_ok || v >= b.len() || !matches!(b[v], b'=' | b':') {
-                continue;
-            }
-            v += 1;
-            while v < b.len() && matches!(b[v], b'"' | b'\'' | b' ') {
-                v += 1;
-            }
-            for scheme in ["bearer ", "basic ", "token "] {
-                if lower[v..].starts_with(scheme) {
-                    v += scheme.len();
-                }
-            }
-            let end = lower[v..]
-                .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';'))
-                .map_or(lower.len(), |e| v + e);
-            if end > v {
-                spans.push((v, end));
-            }
-        }
-    }
-    spans.sort_unstable();
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in spans {
-        match merged.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => merged.push((s, e)),
-        }
-    }
-    for (s, e) in merged.into_iter().rev() {
-        if l.get(s..e).is_some_and(|v| v != REDACTED) {
-            l.replace_range(s..e, REDACTED);
-        }
+impl Redactor for NoRedact {
+    fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(text)
     }
 }
 
 /// Saves the full output of a truncated command under `state/outputs/`.
-pub fn save_output(id: usize, command: &str, r: &CommandResult) -> Option<PathBuf> {
-    let dir = nosh_hub::paths::state_dir().join("outputs");
-    nosh_hub::paths::ensure_private_dir(&dir).ok()?;
+pub fn save_output(
+    id: usize,
+    command: &str,
+    r: &CommandResult,
+    redactor: &dyn Redactor,
+) -> Option<PathBuf> {
+    save_output_in(
+        &nosh_hub::paths::state_dir().join("outputs"),
+        id,
+        command,
+        r,
+        redactor,
+    )
+}
+
+fn save_output_in(
+    dir: &Path,
+    id: usize,
+    command: &str,
+    r: &CommandResult,
+    redactor: &dyn Redactor,
+) -> Option<PathBuf> {
+    nosh_hub::paths::ensure_private_dir(dir).ok()?;
     let pid = std::process::id();
     let path = dir.join(format!("{pid}-{id}.log"));
     let text = format!(
@@ -326,7 +233,7 @@ pub fn save_output(id: usize, command: &str, r: &CommandResult) -> Option<PathBu
     }
     use std::io::Write;
     let mut f = opts.open(&path).ok()?;
-    f.write_all(redact(&text).as_bytes()).ok()?;
+    f.write_all(redactor.redact(&text).as_bytes()).ok()?;
     Some(path)
 }
 
@@ -632,26 +539,47 @@ mod tests {
     }
 
     #[test]
-    fn redaction() {
-        let s = redact(
-            "token=abc123 ghp_ABCDEFGHIJKLMNOP1234 ok\n-----BEGIN RSA PRIVATE KEY-----\nxyz\n-----END RSA PRIVATE KEY-----\nafter\n",
+    fn saved_output_is_written_as_is_through_the_redactor() {
+        let dir = std::env::temp_dir().join(format!("nosh-outputs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = CommandResult {
+            exit_code: 1,
+            stdout: "API_KEY=\"sk-live 0123456789abcdef\" ghp_ABCDEFGHIJKLMNOP1234\n".into(),
+            stderr: "-----BEGIN RSA PRIVATE KEY-----\nxyz\n".into(),
+            ..CommandResult::default()
+        };
+        let p = save_output_in(&dir, 7, "env | grep KEY", &r, &NoRedact).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "$ env | grep KEY\n[exit_code=1]\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+                r.stdout, r.stderr
+            )
         );
-        assert!(!s.contains("abc123"));
-        assert!(!s.contains("ghp_ABCDEFGH"));
-        assert!(!s.contains("xyz"));
-        assert!(s.contains("after"));
-        // A short look-alike earlier on the line must not hide a real key.
-        let s = redact("task-1 done; key sk-live0123456789abcdef and task-2\n");
-        assert!(!s.contains("sk-live0123456789abcdef"), "{s}");
-        assert!(s.contains("task-1") && s.contains("task-2"), "{s}");
-        // Every assignment on a line, in several syntaxes.
-        let s = redact(
-            "password=p1 GITHUB_TOKEN=t2 \"api_key\": \"k3\" Authorization: Bearer b4 tokens=5\n",
-        );
-        for secret in ["p1", "t2", "k3", "b4"] {
-            assert!(!s.contains(secret), "{secret} in {s}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+            let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(dmode & 0o777, 0o700, "{dmode:o}");
         }
-        assert!(s.contains("tokens=5"), "{s}");
+        assert!(matches!(NoRedact.redact("x"), Cow::Borrowed("x")));
+        // Whatever redactor the agent is given is what reaches the disk.
+        struct Upper;
+        impl Redactor for Upper {
+            fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
+                Cow::Owned(text.to_uppercase())
+            }
+        }
+        let p = save_output_in(&dir, 8, "echo hi", &r, &Upper).unwrap();
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .starts_with("$ ECHO HI\n")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -15,5 +15,5 @@ pub use approval::{
 };
 pub use handler::{EngineLoader, LoadedEngine, ShellAi};
 pub use prompt::{Attachment, Environment, TaskInput};
-pub use tools::ToolSet;
+pub use tools::{NoRedact, Redactor, ToolSet};
 pub use ui::{AgentUi, JsonUi, RecordUi, TaskSummary, TermUi};
