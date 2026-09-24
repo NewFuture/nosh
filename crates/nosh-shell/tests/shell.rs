@@ -472,6 +472,12 @@ fn timeout_stops_processes_that_left_the_process_tree() {
         "sh -c 'sleep 35.25; touch {}' &",
         user_job.display()
     ));
+    // brush runs `&` jobs as tasks: wait until the job's process exists, or
+    // it would count as started by the agent command.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while processes_with("sleep 35.25") == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // `sh -c '… &'` exits after starting its job, and `setsid` (util-linux,
     // not on macOS) forks and its parent exits: the sleeps are reparented away
     // from nosh before the timeout.
