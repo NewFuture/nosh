@@ -56,25 +56,12 @@ fn cpu_model() -> String {
         .unwrap_or_else(|| std::env::consts::ARCH.to_string())
 }
 
-#[cfg(target_arch = "x86_64")]
+/// The features candle picks its kernels by, and whether inference is fast
+/// enough: candle's x86 kernels need AVX2 and FMA; every aarch64 CPU has NEON.
 fn cpu_features() -> (Vec<&'static str>, bool) {
-    let mut f = Vec::new();
-    macro_rules! feat {
-        ($($name:tt),*) => {$(
-            if std::arch::is_x86_feature_detected!($name) {
-                f.push($name);
-            }
-        )*};
-    }
-    feat!("avx2", "fma", "f16c", "avx512f", "avx512bw", "avx512vnni");
-    let usable =
-        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma");
+    let f = nosh_llm::cpu::features();
+    let usable = !cfg!(target_arch = "x86_64") || (f.contains(&"avx2") && f.contains(&"fma"));
     (f, usable)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn cpu_features() -> (Vec<&'static str>, bool) {
-    (vec!["neon"], true)
 }
 
 pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {

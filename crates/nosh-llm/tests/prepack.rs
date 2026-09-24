@@ -3,6 +3,9 @@
 //! candle's raw-weight kernels within rounding, and every raw-data path must
 //! fail loudly. On CPUs where candle has no x86 tiles nothing is released and
 //! the checks that need a released tensor are skipped.
+//!
+//! CI runs this file again with `--nocapture`, so its log shows the CPU
+//! features (see `cpu_features`) and what the tests below found with them.
 
 use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
 use candle_core::{DType, Device, Module, Tensor};
@@ -59,6 +62,23 @@ fn columns(y: &[f32], ld: usize, n: usize) -> Vec<f32> {
 }
 
 const MS: [usize; 9] = [1, 2, 3, 4, 5, 17, 32, 33, 64];
+
+/// Which of candle's kernels the tests here ran: the tile layouts and the
+/// dotprod/i8mm paths are picked by these runtime features.
+#[test]
+fn cpu_features() {
+    let f = nosh_llm::cpu::features();
+    eprintln!(
+        "cpu: {} {} · {} threads · {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+        f.join(" ")
+    );
+    if cfg!(target_arch = "aarch64") {
+        assert!(f.contains(&"neon"), "{f:?}");
+    }
+}
 
 #[test]
 fn prepacked_matmul_matches_lazy_tiles_and_raw_kernels() {
