@@ -140,15 +140,25 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
 
 /// First interactive start without a model: offer the download once.
 pub fn offer_first_download(setup: &EngineSetup) {
-    if setup.no_download || net::is_offline() || declined_marker().exists() {
-        return;
+    match first_download_needed(setup) {
+        Ok(true) => {
+            if let Err(e) = download(setup, true) {
+                eprintln!("{}", style::dim(&format!("nosh: {e}")));
+            }
+        }
+        Ok(false) => {}
+        // A configured model that cannot be used (`--model-path` missing or
+        // ambiguous) is reported; downloading another one would not help.
+        Err(e) => eprintln!("{}", style::dim(&format!("nosh: {e}"))),
     }
-    if matches!(locate(setup), Ok(Some(_))) {
-        return;
-    }
-    if let Err(e) = download(setup, true) {
-        eprintln!("{}", style::dim(&format!("nosh: {e}")));
-    }
+}
+
+/// Whether the first start should offer the download: only when no model is
+/// found (not when the configured one cannot be resolved) and downloads are
+/// allowed and were not declined.
+fn first_download_needed(setup: &EngineSetup) -> Result<bool, HubError> {
+    let missing = locate(setup)?.is_none();
+    Ok(missing && !setup.no_download && !net::is_offline() && !declined_marker().exists())
 }
 
 /// Loads the engine, downloading the model first if needed.
@@ -193,4 +203,36 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
         engine: Box::new(engine),
         description,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup(model_path: PathBuf) -> EngineSetup {
+        EngineSetup {
+            model_id: None,
+            model_path: Some(model_path),
+            context_length: 8192,
+            seed: None,
+            no_download: false,
+            selection: SourceSelection::Auto,
+        }
+    }
+
+    #[test]
+    fn an_unusable_model_path_is_reported_instead_of_downloading() {
+        let dir = std::env::temp_dir().join(format!("nosh-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing.
+        let err = first_download_needed(&setup(dir.join("missing.gguf"))).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        // Ambiguous: several GGUFs, none named for the requested model.
+        std::fs::write(dir.join("a.gguf"), b"a").unwrap();
+        std::fs::write(dir.join("b.gguf"), b"b").unwrap();
+        let err = first_download_needed(&setup(dir.clone())).unwrap_err();
+        assert!(err.to_string().contains("a.gguf, b.gguf"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
