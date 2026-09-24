@@ -91,10 +91,10 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
                 t as f64 / 1e9,
                 a as f64 / 1e9
             );
-            if a < 4_000_000_000 {
+            if a < 3_500_000_000 {
                 warn(
                     "memory",
-                    &format!("{line} · the 2B model needs about 3.5 GB"),
+                    &format!("{line} · the 2B model needs about 3 GB (8K context)"),
                 );
             } else {
                 ok("memory", &line);
