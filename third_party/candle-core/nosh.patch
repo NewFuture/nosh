@@ -135,7 +135,7 @@ diff -ruN a/candle-core/src/quantized/repack.rs b/candle-core/src/quantized/repa
  }
  
  impl PackedCache {
-@@ -60,6 +65,27 @@
+@@ -60,6 +65,28 @@
          self.x86.get_or_init(init)
      }
  
@@ -152,6 +152,7 @@ diff -ruN a/candle-core/src/quantized/repack.rs b/candle-core/src/quantized/repa
 +        }
 +    }
 +
++    #[cfg(target_arch = "x86_64")]
 +    pub(crate) fn mark_released(&mut self) {
 +        self.released = true;
 +    }
@@ -163,7 +164,7 @@ diff -ruN a/candle-core/src/quantized/repack.rs b/candle-core/src/quantized/repa
      pub(crate) fn new() -> Self {
          Self {
              #[cfg(target_arch = "x86_64")]
-@@ -76,6 +102,7 @@
+@@ -76,6 +103,7 @@
              q6kx8: OnceLock::new(),
              #[cfg(target_arch = "aarch64")]
              q8_0x4: OnceLock::new(),
