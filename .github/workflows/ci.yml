@@ -39,6 +39,8 @@ jobs:
         run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked
+      - name: evaluation runner tests (no model)
+        run: python3 -m unittest discover -s eval -v
       - name: cpu features and kernel paths
         if: success() || failure()
         run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1

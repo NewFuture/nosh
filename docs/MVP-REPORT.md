@@ -118,6 +118,8 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 
 ## 3. 端到端场景（真实模型）
 
+后续的固定 seed 评测见 [`eval`](../eval/README.md)。新套件按下列 10 个场景的意图重建夹具，每场景默认 5 个 seed，使用独立进程和自动二元判定；不沿用未入库的旧夹具、跨场景会话或“有小错”分级。因此新的通过率与冷会话耗时不应直接与本节的手工结果比较。原始 main 的有限观测实测和合并后补录的完整正式基线分别标注。
+
 **环境**：Windows 11 + WSL2 Ubuntu 26.04，Intel Xeon Platinum 8370C（8 核 16 线程，AVX-512 VNNI），31 GB 内存；Rust 1.98.1；模型 MiniCPM5-2B Q4_K_M（由 `nosh model pull` 下载，SHA-256 与 registry 一致）；上下文 8K；采样用设计默认值（temperature 1.0）。
 
 **方法**：交互场景用 Python pty 驱动真实的 `nosh --norc`（发送按键、按提示回答审批），CLI 场景直接调用 `nosh -a`/`nosh -s`。夹具在 `~/nosh-e2e`（不同大小的文件、一个多语言小项目、待重命名的 `.txt`、用本仓库 git bundle 克隆的仓库、`python3 -m http.server 8080` 监听端口）。所有场景用最终构建（`56d11d3`；之后的 `cd2525b` 只改了用户 allow 规则的判定，场景中没有配置规则，不影响结果）连续跑 3 轮，每轮重建夹具；`NOSH_STATS=1` 记录每个任务的 token 数、速度、首 token 延迟和 RSS。

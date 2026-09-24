@@ -1,0 +1,428 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+from eval import checks, driver, fixtures, report, run
+
+
+class ContractTests(unittest.TestCase):
+    def test_default_suite_and_seeds(self):
+        suite = run.load_suite(run.HERE / "scenarios.json")
+        self.assertEqual(len(suite["scenarios"]), 10)
+        self.assertEqual(suite["seeds"], [0, 1, 2, 3, 4])
+        self.assertEqual(run.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
+        for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                run.seeds(bad)
+
+    def test_invalid_suite_rejected(self):
+        original = json.loads((run.HERE / "scenarios.json").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "suite.json"
+            for field, value in (("id", "../outside"), ("mode", "unknown"), ("approval", "yolo"),
+                                 ("fixture", "host"), ("fixture", "project"), ("inputs", ["# x\nrm x"]),
+                                 ("unknown_option", True)):
+                suite = copy.deepcopy(original)
+                suite["scenarios"][0][field] = value
+                path.write_text(json.dumps(suite))
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    run.load_suite(path)
+
+    def test_native_suggestion_observes_actual_usage_not_stdout_latency(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.jsonl"
+            events = [
+                {"ev": "engine", "info": {"load_s": 1.5}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 4}},
+                {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "input"}]},
+                {"ev": "step_end", "sid": 1, "text": "", "tool_calls": [],
+                 "usage": {"ttft_s": 0.125}},
+            ]
+            trace.write_text("\n".join(json.dumps(dict(e, schema_version=1)) for e in events))
+            result = driver.Result(stdout="tar -czf logs.tar.gz logs\n", exit_code=0, total_s=9)
+            scenario = {"mode": "suggest", "check": "archive"}
+            observed = run.observe(result, scenario, trace, False, 4)
+            self.assertEqual(observed["metrics"]["ttft_s"], 0.125)
+            self.assertEqual(observed["metrics"]["total_s"], 9)
+            self.assertEqual(observed["metrics"]["load_s"], 1.5)
+            self.assertEqual(observed["answer"], result.stdout.strip())
+            legacy = run.observe(result, scenario, trace, True, 4)
+            self.assertIsNone(legacy["metrics"]["ttft_s"])
+            self.assertIsNone(legacy["inputs"])
+            with self.assertRaises(ValueError):
+                run.observe(result, scenario, trace, False, 5)
+            trace.unlink()
+            with self.assertRaises(ValueError):
+                run.observe(result, scenario, trace, False, 4)
+
+    def test_isolated_config_uses_the_existing_string_contract(self):
+        import tomllib
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = run.environment(home, 4, None)
+            cfg = tomllib.loads((Path(env["NOSH_HOME"]) / "config.toml").read_text())
+            self.assertEqual(cfg["model"]["thinking"], "off")
+            result = driver.Result(stdout="tar -czf logs.tar.gz logs", exit_code=0,
+                                   stderr="nosh: /tmp/config.toml: model.thinking: expected a string\n")
+            with self.assertRaises(ValueError):
+                run.observe(result, {"mode": "suggest", "check": "archive"}, home / "trace", True, 0)
+
+    def test_legacy_answer_excludes_echo_tools_and_intermediate_answers(self):
+        text = (
+            "__NOSH_EVAL_PROMPT__ # expected.py\n"
+            "┃ Let me inspect.\n┃ ⚙ list_dir SAFE\n┃   expected.py\n┃   exit 0\n"
+            "┃ Actual final answer.\n┃ ✔ 2 steps · 1.0 s\n┃ stats: ttft 0.12s\n"
+        )
+        self.assertEqual(run.legacy_answer(text), "Actual final answer.")
+        denied = ("┃ I will change it.\n┃ ╭─ run_command · MUTATING\n┃ │ $ mv a b\n"
+                  "┃ ╰─ [y] run [n] deny › n\n┃ reason (optional, Enter to skip):\n"
+                  "┃ I did not change it.\n┃ ⚠ 2 steps · 1.0 s\n")
+        self.assertEqual(run.legacy_answer(denied), "I did not change it.")
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux fixtures and process interfaces")
+class FixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_fixture_rebuild_and_exact_facts(self):
+        with fixtures.Workspace(self.base / "work") as workspace:
+            scenario = {"id": "project", "fixture": "project"}
+            root, _, first = workspace.prepare(scenario)
+            (root / "main.py").write_text("changed")
+            root, _, second = workspace.prepare(scenario)
+            self.assertEqual(first, second)
+            self.assertEqual(second["languages"], {"python": 15, "javascript": 4, "rust": 6, "shell": 4})
+            self.assertEqual(second["total"], 29)
+            self.assertEqual(len(second["python"]), 3)
+            self.assertTrue(all(int(p.stat().st_mtime) == fixtures.EPOCH for p in root.rglob("*")))
+
+    def test_fixed_git_history(self):
+        a, b = self.base / "a", self.base / "b"
+        first = fixtures.create(a, "history")
+        second = fixtures.create(b, "history")
+        self.assertEqual(first, second)
+        self.assertEqual(fixtures.git(a, "rev-list", "--count", "HEAD").strip(), "8")
+
+    def test_large_files_are_materialized_not_sparse(self):
+        root = self.base / "big"
+        facts = fixtures.create(root, "big")
+        allocated = {name: (root / name).stat().st_blocks * 512 for name in facts["before"]}
+        self.assertTrue(all(size > 0 for size in allocated.values()))
+        self.assertEqual(sorted(allocated, key=allocated.get, reverse=True)[:3], facts["largest"])
+        self.assertEqual((root / "data" / "dump.bin").stat().st_size, 21_000_000)
+
+    def test_ownership_lock_and_symlink_boundaries(self):
+        outsider = self.base / "outside"
+        outsider.mkdir()
+        (outsider / "keep").write_text("keep")
+        with self.assertRaises(ValueError):
+            with fixtures.Workspace(outsider):
+                pass
+        with fixtures.Workspace(self.base / "work") as workspace:
+            with self.assertRaises(RuntimeError):
+                with fixtures.Workspace(workspace.root):
+                    pass
+            with self.assertRaises(ValueError):
+                workspace.clean("../outside")
+            (workspace.root / "linked").symlink_to(outsider, target_is_directory=True)
+            workspace.clean("linked")
+            self.assertEqual((outsider / "keep").read_text(), "keep")
+        with self.assertRaises(ValueError):
+            workspace.clean("linked")
+        (self.base / "link").symlink_to(outsider, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            with fixtures.Workspace(self.base / "link" / "child"):
+                pass
+
+    def test_listener_owns_pid_and_never_replaces_occupied_port(self):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            port = occupied.getsockname()[1]
+            with self.assertRaises(RuntimeError):
+                with fixtures.listener(self.base, port):
+                    pass
+        with fixtures.listener(self.base, port) as info:
+            self.assertEqual(info["port"], port)
+            self.assertTrue(Path(f"/proc/{info['pid']}").exists())
+        self.assertFalse(Path(f"/proc/{info['pid']}").exists())
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux fixture tools")
+class CheckTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.result = driver.Result(exit_code=0)
+        self.metrics = {"task_status": "completed", "steps": 1}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def judge(self, kind, fixture, answer):
+        root = self.base / fixture
+        facts = fixtures.create(root, fixture)
+        return checks.judge({"check": kind}, answer, facts, root, facts["before"], self.result, self.metrics)
+
+    def test_largest_order_and_no_echo_shortcut(self):
+        root = self.base / "big"
+        facts = fixtures.create(root, "big")
+        def verdict(answer):
+            return checks.judge({"check": "largest"}, answer, facts, root, facts["before"], self.result, self.metrics)
+        self.assertTrue(verdict("1. data/dump.bin\n2. video.bin\n3. cache/archive.bin").passed)
+        self.assertFalse(verdict("dump.bin, archive.bin, video.bin").passed)
+        self.assertFalse(verdict("Done.").passed)
+
+    def test_language_counts_and_wrong_total(self):
+        facts = fixtures.create(self.base / "project", "project")
+        text = "| Language | Files | Lines |\n| Python | 3 | 15 |\n| JavaScript | 1 | 4 |\n| Rust | 1 | 6 |\n| Shell | 1 | 4 |\nTotal: 29 lines in 6 files."
+        self.assertEqual(checks.line_counts(text, facts), [])
+        self.assertTrue(checks.line_counts(text.replace("29 lines", "36 lines"), facts))
+        self.assertTrue(checks.line_counts(text.replace("6 files", "8 files"), facts))
+        self.assertTrue(checks.line_counts(text.replace("| 15 |", "| 5 |"), facts))
+        self.assertTrue(checks.line_counts("Python files: main.py", facts))
+        sections = (
+            "**Python (.py files):**\n- main.py: 5 lines\n- **Total: 15 lines**\n\n"
+            "**Shell script (.sh files):**\n- **Total: 4 lines**\n\n"
+            "**Rust:**\n- **Total: 6 lines**\n\n**JavaScript:**\n- **Total: 4 lines**\n\n"
+            "**Summary:**\n" + text
+        )
+        self.assertEqual(checks.line_counts(sections, facts), [])
+        self.assertTrue(checks.line_counts(sections.replace("Total: 15", "Total: 16"), facts))
+
+    def test_python_files_language_and_extras(self):
+        root = self.base / "project"
+        facts = fixtures.create(root, "project")
+        def verdict(text):
+            return checks.judge({"check": "python"}, text, facts, root, facts["before"], self.result, self.metrics)
+        good = "Python 文件有 main.py、lib/maths.py 和 tools/report.py。"
+        self.assertTrue(verdict(good).passed)
+        self.assertFalse(verdict(good + " missing.py").passed)
+        self.assertFalse(verdict("main.py, lib/maths.py, tools/report.py").passed)
+        self.assertTrue(verdict(good + "\n另外还有一些非 Python 文件：\n- scripts/check.sh\n- src/main.rs\n- web/app.js").passed)
+        self.assertFalse(verdict(good + " web/app.js").passed)
+
+    def test_rename_contents_and_approval(self):
+        root = self.base / "rename"
+        facts = fixtures.create(root, "rename")
+        scenario = {"check": "rename"}
+        for source, destination in facts["renames"].items():
+            (root / source).rename(root / destination)
+        after = fixtures.snapshot(root)
+        self.assertFalse(checks.judge(scenario, "done", facts, root, after, self.result, self.metrics).passed)
+        self.result.approvals = [{"allowed": True}]
+        self.assertTrue(checks.judge(scenario, "done", facts, root, after, self.result, self.metrics).passed)
+        (root / "readme.md").write_text("changed")
+        self.assertFalse(checks.judge(scenario, "done", facts, root, fixtures.snapshot(root), self.result, self.metrics).passed)
+        loop = 'for f in *.txt; do mv "$f" "${f%.txt}.md"; done'
+        self.assertTrue(checks.allow_approval("rename", loop, root, facts))
+        self.assertTrue(checks.allow_approval("rename", f"cd {root} && {loop}", root, facts))
+        self.assertTrue(checks.allow_approval("rename", f"cd {root} && mv alpha.txt alpha.md && ls -la", root, facts))
+        self.assertTrue(checks.allow_approval("rename", loop.replace("*.txt", "./*.txt").replace("%.txt", "%.*"), root, facts))
+        self.assertFalse(checks.allow_approval("rename", f"cd /tmp && {loop}", root, facts))
+        self.assertFalse(checks.allow_approval("rename", loop + "; touch /tmp/other", root, facts))
+        self.assertFalse(checks.allow_approval("rename", "mv alpha.txt /tmp/a.md", root, facts))
+
+    def test_cwd_requires_physical_probe(self):
+        root = self.base / "big"
+        facts = fixtures.create(root, "big")
+        self.result.pwd = str(root)
+        args = ({"check": "cwd"}, "Changed to data: dump.bin and small.bin.", facts, root, facts["before"], self.result, self.metrics)
+        self.assertFalse(checks.judge(*args).passed)
+        self.result.pwd = str(root / "data")
+        self.assertTrue(checks.judge(*args).passed)
+        self.assertTrue(checks.allow_approval("cwd", "cd data && ls -la", root, facts))
+        self.assertFalse(checks.allow_approval("cwd", "cd / && ls -la", root, facts))
+
+    def test_archive_verifies_contents_without_running_arbitrary_shell(self):
+        root = self.base / "logs"
+        facts = fixtures.create(root, "logs")
+        before = facts["before"]
+        for command in ("tar -czf logs.tar.gz logs", "cd logs && tar -czvf ../logs.tar.gz .",
+                        "tar -czf logs.tar.gz -C logs ."):
+            with self.subTest(command=command):
+                self.assertEqual(checks.check_archive(command, root, before, before), [])
+                self.assertFalse((root / "logs.tar.gz").exists())
+        for command in ("echo logs.tar.gz", "tar -czf /tmp/stolen.tar.gz logs",
+                        "tar -czf logs.tar.gz .", "tar -czf logs.tar.gz logs; touch owned",
+                        "tar --checkpoint-action=exec=touch -czf logs.tar.gz logs",
+                        "tar -czf logs.tar.gz $(touch owned)"):
+            with self.subTest(command=command):
+                self.assertTrue(checks.check_archive(command, root, before, before))
+                self.assertFalse((root / "owned").exists())
+
+    def test_git_summary_associates_features_with_their_components_across_lines(self):
+        root = self.base / "history"
+        facts = fixtures.create(root, "history")
+        answer = "\n\n".join(f"{i}. **Commit**\n   - Feature: {subject}\n   - Component: `{component}`"
+                             for i, (component, _, subject) in enumerate(fixtures.HISTORY, 1))
+        self.assertTrue(checks.judge({"check": "history"}, answer, facts, root, facts["before"],
+                                    self.result, self.metrics).passed)
+        swapped = answer.replace("Component: `llm`", "Component: `hub`", 1)
+        self.assertFalse(checks.judge({"check": "history"}, swapped, facts, root, facts["before"],
+                                     self.result, self.metrics).passed)
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux PTY and wait4")
+class DriverTests(unittest.TestCase):
+    def test_screen_fragmented_queries_and_saved_cursor(self):
+        screen = driver.Screen()
+        self.assertEqual(screen.feed("abc\x1b["), b"")
+        self.assertEqual(screen.feed("6n"), b"\x1b[1;4R")
+        screen.feed("\x1b7\x1b[1;100Hconfirm\x1b8")
+        self.assertEqual(screen.feed("\x1b[6n"), b"\x1b[1;4R")
+        screen.feed("\r\x1b[K" + driver.PROMPT + "git status")
+        self.assertEqual(screen.line(), driver.PROMPT + "git status")
+
+    def test_cli_drains_both_pipes_and_has_no_controlling_tty(self):
+        script = (
+            "import os,sys; data=sys.stdin.buffer.read(); print(len(data)); "
+            "sys.stderr.write('stderr\\n'); "
+            "print(os.isatty(0), os.isatty(1)); "
+            "\ntry: os.open('/dev/tty', os.O_RDWR)\nexcept OSError: print('no-tty')"
+        )
+        result = driver.run_cli([sys.executable, "-c", script], Path.cwd(), {"PATH": "/usr/bin:/bin"}, 5, b"a" * 100_000)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout, "100000\nFalse False\nno-tty\n")
+        self.assertEqual(result.stderr, "stderr\n")
+        self.assertGreater(result.peak_rss_mib, 0)
+
+    def test_timeout_escalates_and_keeps_partial_output(self):
+        code = "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(60)"
+        result = driver.run_cli([sys.executable, "-c", code], Path.cwd(), {"PATH": "/usr/bin:/bin"}, .3)
+        self.assertIn("did not finish", result.error)
+        self.assertEqual(result.stdout, "ready\n")
+        self.assertEqual(result.exit_code, -9)
+
+    def test_output_limit_is_an_explicit_failure(self):
+        with patch.object(driver, "OUTPUT_LIMIT", 4096):
+            result = driver.run_cli([sys.executable, "-c", "print('x' * 10000)"],
+                                    Path.cwd(), {"PATH": "/usr/bin:/bin"}, 5)
+        self.assertIn("output exceeded", result.error)
+
+    def test_cleanup_finds_a_detached_owned_descendant(self):
+        code = (
+            "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+            "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True);"
+            "print(p.pid,flush=True)"
+        )
+        result = driver.run_cli([sys.executable, "-c", code], Path.cwd(), {"PATH": "/usr/bin:/bin"}, 5)
+        self.assertIsNone(result.error)
+        status = Path(f"/proc/{int(result.stdout.strip())}/status")
+        for _ in range(100):
+            try:
+                state = status.read_text()
+            except FileNotFoundError:
+                return
+            if "State:\tZ" in state:
+                return
+            time.sleep(.01)
+        self.fail("owned detached child survived cleanup")
+
+    def test_pty_waits_for_split_approval_and_task_completion(self):
+        script = r'''
+import os, tty, time
+tty.setraw(0)
+def out(text):
+    os.write(1, text.encode())
+def line():
+    data = b""
+    while not data.endswith(b"\r"):
+        data += os.read(0, 1)
+    return data
+out("__NOSH_EVAL_PROMPT__ ")
+line()
+out("\r\n┃ inspecting\r\n┃ ╭─ run_command · MUTATING\r\n┃ │ $ touch fixture\r\n┃ ╰─ [y] run")
+time.sleep(.01)
+out("  [n] deny  [e] edit › ")
+assert os.read(0, 1) == b"y"
+out("y\r\n┃ answer\r\n┃ ✔ 1 steps · 0.1 s\r\n┃ stats: ttft 0.01s\r\n__NOSH_EVAL_PROMPT__ ")
+assert b"exit 0" in line()
+'''
+        scenario = {"inputs": ["# task"], "check": "largest"}
+        result = driver.run_repl([sys.executable, "-c", script], Path.cwd(),
+                                 {"PATH": "/usr/bin:/bin"}, 5, scenario,
+                                 lambda command, card: command == "touch fixture")
+        self.assertIsNone(result.error, result.transcript)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(len(result.approvals), 1)
+        self.assertEqual(result.approvals[0]["answer"], "y")
+
+
+class ReportTests(unittest.TestCase):
+    def sample(self):
+        return {
+            "schema_version": 1,
+            "metadata": {"run_id": "test", "observation": "native-v1",
+                         "build": {"binary_sha256": "a" * 64},
+                         "scenarios": [{"id": "example"}], "seeds": [0, 1], "repeat": 1},
+            "trials": [{"scenario_id": "example", "seed": 0, "repeat": 0, "status": "pass",
+                        "metrics": {"steps": 1, "confirmations": 0, "ttft_s": None, "total_s": 2, "peak_rss_mib": 10},
+                        "answer": "answer\n```", "inputs": None, "final_state": {}}],
+        }
+
+    def test_denominator_keeps_missing_and_error_trials(self):
+        data = self.sample()
+        row = report.aggregate(data)[0]
+        self.assertEqual((row["pass"], row["planned"], row["missing"]), (1, 2, 1))
+        data["trials"].append(dict(data["trials"][0], seed=1, status="error"))
+        row = report.aggregate(data)[0]
+        self.assertEqual((row["pass"], row["planned"], row["error"]), (1, 2, 1))
+        self.assertIn("1/2 (50%)", report.markdown(data))
+
+    def test_paired_comparison_and_incompatibility(self):
+        before = self.sample()
+        after = copy.deepcopy(before)
+        after["trials"][0]["status"] = "fail"
+        after["trials"][0]["metrics"]["total_s"] = 3
+        after["metadata"]["model"] = {"weights_sha256": "different"}
+        comparison = report.compare(after, before)
+        self.assertEqual(comparison["paired_trials"], 1)
+        self.assertEqual(len(comparison["regressions"]), 1)
+        self.assertEqual(comparison["pairs"][0]["metric_delta"]["total_s"], 1)
+        self.assertIsNone(comparison["pairs"][0]["metric_delta"]["ttft_s"])
+        self.assertTrue(comparison["warnings"])
+
+    def test_repeatability_does_not_require_identical_answers_or_timings(self):
+        first = self.sample()["trials"][0]
+        second = dict(first, repeat=1, answer="different prose")
+        pair = report.repetitions([first, second])[0]
+        self.assertTrue(pair["consistent"])
+        self.assertTrue(pair["answer_changed"])
+        self.assertIsNone(pair["inputs_changed"])
+        second["final_state"] = {"changed": True}
+        self.assertFalse(report.repetitions([first, second])[0]["consistent"])
+        second["status"] = "error"
+        self.assertIsNone(report.repetitions([first, second])[0]["consistent"])
+
+    def test_report_shape_roundtrip_and_fences(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = self.sample()
+            report.save(data, root)
+            report.validate(json.loads((root / "report.json").read_text()))
+            self.assertIn("````text", (root / "report.md").read_text())
+            self.assertIn("Not measured", (root / "report.md").read_text())
+        data["trials"].append(data["trials"][0])
+        with self.assertRaises(ValueError):
+            report.validate(data)
+
+
+if __name__ == "__main__":
+    unittest.main()

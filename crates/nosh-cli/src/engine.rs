@@ -199,8 +199,22 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
         info.threads,
         info.load_secs
     );
+    let trace = std::env::var_os("NOSH_EVAL_TRACE").filter(|p| !p.is_empty());
+    let metadata = serde_json::json!({
+        "model": resolved.entry.id,
+        "context_length": info.context,
+        "threads": info.threads,
+        "load_s": info.load_secs,
+        "kv_dtype": format!("{:?}", info.kv_dtype),
+    });
+    let engine = crate::eval_trace::wrap(
+        Box::new(engine),
+        trace.as_deref().map(std::path::Path::new),
+        metadata,
+    )
+    .map_err(|e| format!("evaluation trace: {e}"))?;
     Ok(LoadedEngine {
-        engine: Box::new(engine),
+        engine,
         description,
     })
 }

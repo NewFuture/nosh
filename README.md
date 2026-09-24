@@ -32,6 +32,7 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 - [设计文档](docs/DESIGN.md)
 - [MVP 实施计划](docs/MVP-PLAN.md)
 - [MVP 报告](docs/MVP-REPORT.md)
+- [固定 seed 的真实模型评测](eval/README.md)
 
 ## 许可
 
