@@ -71,7 +71,9 @@ fn agent(per_call: Duration) -> ureq::Agent {
         .into()
 }
 
-fn shared_probe_agent() -> &'static ureq::Agent {
+/// One agent for HEAD requests, so probes reuse connections; each request
+/// sets its own timeout.
+fn head_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| agent(Duration::from_secs(5)))
 }
@@ -89,14 +91,17 @@ pub struct HeadInfo {
     pub accept_ranges: bool,
 }
 
+/// HEAD `url`; the whole request (redirects included) ends within `timeout`.
 pub fn head(url: &str, timeout: Duration) -> Result<HeadInfo, HubError> {
     check_online()?;
-    let agent = if timeout <= Duration::from_secs(5) {
-        shared_probe_agent().clone()
-    } else {
-        agent(timeout)
-    };
-    let resp = agent.head(url).call().map_err(|e| net_err(url, e))?;
+    let resp = head_agent()
+        .head(url)
+        .config()
+        .timeout_global(Some(timeout))
+        .timeout_per_call(Some(timeout))
+        .build()
+        .call()
+        .map_err(|e| net_err(url, e))?;
     let h = resp.headers();
     let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
     Ok(HeadInfo {
@@ -167,6 +172,22 @@ mod tests {
         assert_eq!(parse_content_range_start("bytes 100-199/1000"), Some(100));
         assert_eq!(parse_content_range_start("bytes 0-0/*"), Some(0));
         assert_eq!(parse_content_range_start("garbage"), None);
+    }
+
+    #[test]
+    fn head_keeps_the_callers_timeout() {
+        use crate::testserver::{Behavior, TestServer};
+        let srv = TestServer::start(vec![0; 10], Behavior::Delay(Duration::from_secs(3)));
+        // Shorter than the shared agent's own 5 s.
+        let t0 = std::time::Instant::now();
+        let r = head(&srv.url("slow"), Duration::from_millis(400));
+        assert!(r.is_err(), "{r:?}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        // Longer than 5 s is honoured too.
+        let t0 = std::time::Instant::now();
+        let r = head(&srv.url("slow"), Duration::from_secs(8)).unwrap();
+        assert_eq!((r.status, r.content_length), (200, Some(10)));
+        assert!(t0.elapsed() >= Duration::from_secs(3));
     }
 
     #[test]

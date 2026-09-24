@@ -14,6 +14,8 @@ pub enum Behavior {
     IgnoreRange,
     /// Always answer with this HTTP status.
     Status(u16),
+    /// Answer normally after this delay.
+    Delay(std::time::Duration),
 }
 
 pub struct TestServer {
@@ -115,6 +117,9 @@ fn handle(
         }
     }
     requests.fetch_add(1, Ordering::SeqCst);
+    if let Behavior::Delay(d) = behavior {
+        std::thread::sleep(d);
+    }
     let mut out = stream;
     let total = body.len() as u64;
     if let Behavior::Status(code) = behavior {
