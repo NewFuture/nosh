@@ -16,12 +16,12 @@
 |---|---|
 | `nosh-hub` | 内置 registry（2B Q4_K_M/Q8_0、1B Q4_K_M + tokenizer，固定 revision 和 SHA-256）；按地区（locale/时区）+ 并行 HEAD/2 MB 测速选源（HF / hf-mirror / ModelScope）；64 MiB 分块 Range 下载、`.partial` 断点续传、文件锁、磁盘空间检查、失败换源与退避、边下边算 SHA-256、原子 rename；离线开关（`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`，全部网络访问经过唯一出口 `net`）；`nosh model pull/list/verify/import/path`。 |
 | `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核；KV 默认 f16，加载时预先重排 Q4K 权重并释放原始数据，见 §5.3）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`（`--kv f16/f32`、`--no-prepack` 用于对比）。 |
-| `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"。247 条表驱动用例，Dangerous 召回率 100%。 |
+| `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"；效果未知的命令（不在规则表中、按路径执行、解释器执行脚本或内联代码）在 auto 模式下也要确认（§2.2）。247 条表驱动用例，Dangerous 召回率 100%。 |
 | `nosh-shell` | 嵌入 brush-core：交互/登录/`-c`/脚本/stdin 模式，rc 与 profile 加载；reedline REPL（brush 历史桥接、补全、续行校验、hinter、PS1 或 `cwd ❯` 提示符 + 右侧审批模式/YOLO 标记、Ctrl-C/Ctrl-D、Ctrl+G）；输入流水线（`#`、解析失败与单词内撇号判定、整行静态命令名检查、本地拼写纠错、破坏性命令安全网、失败提示与含中文时自动交给 AI、`ai` 内建命令）；`run_agent_command`（同一 `Shell`、stdin 为 `/dev/null`、管道采集 10 MB 上限、后台进程组、防卡住环境变量只作用于单次执行、超时与 Ctrl-C、SIGTTIN 识别、状态差异）。 |
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出脱敏后存入 `state/outputs/`）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 138 个测试（权限的 247 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 148 个测试（权限的 247 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3）；`crates/nosh-permissions/tests/unknown.rs` 覆盖效果未知的命令在三种审批模式下的决定（§2.2）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -44,6 +44,18 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 11 | 下载时 Ctrl-C 无法取消 | 下载循环检查取消标志；加载期间按 Ctrl-C 放弃当前任务（退出码 130） |
 
 小问题：被中断的 `git status` 会留下 `index.lock`（任务头改用 `git --no-optional-locks`）；连按两次 Ctrl-C 中止任务改为按单条命令计数；脱敏改为整行扫描，并覆盖更多 `key=value`、`"key": "value"`、`Authorization: Bearer` 形式；`read_file` 在 `end_line < start_line` 时返回错误，不再下溢。
+
+### 2.2 第二轮审查（PR #1 上的 Copilot 代码审查）
+
+| # | 问题 | 修复 | 提交 |
+|---|---|---|---|
+| 1 | 校验缓存只比较秒级 mtime，同一秒内（或保留 mtime 的 `cp -p`）换成同样大小的文件时，不重新计算哈希就当作已校验 | manifest 升到版本 2，每个文件记录 `FileStamp`：大小、纳秒级 mtime，Unix 上再加 dev、inode 和 ctime（其他平台用创建时间）；版本 1 的记录一律不信任，旧的模型目录会重新校验一次；校验前先取 stamp，哈希期间文件变了就不记录 | `1931aae` |
+| 2 | 不在规则表里的命令、按路径执行的程序、用解释器执行脚本或内联代码的命令，都被当作"工作区内的 Mutating"，auto 模式下不经确认直接执行 | 这几类标记为"效果未知"（`RiskReport::unknown_effect`）：auto 模式下也要单键确认，confirm 模式照旧单键确认，yolo 照旧自动执行；不因此升级为 Dangerous（同时命中其他危险规则时除外，例如 `./rm -rf x`）；`/usr/bin` 等系统目录中的程序仍按名称套用规则，已知只读的命令不受影响；对这类命令选择"同类放行"只放行完全相同的命令 | `66d2725` |
+| 3 | `read_file` 先读 8 MiB 前缀再定位 `start_line`，读不到大文件后面的部分，总行数也只是前缀的 | 流式读到请求的行，只保留要返回的行（最多 400 行、每行 2 KiB、共 6,000 字符）；之后在 64 MiB 的预算内继续数行，数不完时标注"≥ N lines (stopped counting)" | `1f20dca` |
+| 4 | 等待另一个进程的下载锁时用阻塞的 `File::lock()`，Ctrl-C 无效 | 每 200 ms 轮询一次 `try_lock()`，其间检查取消标志；等待时提示"另一个 nosh 进程正在下载" | `b31e7ae` |
+| 5 | 测速没有计入第一次读取的字节；服务器只返回一块就断开时，回退逻辑把它当作完整的 2 MiB，可能把坏掉的源排在第一 | 每次读取都计入，第一个字节只用来开始计时；在达到测速大小（或更小的文件大小）之前结束的响应算作测速失败 | `8f1554a` |
+
+每项都有回归测试。
 
 ## 3. 端到端场景（真实模型）
 
@@ -229,7 +241,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 8. **提示符下 Ctrl-C 的覆盖范围**：循环体里运行外部命令时（`while true; do sleep 1; done`），Ctrl-C 只结束当前子进程，brush 会继续循环；只含 `[[ ]]`/`(( ))` 而没有其他命令的循环无法中断；`read` 内建命令等待输入时不响应 Ctrl-C。这些都需要 brush 上游支持中断。agent 命令不受影响（超时和 Ctrl-C 会放弃整条命令行）。
 9. **WSL 特有**：PATH 中的 `/mnt/c` 目录经 9p 访问很慢，"命令不存在"的判定约 79 ms；首次列 PATH 约 0.4 s（在后台预热）。
 10. **Ctrl+G 建议使用独立会话**：`LocalChatEngine` 只维护一份 KV，切换会话时从最长公共前缀开始重算，所以 Ctrl+G 之后的下一个 `#` 任务要重新 prefill 主对话。
-11. **保守的风险分级**：写入目标是运行时计算的路径（`for f in *.txt; do mv …`、`find -exec cp {} {}.bak`）一律评为 Dangerous，需要键入 `yes`。
+11. **保守的风险分级**：写入目标是运行时计算的路径（`for f in *.txt; do mv …`、`find -exec cp {} {}.bak`）一律评为 Dangerous，需要键入 `yes`。效果未知的命令（§2.2 #2）在 auto 模式下也要确认。反过来，`make`、`cargo build/run`、`npm run` 这类构建和运行命令同样会执行项目中的代码，但它们在规则表中，仍按"工作区内的 Mutating"处理，auto 模式下不询问。
 12. **审批卡片出现时会丢弃预输入**：为防止之前缓冲的按键误答审批，出现卡片时清空终端输入缓冲；设计文档里写的是"agent 运行期间用户的输入先缓冲"。
 13. **`list_dir` 只检查起始目录**：`list_dir ~/.ssh` 需要审批，但 `list_dir ~`（depth ≥ 2）会列出 `~/.ssh` 里的文件名和大小（不含内容）。
 14. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
