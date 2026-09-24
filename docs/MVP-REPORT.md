@@ -7,7 +7,7 @@
 - MVP 范围内的 9 项能力全部实现，验收标准 7 条全部满足（逐条结果见 §4）。MVP 构建有两项性能指标未达标：常驻内存（3.2–3.8 GB）和冷启动首 token 延迟（6–7 s，目标 ≤ 3 s，依赖 M2 的磁盘前缀缓存）。
 - **内存优化（§5.3）之后**：加载时预先重排 Q4K 权重并释放其原始数据（给 candle 打的补丁见 `third_party/candle-core`），KV 改为 f16。8K 上下文的 RSS 峰值从 4,150 MiB 降到 2,737–2,751 MiB（2.69 GiB），达到 v0.6 的目标（约 2.9 GB，≤ 3.0 GB）；场景中（1–3K 上下文）从 3,450–3,650 MiB 降到 2,342–2,520 MiB。速度没有回退：decode 在长上下文变快（7.9K 时 11.9–12.4 → 13.1–13.8 tok/s），prefill 持平或更快；冷启动首 token 从 6–7 s 降到 4.7–5.5 s。
 - 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。内存优化后的构建再跑 3 轮：26/4/0。
-- 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等；PR #1 上两次 Copilot 代码审查的 5 条和 8 条意见也已处理（§2.2、§2.3）。
+- 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等；PR #1 上三次 Copilot 代码审查的 5 条、8 条和 5 条意见也已处理（§2.2–§2.4）。
 - 性能（WSL2，Xeon 8370C 8 核，Q4_K_M，release 构建）：decode 19–25 tok/s，prefill 102–147 tok/s，热对话首 token 0.5–1.0 s，无 rc 启动到提示符约 8 ms。
 
 ## 2. 实现摘要
@@ -21,7 +21,7 @@
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 161 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 167 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -69,6 +69,18 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 6 | `SharedProgress::finish` 不设置完成标志，复用时 `start` 不清除上一次的完成和失败状态 | `start` 重置状态（保留最后一条说明）；`finish` 记录完成，失败时设置失败标志，成功时进度置满 | `e187c9a` |
 | 7 | GGUF 的 attention head 数为 0 时，加载在除法和取模处 panic（`--model-path` 的文件不经过 registry 哈希校验） | `LlamaConfig::from_gguf` 在做除法前检查两个 head 数和维度能否整除，返回加载错误 | `ea4920d` |
 | 8 | vendored candle 的 Metal 桩函数 `quantize_onto` 返回 CUDA 的错误（上游问题） | 改为 `NotCompiledWithMetalSupport`，并重新生成 `nosh.patch`、在 `NOSH_PATCH.md` 中记录；新增测试防止重新 vendor 时丢失补丁 | `ebf7cc6` |
+
+每项都有回归测试。
+
+### 2.4 第四轮审查（PR #1 上的第三次 Copilot 代码审查）
+
+| # | 问题 | 处理 | 提交 |
+|---|---|---|---|
+| 1 | `LocalChatEngine::load` 用 `std::env::set_var` 设置 `CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS`，此时 shell 的 Tokio 运行时等线程已经存在，修改环境变量可能与其他线程的读取竞争（未定义行为） | 改为在 `main` 开头、任何线程启动之前设置（`configure_thread_env` 改为 `unsafe fn` 并写明这个前提，debug 构建用 `/proc/self/task` 检查），随即登记原值，shell 照旧不把它们传给子进程；加载时只读取线程数。candle 的私有 rayon 池和 barrier pool 都只读这两个环境变量，没有可用的 API。代价是每次启动多约 0.4 ms（计算物理核心数；`nosh -c true` 3.2–3.4 ms/次，同时测得 `bash -c true` 4.1–4.2 ms/次）；decode 速度不变（短 prompt 23.5–24.5 tok/s，8 个 barrier 线程） | `a2f4247` |
+| 2 | `nosh doctor` 的内存检查写死 3.5 GB 和 2B 的提示，不看 registry 的 `min_memory_mb`：Q8_0（3.8 GB）可能在内存不足时显示正常，1B 模型却收到 2B 的警告 | 按已安装模型（否则按选中的或默认的 registry 条目）的 `min_memory_mb` 加 512 MiB 余量检查，警告里写出该模型 | `d4940b9` |
+| 3 | 首次启动时，`--model-path` 缺失或有歧义这类解析错误被当成"没有模型"，会下载 registry 模型，而加载时仍然用那个错误的路径 | 先解析：出错就报告错误；只有确实没有模型、允许下载且没有拒绝过时才提议下载 | `830ebdb` |
+| 4 | 下载失败后的指数退避（最长 8 s）是一次整段 sleep；Ctrl-C 只设置取消标志，要等 sleep 结束才生效 | 退避按 200 ms 分段等待，取消后立即返回 `Cancelled`；取消检查一路传下去（等锁、退避、读分块），测试可以不依赖全局标志 | `37740da` |
+| 5 | `net::head` 对 5 s 以内的超时一律用共享 agent 的固定 5 s 超时，测速传入的 3 s 预算不起作用，`probe_all` 结束后探测线程还可能继续发请求 | 仍用共享 agent 复用连接，但每个请求设置调用方的超时（整次请求含重定向），长短超时都生效 | `a45e274` |
 
 每项都有回归测试。
 
@@ -153,7 +165,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | prefill | ≥ 100 tok/s | 131–147 tok/s（短增量）；130–140 tok/s（场景首个任务约 1K token）；135–140 tok/s（场景 8 的 2.5K token 冷 prompt）；102 tok/s（2.2K→4.3K 上下文） | ✔ |
 | engine 常驻内存（8K） | v0.4：≤ 2.3 GB；v0.6 修正为约 2.9 GB（≤ 3.0 GB） | MVP：3.2–3.8 GB（RSS 峰值，8K 时 4,150 MiB）。内存优化后：8K 时 2,737–2,751 MiB（2.69 GiB），场景中 2,342–2,520 MiB | ✔（v0.6）见 §5.3 |
 | 启动到提示符（不含用户 rc） | ≤ 50 ms | 中位数 8 ms（5–11 ms）；加载 Ubuntu 默认 `~/.bashrc` 时约 60 ms | ✔ |
-| `nosh -c` 相对 bash 的额外开销 | ≤ 10 ms | `nosh -c true` 3.0 ms/次，`bash -c true` 5.1 ms/次 | ✔ |
+| `nosh -c` 相对 bash 的额外开销 | ≤ 10 ms | `nosh -c true` 3.0 ms/次，`bash -c true` 5.1 ms/次（§2.4 之后另测：3.2–3.4 ms/次，`bash -c true` 4.1–4.2 ms/次） | ✔ |
 | 命令不存在 → 本地拼写建议 | ≤ 50 ms | 4 ms；WSL 默认 PATH（42 项中 32 项在 `/mnt/c`，经 9p 访问）下为 79 ms | ✔（WSL 下 ✘） |
 | `#` 任务首 token（engine 已加载、同一对话） | ≤ 0.8 s | 0.48–0.95 s，中位数 0.75 s | ✔ |
 | `#` 任务首 token（engine 冷启动） | ≤ 3 s（依赖磁盘前缀缓存） | MVP：6.2–7.0 s；内存优化后：4.7–5.5 s（另加模型加载约 2 s） | ✘ 需 M2 |
@@ -267,7 +279,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 事项 | 设计 | 实现 | 原因 |
 |---|---|---|---|
 | candle 版本 | `candle-core` 0.11 | 固定 git rev `9b1be4a`（main）；candle-core 以 vendored 副本 + 补丁的形式放在 `third_party/candle-core`，通过 `[patch]` 替换（candle-nn 仍来自同一 rev） | 0.11.0 只有编译期 AVX2，并且依赖带 onig（C 库）的 tokenizers 0.22；main 支持运行时 AVX2/AVX-512 VNNI 分派和 x86 重排内核，Q4K GEMV 快 2.3 倍。补丁见 §5.3：上游没有在重排后释放原始数据的方法 |
-| 推理线程 | — | `RAYON_NUM_THREADS=1`、`CANDLE_NUM_THREADS=物理核心数`，只作用于 nosh 进程，在 shell 子进程中还原 | rayon 线程池与 candle 的 barrier pool 争抢核心，decode 只有 6.5 tok/s；调整后达到 20 tok/s |
+| 推理线程 | — | `RAYON_NUM_THREADS=1`、`CANDLE_NUM_THREADS=物理核心数`，在 `main` 开头、任何线程启动之前设置，只作用于 nosh 进程，在 shell 子进程中还原 | rayon 线程池与 candle 的 barrier pool 争抢核心，decode 只有 6.5 tok/s；调整后达到 20 tok/s。candle 只从环境变量读取这两个值，而修改环境变量必须在单线程时进行（§2.4） |
 | 注意力 | candle 算子 | 自有分块 GQA 内核（直接调用 candle 已依赖的 `gemm` crate），decode 按 key 切分 | 见 §5.2 |
 | KV | 预先分配 8K（v0.6：默认 f16） | f16（`half`），按 1024 token 增长；decode 按 256 个 key 分块转成 f32，prefill 每次调用整段转换到可复用的 scratch；`LoadOptions`/`nosh debug gen --kv f32` 可切回 f32 | 降低短对话的内存占用；转换方式见 §5.3 |
 | Q4K 权重 | v0.6：加载时提前重排并释放原始数据 | 加载时每层的 Q4K 矩阵各用一个线程重排；只在 candle 的 tile 服务所有 m 时释放，否则保留原始数据；`--no-prepack` 可关闭 | 把重排从首次前向挪到加载阶段并行完成，冷启动更快 |
