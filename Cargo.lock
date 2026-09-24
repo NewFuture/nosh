@@ -1860,6 +1860,7 @@ dependencies = [
  "crossterm",
  "ignore",
  "libc",
+ "memchr",
  "nosh-hub",
  "nosh-llm",
  "nosh-permissions",

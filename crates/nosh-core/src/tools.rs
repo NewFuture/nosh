@@ -1,7 +1,7 @@
 //! Tool definitions and the built-in read-only tools (design §5.5).
 
 use std::fmt::Write as _;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use nosh_llm::{ToolCall, ToolSpec};
@@ -365,22 +365,24 @@ pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
 
 /// `read_file`: numbered lines, binary files refused.
 pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
+    read_file_with(call, cwd, COUNT_BUDGET)
+}
+
+/// Bytes kept per displayed line (at most 400 characters are shown).
+const LINE_BYTES: usize = 2048;
+/// Bytes read past the returned lines to count the file's total.
+const COUNT_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Streams the file: skips to `start_line` however far it is, keeps only the
+/// returned lines (bounded in count, per-line bytes and total characters),
+/// then counts the remaining lines within `count_budget` bytes.
+fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<String, String> {
     let path = tool_path(call, cwd);
-    let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let meta = std::fs::metadata(&path).map_err(err)?;
     if meta.is_dir() {
         return Err(format!("{} is a directory; use list_dir", path.display()));
     }
-    let mut f = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut bytes = Vec::new();
-    f.by_ref()
-        .take(8 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.iter().take(8192).any(|&b| b == 0) {
-        return Ok(format!("[binary file, {} bytes; not shown]", meta.len()));
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let total = text.lines().count();
     let start = call.int_arg("start_line").unwrap_or(1).max(1) as usize;
     let end_req = call
         .int_arg("end_line")
@@ -389,37 +391,110 @@ pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
     if end_req < start {
         return Err(format!("end_line {end_req} is before start_line {start}"));
     }
-    let end = end_req.min(start + READ_FILE_LINES - 1).min(total);
-    let mut out = format!("[{} · {} lines]\n", path.display(), total);
-    if total == 0 {
+    let last = end_req.min(start + READ_FILE_LINES - 1);
+    let mut f = std::fs::File::open(&path).map_err(err)?;
+    let mut sniff = Vec::with_capacity(8192);
+    f.by_ref().take(8192).read_to_end(&mut sniff).map_err(err)?;
+    if sniff.contains(&0) {
+        return Ok(format!("[binary file, {} bytes; not shown]", meta.len()));
+    }
+    let mut r = std::io::BufReader::with_capacity(64 * 1024, std::io::Cursor::new(sniff).chain(f));
+
+    // Room for the entries within OUTPUT_CHARS once header and footer are added.
+    let room = OUTPUT_CHARS.saturating_sub(path.as_os_str().len() + 120);
+    let mut shown: Vec<String> = Vec::new();
+    let mut shown_chars = 0usize;
+    let mut collecting = true;
+    let mut line = 1usize;
+    let mut cur: Vec<u8> = Vec::new();
+    let mut cur_cut = false;
+    // Bytes since the last newline (a final line without one still counts).
+    let mut pending = false;
+    let mut after = 0u64;
+    let mut eof = false;
+    let mut finish = |line: usize, cur: &mut Vec<u8>, cut: bool, shown: &mut Vec<String>| {
+        let s = String::from_utf8_lossy(cur);
+        let s = s.strip_suffix('\r').unwrap_or(&s);
+        let text: String = if cut || s.chars().count() > 400 {
+            s.chars().take(400).chain("…".chars()).collect()
+        } else {
+            s.to_string()
+        };
+        cur.clear();
+        let entry = format!("{line:>5}  {text}\n");
+        if shown_chars + entry.len() > room && !shown.is_empty() {
+            return false;
+        }
+        shown_chars += entry.len();
+        shown.push(entry);
+        true
+    };
+    loop {
+        let buf = r.fill_buf().map_err(err)?;
+        if buf.is_empty() {
+            eof = true;
+            break;
+        }
+        let n = buf.len();
+        let mut i = 0;
+        while i < n {
+            let want = collecting && line >= start;
+            let nl = memchr::memchr(b'\n', &buf[i..]);
+            let piece = &buf[i..nl.map_or(n, |p| i + p)];
+            if want {
+                let keep = piece.len().min(LINE_BYTES.saturating_sub(cur.len()));
+                cur.extend_from_slice(&piece[..keep]);
+                cur_cut |= keep < piece.len();
+            }
+            match nl {
+                Some(p) => {
+                    if want {
+                        collecting = finish(line, &mut cur, cur_cut, &mut shown) && line < last;
+                        cur_cut = false;
+                    }
+                    line += 1;
+                    pending = false;
+                    i += p + 1;
+                }
+                None => {
+                    pending = true;
+                    i = n;
+                }
+            }
+        }
+        r.consume(n);
+        if !collecting {
+            after += n as u64;
+            if after > count_budget {
+                break;
+            }
+        }
+    }
+    if eof && pending && collecting && line >= start {
+        finish(line, &mut cur, cur_cut, &mut shown);
+    }
+    // Complete lines seen, plus a final line without a newline.
+    let counted = line - 1 + usize::from(pending);
+    let total = if eof {
+        format!("{counted} lines")
+    } else {
+        format!("≥ {counted} lines (stopped counting)")
+    };
+    let mut out = format!("[{} · {total}]\n", path.display());
+    if eof && counted == 0 {
         out.push_str("(empty file)");
         return Ok(out);
     }
-    if start > total {
+    if eof && start > counted {
         return Err(format!(
-            "start_line {start} is past the end ({total} lines)"
+            "start_line {start} is past the end ({counted} lines)"
         ));
     }
-    let mut shown_to = start - 1;
-    for (i, line) in text
-        .lines()
-        .enumerate()
-        .skip(start - 1)
-        .take(end + 1 - start)
-    {
-        let line: String = if line.chars().count() > 400 {
-            line.chars().take(400).chain("…".chars()).collect()
-        } else {
-            line.to_string()
-        };
-        let entry = format!("{:>5}  {line}\n", i + 1);
-        if out.len() + entry.len() > OUTPUT_CHARS {
-            break;
-        }
-        out.push_str(&entry);
-        shown_to = i + 1;
+    let shown_to = start - 1 + shown.len();
+    for e in &shown {
+        out.push_str(e);
     }
-    if shown_to < total {
+    if !eof || shown_to < counted {
         let _ = write!(
             out,
             "[showing lines {start}-{shown_to}; continue with start_line={}]",
@@ -639,6 +714,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn read_file_pages_past_8_mib_and_bounds_what_it_keeps() {
+        let dir = std::env::temp_dir().join(format!("nosh-bigread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 100,000 lines of 100 bytes: 10 MB, beyond the old 8 MiB prefix.
+        let mut s = String::with_capacity(10_000_000);
+        for i in 1..=100_000 {
+            let _ = writeln!(s, "line {i:06} {}", "x".repeat(87));
+        }
+        std::fs::write(dir.join("big.log"), &s).unwrap();
+        let read = |args: serde_json::Value| read_file(&call("read_file", args), &dir);
+
+        let r = read(json!({"path": "big.log", "start_line": 99_990})).unwrap();
+        assert!(
+            r.starts_with(&format!(
+                "[{} · 100000 lines]",
+                dir.join("big.log").display()
+            )),
+            "{r}"
+        );
+        assert!(r.contains("99990  line 099990 x"), "{r}");
+        assert!(
+            r.ends_with(&format!("100000  line 100000 {}", "x".repeat(87))),
+            "{r}"
+        );
+        assert!(!r.contains("continue with"), "{r}");
+        let e = read(json!({"path": "big.log", "start_line": 100_001})).unwrap_err();
+        assert!(e.contains("past the end (100000 lines)"), "{e}");
+        // Output stays bounded however many lines are asked for.
+        let r = read(json!({"path": "big.log", "start_line": 50_000, "end_line": 99_000})).unwrap();
+        assert!(r.len() <= OUTPUT_CHARS, "{}", r.len());
+        assert!(r.contains("50000  line 050000"), "{r}");
+        assert!(r.contains("continue with start_line="), "{r}");
+
+        // Counting stops at the budget; the total is then reported as a lower bound.
+        let r = read_file_with(
+            &call("read_file", json!({"path": "big.log", "end_line": 2})),
+            &dir,
+            1024 * 1024,
+        )
+        .unwrap();
+        let header = r.lines().next().unwrap();
+        assert!(
+            header.contains("≥ ") && header.contains("stopped counting"),
+            "{header}"
+        );
+        assert!(
+            r.ends_with("[showing lines 1-2; continue with start_line=3]"),
+            "{r}"
+        );
+
+        // A 9 MiB line is cut when shown and skipped without being kept.
+        let mut long = "a".repeat(9 * 1024 * 1024);
+        long.push_str("\ntail");
+        std::fs::write(dir.join("long.txt"), &long).unwrap();
+        let r = read(json!({"path": "long.txt", "start_line": 2})).unwrap();
+        assert!(
+            r.contains("· 2 lines]") && r.ends_with("    2  tail"),
+            "{r}"
+        );
+        let r = read(json!({"path": "long.txt", "end_line": 1})).unwrap();
+        assert!(r.contains(&format!("    1  {}…", "a".repeat(400))), "{r}");
+        assert!(r.len() < 1000, "{}", r.len());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_file_line_counts_match_str_lines() {
+        let dir = std::env::temp_dir().join(format!("nosh-lines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, text) in ["", "\n", "a", "a\n", "a\nb", "a\r\nb\r\n", "\n\nx"]
+            .iter()
+            .enumerate()
+        {
+            let name = format!("f{i}.txt");
+            std::fs::write(dir.join(&name), text).unwrap();
+            let r = read_file(&call("read_file", json!({"path": name})), &dir).unwrap();
+            let n = text.lines().count();
+            assert!(r.contains(&format!("· {n} lines]")), "{text:?}: {r}");
+            if n > 0 {
+                let last = text.lines().last().unwrap();
+                let want = format!("{n:>5}  {last}");
+                assert!(r.ends_with(want.trim_end()), "{text:?}: {r}");
+            } else {
+                assert!(r.ends_with("(empty file)"), "{r}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn list_dir_sizes_share_one_unit() {
         let dir = std::env::temp_dir().join(format!("nosh-sizes-{}", std::process::id()));

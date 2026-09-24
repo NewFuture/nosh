@@ -12,6 +12,7 @@ publish.workspace = true
 crossterm.workspace = true
 ignore.workspace = true
 libc.workspace = true
+memchr.workspace = true
 nosh-hub.workspace = true
 nosh-llm.workspace = true
 nosh-permissions.workspace = true
