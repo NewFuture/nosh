@@ -47,7 +47,8 @@ impl QMetalStorage {
     }
 
     pub fn quantize_onto(&mut self, _src: &crate::CpuStorage) -> Result<()> {
-        Err(Error::NotCompiledWithCudaSupport)
+        // nosh patch: upstream returns NotCompiledWithCudaSupport here (a bug).
+        Err(Error::NotCompiledWithMetalSupport)
     }
 
     pub fn storage_size_in_bytes(&self) -> usize {

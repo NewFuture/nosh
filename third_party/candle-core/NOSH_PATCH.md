@@ -2,7 +2,7 @@
 
 This directory is `candle-core` from [huggingface/candle](https://github.com/huggingface/candle)
 at rev `9b1be4a321ef265f13d2c30be4f2037109c51d14` (crate version 0.11.0, the rev nosh pins),
-plus one small patch. The root `Cargo.toml` uses it through
+plus a small patch (the prepack below and one upstream bug fix). The root `Cargo.toml` uses it through
 `[patch."https://github.com/huggingface/candle"]`, so `candle-nn` from the same rev links
 against it too. License: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 
@@ -37,6 +37,10 @@ All changes are marked `nosh patch`; `nosh.patch` is the diff against the rev ab
   touching them: `dequantize`, `dequantize_f16`, `embedding`, `data`, matmuls with f16
   inputs and the raw-kernel fallbacks of f32/bf16 matmuls (unreachable, since `select`
   does not depend on m for these dtypes).
+- Upstream bug fix, unrelated to the prepack: in `src/quantized/dummy_metal.rs` (the
+  Metal stub compiled without the `metal` feature), `QMetalStorage::quantize_onto`
+  returned `Error::NotCompiledWithCudaSupport`; it now returns
+  `NotCompiledWithMetalSupport` like the other Metal stubs. Worth sending upstream.
 
 nosh calls the new method for the Q4K layer matrices only (not `token_embd` or `output`),
 see `crates/nosh-llm/src/model/llama.rs`; `crates/nosh-llm/tests/prepack.rs` checks that
@@ -51,11 +55,12 @@ within rounding (max relative error 4e-7), and that the raw-data paths fail.
    candle checkout, take `Cargo.toml` from the `.crate`, drop the `[[example]]`,
    `[[test]]`, `[[bench]]` and dev-dependency sections, keep the header comment.
 3. Update the rev in this file, in the file headers of `src/quantized/{mod,repack}.rs` and
-   in the root `Cargo.toml`; run `cargo test -p nosh-llm --test prepack`.
+   in the root `Cargo.toml`; run `cargo test -p nosh-llm --test prepack --test vendored_candle`.
+   If upstream has fixed the Metal stub, drop that hunk.
 
 ## When to remove it
 
 As soon as the candle rev nosh pins can drop the raw blocks after repacking (an upstream
 option or an equivalent API; nosh intends to propose one), or nosh stops using candle's x86
-tiles. Then delete this directory and the `[patch]` entry, and call the upstream API from
-`llama.rs` instead.
+tiles. Then delete this directory, the `[patch]` entry and `crates/nosh-llm/tests/vendored_candle.rs`,
+and call the upstream API from `llama.rs` instead.
