@@ -64,25 +64,49 @@ struct Lock {
     _file: File,
 }
 
-fn acquire_lock(dir: &Path, file: &FileEntry, progress: &dyn Progress) -> Result<Lock, HubError> {
+/// How often a download waiting for another process's lock re-checks it.
+const LOCK_POLL: Duration = Duration::from_millis(200);
+
+/// Takes `<name>.lock`, waiting while another process holds it; `cancelled`
+/// is checked between attempts so Ctrl-C ends the wait.
+fn acquire_lock(
+    dir: &Path,
+    file: &FileEntry,
+    progress: &dyn Progress,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Lock, HubError> {
     let lock_path = dir.join(format!("{}.lock", file.name));
     let f = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)?;
-    match f.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            progress.note(&crate::tr!(
-                format!("另一个进程正在下载 {}，等待其完成…", file.name),
-                format!("another process is downloading {}; waiting…", file.name)
-            ));
-            f.lock()?;
+    let mut waiting = false;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Lock { _file: f }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if !waiting {
+                    waiting = true;
+                    progress.note(&crate::tr!(
+                        format!(
+                            "另一个 nosh 进程正在下载 {}，等待其完成…（Ctrl-C 取消）",
+                            file.name
+                        ),
+                        format!(
+                            "another nosh process is downloading {}; waiting for it… (Ctrl-C to cancel)",
+                            file.name
+                        )
+                    ));
+                }
+                if cancelled() {
+                    return Err(HubError::Cancelled);
+                }
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
-        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
-    Ok(Lock { _file: f })
 }
 
 /// Downloads `file` into `dir` trying `cands` in order, failing over on error.
@@ -100,7 +124,7 @@ pub fn download_file(
         )));
     }
     fs::create_dir_all(dir)?;
-    let _lock = acquire_lock(dir, file, progress)?;
+    let _lock = acquire_lock(dir, file, progress, &net::is_cancelled)?;
     let final_path = dir.join(&file.name);
 
     // Another process may have finished while we waited for the lock.
@@ -452,5 +476,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, HubError::AllSourcesFailed(_)), "{err}");
+    }
+
+    #[derive(Default)]
+    struct Notes(std::sync::Mutex<Vec<String>>);
+
+    impl Progress for Notes {
+        fn start(&self, _: &str, _: u64, _: u64) {}
+        fn advance(&self, _: u64) {}
+        fn note(&self, msg: &str) {
+            self.0.lock().unwrap().push(msg.to_string());
+        }
+        fn finish(&self, _: bool) {}
+    }
+
+    #[test]
+    fn waiting_for_another_process_can_be_cancelled() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempdir("dl-lock");
+        let f = entry(b"x", "locked.bin");
+        // Another handle holds the lock, as another nosh process would.
+        let other = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("locked.bin.lock"))
+            .unwrap();
+        other.try_lock().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let notes = Notes::default();
+        let t0 = std::time::Instant::now();
+        std::thread::scope(|s| {
+            let c = cancel.clone();
+            s.spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                c.store(true, Ordering::SeqCst);
+            });
+            let r = acquire_lock(&dir, &f, &notes, &|| cancel.load(Ordering::SeqCst));
+            assert!(matches!(r, Err(HubError::Cancelled)));
+        });
+        let waited = t0.elapsed();
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        // A blocking lock() would never return here.
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        let notes = notes.0.lock().unwrap();
+        assert_eq!(notes.len(), 1, "one note while waiting: {notes:?}");
+        assert!(
+            notes[0].contains("nosh") && notes[0].contains("locked.bin"),
+            "{notes:?}"
+        );
+        // Once the other process is done the lock is taken.
+        drop(other);
+        assert!(acquire_lock(&dir, &f, &NoProgress, &|| false).is_ok());
     }
 }
