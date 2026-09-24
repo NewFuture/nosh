@@ -1,4 +1,26 @@
-//! Hermetic, rule-only trigger evaluation. Corpus inputs are never executed.
+//! AI trigger corpus (design §13.2), checked against the local rules only.
+//!
+//! `fixtures/trigger_corpus.jsonl` holds one labelled line per record: `id`,
+//! `category`, `input` and `expected`, plus the full `corrected` line for
+//! typos. An optional `reason` explains a tricky label; it never excuses a
+//! mismatch, and there are no skipped or expected failures.
+//!
+//! `classify` runs against a shell whose PATH holds only fake executables in a
+//! temporary directory, with a controlled working tree, no rc and no model.
+//! Corpus inputs are never executed, and every case is replayed in a second,
+//! independent fixture.
+//!
+//! Every case must match. The four metrics are also asserted, each over one
+//! category: Chinese requests routed to the AI (`zh_nl`; Chinese arguments of
+//! valid commands do not count), false guards (`valid_command`), executed
+//! destructive prose (`destructive_prose`; lines the guard lets through by
+//! design, such as `rm -rf all temp files`, are labelled as valid commands)
+//! and exact corrections (`typo`). CI runs this test in its own step so the
+//! metrics show on success:
+//!
+//! ```sh
+//! cargo test -p nosh-shell --test trigger_corpus -- --show-output
+//! ```
 
 use std::collections::HashSet;
 use std::fs;
