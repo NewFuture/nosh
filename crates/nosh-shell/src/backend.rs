@@ -848,6 +848,12 @@ impl EmbeddedShell {
     ) -> Result<CommandResult, ShellError> {
         let before = self.snapshot();
         let before_children = procs::child_pids();
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        let run = format!(
+            "{}.{}",
+            std::process::id(),
+            RUNS.fetch_add(1, Ordering::Relaxed)
+        );
         let rt = self.rt.clone();
         let ints = self.interrupts.clone();
         let start = Instant::now();
@@ -869,7 +875,7 @@ impl EmbeddedShell {
             let mut sh = self.lock();
             let job_ids_before: HashSet<usize> = sh.jobs().jobs.iter().map(|j| j.id).collect();
             let scopes = scope_depth(sh.env());
-            let saved = apply_anti_hang_env(&mut sh);
+            let saved = apply_agent_env(&mut sh, &run);
             let mut params = sh.default_exec_params();
             params.process_group_policy = brush_core::ProcessGroupPolicy::NewProcessGroup;
             params.set_fd(OpenFiles::STDIN_FD, openfiles::null()?);
@@ -906,9 +912,10 @@ impl EmbeddedShell {
             if res.is_none() {
                 // The whole command line is abandoned (like bash on Ctrl-C):
                 // drop what brush left on its scope stack, stop everything the
-                // command started, and escalate to SIGKILL.
+                // command started (also what left nosh's process tree), and
+                // escalate to SIGKILL.
                 truncate_scopes(&mut sh, scopes);
-                let targets = procs::new_targets(&before_children);
+                let targets = procs::new_targets(&before_children, &run);
                 if let Some(sig) = stop_signal {
                     procs::signal(&targets, sig);
                 }
@@ -1124,9 +1131,10 @@ pub fn register_internal_env(entries: &[(&str, Option<String>)]) {
 
 type SavedEnv = Vec<(String, Option<ShellVariable>, String)>;
 
-fn apply_anti_hang_env(sh: &mut BrushShell) -> SavedEnv {
+fn apply_agent_env(sh: &mut BrushShell, run: &str) -> SavedEnv {
     let mut saved = Vec::new();
-    for (k, v) in ANTI_HANG_ENV {
+    let run_var = [(procs::RUN_VAR, run)];
+    for (k, v) in ANTI_HANG_ENV.iter().chain(&run_var) {
         let prev = sh.env_var(k).cloned();
         let mut var = ShellVariable::new(*v);
         var.export();

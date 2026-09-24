@@ -3,8 +3,14 @@
 //! brush does not expose the pids of running children, so on Linux the
 //! process tree is read from `/proc`. Children that existed before an agent
 //! command started (user background jobs) and their descendants are left alone.
+//! A process that double-forks or calls `setsid` leaves the tree once its
+//! parent exits; it is still found by the run's value of [`RUN_VAR`], which
+//! it inherited in its environment.
 
 use std::collections::{HashMap, HashSet};
+
+/// Set, with a value unique to each run, in an agent command's environment.
+pub const RUN_VAR: &str = "NOSH_AGENT_RUN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Proc {
@@ -58,24 +64,33 @@ pub fn child_pids() -> HashSet<i32> {
     children().into_iter().map(|p| p.pid).collect()
 }
 
-/// Children not in `before`, and all their descendants.
-pub fn new_descendants(before: &HashSet<i32>) -> Vec<Proc> {
+/// Whether `RUN_VAR=run` is in the environment `pid` was started with.
+fn has_run(pid: i32, entry: &[u8]) -> bool {
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .is_ok_and(|env| env.split(|&b| b == 0).any(|e| e == entry))
+}
+
+/// What the agent run `run` started: children not in `before`, processes
+/// carrying the run in their environment wherever they were reparented to,
+/// and all their descendants.
+pub fn run_procs(before: &HashSet<i32>, run: &str) -> Vec<Proc> {
     let me = std::process::id() as i32;
+    let entry = format!("{RUN_VAR}={run}").into_bytes();
     let mut kids: HashMap<i32, Vec<Proc>> = HashMap::new();
+    let mut stack = Vec::new();
     for (pid, ppid, pgid) in all_procs() {
-        kids.entry(ppid).or_default().push(Proc { pid, pgid });
+        let p = Proc { pid, pgid };
+        kids.entry(ppid).or_default().push(p);
+        if pid != me && ((ppid == me && !before.contains(&pid)) || has_run(pid, &entry)) {
+            stack.push(p);
+        }
     }
+    let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let mut stack: Vec<Proc> = kids
-        .get(&me)
-        .map(|v| {
-            v.iter()
-                .filter(|p| !before.contains(&p.pid))
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
     while let Some(p) = stack.pop() {
+        if !seen.insert(p.pid) {
+            continue;
+        }
         if let Some(k) = kids.get(&p.pid) {
             stack.extend(k.iter().copied());
         }
@@ -99,11 +114,11 @@ impl Targets {
     }
 }
 
-pub fn new_targets(before: &HashSet<i32>) -> Targets {
+pub fn new_targets(before: &HashSet<i32>, run: &str) -> Targets {
     // SAFETY: getpgrp has no preconditions.
     let own = unsafe { libc::getpgrp() };
     let mut t = Targets::default();
-    for p in new_descendants(before) {
+    for p in run_procs(before, run) {
         if p.pgid == own {
             t.pids.push(p.pid);
         } else if p.pgid > 1 {

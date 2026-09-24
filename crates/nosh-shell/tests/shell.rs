@@ -439,6 +439,67 @@ fn timeout_stops_substitutions_and_pipeline_stages() {
 }
 
 #[test]
+fn timeout_stops_processes_that_left_the_process_tree() {
+    let _g = serial();
+    if !which("setsid") {
+        return;
+    }
+    let dir = tmpdir("orphans");
+    let user_job = dir.join("user-job");
+    let mut sh = shell();
+    // A user background job started before the agent command is left alone.
+    sh.run_user_line(&format!(
+        "sh -c 'sleep 35.25; touch {}' &",
+        user_job.display()
+    ));
+    // `setsid` forks (its parent exits) and `sh -c '… &'` exits after
+    // starting its job: both sleeps are reparented away from nosh before the
+    // timeout.
+    let cmd = "setsid sh -c 'exec sleep 33.25'; sh -c 'sleep 34.25 &'; sleep 20";
+    let r = sh
+        .run_agent_command(
+            cmd,
+            &AgentExecOpts {
+                timeout: Duration::from_millis(1500),
+                ..AgentExecOpts::default()
+            },
+            &mut NullSink,
+        )
+        .unwrap();
+    assert!(r.timed_out);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let left = || processes_with("sleep 33.25") + processes_with("sleep 34.25");
+    while left() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(left(), 0, "a detached process survived the timeout");
+    assert!(
+        processes_with("sleep 35.25") > 0,
+        "the user's job was stopped"
+    );
+    kill_processes_with("sleep 35.25");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn kill_processes_with(needle: &str) {
+    for e in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        let cmdline = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
+        if String::from_utf8_lossy(&cmdline)
+            .replace('\0', " ")
+            .contains(needle)
+        {
+            // SAFETY: plain syscall on a pid read from /proc.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+    }
+}
+
+#[test]
 fn builtin_only_loops_time_out() {
     let _g = serial();
     // Agent shells (interactive or `nosh -a`) catch SIGINT and make builtins
