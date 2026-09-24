@@ -1707,7 +1707,20 @@ impl Analyzer<'_> {
                 self.cwd_unknown = true;
                 self.vars.remove("OLDPWD");
             }
-            _ => self.apply(rules::classify(&base, &args)),
+            _ => {
+                let v = rules::classify(&base, &args);
+                // `rustc --version`: an unlisted program run by name (or from
+                // a system bin directory) asked only for its version or usage.
+                // Local programs (`./x --help`, `/tmp/x --version`) stay unknown.
+                if v.unlisted
+                    && (!name.contains('/') || in_system_bin_dir(&name))
+                    && rules::asks_version_or_help(&args)
+                {
+                    self.add(Risk::Safe, "prints version or usage");
+                } else {
+                    self.apply(v);
+                }
+            }
         }
     }
 
