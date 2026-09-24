@@ -1,0 +1,23 @@
+[package]
+name = "nosh-core"
+description = "Agent harness, prompts, tools and terminal approval UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+ignore.workspace = true
+libc.workspace = true
+memchr.workspace = true
+nosh-hub.workspace = true
+nosh-llm.workspace = true
+nosh-permissions.workspace = true
+nosh-shell.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

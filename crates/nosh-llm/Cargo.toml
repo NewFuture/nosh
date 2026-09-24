@@ -1,0 +1,24 @@
+[package]
+name = "nosh-llm"
+description = "Local inference for nosh: candle model, tokenizer, MiniCPM5 template, sampling and tool-call parsing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+gemm.workspace = true
+half.workspace = true
+nosh-hub.workspace = true
+num_cpus = "1.17.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+
+[lints]
+workspace = true

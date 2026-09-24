@@ -68,46 +68,46 @@ nosh/
 每个任务结束时都要通过：`cargo fmt`、`clippy -D warnings`，以及该任务的测试。任务完成后在本节勾选。
 
 ### T0 基础设施（约 0.5 天）
-- [ ] 建立 workspace 骨架和各个 crate，统一 lint 配置，加上 `.gitattributes`（LF）和 CI 工作流。
-- [ ] 验证：WSL 中 `cargo build` 和 `cargo test` 通过；CI 变绿。
+- [x] 建立 workspace 骨架和各个 crate，统一 lint 配置，加上 `.gitattributes`（LF）和 CI 工作流。
+- [x] 验证：WSL 中 `cargo build` 和 `cargo test` 通过；CI 变绿。
 
 ### T1 nosh-hub：模型管理（约 1–1.5 天）
-- [ ] 内置 `registry.toml`，记录 2B Q4_K_M/Q8_0、1B Q4_K_M 和 tokenizer，含 SHA-256、大小和 revision。
-- [ ] 下载器（`ureq` + `rustls`）：
+- [x] 内置 `registry.toml`，记录 2B Q4_K_M/Q8_0、1B Q4_K_M 和 tokenizer，含 SHA-256、大小和 revision。
+- [x] 下载器（`ureq` + `rustls`）：
   - 选源：只用 locale/时区推断地区；并行发送 HEAD，再下载 2 MB 测速；
   - 可靠性：`Range` 续传（`*.partial`）；流式计算 SHA-256；原子 rename；`fs4` 文件锁；`indicatif` 进度条；
   - 切换与重试：某个源失败时切换到下一个源，从已下载的偏移处继续；
   - 下载前检查磁盘空间。
-- [ ] 离线开关：`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`。开启后，任何代码路径都不访问网络。
-- [ ] CLI：`nosh model pull [id]`、`list`、`verify`、`import <gguf> [--tokenizer]`、`path`。
-- [ ] 验证：单元测试（校验、续传偏移、选源逻辑用 mock HTTP）；在 WSL 中真实下载 Q4_K_M 和 tokenizer，SHA-256 与 registry 一致。
+- [x] 离线开关：`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`。开启后，任何代码路径都不访问网络。
+- [x] CLI：`nosh model pull [id]`、`list`、`verify`、`import <gguf> [--tokenizer]`、`path`。
+- [x] 验证：单元测试（校验、续传偏移、选源逻辑用 mock HTTP）；在 WSL 中真实下载 Q4_K_M 和 tokenizer，SHA-256 与 registry 一致。
 
 ### T2 nosh-llm：推理（约 2–3 天）
-- [ ] `model/llama.rs`（fork 自 quantized_llama）：
+- [x] `model/llama.rs`（fork 自 quantized_llama）：
   - RoPE 表按 `context_length` 计算（默认 8K）；
   - embedding 保持量化，按行反量化；
   - 预先分配 KV，支持 `truncate`；
   - 分块 prefill（512 token/块，块与块之间检查取消标志）；
   - 只计算最后一个位置的 logits；
   - 线程数等于物理核心数。
-- [ ] tokenizer 加载；EOG 为 {1, 130073}；分段编码（模板骨架允许 special token，不可信内容开启 `encode_special_tokens`）；增量 UTF-8 解码。
-- [ ] MiniCPM5 渲染器：
+- [x] tokenizer 加载；EOG 为 {1, 130073}；分段编码（模板骨架允许 special token，不可信内容开启 `encode_special_tokens`）；增量 UTF-8 解码。
+- [x] MiniCPM5 渲染器：
   - system 通过 `<tool_def_sep>` 插入工具定义，工具 JSON 使用 Python `json.dumps` 风格的分隔符；
   - user；
   - assistant 直接拼接原始 token ids；
   - 连续的 tool 结果合并进一个 user 轮；
   - generation prompt 预填空的 think 块。
-- [ ] 采样：temperature、top-p、min-p；检测到复读时启用 repetition penalty 1.05；在 `<function` 区间把温度降到 0.3；支持 `--seed`。
-- [ ] 流式状态机：TEXT/THINK/CALL 由 token ID 8/9/18/19 驱动，DONE 由 1/130073 驱动。解析 `<function name=..><param name=..>..</param></function>`，支持 CDATA 和实体反转义，按 schema 转换类型。
-- [ ] `LocalChatEngine`：token 级对话日志，基于最长公共前缀复用 KV，支持取消。
-- [ ] 调试命令：`nosh debug gen "<prompt>"`，输出生成结果和 prefill/decode 的 tok/s。
-- [ ] 验证：
+- [x] 采样：temperature、top-p、min-p；检测到复读时启用 repetition penalty 1.05；在 `<function` 区间把温度降到 0.3；支持 `--seed`。
+- [x] 流式状态机：TEXT/THINK/CALL 由 token ID 8/9/18/19 驱动，DONE 由 1/130073 驱动。解析 `<function name=..><param name=..>..</param></function>`，支持 CDATA 和实体反转义，按 schema 转换类型。
+- [x] `LocalChatEngine`：token 级对话日志，基于最长公共前缀复用 KV，支持取消。
+- [x] 调试命令：`nosh debug gen "<prompt>"`，输出生成结果和 prefill/decode 的 tok/s。
+- [x] 验证：
   - 单元测试：模板渲染与官方模板逐字节对比（期望字符串按 `chat_template.jinja` 手工推导并提交为 fixture）、工具调用解析（含 CDATA、截断）、采样；
   - `#[ignore]` 测试：真实模型能输出连贯的中英文，并在工具场景中产生可以解析的调用。
 
 ### T3 nosh-permissions：权限（约 1 天）
-- [ ] 用 brush-parser 遍历 AST，拆出所有简单命令：管道、列表、子 shell、`$(…)`、重定向，并展开 `sudo`/`env`/`xargs`/`nohup`/`timeout`/`bash -c`/`eval` 这类包装器；别名和函数用会话表展开（由调用方传入）。
-- [ ] 规则表：
+- [x] 用 brush-parser 遍历 AST，拆出所有简单命令：管道、列表、子 shell、`$(…)`、重定向，并展开 `sudo`/`env`/`xargs`/`nohup`/`timeout`/`bash -c`/`eval` 这类包装器；别名和函数用会话表展开（由调用方传入）。
+- [x] 规则表：
   - 四个等级；
   - 网络命令至少按 Mutating 处理；
   - `find -delete/-exec`、`rm` 的参数、`sed -i`、`chmod/chown -R`、git 子命令；
@@ -115,45 +115,45 @@ nosh/
   - 解码后执行和变量拼接出的命令名；
   - 把 sudo 改写成 `sudo -n`；
   - agent 执行 `exit`/`exec` 判为 Forbidden。
-- [ ] 决策矩阵（confirm/auto/yolo）；用户的 allow/deny 规则；"本会话放行"。
-- [ ] 验证：≥ 200 条表驱动用例（覆盖四个等级、混淆写法和包装器）；Dangerous 的召回率为 100%。
+- [x] 决策矩阵（confirm/auto/yolo）；用户的 allow/deny 规则；"本会话放行"。
+- [x] 验证：≥ 200 条表驱动用例（覆盖四个等级、混淆写法和包装器）；Dangerous 的召回率为 100%。
 
 ### T4 nosh-shell：shell 核心（约 2–3 天）
-- [ ] 嵌入 brush-core：交互模式，加载 rc；用 reedline 写 REPL，包括历史文件、显示 cwd 和审批模式的提示符、Ctrl-C/Ctrl-D。
-- [ ] 输入流水线：
+- [x] 嵌入 brush-core：交互模式，加载 rc；用 reedline 写 REPL，包括历史文件、显示 cwd 和审批模式的提示符、Ctrl-C/Ctrl-D。
+- [x] 输入流水线：
   - `#` 前缀 → AI；
   - 解析失败 → 判断是否为不完整输入（单词内撇号 → AI；否则显示续行提示）；
   - 整行静态解析命令名 → 有不存在的就先做本地模糊匹配（编辑距离 ≤ 2），匹配不上再交给 AI；
   - 安全网：破坏性命令带自然语言样式的参数时拦截；
   - 其余情况交给 brush 执行；非零退出时给出提示，这一行含中文时直接交给 AI。
-- [ ] `run_agent_command`：
+- [x] `run_agent_command`：
   - 在同一个 `Shell` 中执行，stdin 接 `null()`，stdout/stderr 接 `std::io::pipe()`；
   - 用线程读取管道，实时显示并采集（有上限）；
   - 超时后中断；
   - 执行前后对比 cwd、PATH 和变量，计算状态差异；
   - 防卡住的环境变量只作用于单次执行。
-- [ ] `nosh -c` 和脚本：纯 brush 执行，不加载模型，也不输出额外内容。
-- [ ] 验证：
+- [x] `nosh -c` 和脚本：纯 brush 执行，不加载模型，也不输出额外内容。
+- [x] 验证：
   - 集成测试（MockChatEngine）：`#` 能触发 AI；`gti status` 能纠正为 `git status`；agent 执行 `cd /tmp` 后，用户命令里的 `pwd` 输出为 `/tmp`；状态保护能拦下 `exec`；
   - `nosh -c 'echo hi'` 的输出恰好是 `hi\n`。
 
 ### T5 nosh-core：harness 与工具（约 1.5 天）
-- [ ] system prompt（静态）和任务头 `[task trigger=… cwd=… …]`、`[recent]`。
-- [ ] 工具注册与 schema；`run_command`、`read_file`（带行号，最多 400 行，识别二进制文件）、`list_dir`（遵循 .gitignore，深度 ≤ 3）、`propose_command`（把命令预填进下一次输入；reedline 不支持时，就打印出来并写入历史）。
-- [ ] 输出截断（头 60% + 尾 40%，最多 6,000 字符，完整输出落盘）；错误回灌（同一种错误最多重试 2 次）；拒绝理由；`max_steps`；达到上限时要求模型总结。
-- [ ] 终端审批卡片：`y`/`n`/`e`/`a`，Dangerous 需要键入 `yes`，Ctrl-C 视为拒绝；没有 TTY 时拒绝（除非传入 `--auto`/`--yolo`）。
-- [ ] 验证：用 MockChatEngine 跑完整的任务流测试（多步、拒绝、错误回灌、截断）。
+- [x] system prompt（静态）和任务头 `[task trigger=… cwd=… …]`、`[recent]`。
+- [x] 工具注册与 schema；`run_command`、`read_file`（带行号，最多 400 行，识别二进制文件）、`list_dir`（遵循 .gitignore，深度 ≤ 3）、`propose_command`（把命令预填进下一次输入；reedline 不支持时，就打印出来并写入历史）。
+- [x] 输出截断（头 60% + 尾 40%，最多 6,000 字符，完整输出落盘）；错误回灌（同一种错误最多重试 2 次）；拒绝理由；`max_steps`；达到上限时要求模型总结。
+- [x] 终端审批卡片：`y`/`n`/`e`/`a`，Dangerous 需要键入 `yes`，Ctrl-C 视为拒绝；没有 TTY 时拒绝（除非传入 `--auto`/`--yolo`）。
+- [x] 验证：用 MockChatEngine 跑完整的任务流测试（多步、拒绝、错误回灌、截断）。
 
 ### T6 CLI 与收尾（约 0.5 天）
-- [ ] `nosh`、`-c`、脚本、`-a`（stdin 作为附件）、`-s`（stdout 只输出命令）；`--auto`、`--yolo`、`--offline`、`--model-path`、`--no-download`、`--norc`、`--safe`；设计文档中的退出码约定。
-- [ ] 首次启动时的下载确认（默认 Y）；MVP 可以在前台下载，改成后台下载是加分项。
-- [ ] `nosh doctor`：检查 CPU 特性、内存、模型状态、下载源连通性和离线状态。
-- [ ] 配置文件 `~/.config/nosh/config.toml`：只支持 §11 中的常用项，未知项给出警告。
+- [x] `nosh`、`-c`、脚本、`-a`（stdin 作为附件）、`-s`（stdout 只输出命令）；`--auto`、`--yolo`、`--offline`、`--model-path`、`--no-download`、`--norc`、`--safe`；设计文档中的退出码约定。
+- [x] 首次启动时的下载确认（默认 Y）；MVP 可以在前台下载，改成后台下载是加分项。
+- [x] `nosh doctor`：检查 CPU 特性、内存、模型状态、下载源连通性和离线状态。
+- [x] 配置文件 `~/.config/nosh/config.toml`：只支持 §11 中的常用项，未知项给出警告。
 
 ### T7 端到端验证与报告（约 1 天）
-- [ ] 在 WSL 中用真实模型跑 10 个脚本化场景，至少覆盖：查找大文件、端口占用、统计代码行数、批量重命名（需要审批）、用中文提问、拼写纠错、执行失败后分析原因、管道总结 `git log`、`nosh -s` 生成命令、agent 执行 `cd` 后状态延续。
-- [ ] 测量 prefill/decode 的 tok/s、首 token 延迟和 RSS，并与设计目标对比。
-- [ ] 撰写 `docs/MVP-REPORT.md`：场景结果（成功或失败、步数）、性能数据、已知问题和对 M2 的建议。
+- [x] 在 WSL 中用真实模型跑 10 个脚本化场景，至少覆盖：查找大文件、端口占用、统计代码行数、批量重命名（需要审批）、用中文提问、拼写纠错、执行失败后分析原因、管道总结 `git log`、`nosh -s` 生成命令、agent 执行 `cd` 后状态延续。
+- [x] 测量 prefill/decode 的 tok/s、首 token 延迟和 RSS，并与设计目标对比。
+- [x] 撰写 `docs/MVP-REPORT.md`：场景结果（成功或失败、步数）、性能数据、已知问题和对 M2 的建议。
 
 ## 5. 验收标准
 

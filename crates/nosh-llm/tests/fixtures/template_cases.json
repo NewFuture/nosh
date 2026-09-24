@@ -1,0 +1,266 @@
+[
+ {
+  "name": "agent_multi_turn",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "run_command",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file with line numbers; \"path\" may be relative.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start_line": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools."
+   },
+   {
+    "role": "user",
+    "content": "[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？"
+   },
+   {
+    "role": "assistant",
+    "content": "我先看看端口。",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "run_command",
+       "arguments": {
+        "command": "ss -ltnp 'sport = :8080'"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)"
+   },
+   {
+    "role": "assistant",
+    "content": "8080 端口被 **node** 占用。"
+   },
+   {
+    "role": "user",
+    "content": "再把它结束掉"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "expected": "<s><|im_start|>system\nYou are nosh, an AI shell running fully offline on the user's computer.\n# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"run_command\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param>\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\n[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n我先看看端口。\n<function name=\"run_command\"><param name=\"command\">ss -ltnp 'sport = :8080'</param></function><|im_end|>\n<|im_start|>user\n<tool_response>\n[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n8080 端口被 **node** 占用。<|im_end|>\n<|im_start|>user\n再把它结束掉<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "name": "parallel_tool_results_merge",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "run_command",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools."
+   },
+   {
+    "role": "user",
+    "content": "count files"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "run_command",
+       "arguments": {
+        "command": "ls | wc -l",
+        "timeout_sec": 30
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "run_command",
+       "arguments": {
+        "command": "echo <done> && printf 'a\\nb'"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "3"
+   },
+   {
+    "role": "tool",
+    "content": "<done>\na\nb"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "expected": "<s><|im_start|>system\nYou are nosh, an AI shell running fully offline on the user's computer.\n# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"run_command\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param>\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\ncount files<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<function name=\"run_command\"><param name=\"command\">ls | wc -l</param><param name=\"timeout_sec\">30</param></function>\n<function name=\"run_command\"><param name=\"command\"><![CDATA[echo <done> && printf 'a\\nb']]></param></function><|im_end|>\n<|im_start|>user\n<tool_response>\n3\n</tool_response>\n<tool_response>\n<done>\na\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "name": "system_without_separator",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file with line numbers; \"path\" may be relative.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start_line": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "Be brief."
+   },
+   {
+    "role": "user",
+    "content": "hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": true,
+  "expected": "<s><|im_start|>system\nBe brief.\n\n# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param><|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "no_tools",
+  "tools": null,
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Say hello in 中文."
+   },
+   {
+    "role": "assistant",
+    "content": "你好！"
+   },
+   {
+    "role": "user",
+    "content": "thanks"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "expected": "<s><|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nSay hello in 中文.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n你好！<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "name": "tools_without_system",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "run_command",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "content": "pwd?"
+   }
+  ],
+  "add_generation_prompt": false,
+  "enable_thinking": null,
+  "expected": "<s><|im_start|>system\n# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"run_command\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param><|im_end|>\n<|im_start|>user\npwd?<|im_end|>\n"
+ }
+]
