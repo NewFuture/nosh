@@ -59,22 +59,33 @@ pub fn suggest(
     Ok(found.filter(|s| !s.command.chars().any(nosh_shell::style::is_hidden)))
 }
 
-/// Falls back to a command in a code block or a `$ ` line of prose output.
+/// Falls back to the first code block (all of it: a command may span lines)
+/// or a `$ ` line of prose output.
 pub fn extract_command(text: &str) -> Option<String> {
-    let mut in_block = false;
+    let mut block: Option<Vec<&str>> = None;
     for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with("```") {
-            if in_block {
-                in_block = false;
-                continue;
+        if line.trim().starts_with("```") {
+            match block.take() {
+                Some(lines) => {
+                    let cmd = lines.join("\n").trim().to_string();
+                    if !cmd.is_empty() {
+                        return Some(cmd);
+                    }
+                }
+                None => block = Some(Vec::new()),
             }
-            in_block = true;
             continue;
         }
-        if in_block && !t.is_empty() {
-            return Some(t.trim_start_matches("$ ").to_string());
+        if let Some(lines) = &mut block {
+            lines.push(line.trim_start().strip_prefix("$ ").unwrap_or(line));
         }
+    }
+    // A block cut off before its closing fence.
+    if let Some(cmd) = block
+        .map(|lines| lines.join("\n").trim().to_string())
+        .filter(|c| !c.is_empty())
+    {
+        return Some(cmd);
     }
     text.lines()
         .map(str::trim)
@@ -98,5 +109,18 @@ mod tests {
             Some("ls -la")
         );
         assert_eq!(extract_command("no idea"), None);
+    }
+
+    #[test]
+    fn multi_line_blocks_are_kept_whole() {
+        let text = "Rename them:\n```bash\nfor f in *.txt; do\n  mv \"$f\" \"${f%.txt}.md\"\ndone\n```\nThen check.";
+        assert_eq!(
+            extract_command(text).as_deref(),
+            Some("for f in *.txt; do\n  mv \"$f\" \"${f%.txt}.md\"\ndone")
+        );
+        assert_eq!(
+            extract_command("```\n$ cd src\n$ make\n```").as_deref(),
+            Some("cd src\nmake")
+        );
     }
 }
