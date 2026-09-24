@@ -1,6 +1,6 @@
 # nosh MVP 报告
 
-> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施，审批确认策略和脱敏按设计 v0.8 的 §16 #14、#15 调整（§2.2、§2.3）。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
+> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施，审批确认策略和脱敏按设计 v0.8 的 §16 #14、#15 调整（§2.2、§2.3）。多平台 CI（issue #7，设计 v0.10）的结果和随之修复的平台问题见 §2.5。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
 
 ## 1. 结论
 
@@ -8,6 +8,7 @@
 - **内存优化（§5.3）之后**：加载时预先重排 Q4K 权重并释放其原始数据（给 candle 打的补丁见 `third_party/candle-core`），KV 改为 f16。8K 上下文的 RSS 峰值从 4,150 MiB 降到 2,737–2,751 MiB（2.69 GiB），达到 v0.6 的目标（约 2.9 GB，≤ 3.0 GB）；场景中（1–3K 上下文）从 3,450–3,650 MiB 降到 2,342–2,520 MiB。速度没有回退：decode 在长上下文变快（7.9K 时 11.9–12.4 → 13.1–13.8 tok/s），prefill 持平或更快；冷启动首 token 从 6–7 s 降到 4.7–5.5 s。
 - 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。内存优化后的构建再跑 3 轮：26/4/0。
 - 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等；PR #1 上三次 Copilot 代码审查的 5 条、8 条和 5 条意见也已处理（§2.2–§2.4）。
+- **平台**（issue #7，§2.5）：CI 增加 Linux aarch64 和 macOS（Apple Silicon）两个 job，三个平台的 clippy 和全部测试都通过。随之修复了 aarch64 Linux 上 debug 构建编译不过（gemm-f16）、macOS 上 agent 命令超时或中止后进程不停止，以及 macOS 上的两处权限缺口。
 - 性能（WSL2，Xeon 8370C 8 核，Q4_K_M，release 构建）：decode 19–25 tok/s，prefill 102–147 tok/s，热对话首 token 0.5–1.0 s，无 rc 启动到提示符约 8 ms。
 
 ## 2. 实现摘要
@@ -21,7 +22,7 @@
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 172 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 179 个测试（macOS 上另有 1 个只在 macOS 上运行；权限的 555 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..`、符号链接和 nosh 自己的配置与状态目录）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理（这两项在 Linux 和 macOS 上都运行，§2.5）、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），并打印决定内核路径的 CPU 特性（§2.5），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色；之后增加了 Linux aarch64 和 macOS 两个 job（§2.5）。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -85,6 +86,34 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 每项都有回归测试。之后再次请求审查，唯一的新意见是"加载时每个 Q4K 张量开一个线程重排，会同时创建数百个线程"：实际上 `prepack_q4k` 按层调用、每层 7 个矩阵，线程在进入下一层之前全部 join，同时最多 7 个线程，因此只在注释里写明了这一点（`8254d10`）。
 
 第五次 Copilot 审查的 4 条按最小改动修复：`check_dir` 和 `nosh model verify` 遇到哈希期间文件有变化（拿不到初始 stamp，或 `record_verified_as` 返回 `Ok(false)`）时算作校验失败，只读库写不了 manifest 仍然忽略（`8c0f37f`）；识别不出来的 GGUF 显式给了未知的 `--model` 时报错，不再换成默认模型（`b2bbcdf`）；integer 参数的 float 回退只接受有限、整数值且在 i64 范围内的值（`53fa89f`）。第六次（推送后自动触发）的 4 条同样按最小改动修复：配置文件存在但读不了时保留默认值并给出警告，不再当作不存在（`b4de458`）；建议模式从 fenced 代码块取出完整的多行命令（`52e7dcd`）；对已有文件和已下载部分的哈希可以被 Ctrl-C 打断，`.partial` 保留（`a9bc41c`）。
+
+### 2.5 多平台 CI（issue #7）
+
+CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy（`-D warnings`）和全部测试，fmt 只在 x86_64 上跑（`d3190e8`）：
+
+| job | runner | 触发 | 测试日志里的 CPU 特性 | candle 的内核路径 |
+|---|---|---|---|---|
+| `check` | `ubuntu-latest`（Ubuntu 24.04，x86_64，2 vCPU） | 每次 | 随 runner 不同：一次为 avx avx2 fma f16c avx512f avx512bw avx512vl avx512vnni，一次只到 avx2 | VNNI 或 AVX2 tile；Q4K 都预重排并释放原始数据，Q8_0 只在有 VNNI 时释放 |
+| `linux-arm64` | `ubuntu-24.04-arm`（2 vCPU） | 每次 | neon dotprod i8mm fp16 bf16 | ARM 重排：m == 1 用 dotprod gemv，m 为 4 的倍数用 i8mm tile |
+| `macos` | `macos-latest`（macOS 26，Apple M1，3 vCPU） | PR、main、手动触发（单价约为 Linux x64 的 10 倍） | neon dotprod fp16 | ARM 重排：dotprod gemv 和 dotprod tile（没有 i8mm） |
+
+- 每个 job 的最后一步用 `--nocapture` 重跑 `crates/nosh-llm/tests/prepack.rs`，打印 CPU 特性（`nosh_llm::cpu::features()`，检测方式与 candle 相同）和各个 m 下与原始内核的误差；前面的步骤失败时也运行。`nosh doctor` 改用同一个函数，aarch64 上原来只显示 `neon`（`72fc014`）。
+- 每个 job 限时 30 分钟。缓存命中时 x86_64 约 2.5 分钟、arm64 约 5 分钟、macOS 约 2 分钟；macOS 第一次（没有缓存）约 4.5 分钟。
+- `prepack.rs` 在 ARM 上 `released=false`，需要释放的检查按预期跳过；预重排与懒加载的结果逐位相同，与原始内核的最大误差为 0（ARM 上 40 行和 48 行的矩阵在每个 m 下走同一个内核：m == 1 和 4 的倍数用重排内核，其他 m 用读原始块的 NEON 内核）。ARM 上释放原始权重见 issue #9。
+
+发现并修复的问题：
+
+| # | 平台 | 问题 | 处理 | 提交 |
+|---|---|---|---|---|
+| 1 | Linux aarch64 | `cargo test` 编译失败：gemm-f16 的 aarch64 内核是启用 fp16 的函数，调用的 `#[inline]` 辅助函数里有 fp16 汇编（`fmla v.8h`）。debug 构建不内联，辅助函数单独编译时没有 fp16 特性，而 aarch64 Linux 的基线不含 fp16，汇编器报 "instruction requires: fullfp16"。clippy 不生成代码，所以查不出来；Apple 的基线含 fp16；release 构建会内联 | dev 构建只对 gemm-f16 开 opt-level 3。没有在 RUSTFLAGS 里加 `+fp16`，所以二进制仍能在没有 fp16 的 CPU 上运行（内核按运行时检测分派）。上游问题见 sarah-quinones/gemm#31 | `8dd4980` |
+| 2 | macOS | 没有 `/proc`，找不到 agent 命令启动的进程；brush 0.5 丢弃命令时也不杀子进程，所以超时和 Ctrl-C 之后命令继续运行（如 `yes`） | 用 libproc（`proc_listallpids`，`proc_pidinfo` 取 ppid 和 pgid）列出进程，用 `sysctl(KERN_PROCARGS2)` 读 `NOSH_AGENT_RUN`；按平台拆开的函数也消除了非 Linux 上的 `unused_mut` 警告 | `3ea9d4a` |
+| 3 | macOS | `/etc`、`/tmp`、`/var` 是指向 `/private` 的符号链接：指向 `/etc/hosts` 的链接解析成 `/private/etc/hosts` 后不再受保护；临时目录（`/var/folders/…`）下的受保护路径与解析后的形式对不上 | macOS 上比较路径时，两边（路径、受保护位置、工作区、home、`$TMPDIR`）都去掉 `/private`；`/System`、`/Library`、`/Applications`、`/Volumes`、`/private` 按系统目录处理，`/Users` 本身与 `/home` 相同 | `5c46930` |
+| 4 | macOS；`NOSH_HOME`、`XDG_CONFIG_HOME` | 受保护列表写死了 `~/.config/nosh` 和 `~/.local/share/nosh/state`，而 macOS 上 nosh 的配置和状态在 `~/Library/Application Support/nosh` | agent 的权限上下文加上 nosh 实际使用的配置和状态目录 | `a59af16` |
+| 5 | macOS | 测试默认了 Linux：清理测试读 `/proc`；临时目录在符号链接之后，而 `cd` 保留给定的路径；BSD `ls` 对不存在的文件退出 1，GNU 是 2 | 清理测试改用 `ps` 列进程，在 Linux 和 macOS 上都运行（`setsid` 那一步只在有 `setsid` 时做）；`tmpdir()` 返回 canonicalize 后的路径；按 `ls` 实际的退出码断言 | `3ea9d4a` |
+| 6 | x86_64（2 vCPU 的 runner） | `timeout_stops_processes_that_left_the_process_tree` 偶发失败：brush 把 `cmd &` 作为任务运行，agent 命令记录已有的子进程时，用户的后台作业可能还没 fork，于是被当成 agent 命令启动的进程一起停止 | 测试先等后台作业的进程出现（见 §6 #5） | `40fa512` |
+| 7 | aarch64 | vendored candle 的 `mark_released` 只在 x86_64 上调用，其他架构报 dead_code 警告 | 与 `x86_prepack` 一样限定为 x86_64，同步更新 `nosh.patch` | `cd27d74` |
+
+推送前在 WSL 里做了交叉检查：`aarch64-apple-darwin` 和 `aarch64-unknown-linux-gnu` 两个目标的 `cargo clippy --workspace --all-targets -- -D warnings`，以及 aarch64 Linux 的 `cargo test --no-run`。ring 等 C 依赖用一个只生成空文件的编译器和链接器代替，因为这里不需要能运行的产物。第 1 项就是这样在本地复现并验证的：它只在生成代码时出现，只做 clippy 的交叉检查发现不了。
 
 ## 3. 端到端场景（真实模型）
 
@@ -264,8 +293,8 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 2. **冷启动首 token 4.7–5.5 s**（MVP 6–7 s）：没有磁盘前缀缓存，每个新进程都要重新 prefill 约 1K token 的静态前缀；Q4K 重排已挪到加载阶段（加载多 0.3–0.5 s），首次前向仍有 Q6K prefill 的懒加载重排。
 3. **f16 KV 的 logits 与 f32 KV 余弦约 0.998**：低于原计划的 0.999，但 1 ULP 的扰动也是这个水平（§5.3），NLL、KL 与高置信预测不受影响。
 4. **2B 模型的可靠性**：偶尔写错命令（排序字段、`sort -h -n` 混用）、算错总数、先给出错误的中间结果、自相矛盾；偶尔声称做了实际没做的事（场景 10 说已切换目录），或者在该发起命令时反问用户（场景 4）；偶尔模仿任务头的格式输出 `[task …]` 之类的行。倾向于用 `list_dir`/`read_file` 逐个查看，而不是一条 `find`/`wc` 命令，因此步数偏多。temperature 1.0（官方推荐的设计默认值）放大了结果的波动：四个构建各跑 3 轮，完全正确的次数分别是 27、20、25、26。
-5. **brush 后台作业**：`cmd &` 显示 `[1]+ <pid unknown>`，`kill %1` 失败。brush-core 0.5 把异步命令当作任务运行，没有 pid；需要向上游修复。
-6. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），包括 double-fork 或 `setsid` 后脱离了进程树、但环境里仍带有本次 `NOSH_AGENT_RUN` 的进程；清空了环境又脱离进程树的进程（如 `env -i setsid …`）找不到。放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
+5. **brush 后台作业**：`cmd &` 显示 `[1]+ <pid unknown>`，`kill %1` 失败。brush-core 0.5 把异步命令当作任务运行，没有 pid；需要向上游修复。同样因为是任务，进程可能在命令返回之后才创建：用 `&` 启动作业后几毫秒内就开始的 agent 命令，会把这个作业当作自己启动的进程（交互中不会出现这种时序，§2.5 #6）。
+6. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），包括 double-fork 或 `setsid` 后脱离了进程树、但环境里仍带有本次 `NOSH_AGENT_RUN` 的进程（Linux 从 `/proc` 读取，macOS 用 libproc 和 `sysctl(KERN_PROCARGS2)`，§2.5；其他 Unix 平台不做这种清理）；清空了环境又脱离进程树的进程（如 `env -i setsid …`）找不到。放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
 7. **nosh 进程组内的子进程**：brush 在 nosh 自己的进程组中运行 `$(…)` 和 builtin 之后的管道阶段。agent 命令超时或中断时这些进程会被逐个清理，但它们可以直接读写终端，不会触发 SIGTTIN 识别（例如 `$(ssh host …)` 会直接在终端上询问密码，而不是被识别为需要终端的命令并交给 `propose_command`）。
 8. **提示符下 Ctrl-C 的覆盖范围**：循环体里运行外部命令时（`while true; do sleep 1; done`），Ctrl-C 只结束当前子进程，brush 会继续循环；只含 `[[ ]]`/`(( ))` 而没有其他命令的循环无法中断；`read` 内建命令等待输入时不响应 Ctrl-C。这些都需要 brush 上游支持中断。agent 命令不受影响（超时和 Ctrl-C 会放弃整条命令行）。
 9. **WSL 特有**：PATH 中的 `/mnt/c` 目录经 9p 访问很慢，"命令不存在"的判定约 79 ms；首次列 PATH 约 0.4 s（在后台预热）。
@@ -276,6 +305,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 14. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
 15. **vendored candle-core**：`third_party/candle-core` 是锁定 rev 的副本加补丁；升级 candle 时要按 `NOSH_PATCH.md` 重新打补丁、重新生成 manifest。上游提供释放原始数据的选项后即可删除。
 16. **`nosh model import` 的理论竞态**：先对源文件算哈希，再硬链接或复制进模型库并记录 stamp，中间不复查；如果源文件恰好在这段时间内被改写，库里的文件会被当作已校验。目前只是理论问题，暂不处理（补上需要复制后再算一遍哈希）。
+17. **平台差异**（§2.5）：aarch64 上不释放 Q4K 原始权重（见 #1 和 issue #9）。macOS 上 `nosh doctor` 读不到内存（读的是 `/proc/meminfo`），显示为 unknown；CPU 型号在 macOS 和 aarch64 Linux 上只显示架构名（`/proc/cpuinfo` 里没有 `model name`）；`nosh debug gen` 的 RSS（读 `/proc/self/status`）在 macOS 上没有；`configure_thread_env` 检查"还没有其他线程"只在 Linux 的 debug 构建里做。这些不影响功能，暂不处理。
 
 ## 7. 偏离设计之处与决策
 
