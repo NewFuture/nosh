@@ -176,10 +176,19 @@ impl Reader<'_> {
 impl Config {
     /// Loads the user config (missing file = defaults).
     pub fn load() -> Self {
-        let path = nosh_hub::paths::config_file();
+        Self::load_from(nosh_hub::paths::config_file())
+    }
+
+    /// A missing file means defaults; a file that cannot be read also gets
+    /// defaults, but with a warning, since its rules would be lost silently.
+    fn load_from(path: PathBuf) -> Self {
         let mut cfg = match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text),
-            Err(_) => Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => Self {
+                warnings: vec![format!("cannot be read, using defaults: {e}")],
+                ..Self::default()
+            },
         };
         cfg.path = Some(path);
         cfg
@@ -384,5 +393,19 @@ on = true
         let c = Config::parse("[shell\nx=");
         assert_eq!(c.ai_prefix, "#");
         assert_eq!(c.warnings.len(), 1);
+    }
+
+    #[test]
+    fn unreadable_config_warns_but_missing_does_not() {
+        let dir = std::env::temp_dir().join(format!("nosh-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = Config::load_from(dir.join("missing.toml"));
+        assert!(missing.warnings.is_empty(), "{:?}", missing.warnings);
+        // A directory cannot be read as a file (like a permission or I/O error).
+        let unreadable = Config::load_from(dir.clone());
+        assert_eq!(unreadable.approval, Config::default().approval);
+        assert_eq!(unreadable.warnings.len(), 1, "{:?}", unreadable.warnings);
+        assert!(unreadable.warnings[0].contains("cannot be read"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
