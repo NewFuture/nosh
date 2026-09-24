@@ -115,6 +115,10 @@ enum Cmd {
 }
 
 fn main() {
+    // SAFETY: first thing in main, before anything has started a thread.
+    unsafe { nosh_llm::local::configure_thread_env() };
+    // Shells created from here on keep those values out of child processes.
+    nosh_shell::register_internal_env(nosh_llm::local::env_overrides());
     let argv0_login = std::env::args_os()
         .next()
         .is_some_and(|a| a.to_string_lossy().starts_with('-'));

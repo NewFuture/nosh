@@ -180,7 +180,6 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
     }
     let engine =
         engine.map_err(|e| format!("failed to load {}: {e}", resolved.weights.display()))?;
-    nosh_shell::register_internal_env(nosh_llm::local::env_overrides());
     let info = engine.info();
     let description = format!(
         "{} · {} · ctx {} · {} threads · loaded in {:.1}s",

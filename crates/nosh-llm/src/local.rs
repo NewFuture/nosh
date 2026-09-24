@@ -123,7 +123,8 @@ impl LocalChatEngine {
         opts: LocalEngineOptions,
     ) -> Result<Self, LlmError> {
         let t0 = Instant::now();
-        let threads = configure_threads();
+        // The environment is set up by the binary (`configure_thread_env`).
+        let threads = barrier_threads();
         let device = Device::Cpu;
         let mut tok = Tok::load(&model.tokenizer)?;
         let llama = Llama::load(
@@ -504,14 +505,34 @@ static ENV_OVERRIDES: OnceLock<Vec<(&'static str, Option<String>)>> = OnceLock::
 /// pool for the same cores and made decode ~3× slower in measurements. Keep
 /// rayon to one thread and give the barrier pool the physical cores.
 /// Returns the barrier-pool thread count.
-fn configure_threads() -> usize {
-    let n = std::env::var("CANDLE_NUM_THREADS")
+fn barrier_threads() -> usize {
+    std::env::var("CANDLE_NUM_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or_else(num_cpus::get_physical)
-        .max(1);
+        .max(1)
+}
+
+/// Puts the thread counts of [`barrier_threads`] into the process
+/// environment, where candle and rayon read them: `CANDLE_NUM_THREADS`
+/// (physical cores unless set) and `RAYON_NUM_THREADS` (1, or
+/// `NOSH_RAYON_THREADS`). The previous values are kept for
+/// [`env_overrides`]. A binary calls this first thing in `main`.
+///
+/// # Safety
+///
+/// Changing the environment is only sound while no other thread runs (one
+/// could be reading it), so no thread may have been started yet.
+pub unsafe fn configure_thread_env() {
+    #[cfg(target_os = "linux")]
+    debug_assert_eq!(
+        std::fs::read_dir("/proc/self/task").map_or(1, |d| d.count()),
+        1,
+        "configure_thread_env must run before any thread starts"
+    );
     ENV_OVERRIDES.get_or_init(|| {
+        let n = barrier_threads();
         let saved = vec![
             (
                 "CANDLE_NUM_THREADS",
@@ -519,9 +540,7 @@ fn configure_threads() -> usize {
             ),
             ("RAYON_NUM_THREADS", std::env::var("RAYON_NUM_THREADS").ok()),
         ];
-        // SAFETY: runs once, before candle creates any thread pool and before any
-        // nosh thread reads these variables; shells snapshot their environment
-        // earlier and scrub these names (see `env_overrides`).
+        // SAFETY: the caller guarantees that no other thread exists.
         unsafe {
             std::env::set_var("CANDLE_NUM_THREADS", n.to_string());
             std::env::set_var(
@@ -531,7 +550,6 @@ fn configure_threads() -> usize {
         }
         saved
     });
-    n
 }
 
 /// `(name, original value)` for every process variable the engine overrode.
@@ -593,4 +611,17 @@ pub fn rss_mb() -> Option<(f64, f64)> {
             .map(|kb| kb / 1024.0)
     };
     Some((field("VmRSS:")?, field("VmHWM:")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_reads_the_thread_count_without_changing_the_environment() {
+        let before: Vec<_> = std::env::vars_os().collect();
+        assert!(barrier_threads() >= 1);
+        assert!(env_overrides().is_empty(), "only a binary's main sets them");
+        assert_eq!(std::env::vars_os().collect::<Vec<_>>(), before);
+    }
 }

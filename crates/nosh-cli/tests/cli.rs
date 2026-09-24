@@ -52,6 +52,21 @@ fn script_file_with_args() {
 }
 
 #[test]
+fn inference_thread_settings_stay_out_of_the_shell() {
+    // nosh sets these for its own threads when it starts; the shell and the
+    // programs it runs see the user's values.
+    let show = r#"echo "${CANDLE_NUM_THREADS-unset} ${RAYON_NUM_THREADS-unset}""#;
+    let out = nosh()
+        .env_remove("CANDLE_NUM_THREADS")
+        .env("RAYON_NUM_THREADS", "7")
+        .args(["-c", &format!("{show}; sh -c '{show}'")])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "unset 7\nunset 7\n");
+    assert!(out.status.success());
+}
+
+#[test]
 fn commands_from_stdin() {
     let mut child = nosh()
         .stdin(Stdio::piped())
