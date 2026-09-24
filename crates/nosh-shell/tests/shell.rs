@@ -27,7 +27,9 @@ fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nosh-shell-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    // On macOS the temp dir is under a symlink (`/var` → `/private/var`), and
+    // `cd` keeps the name it was given, like bash.
+    std::fs::canonicalize(&d).unwrap()
 }
 
 fn agent(sh: &mut EmbeddedShell, cmd: &str) -> nosh_shell::CommandResult {
@@ -272,6 +274,14 @@ fn pipeline_routes_lines() {
         notices: Vec::new(),
     };
     let mut p = Pipeline::new(ReplConfig::default());
+    // GNU ls exits 2 for a missing file, BSD ls (macOS) 1.
+    let ls_missing = std::process::Command::new("ls")
+        .arg("/definitely/not/here")
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
 
     assert_eq!(
         p.process(&mut sh, &mut ai, &mut ui, "# list big files"),
@@ -298,22 +308,25 @@ fn pipeline_routes_lines() {
     assert_eq!(r, LineOutcome::Continue(None));
     assert_eq!(ai.requests.len(), 1);
     assert!(
-        ui.notices.last().unwrap().contains("exit 2"),
+        ui.notices
+            .last()
+            .unwrap()
+            .contains(&format!("exit {ls_missing}")),
         "{:?}",
         ui.notices
     );
-    assert_eq!(p.last_failure().map(|c| c.exit), Some(2));
+    assert_eq!(p.last_failure().map(|c| c.exit), Some(ls_missing));
 
     // Bare `#` asks about the failure.
     p.process(&mut sh, &mut ai, &mut ui, "#");
     assert_eq!(ai.requests.len(), 2);
-    assert_eq!(ai.requests[1].trigger, Trigger::Failed { exit: 2 });
+    assert_eq!(ai.requests[1].trigger, Trigger::Failed { exit: ls_missing });
     assert!(ai.requests[1].failed.is_some());
 
     // Chinese in a failing line goes straight to the AI.
     p.process(&mut sh, &mut ai, &mut ui, "ls /不存在的目录 2>/dev/null");
     assert_eq!(ai.requests.len(), 3);
-    assert_eq!(ai.requests[2].trigger, Trigger::Failed { exit: 2 });
+    assert_eq!(ai.requests[2].trigger, Trigger::Failed { exit: ls_missing });
 
     // grep's "no match" is not a failure.
     let n = ui.notices.len();
@@ -394,23 +407,32 @@ fn fast_output_does_not_block_the_timeout() {
     );
 }
 
-/// Processes whose command line contains `needle` (from /proc).
-fn processes_with(needle: &str) -> usize {
-    std::fs::read_dir("/proc")
-        .unwrap()
-        .flatten()
-        .filter(|e| {
-            std::fs::read(e.path().join("cmdline"))
-                .map(|c| {
-                    String::from_utf8_lossy(&c)
-                        .replace('\0', " ")
-                        .contains(needle)
-                })
-                .unwrap_or(false)
+/// `(pid, command line)` of every process, from `ps` (procps and BSD alike).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn processes() -> Vec<(i32, String)> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=", "-o", "command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (pid, cmd) = l.trim_start().split_once(' ')?;
+            Some((pid.parse().ok()?, cmd.trim_start().to_string()))
         })
+        .collect()
+}
+
+/// Processes whose command line contains `needle`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn processes_with(needle: &str) -> usize {
+    processes()
+        .iter()
+        .filter(|(_, cmd)| cmd.contains(needle))
         .count()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn timeout_stops_substitutions_and_pipeline_stages() {
     let _g = serial();
@@ -438,12 +460,10 @@ fn timeout_stops_substitutions_and_pipeline_stages() {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn timeout_stops_processes_that_left_the_process_tree() {
     let _g = serial();
-    if !which("setsid") {
-        return;
-    }
     let dir = tmpdir("orphans");
     let user_job = dir.join("user-job");
     let mut sh = shell();
@@ -452,13 +472,19 @@ fn timeout_stops_processes_that_left_the_process_tree() {
         "sh -c 'sleep 35.25; touch {}' &",
         user_job.display()
     ));
-    // `setsid` forks (its parent exits) and `sh -c '… &'` exits after
-    // starting its job: both sleeps are reparented away from nosh before the
-    // timeout.
-    let cmd = "setsid sh -c 'exec sleep 33.25'; sh -c 'sleep 34.25 &'; sleep 20";
+    // `sh -c '… &'` exits after starting its job, and `setsid` (util-linux,
+    // not on macOS) forks and its parent exits: the sleeps are reparented away
+    // from nosh before the timeout.
+    let mut detached = vec!["sleep 34.25"];
+    let mut cmd = String::new();
+    if which("setsid") {
+        cmd.push_str("setsid sh -c 'exec sleep 33.25'; ");
+        detached.push("sleep 33.25");
+    }
+    cmd.push_str("sh -c 'sleep 34.25 &'; sleep 20");
     let r = sh
         .run_agent_command(
-            cmd,
+            &cmd,
             &AgentExecOpts {
                 timeout: Duration::from_millis(1500),
                 ..AgentExecOpts::default()
@@ -468,7 +494,7 @@ fn timeout_stops_processes_that_left_the_process_tree() {
         .unwrap();
     assert!(r.timed_out);
     let deadline = Instant::now() + Duration::from_secs(4);
-    let left = || processes_with("sleep 33.25") + processes_with("sleep 34.25");
+    let left = || detached.iter().map(|n| processes_with(n)).sum::<usize>();
     while left() > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -481,17 +507,11 @@ fn timeout_stops_processes_that_left_the_process_tree() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn kill_processes_with(needle: &str) {
-    for e in std::fs::read_dir("/proc").unwrap().flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
-            continue;
-        };
-        let cmdline = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
-        if String::from_utf8_lossy(&cmdline)
-            .replace('\0', " ")
-            .contains(needle)
-        {
-            // SAFETY: plain syscall on a pid read from /proc.
+    for (pid, cmd) in processes() {
+        if cmd.contains(needle) {
+            // SAFETY: plain syscall; a stale pid just yields ESRCH.
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }
