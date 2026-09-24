@@ -367,9 +367,12 @@ impl ModelHub {
         let mut all_ok = true;
         for f in &entry.files {
             let path = dir.join(&f.name);
+            let before = store::FileStamp::of(&path);
             let res = match hash::sha256_file(&path, |_| {}) {
                 Ok(sha) if sha.eq_ignore_ascii_case(&f.sha256) => {
-                    let _ = store::record_verified(&dir, &entry.id, f, "local", "");
+                    if let Some(stamp) = &before {
+                        let _ = store::record_verified_as(&dir, &entry.id, f, "local", "", stamp);
+                    }
                     Ok(())
                 }
                 Ok(sha) => Err(format!("SHA-256 mismatch (got {sha})")),
