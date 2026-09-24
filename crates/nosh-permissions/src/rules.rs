@@ -12,6 +12,9 @@ pub struct Arg {
     pub dynamic: bool,
     /// Contains unquoted glob characters.
     pub glob: bool,
+    /// Dynamic, but only names files the analysis knows to be inside the
+    /// workspace (`"$f"` in `for f in *.txt`, `{}` in `find . -exec`).
+    pub bound: bool,
 }
 
 impl Arg {
@@ -20,6 +23,7 @@ impl Arg {
             value: s.to_string(),
             dynamic: false,
             glob: false,
+            bound: false,
         }
     }
 }
@@ -29,6 +33,7 @@ pub struct Target {
     pub path: String,
     pub dynamic: bool,
     pub glob: bool,
+    pub bound: bool,
 }
 
 impl Target {
@@ -37,6 +42,7 @@ impl Target {
             path: a.value.clone(),
             dynamic: a.dynamic,
             glob: a.glob,
+            bound: a.bound,
         }
     }
 }
@@ -219,6 +225,7 @@ fn strip_opt_prefix(a: &Arg, short: char, long: &[&str]) -> Target {
         path: path.to_string(),
         dynamic: a.dynamic,
         glob: a.glob,
+        bound: false,
     }
 }
 
@@ -590,6 +597,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                         path: of.to_string(),
                         dynamic: a.dynamic,
                         glob: false,
+                        bound: false,
                     });
                     if is_disk_device(of) {
                         return Verdict::new(
@@ -602,6 +610,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                         path: i.to_string(),
                         dynamic: a.dynamic,
                         glob: false,
+                        bound: false,
                     });
                 }
             }
@@ -1539,6 +1548,7 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
                         path: p.to_string(),
                         dynamic: a.dynamic,
                         glob: false,
+                        bound: false,
                     });
                 }
             }
