@@ -84,7 +84,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 
 每项都有回归测试。之后再次请求审查，唯一的新意见是"加载时每个 Q4K 张量开一个线程重排，会同时创建数百个线程"：实际上 `prepack_q4k` 按层调用、每层 7 个矩阵，线程在进入下一层之前全部 join，同时最多 7 个线程，因此只在注释里写明了这一点（`8254d10`）。
 
-第五次审查的 4 条按最小改动修复：`check_dir` 和 `nosh model verify` 遇到哈希期间文件有变化（拿不到初始 stamp，或 `record_verified_as` 返回 `Ok(false)`）时算作校验失败，只读库写不了 manifest 仍然忽略（`8c0f37f`）；识别不出来的 GGUF 显式给了未知的 `--model` 时报错，不再换成默认模型（`b2bbcdf`）；integer 参数的 float 回退只接受有限、整数值且在 i64 范围内的值（`53fa89f`）。
+第五次 Copilot 审查的 4 条按最小改动修复：`check_dir` 和 `nosh model verify` 遇到哈希期间文件有变化（拿不到初始 stamp，或 `record_verified_as` 返回 `Ok(false)`）时算作校验失败，只读库写不了 manifest 仍然忽略（`8c0f37f`）；识别不出来的 GGUF 显式给了未知的 `--model` 时报错，不再换成默认模型（`b2bbcdf`）；integer 参数的 float 回退只接受有限、整数值且在 i64 范围内的值（`53fa89f`）。
 
 ## 3. 端到端场景（真实模型）
 
