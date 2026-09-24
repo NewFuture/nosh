@@ -15,6 +15,11 @@ pub struct Arg {
     /// Dynamic, but only names files the analysis knows to be inside the
     /// workspace (`"$f"` in `for f in *.txt`, `{}` in `find . -exec`).
     pub bound: bool,
+    /// Dynamic, but every expansion in it has a value known to the analysis
+    /// (`"$KEY"` after `KEY=~/.ssh/id_rsa`): the value it will have. Only
+    /// used to find protected reads; everything else still treats the
+    /// argument as computed at runtime.
+    pub known: Option<String>,
 }
 
 impl Arg {
@@ -24,6 +29,16 @@ impl Arg {
             dynamic: false,
             glob: false,
             bound: false,
+            known: None,
+        }
+    }
+
+    /// The value it will have, when the analysis knows it.
+    pub fn resolved(&self) -> Option<&str> {
+        if self.dynamic {
+            self.known.as_deref()
+        } else {
+            Some(&self.value)
         }
     }
 }
@@ -34,6 +49,8 @@ pub struct Target {
     pub dynamic: bool,
     pub glob: bool,
     pub bound: bool,
+    /// See [`Arg::known`].
+    pub known: Option<String>,
 }
 
 impl Target {
@@ -43,6 +60,22 @@ impl Target {
             dynamic: a.dynamic,
             glob: a.glob,
             bound: a.bound,
+            known: a.known.clone(),
+        }
+    }
+
+    /// The part of `a` after the literal `prefix` (`if=`, `--file=`).
+    fn after(a: &Arg, prefix: &str) -> Self {
+        Self {
+            path: a.value.get(prefix.len()..).unwrap_or_default().to_string(),
+            dynamic: a.dynamic,
+            glob: a.glob,
+            bound: false,
+            known: a
+                .known
+                .as_deref()
+                .and_then(|k| k.strip_prefix(prefix))
+                .map(str::to_string),
         }
     }
 }
@@ -221,12 +254,7 @@ fn strip_opt_prefix(a: &Arg, short: char, long: &[&str]) -> Target {
     } else {
         v
     };
-    Target {
-        path: path.to_string(),
-        dynamic: a.dynamic,
-        glob: a.glob,
-        bound: false,
-    }
+    Target::after(a, &v[..v.len() - path.len()])
 }
 
 /// Variables whose modification changes how the session or its children behave.
@@ -744,10 +772,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             for a in args {
                 if let Some(of) = a.value.strip_prefix("of=") {
                     v.writes.push(Target {
-                        path: of.to_string(),
-                        dynamic: a.dynamic,
                         glob: false,
-                        bound: false,
+                        ..Target::after(a, "of=")
                     });
                     if is_disk_device(of) {
                         return Verdict::new(
@@ -755,12 +781,10 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                             format!("dd overwrites disk device {of}"),
                         );
                     }
-                } else if let Some(i) = a.value.strip_prefix("if=") {
+                } else if a.value.starts_with("if=") {
                     v.reads.push(Target {
-                        path: i.to_string(),
-                        dynamic: a.dynamic,
                         glob: false,
-                        bound: false,
+                        ..Target::after(a, "if=")
                     });
                 }
             }
@@ -1699,6 +1723,11 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
                         dynamic: a.dynamic,
                         glob: false,
                         bound: false,
+                        known: a
+                            .known
+                            .as_deref()
+                            .and_then(|k| k.split('@').nth(1))
+                            .map(str::to_string),
                     });
                 }
             }

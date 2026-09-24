@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use brush_parser::ParserOptions;
 use brush_parser::ast;
@@ -17,6 +18,10 @@ const MAX_DEPTH: usize = 8;
 const SCRIPT_BYTES: u64 = 256 * 1024;
 /// Script bytes read per command line, nested scripts included.
 const SCRIPT_BUDGET: usize = 1024 * 1024;
+/// Calls of functions defined in the command line re-analyzed with their
+/// arguments, per command line.
+const CALL_BUDGET: usize = 1024;
+const PROTECTED_READ: &str = "reads protected path";
 
 /// Analyzes an agent-issued command line.
 pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
@@ -35,6 +40,16 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
         script_budget: SCRIPT_BUDGET,
         bound_vars: HashMap::new(),
         script_path: None,
+        vars: ctx
+            .variables
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        exported: ctx.exported.clone(),
+        positional: None,
+        replaying: false,
+        calls_left: CALL_BUDGET,
     };
     if cmd.trim().is_empty() {
         a.report.add(Risk::Safe, "empty command");
@@ -96,7 +111,8 @@ struct Analyzer<'a> {
     cwd: PathBuf,
     cwd_unknown: bool,
     expanding: HashSet<String>,
-    local_funcs: HashMap<String, ()>,
+    /// Functions defined in the analyzed text: name → body.
+    local_funcs: HashMap<String, Rc<ast::FunctionBody>>,
     sudo_inserts: Vec<usize>,
     opts: ParserOptions,
     /// Runs in a child shell (a script, `bash -c`): `exit`/`exec` end that
@@ -109,6 +125,19 @@ struct Analyzer<'a> {
     bound_vars: HashMap<String, PathBuf>,
     /// `$0` while analyzing a script: the path it was run by.
     script_path: Option<String>,
+    /// Variables with a known, non-empty value: the session's, then
+    /// assignments seen so far. Only used to find protected reads (a value
+    /// can be stale after a branch or loop); for everything else expansions
+    /// stay computed at runtime.
+    vars: HashMap<String, String>,
+    /// Variables a child process (script, `bash -c`) inherits.
+    exported: HashSet<String>,
+    /// `$1`… inside a function or script called with known arguments.
+    positional: Option<Vec<String>>,
+    /// Re-analyzing a function body at a call (see `replay`).
+    replaying: bool,
+    /// Function calls that may still be re-analyzed.
+    calls_left: usize,
 }
 
 const INTERPRETERS: &[&str] = &[
@@ -264,6 +293,66 @@ fn param_name(src: &str) -> Option<&str> {
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     if end == 0 { None } else { Some(&s[..end]) }
+}
+
+/// The variable of `$v` or `${v}` (a plain expansion of a named variable).
+fn plain_expansion(src: &str) -> Option<&str> {
+    bound_expansion(src).filter(|n| src == format!("${n}") || src == format!("${{{n}}}"))
+}
+
+/// The index of `$1`…`$9` or `${N}`.
+fn positional_index(src: &str) -> Option<usize> {
+    let s = src.strip_prefix('$')?;
+    let digits = match s.strip_prefix('{') {
+        Some(r) => r.strip_suffix('}')?,
+        None if s.len() == 1 => s,
+        None => return None,
+    };
+    digits
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| digits.parse::<usize>().ok())
+        .flatten()
+        .filter(|&i| i > 0)
+}
+
+/// Argument values for `$1`…: up to the first one that is unknown or may
+/// expand to several words (or none), which shifts the ones after it.
+fn known_values(args: &[Arg]) -> Vec<String> {
+    args.iter()
+        .map_while(|a| {
+            let v = a.resolved()?;
+            (!a.glob && !has_brace_expansion(&a.value)).then(|| v.to_string())
+        })
+        .collect()
+}
+
+/// `{a,b}` or `{1..3}` (not `${…}`): brace expansion makes several words.
+fn has_brace_expansion(s: &str) -> bool {
+    s.char_indices().any(|(i, c)| {
+        c == '{'
+            && !s[..i].ends_with('$')
+            && s[i..].contains('}')
+            && (s[i..].contains(',') || s[i..].contains(".."))
+    })
+}
+
+/// Appends literal text (the same at runtime) to `arg`.
+fn push_lit(arg: &mut Arg, s: &str) {
+    arg.value.push_str(s);
+    if let Some(k) = &mut arg.known {
+        k.push_str(s);
+    }
+}
+
+/// Appends an expansion (`src`) to `arg`, with its value when known.
+fn push_expansion(arg: &mut Arg, src: &str, value: Option<&str>) {
+    arg.dynamic = true;
+    arg.value.push_str(src);
+    match (value, &mut arg.known) {
+        (Some(v), Some(k)) => k.push_str(v),
+        _ => arg.known = None,
+    }
 }
 
 /// The variable of `$v`, `${v}`, `${v%suffix}` or `${v%%suffix}`: expansions
@@ -508,6 +597,7 @@ impl Analyzer<'_> {
                     Some(cwd) => self.bound_vars.insert(f.variable_name.clone(), cwd),
                     None => self.bound_vars.remove(&f.variable_name),
                 };
+                self.vars.remove(&f.variable_name);
                 self.compound_list(&f.body.list);
                 match prev {
                     Some(p) => self.bound_vars.insert(f.variable_name.clone(), p),
@@ -584,8 +674,12 @@ impl Analyzer<'_> {
                     dynamic: false,
                     glob: false,
                     bound: false,
+                    known: Some(String::new()),
                 };
                 self.pieces(raw, &pieces, &mut arg, false);
+                if !arg.dynamic {
+                    arg.known = None;
+                }
                 if arg.dynamic && !arg.glob && !self.bound_vars.is_empty() && !self.cwd_unknown {
                     let mut lit = String::new();
                     arg.bound = self.bound_pieces(raw, &pieces, &mut lit) && stays_below(&lit);
@@ -597,6 +691,7 @@ impl Analyzer<'_> {
                 dynamic: true,
                 glob: false,
                 bound: false,
+                known: None,
             },
         }
     }
@@ -667,32 +762,39 @@ impl Analyzer<'_> {
         !self.cwd_unknown && classify_path_real(&self.cwd, self.ctx, true).0 == PathClass::Workspace
     }
 
-    /// Assignments end a loop variable's binding (`f=/x`, `read f`, `let f=1`).
+    /// Assignments end a loop variable's binding (`f=/x`, `read f`, `let f=1`);
+    /// builtins that assign make the value unknown.
     fn unbind(&mut self, assigns: &[String], argv: &[Arg]) {
         for n in assigns {
             self.bound_vars.remove(n);
         }
-        let assigning = argv.first().is_some_and(|c| {
-            matches!(
-                basename(&c.value),
-                "read"
-                    | "mapfile"
-                    | "readarray"
-                    | "printf"
-                    | "declare"
-                    | "typeset"
-                    | "local"
-                    | "export"
-                    | "readonly"
-                    | "unset"
-                    | "getopts"
-                    | "let"
-            )
-        });
+        let cmd = argv.first().map_or("", |c| basename(&c.value));
+        let assigning = matches!(
+            cmd,
+            "read"
+                | "mapfile"
+                | "readarray"
+                | "printf"
+                | "declare"
+                | "typeset"
+                | "local"
+                | "export"
+                | "readonly"
+                | "unset"
+                | "getopts"
+                | "let"
+        );
         if assigning {
-            for a in &argv[1..] {
-                self.bound_vars
-                    .remove(a.value.split(['=', '[']).next().unwrap_or(""));
+            // `export NAME` and `readonly NAME` keep the value.
+            let keeps = matches!(cmd, "export" | "readonly");
+            for a in argv[1..].iter().filter(|a| !keeps || a.value.contains('=')) {
+                let n = a.value.split(['=', '[']).next().unwrap_or("");
+                self.bound_vars.remove(n);
+                self.vars.remove(n);
+            }
+            // Assigned without being named.
+            for n in ["REPLY", "OPTARG", "OPTIND"] {
+                self.vars.remove(n);
             }
         }
     }
@@ -700,6 +802,7 @@ impl Analyzer<'_> {
     /// Arithmetic may assign to a loop variable: `(( f = 1 ))`.
     fn unbind_in(&mut self, text: &str) {
         self.bound_vars.retain(|n, _| !text.contains(n.as_str()));
+        self.vars.retain(|n, _| !text.contains(n.as_str()));
     }
 
     fn pieces(&mut self, raw: &str, pieces: &[WordPieceWithSource], arg: &mut Arg, quoted: bool) {
@@ -710,9 +813,9 @@ impl Analyzer<'_> {
                     if !quoted && s.contains(['*', '?', '[']) {
                         arg.glob = true;
                     }
-                    arg.value.push_str(s);
+                    push_lit(arg, s);
                 }
-                WordPiece::SingleQuotedText(s) => arg.value.push_str(s),
+                WordPiece::SingleQuotedText(s) => push_lit(arg, s),
                 WordPiece::AnsiCQuotedText(s) => {
                     if has_escape_obfuscation(src) || has_escape_obfuscation(s) {
                         self.add(
@@ -720,23 +823,16 @@ impl Analyzer<'_> {
                             "uses $'\\x..' escape sequences that can hide the real command",
                         );
                     }
-                    arg.value.push_str(&decode_ansi_c(s));
+                    push_lit(arg, &decode_ansi_c(s));
                 }
                 WordPiece::DoubleQuotedSequence(inner)
                 | WordPiece::GettextDoubleQuotedSequence(inner) => {
                     self.pieces(raw, inner, arg, true);
                 }
                 WordPiece::TildeExpansion(t) => match t {
-                    TildeExpr::Home => arg.value.push('~'),
-                    TildeExpr::UserHome(u) => {
-                        arg.dynamic = true;
-                        arg.value.push('~');
-                        arg.value.push_str(u);
-                    }
-                    _ => {
-                        arg.dynamic = true;
-                        arg.value.push_str("~+");
-                    }
+                    TildeExpr::Home => push_lit(arg, "~"),
+                    TildeExpr::UserHome(u) => push_expansion(arg, &format!("~{u}"), None),
+                    _ => push_expansion(arg, "~+", None),
                 },
                 WordPiece::ParameterExpansion(_) => {
                     if src.contains("$(") || src.contains('`') {
@@ -746,9 +842,9 @@ impl Analyzer<'_> {
                         );
                     }
                     match param_name(src) {
-                        Some("HOME") if src == "$HOME" || src == "${HOME}" => arg.value.push('~'),
+                        Some("HOME") if src == "$HOME" || src == "${HOME}" => push_lit(arg, "~"),
                         Some("PWD") if src == "$PWD" || src == "${PWD}" => {
-                            arg.value.push_str(&self.cwd.to_string_lossy())
+                            push_lit(arg, &self.cwd.to_string_lossy())
                         }
                         _ if self.script_path.is_some()
                             && matches!(
@@ -759,12 +855,15 @@ impl Analyzer<'_> {
                                     | "${BASH_SOURCE[0]}"
                             ) =>
                         {
-                            arg.value
-                                .push_str(self.script_path.as_deref().unwrap_or_default())
+                            push_lit(arg, self.script_path.as_deref().unwrap_or_default())
                         }
                         _ => {
-                            arg.dynamic = true;
-                            arg.value.push_str(src);
+                            // Unquoted, a value with spaces or glob characters is
+                            // split and globbed: not one known word.
+                            let v = self.known_expansion(src).filter(|v| {
+                                quoted || !v.contains([' ', '\t', '\n', '*', '?', '['])
+                            });
+                            push_expansion(arg, src, v.as_deref());
                         }
                     }
                 }
@@ -773,19 +872,15 @@ impl Analyzer<'_> {
                     self.in_child(|a| a.program_text(s, false));
                     self.top = prev;
                     match self.static_subst(s) {
-                        Some(v) => arg.value.push_str(&v),
-                        None => {
-                            arg.dynamic = true;
-                            arg.value.push_str("$(…)");
-                        }
+                        Some(v) => push_lit(arg, &v),
+                        None => push_expansion(arg, "$(…)", None),
                     }
                 }
                 WordPiece::EscapeSequence(s) => {
-                    arg.value.push_str(s.strip_prefix('\\').unwrap_or(s));
+                    push_lit(arg, s.strip_prefix('\\').unwrap_or(s));
                 }
                 WordPiece::ArithmeticExpression(e) => {
-                    arg.dynamic = true;
-                    arg.value.push_str("$((…))");
+                    push_expansion(arg, "$((…))", None);
                     self.text_substitutions(&e.value);
                 }
             }
@@ -794,6 +889,7 @@ impl Analyzer<'_> {
 
     fn simple(&mut self, sc: &ast::SimpleCommand) {
         let mut assigns: Vec<String> = Vec::new();
+        let mut values: Vec<Option<String>> = Vec::new();
         let mut redirects: Vec<&ast::IoRedirect> = Vec::new();
         if let Some(prefix) = &sc.prefix {
             for item in &prefix.0 {
@@ -806,7 +902,8 @@ impl Analyzer<'_> {
                         };
                         match &a.value {
                             ast::AssignmentValue::Scalar(w) => {
-                                self.word(w);
+                                let v = self.word(w);
+                                values.push(v.resolved().map(str::to_string));
                             }
                             ast::AssignmentValue::Array(items) => {
                                 for (k, v) in items {
@@ -815,7 +912,18 @@ impl Analyzer<'_> {
                                     }
                                     self.word(v);
                                 }
+                                values.push(None);
                             }
+                        }
+                        if matches!(a.name, ast::AssignmentName::ArrayElementName(..)) {
+                            *values.last_mut().unwrap() = None;
+                        }
+                        if a.append {
+                            // `NAME+=value`: known when both parts are.
+                            let v = values.last_mut().unwrap();
+                            *v = v
+                                .take()
+                                .and_then(|v| Some(format!("{}{v}", self.vars.get(&name)?)));
                         }
                         assigns.push(name);
                     }
@@ -842,12 +950,7 @@ impl Analyzer<'_> {
                     ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => argv.push(self.word(w)),
                     ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
                         self.compound_list(&sub.list);
-                        argv.push(Arg {
-                            value: "/dev/fd/63".into(),
-                            dynamic: false,
-                            glob: false,
-                            bound: false,
-                        });
+                        argv.push(Arg::lit("/dev/fd/63"));
                     }
                 }
             }
@@ -855,9 +958,13 @@ impl Analyzer<'_> {
         for r in redirects {
             self.redirect(r);
         }
-        if !self.bound_vars.is_empty() {
-            self.unbind(&assigns, &argv);
+        if argv.is_empty() {
+            // `NAME=value` on its own sets the variable for what follows.
+            for (n, v) in assigns.iter().zip(&values) {
+                self.set_var(n, v.as_deref());
+            }
         }
+        self.unbind(&assigns, &argv);
         if argv.is_empty() {
             for n in &assigns {
                 if let Some((risk, why)) = rules::var_assignment_risk(n) {
@@ -866,9 +973,7 @@ impl Analyzer<'_> {
                 }
             }
             if !assigns.is_empty() {
-                self.report
-                    .commands
-                    .push(format!("{}=…", assigns.join("=… ")));
+                self.push_command(format!("{}=…", assigns.join("=… ")));
             }
             return;
         }
@@ -880,13 +985,42 @@ impl Analyzer<'_> {
                 );
             }
         }
-        self.report.commands.push(shell_join(&argv));
+        self.push_command(shell_join(&argv));
         let name_end = if self.top && self.depth == 1 {
             name_end
         } else {
             None
         };
+        // `NAME=value cmd`: a function, script or child shell it runs sees
+        // NAME (exported); afterwards NAME is as before.
+        let before: Vec<(String, Option<String>, bool)> = assigns
+            .iter()
+            .map(|n| {
+                (
+                    n.clone(),
+                    self.vars.get(n).cloned(),
+                    self.exported.contains(n),
+                )
+            })
+            .collect();
+        for (n, v) in assigns.iter().zip(&values) {
+            self.set_var(n, v.as_deref());
+            self.exported.insert(n.clone());
+        }
         self.exec(argv, name_end);
+        for (n, v, exported) in before {
+            self.set_var(&n, v.as_deref());
+            if !exported {
+                self.exported.remove(&n);
+            }
+        }
+    }
+
+    /// Records a simple command of the line (once).
+    fn push_command(&mut self, c: String) {
+        if !self.report.commands.contains(&c) {
+            self.report.commands.push(c);
+        }
     }
 
     fn redirect(&mut self, r: &ast::IoRedirect) {
@@ -966,8 +1100,18 @@ impl Analyzer<'_> {
                 format!("fork bomb (function {name} spawns itself)"),
             );
         }
-        self.local_funcs.insert(name, ());
+        self.local_funcs
+            .insert(name.clone(), Rc::new(fd.body.clone()));
+        // Checked here once without arguments (`$1`… unknown); each call
+        // checks it again with its own (see `replay`).
+        let key = format!("fn:{name}");
+        let outer = self.positional.take();
+        let fresh = self.expanding.insert(key.clone());
         self.compound(&fd.body.0);
+        if fresh {
+            self.expanding.remove(&key);
+        }
+        self.positional = outer;
     }
 
     fn write_effect(&mut self, t: &Target, v: &Verdict) {
@@ -1069,13 +1213,15 @@ impl Analyzer<'_> {
     }
 
     fn read_effect(&mut self, t: &Target) {
-        if t.dynamic {
-            return;
-        }
+        let path = match (&t.known, t.dynamic) {
+            (_, false) => t.path.as_str(),
+            (Some(k), true) => k.as_str(),
+            (None, true) => return,
+        };
         if let (PathClass::Protected(l), _) =
-            classify_path_real(&self.resolve(&t.path), self.ctx, true)
+            classify_path_real(&self.resolve(path), self.ctx, true)
         {
-            self.add(Risk::Mutating, format!("reads protected path {l}"));
+            self.add(Risk::Mutating, format!("{PROTECTED_READ} {l}"));
             self.report.reads_protected = true;
         }
     }
@@ -1096,11 +1242,18 @@ impl Analyzer<'_> {
         }
     }
 
-    /// Analyzes the shell script at `path` (run as a child process) with the
-    /// same rules. Only its Dangerous and Forbidden findings are taken over, so
-    /// a script is Mutating unless it contains something destructive. Returns
-    /// false when the file is not a readable, small enough shell script.
-    fn script(&mut self, shown: &str, path: &std::path::Path, by_shell: bool) -> bool {
+    /// Analyzes the shell script at `path` (run as a child process with
+    /// `args`) with the same rules. Only its Dangerous and Forbidden findings
+    /// are taken over, so a script is Mutating unless it contains something
+    /// destructive. Returns false when the file is not a readable, small
+    /// enough shell script.
+    fn script(
+        &mut self,
+        shown: &str,
+        path: &std::path::Path,
+        by_shell: bool,
+        args: &[Arg],
+    ) -> bool {
         let key = format!("script:{}", path.display());
         if self.expanding.contains(&key) {
             // A script that runs itself: its contents are being analyzed already.
@@ -1110,7 +1263,8 @@ impl Analyzer<'_> {
             return false;
         };
         self.script_budget -= text.len();
-        // A child shell sees neither the session's aliases nor its functions.
+        // A child process sees neither the session's aliases nor its
+        // functions, and of its variables only the exported ones.
         let child_ctx = Context {
             aliases: HashMap::new(),
             functions: HashMap::new(),
@@ -1131,16 +1285,58 @@ impl Analyzer<'_> {
             script_budget: self.script_budget,
             bound_vars: HashMap::new(),
             script_path: Some(shown.to_string()),
+            vars: self.exported_vars(),
+            exported: self.exported.clone(),
+            positional: Some(known_values(args)),
+            replaying: false,
+            calls_left: self.calls_left,
         };
         sub.expanding.insert(key);
         sub.program_text(&text, false);
         self.script_budget = sub.script_budget;
+        self.calls_left = sub.calls_left;
         for f in sub.report.findings {
-            if f.risk >= Risk::Dangerous {
+            // Protected reads ask as they would on the command line.
+            if f.risk >= Risk::Dangerous || f.reason.contains(PROTECTED_READ) {
                 self.add(f.risk, format!("{shown}: {}", f.reason));
             }
         }
+        self.report.reads_protected |= sub.report.reads_protected;
         true
+    }
+
+    /// The known variables a child process inherits.
+    fn exported_vars(&self) -> HashMap<String, String> {
+        self.vars
+            .iter()
+            .filter(|(k, _)| self.exported.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The value of `$NAME`, `${NAME}` or `$1`… when it is known.
+    fn known_expansion(&self, src: &str) -> Option<String> {
+        if let Some(i) = positional_index(src) {
+            return self.positional.as_ref()?.get(i - 1).cloned();
+        }
+        let name = plain_expansion(src)?;
+        if self.bound_vars.contains_key(name) {
+            return None;
+        }
+        self.vars.get(name).cloned()
+    }
+
+    /// Records what an assignment leaves in `name`: a known value or unknown.
+    fn set_var(&mut self, name: &str, value: Option<&str>) {
+        self.bound_vars.remove(name);
+        match value.filter(|v| !v.is_empty()) {
+            Some(v) => {
+                self.vars.insert(name.to_string(), v.to_string());
+            }
+            None => {
+                self.vars.remove(name);
+            }
+        }
     }
 
     /// Runs `f` as a child shell (subshell, `$(…)`, `bash -c`): `exit`/`exec`,
@@ -1153,6 +1349,9 @@ impl Analyzer<'_> {
             self.report.changes_session,
             self.local_funcs.clone(),
             self.bound_vars.clone(),
+            self.vars.clone(),
+            self.exported.clone(),
+            self.positional.clone(),
         );
         self.child = true;
         f(self);
@@ -1163,6 +1362,9 @@ impl Analyzer<'_> {
             self.report.changes_session,
             self.local_funcs,
             self.bound_vars,
+            self.vars,
+            self.exported,
+            self.positional,
         ) = saved;
     }
 
@@ -1232,6 +1434,38 @@ impl Analyzer<'_> {
         out
     }
 
+    /// Analyzes a session function's body for one call, `$1`… being the
+    /// known arguments.
+    fn call_function(&mut self, key: &str, body: &str, args: &[Arg]) {
+        self.expanding.insert(key.to_string());
+        let outer = self.positional.replace(known_values(args));
+        self.program_text(body, false);
+        self.positional = outer;
+        self.expanding.remove(key);
+    }
+
+    /// Re-analyzes, at a call, a function defined in the analyzed text with
+    /// the call's arguments as `$1`… and the variables known there: what it
+    /// reads through them. Its definition already applied the rest (its
+    /// directory changes are not applied twice).
+    fn replay(&mut self, key: String, body: &ast::FunctionBody, args: &[Arg]) {
+        if self.calls_left == 0 || self.expanding.contains(&key) {
+            return;
+        }
+        self.calls_left -= 1;
+        let saved = (
+            self.cwd.clone(),
+            self.cwd_unknown,
+            self.positional.replace(known_values(args)),
+            self.replaying,
+        );
+        self.replaying = true;
+        self.expanding.insert(key.clone());
+        self.compound(&body.0);
+        self.expanding.remove(&key);
+        (self.cwd, self.cwd_unknown, self.positional, self.replaying) = saved;
+    }
+
     /// Dispatches one simple command (`argv[0]` is the command name).
     fn exec(&mut self, argv: Vec<Arg>, name_end: Option<usize>) {
         let Some(name_arg) = argv.first() else {
@@ -1257,7 +1491,8 @@ impl Analyzer<'_> {
                     return;
                 }
             }
-            if self.local_funcs.contains_key(&name) {
+            if let Some(body) = self.local_funcs.get(&name).cloned() {
+                self.replay(format!("fn:{name}"), &body, &args);
                 return;
             }
             if let Some(body) = self.ctx.functions.get(&name).cloned() {
@@ -1265,9 +1500,7 @@ impl Analyzer<'_> {
                 if self.expanding.contains(&key) {
                     self.add(Risk::Mutating, format!("recursive function {name}"));
                 } else {
-                    self.expanding.insert(key.clone());
-                    self.program_text(&body, false);
-                    self.expanding.remove(&key);
+                    self.call_function(&key, &body, &args);
                 }
                 return;
             }
@@ -1277,7 +1510,7 @@ impl Analyzer<'_> {
         if name.contains('/') && !in_system_bin_dir(&name) {
             // `./x.sh`, `/path/x.sh`, `~/bin/x.sh`: a shell script is analyzed.
             let path = self.resolve(&name);
-            if self.script(&name, &path, false) {
+            if self.script(&name, &path, false, &args) {
                 self.add(Risk::Mutating, format!("runs shell script {name}"));
                 return;
             }
@@ -1285,6 +1518,22 @@ impl Analyzer<'_> {
                 self.add(Risk::Mutating, format!("runs local program {name}"));
                 return;
             }
+        }
+        match base.as_str() {
+            // A sourced file can set anything: forget what was known.
+            "source" | "." => {
+                self.vars.clear();
+                self.bound_vars.clear();
+            }
+            "shift" => self.positional = None,
+            "set"
+                if args
+                    .iter()
+                    .any(|a| !a.value.starts_with(['-', '+']) || a.value == "--") =>
+            {
+                self.positional = None
+            }
+            _ => {}
         }
         match base.as_str() {
             // In a script or `bash -c`, these end that child shell only.
@@ -1454,7 +1703,10 @@ impl Analyzer<'_> {
             "export" | "declare" | "typeset" | "local" | "readonly" => self.declare(&base, &args),
             "unset" => self.unset(&args),
             "cd" | "pushd" => self.cd(&args),
-            "popd" => self.cwd_unknown = true,
+            "popd" => {
+                self.cwd_unknown = true;
+                self.vars.remove("OLDPWD");
+            }
             _ => self.apply(rules::classify(&base, &args)),
         }
     }
@@ -1528,6 +1780,7 @@ impl Analyzer<'_> {
                     || (!a.value.starts_with("--") && a.value.contains('n'))
             });
         match name_end {
+            _ if self.replaying => {}
             Some(p) if !already_n => self.sudo_inserts.push(p),
             None if !already_n => self.add(
                 Risk::Dangerous,
@@ -1639,6 +1892,7 @@ impl Analyzer<'_> {
             dynamic: true,
             glob: false,
             bound: false,
+            known: None,
         });
         self.exec(argv, None);
     }
@@ -1701,6 +1955,7 @@ impl Analyzer<'_> {
                                 bound: bound_starts
                                     && !a.dynamic
                                     && stays_below(&a.value.replace("{}", "\u{1}")),
+                                known: None,
                             }
                         } else {
                             a.clone()
@@ -1738,8 +1993,23 @@ impl Analyzer<'_> {
                     format!("{base} -c with a command string built at runtime"),
                 ),
                 Some(s) => {
-                    let s = s.value.clone();
-                    self.in_child(|a| a.program_text(&s, false));
+                    let text = s.value.clone();
+                    // A new process: exported variables only, and `$0`, `$1`…
+                    // are the words after the command string.
+                    let after = args
+                        .iter()
+                        .position(|a| std::ptr::eq(a, s))
+                        .map_or(&[][..], |i| &args[i + 1..]);
+                    let zero = after.first().and_then(|a| a.resolved()).map(str::to_string);
+                    let positional = known_values(after.get(1..).unwrap_or_default());
+                    let vars = self.exported_vars();
+                    self.in_child(|a| {
+                        a.vars = vars;
+                        a.positional = Some(positional);
+                        let outer = std::mem::replace(&mut a.script_path, zero);
+                        a.program_text(&text, false);
+                        a.script_path = outer;
+                    });
                 }
                 None => {}
             }
@@ -1755,7 +2025,12 @@ impl Analyzer<'_> {
                 self.read_effect(&target_of(script));
                 if !script.dynamic && SH_SYNTAX.contains(&base) {
                     let path = self.resolve(&script.value);
-                    self.script(&script.value, &path, true);
+                    // Everything after the script is its arguments.
+                    let after = args
+                        .iter()
+                        .position(|a| std::ptr::eq(a, *script))
+                        .map_or(&[][..], |i| &args[i + 1..]);
+                    self.script(&script.value, &path, true, after);
                 }
             }
             _ => self.add(Risk::Mutating, format!("starts {base}")),
@@ -1784,12 +2059,42 @@ impl Analyzer<'_> {
             self.report.changes_session = true;
         }
         let mut any = false;
+        // Arrays, namerefs and case or integer conversion: the value seen
+        // here is not what the variable holds.
+        let converts = flags
+            .iter()
+            .any(|f| f.starts_with('-') && f.contains(['a', 'A', 'n', 'l', 'u', 'c', 'i']));
+        let functions = flags.iter().any(|f| f.contains('f'));
+        let exports = !functions
+            && match base {
+                "export" => !flags.iter().any(|f| f.contains('n')),
+                _ => flags.iter().any(|f| f.starts_with('-') && f.contains('x')),
+            };
+        let unexports = !functions
+            && (base == "export" && flags.iter().any(|f| f.contains('n'))
+                || flags.iter().any(|f| f.starts_with('+') && f.contains('x')));
         for a in &assigns {
             let name = a.value.split('=').next().unwrap_or("");
             if let Some((risk, why)) = rules::var_assignment_risk(name) {
                 self.add(risk, why);
                 self.report.changes_session = true;
                 any = true;
+            }
+            if functions {
+                continue;
+            }
+            if a.value.contains('=') {
+                let value = a
+                    .resolved()
+                    .filter(|_| !a.glob && !converts)
+                    .and_then(|r| r.split_once('='))
+                    .map(|(_, v)| v.to_string());
+                self.set_var(name, value.as_deref());
+            }
+            if exports {
+                self.exported.insert(name.to_string());
+            } else if unexports {
+                self.exported.remove(name);
             }
         }
         if !any {
@@ -1807,12 +2112,14 @@ impl Analyzer<'_> {
                 self.add(Risk::Mutating, format!("unsets key variable {}", a.value));
                 self.report.changes_session = true;
             }
+            self.exported.remove(&a.value);
         }
         self.add(Risk::Safe, "unset");
     }
 
     fn cd(&mut self, args: &[Arg]) {
         self.add(Risk::Safe, "changes directory");
+        self.vars.remove("OLDPWD");
         match rules::operands(args).first() {
             None => {
                 if let Some(h) = self.ctx.home_dir() {
@@ -1833,6 +2140,7 @@ fn target_of(a: &Arg) -> Target {
         dynamic: a.dynamic,
         glob: a.glob,
         bound: a.bound,
+        known: a.known.clone(),
     }
 }
 

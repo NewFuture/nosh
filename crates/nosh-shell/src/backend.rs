@@ -676,6 +676,28 @@ impl EmbeddedShell {
             .collect()
     }
 
+    /// Scalar variables (arrays, volatile ones like `RANDOM` and ones whose
+    /// assignments are converted, such as namerefs, left out): name, value
+    /// and whether it is exported.
+    pub fn scalar_vars(&self) -> Vec<(String, String, bool)> {
+        let sh = self.lock();
+        sh.env()
+            .iter()
+            .filter(|(name, var)| {
+                !VOLATILE.contains(&name.as_str())
+                    && !var.value().is_array()
+                    && !var.attribute_flags(&sh).contains(['c', 'i', 'l', 'n', 'u'])
+            })
+            .map(|(name, var)| {
+                (
+                    name.clone(),
+                    var.value().to_cow_str(&sh).into_owned(),
+                    var.is_exported(),
+                )
+            })
+            .collect()
+    }
+
     pub fn snapshot(&self) -> SessionState {
         let sh = self.lock();
         let mut vars = BTreeMap::new();

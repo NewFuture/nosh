@@ -11,7 +11,7 @@ mod paths;
 mod policy;
 mod rules;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use analyze::assess_command;
@@ -67,6 +67,11 @@ pub struct Context {
     pub aliases: HashMap<String, String>,
     /// Live function table (`name → body text`).
     pub functions: HashMap<String, String>,
+    /// Scalar shell variables of the session and their values, so a read of
+    /// `"$VAR"` is checked against the protected paths like a literal one;
+    /// those in `exported` also reach child processes such as scripts.
+    pub variables: HashMap<String, String>,
+    pub exported: HashSet<String>,
     /// Extra protected paths (already `~`-expanded).
     pub protected: Vec<PathBuf>,
 }

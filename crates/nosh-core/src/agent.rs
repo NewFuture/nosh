@@ -245,6 +245,12 @@ impl Agent {
         }
         ctx.aliases = shell.aliases();
         ctx.functions = shell.functions();
+        for (name, value, exported) in shell.scalar_vars() {
+            if exported {
+                ctx.exported.insert(name.clone());
+            }
+            ctx.variables.insert(name, value);
+        }
         ctx.protected = self.cfg.protected.clone();
         ctx
     }
