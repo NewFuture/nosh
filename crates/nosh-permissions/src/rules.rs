@@ -91,6 +91,8 @@ pub struct Verdict {
     /// Recursive delete/permission change: root/home/system targets become Forbidden/Dangerous.
     pub recursive: bool,
     pub deletes: bool,
+    /// Not in the rule table: what the command does is unknown.
+    pub unlisted: bool,
 }
 
 impl Verdict {
@@ -104,6 +106,7 @@ impl Verdict {
             session: false,
             recursive: false,
             deletes: false,
+            unlisted: false,
         }
     }
 
@@ -1253,8 +1256,18 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         }
         n if INFO.contains(&n) => Verdict::safe("read-only"),
         n if NETWORK.contains(&n) => network_tool(n, args),
-        _ => Verdict::mutating(format!("unknown command '{name}'; assumed to modify state")),
+        _ => Verdict {
+            unlisted: true,
+            ..Verdict::mutating(format!("unknown command '{name}'; assumed to modify state"))
+        },
     }
+}
+
+/// Only `--version` or only `--help`: nearly every program prints and exits.
+/// `-V` and `-h` are left out: they mean different things to different
+/// programs (`shutdown -h`, `sort -h`).
+pub fn asks_version_or_help(args: &[Arg]) -> bool {
+    matches!(args, [a] if !a.dynamic && matches!(a.value.as_str(), "--version" | "--help"))
 }
 
 pub fn is_disk_device(p: &str) -> bool {

@@ -70,6 +70,7 @@ fn shell_scripts_are_analyzed_and_only_escalate_for_dangerous_contents() {
     let (c, root) = fixture();
     let ws = c.workspace.display().to_string();
     let abs = format!("{ws}/clean.sh");
+    let abs_bin = format!("{ws}/bin.run --version");
     let cases: Vec<(String, Risk)> = [
         // Analyzed: Dangerous or Forbidden contents escalate.
         ("./clean.sh", Dangerous),
@@ -102,6 +103,12 @@ fn shell_scripts_are_analyzed_and_only_escalate_for_dangerous_contents() {
         // Unlisted commands and inline code keep their classification.
         ("frobnicate --all", Mutating),
         ("node -e 'console.log(1)'", Mutating),
+        // `--version`/`--help` makes only unlisted programs run by name Safe;
+        // local programs and scripts are graded as without it.
+        ("./bin.run --version", Mutating),
+        (abs_bin.as_str(), Mutating),
+        ("./build.sh --help", Mutating),
+        ("./clean.sh --help", Dangerous),
     ]
     .iter()
     .map(|(c, r)| (c.to_string(), *r))
