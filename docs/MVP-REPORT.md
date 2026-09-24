@@ -1,13 +1,13 @@
 # nosh MVP 报告
 
-> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
+> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施，审批确认策略和脱敏按设计 v0.8 的 §16 #14、#15 调整（§2.2、§2.3）。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
 
 ## 1. 结论
 
 - MVP 范围内的 9 项能力全部实现，验收标准 7 条全部满足（逐条结果见 §4）。MVP 构建有两项性能指标未达标：常驻内存（3.2–3.8 GB）和冷启动首 token 延迟（6–7 s，目标 ≤ 3 s，依赖 M2 的磁盘前缀缓存）。
 - **内存优化（§5.3）之后**：加载时预先重排 Q4K 权重并释放其原始数据（给 candle 打的补丁见 `third_party/candle-core`），KV 改为 f16。8K 上下文的 RSS 峰值从 4,150 MiB 降到 2,737–2,751 MiB（2.69 GiB），达到 v0.6 的目标（约 2.9 GB，≤ 3.0 GB）；场景中（1–3K 上下文）从 3,450–3,650 MiB 降到 2,342–2,520 MiB。速度没有回退：decode 在长上下文变快（7.9K 时 11.9–12.4 → 13.1–13.8 tok/s），prefill 持平或更快；冷启动首 token 从 6–7 s 降到 4.7–5.5 s。
 - 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。内存优化后的构建再跑 3 轮：26/4/0。
-- 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等。
+- 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等；PR #1 上两次 Copilot 代码审查的 5 条和 8 条意见也已处理（§2.2、§2.3）。
 - 性能（WSL2，Xeon 8370C 8 核，Q4_K_M，release 构建）：decode 19–25 tok/s，prefill 102–147 tok/s，热对话首 token 0.5–1.0 s，无 rc 启动到提示符约 8 ms。
 
 ## 2. 实现摘要
@@ -16,12 +16,12 @@
 |---|---|
 | `nosh-hub` | 内置 registry（2B Q4_K_M/Q8_0、1B Q4_K_M + tokenizer，固定 revision 和 SHA-256）；按地区（locale/时区）+ 并行 HEAD/2 MB 测速选源（HF / hf-mirror / ModelScope）；64 MiB 分块 Range 下载、`.partial` 断点续传、文件锁、磁盘空间检查、失败换源与退避、边下边算 SHA-256、原子 rename；离线开关（`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`，全部网络访问经过唯一出口 `net`）；`nosh model pull/list/verify/import/path`。 |
 | `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核；KV 默认 f16，加载时预先重排 Q4K 权重并释放原始数据，见 §5.3）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`（`--kv f16/f32`、`--no-prepack` 用于对比）。 |
-| `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"；效果未知的命令（不在规则表中、按路径执行、解释器执行脚本或内联代码）在 auto 模式下也要确认（§2.2）。247 条表驱动用例，Dangerous 召回率 100%。 |
-| `nosh-shell` | 嵌入 brush-core：交互/登录/`-c`/脚本/stdin 模式，rc 与 profile 加载；reedline REPL（brush 历史桥接、补全、续行校验、hinter、PS1 或 `cwd ❯` 提示符 + 右侧审批模式/YOLO 标记、Ctrl-C/Ctrl-D、Ctrl+G）；输入流水线（`#`、解析失败与单词内撇号判定、整行静态命令名检查、本地拼写纠错、破坏性命令安全网、失败提示与含中文时自动交给 AI、`ai` 内建命令）；`run_agent_command`（同一 `Shell`、stdin 为 `/dev/null`、管道采集 10 MB 上限、后台进程组、防卡住环境变量只作用于单次执行、超时与 Ctrl-C、SIGTTIN 识别、状态差异）。 |
-| `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出脱敏后存入 `state/outputs/`）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
+| `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"；效果未知的命令按 Mutating 处理，本地 shell 脚本读取内容后用同一个分析器分析（§16 #14，见 §2.2）；读取目标用已知的变量值和函数、脚本参数检查受保护路径（§2.3）。433 条表驱动用例，Dangerous 召回率 100%。 |
+| `nosh-shell` | 嵌入 brush-core：交互/登录/`-c`/脚本/stdin 模式，rc 与 profile 加载；reedline REPL（brush 历史桥接、补全、续行校验、hinter、PS1 或 `cwd ❯` 提示符 + 右侧审批模式/YOLO 标记、Ctrl-C/Ctrl-D、Ctrl+G）；输入流水线（`#`、解析失败与单词内撇号判定、整行静态命令名检查、本地拼写纠错、破坏性命令安全网、失败提示与含中文时自动交给 AI、`ai` 内建命令）；`run_agent_command`（同一 `Shell`、stdin 为 `/dev/null`、管道采集 10 MB 上限、后台进程组、防卡住环境变量只作用于单次执行、超时与 Ctrl-C（连同脱离了进程树的后台进程一起停止，§2.3）、SIGTTIN 识别、状态差异）。 |
+| `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 148 个测试（权限的 247 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3）；`crates/nosh-permissions/tests/unknown.rs` 覆盖效果未知的命令在三种审批模式下的决定（§2.2）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
+测试：`cargo test --workspace` 共 161 个测试（权限的 433 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..` 和符号链接）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -43,17 +43,32 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 10 | agent 命令运行时按 Ctrl-Z 会杀掉命令 | 运行期间关闭终端的 VSUSP |
 | 11 | 下载时 Ctrl-C 无法取消 | 下载循环检查取消标志；加载期间按 Ctrl-C 放弃当前任务（退出码 130） |
 
-小问题：被中断的 `git status` 会留下 `index.lock`（任务头改用 `git --no-optional-locks`）；连按两次 Ctrl-C 中止任务改为按单条命令计数；脱敏改为整行扫描，并覆盖更多 `key=value`、`"key": "value"`、`Authorization: Bearer` 形式；`read_file` 在 `end_line < start_line` 时返回错误，不再下溢。
+小问题：被中断的 `git status` 会留下 `index.lock`（任务头改用 `git --no-optional-locks`）；连按两次 Ctrl-C 中止任务改为按单条命令计数；脱敏改为整行扫描，并覆盖更多 `key=value`、`"key": "value"`、`Authorization: Bearer` 形式（脱敏后来按 §16 #15 移除，见 §2.3）；`read_file` 在 `end_line < start_line` 时返回错误，不再下溢。
 
 ### 2.2 第二轮审查（PR #1 上的 Copilot 代码审查）
 
 | # | 问题 | 修复 | 提交 |
 |---|---|---|---|
 | 1 | 校验缓存只比较秒级 mtime，同一秒内（或保留 mtime 的 `cp -p`）换成同样大小的文件时，不重新计算哈希就当作已校验 | manifest 升到版本 2，每个文件记录 `FileStamp`：大小、纳秒级 mtime，Unix 上再加 dev、inode 和 ctime（其他平台用创建时间）；版本 1 的记录一律不信任，旧的模型目录会重新校验一次；校验前先取 stamp，哈希期间文件变了就不记录 | `1931aae` |
-| 2 | 不在规则表里的命令、按路径执行的程序、用解释器执行脚本或内联代码的命令，都被当作"工作区内的 Mutating"，auto 模式下不经确认直接执行 | 这几类标记为"效果未知"（`RiskReport::unknown_effect`）：auto 模式下也要单键确认，confirm 模式照旧单键确认，yolo 照旧自动执行；不因此升级为 Dangerous（同时命中其他危险规则时除外，例如 `./rm -rf x`）；`/usr/bin` 等系统目录中的程序仍按名称套用规则，已知只读的命令不受影响；对这类命令选择"同类放行"只放行完全相同的命令 | `66d2725` |
+| 2 | 不在规则表里的命令、按路径执行的程序、用解释器执行脚本或内联代码的命令，都被当作"工作区内的 Mutating"，auto 模式下不经确认直接执行 | 先按意见改为"效果未知、auto 模式下也要单键确认"（`66d2725`）；随后按用户"方便优先"的决定（§16 #14）撤回（`fe649b5`）：这类命令仍按 Mutating 处理，auto 模式下自动执行，改为分析本地 shell 脚本的内容（`./x.sh`、`/path/x.sh`、`bash x.sh`；单个脚本 256 KiB、每条命令共 1 MiB），只有其中的 Dangerous/Forbidden 才升级；脚本、`bash -c`、子 shell 和 `$(…)` 里的 `exit`/`exec`/`cd`/函数定义只作用于该子 shell。同一提交把工作区内运行时才确定的写入目标（`for f in *.txt; do mv …`、`find . -exec cp {} {}.bak`）从 Dangerous 降为 Mutating；删除和可能离开工作区的目标仍为 Dangerous | `66d2725` → `fe649b5`、`146118a` |
 | 3 | `read_file` 先读 8 MiB 前缀再定位 `start_line`，读不到大文件后面的部分，总行数也只是前缀的 | 流式读到请求的行，只保留要返回的行（最多 400 行、每行 2 KiB、共 6,000 字符）；之后在 64 MiB 的预算内继续数行，数不完时标注"≥ N lines (stopped counting)" | `1f20dca` |
 | 4 | 等待另一个进程的下载锁时用阻塞的 `File::lock()`，Ctrl-C 无效 | 每 200 ms 轮询一次 `try_lock()`，其间检查取消标志；等待时提示"另一个 nosh 进程正在下载" | `b31e7ae` |
 | 5 | 测速没有计入第一次读取的字节；服务器只返回一块就断开时，回退逻辑把它当作完整的 2 MiB，可能把坏掉的源排在第一 | 每次读取都计入，第一个字节只用来开始计时；在达到测速大小（或更小的文件大小）之前结束的响应算作测速失败 | `8f1554a` |
+
+每项都有回归测试。
+
+### 2.3 第三轮审查（PR #1 上的第二次 Copilot 代码审查）
+
+| # | 问题 | 处理 | 提交 |
+|---|---|---|---|
+| 1 | 脱敏在带引号、含空格的值（`password="a b c"`）处提前停止，后半截留在输出日志里 | 按用户决定（§16 #15）本地 agent 受信任，移除脱敏实现，完整输出原样写入 `state/outputs/`（文件 0600、目录 0700）；只保留 `Redactor` 扩展接口（本地为不复制内容的 `NoRedact`），接入远程 agent 时再实现具体规则，届时把这个例子加入回归测试 | `6c0dab9` |
+| 2 | 动态读取目标被忽略：`cat "$KEY_PATH"` 在变量值为 `~/.ssh/id_rsa` 时仍是 Safe；函数体分析时不代入调用参数，受保护路径的确认可以绕过 | 分析时已知的值像字面路径一样检查受保护路径：会话中的标量变量（连同导出标志）；同一行里之前的赋值（`read`、`unset`、循环、算术、`source`、子 shell 等使之失效）；行内定义的函数在每次调用时按参数再分析一遍（只取结论，不重复应用 `cd` 等效果）；会话函数、脚本和 `bash -c` 的 `$1`…；子进程只看到导出的变量和 `NAME=value cmd`。无法确定的值不改变分级、不额外确认（§16 #14）。已知值只用来增加确认：流不敏感的分析在分支或循环之后可能拿到过时的值，所以用变量拼出的写入、删除目标和命令名仍按运行时计算处理。脚本里的受保护路径读取现在也会提出来 | `a5f984b` |
+| 3 | `read`、`hash` 等会修改会话的形式被当作只读（`read PATH <<< /tmp`、`hash -p /tmp/evil ls`） | `read`/`mapfile`/`readarray`/`printf -v`/`getopts`/`let` 的赋值按变量赋值规则分级（改 `PATH` 等关键变量需要确认）；`hash -p/-d/-r` 修改会话，查询仍是 Safe；`fc -l` 为 Safe、`fc -s`（重新执行历史命令）为 Dangerous、其他形式为 Mutating；`stty`、`mesg` 修改终端设置 | `fb50268` |
+| 4 | 超时和 Ctrl-C 的清理只找 nosh 的后代进程：double-fork 或 `setsid` 之后、父进程已退出的进程被重新挂到 init 下，清理不到 | 每次 agent 命令在环境中设置 `NOSH_AGENT_RUN=<pid>.<序号>`（与防卡住变量一样只作用于这一次）；超时或 Ctrl-C 时，环境里带有本次取值的进程无论挂在哪里都一起停止，连同其后代。之前启动的用户后台作业不带这个值，不受影响。没有采用 subreaper：孤儿进程不会挂到 nosh 下，也就不必额外回收 | `bc7f346` |
+| 5 | `--model-path` 指向含多个 `.gguf` 的目录时按文件系统顺序任取一个，`--model` 不起作用 | 目录里只有一个 `.gguf` 时直接使用；有多个时选请求模型（未指定时为默认模型）在 registry 中的文件名，找不到就报错并列出候选 | `96e0c77` |
+| 6 | `SharedProgress::finish` 不设置完成标志，复用时 `start` 不清除上一次的完成和失败状态 | `start` 重置状态（保留最后一条说明）；`finish` 记录完成，失败时设置失败标志，成功时进度置满 | `e187c9a` |
+| 7 | GGUF 的 attention head 数为 0 时，加载在除法和取模处 panic（`--model-path` 的文件不经过 registry 哈希校验） | `LlamaConfig::from_gguf` 在做除法前检查两个 head 数和维度能否整除，返回加载错误 | `ea4920d` |
+| 8 | vendored candle 的 Metal 桩函数 `quantize_onto` 返回 CUDA 的错误（上游问题） | 改为 `NotCompiledWithMetalSupport`，并重新生成 `nosh.patch`、在 `NOSH_PATCH.md` 中记录；新增测试防止重新 vendor 时丢失补丁 | `ebf7cc6` |
 
 每项都有回归测试。
 
@@ -85,7 +100,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 1. **查找大文件**：三轮都先用 `list_dir` 浏览 5 个目录。第 1 轮直接根据 `list_dir` 的大小得出正确的前三（20.0 MB、11.4 MB、4.8 MB）；第 2 轮再用 `find … -exec ls -la {} \;` 列出全部文件，第 3 轮用 `find … -exec ls -lh {} \; | sort -k5 -rh | head` 核对，结论都正确。
 2. **端口占用**：三轮都用 `ss -tlnp | grep 8080` 找到 `python3` 及其 PID（均为 Safe，自动执行）。
 3. **统计代码行数**：模型先用 `list_dir` 浏览，再用 `read_file` 读每个文件并计数（第 1 轮还用 `cat … | wc -l` 核对了总数），各语言行数三轮都对，但步数偏多（3–4 步，24–33 s），总数和中间表格偶尔出错。
-4. **批量重命名**：成功的两轮生成 `for f in *.txt; do mv "$f" "${f%.txt}.md"; done`，因为写入目标是运行时计算的路径被评为 **DANGEROUS**，审批卡片要求键入 `yes`；执行后 4 个文件改名，`readme.md` 保持不变。**失败的第 3 轮**：模型列出目录后给出改名计划，然后反问"Would you like me to proceed?"，没有发起命令（审批卡片本身就是确认环节）；回答开头还模仿任务头写了一行 `[task complete=hash …]`。
+4. **批量重命名**：成功的两轮生成 `for f in *.txt; do mv "$f" "${f%.txt}.md"; done`，因为写入目标是运行时计算的路径被评为 **DANGEROUS**，审批卡片要求键入 `yes`（`146118a` 之后，工作区内的这类改名评为 Mutating，§2.2）；执行后 4 个文件改名，`readme.md` 保持不变。**失败的第 3 轮**：模型列出目录后给出改名计划，然后反问"Would you like me to proceed?"，没有发起命令（审批卡片本身就是确认环节）；回答开头还模仿任务头写了一行 `[task complete=hash …]`。
 5. **中文提问**：三轮都用中文回答，列出正确的 3 个文件。
 6. **拼写纠错**：`gti status` → 输入行预填 `git status`，`pyhton3 --version` → `python3 --version`，都不自动执行，也不调用模型。
 7. **失败分析**：`python3 broken.py` 失败后提示 `✗ exit 1 · Ctrl+G or # to ask AI`；输入 `#` 后，agent 读取脚本，指出缺少 `config.json`，并给出修复方法。第 2、3 轮沿用了上一轮中文提问的语言，用中文回答。
@@ -236,12 +251,12 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 3. **f16 KV 的 logits 与 f32 KV 余弦约 0.998**：低于原计划的 0.999，但 1 ULP 的扰动也是这个水平（§5.3），NLL、KL 与高置信预测不受影响。
 4. **2B 模型的可靠性**：偶尔写错命令（排序字段、`sort -h -n` 混用）、算错总数、先给出错误的中间结果、自相矛盾；偶尔声称做了实际没做的事（场景 10 说已切换目录），或者在该发起命令时反问用户（场景 4）；偶尔模仿任务头的格式输出 `[task …]` 之类的行。倾向于用 `list_dir`/`read_file` 逐个查看，而不是一条 `find`/`wc` 命令，因此步数偏多。temperature 1.0（官方推荐的设计默认值）放大了结果的波动：四个构建各跑 3 轮，完全正确的次数分别是 27、20、25、26。
 5. **brush 后台作业**：`cmd &` 显示 `[1]+ <pid unknown>`，`kill %1` 失败。brush-core 0.5 把异步命令当作任务运行，没有 pid；需要向上游修复。
-6. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
+6. **中断 agent 命令时丢弃 brush 的 future**：超时或 Ctrl-C 时向本次命令新增的进程发送 SIGTERM/SIGINT（2 s 后 SIGKILL），包括 double-fork 或 `setsid` 后脱离了进程树、但环境里仍带有本次 `NOSH_AGENT_RUN` 的进程；清空了环境又脱离进程树的进程（如 `env -i setsid …`）找不到。放弃整条命令行并恢复变量作用域深度，行为与 bash 中按 Ctrl-C 一致。如果当时正处在 shell 函数内部，brush 的调用栈帧（`FUNCNAME` 等）可能残留（很少见，需要上游提供取消接口）。
 7. **nosh 进程组内的子进程**：brush 在 nosh 自己的进程组中运行 `$(…)` 和 builtin 之后的管道阶段。agent 命令超时或中断时这些进程会被逐个清理，但它们可以直接读写终端，不会触发 SIGTTIN 识别（例如 `$(ssh host …)` 会直接在终端上询问密码，而不是被识别为需要终端的命令并交给 `propose_command`）。
 8. **提示符下 Ctrl-C 的覆盖范围**：循环体里运行外部命令时（`while true; do sleep 1; done`），Ctrl-C 只结束当前子进程，brush 会继续循环；只含 `[[ ]]`/`(( ))` 而没有其他命令的循环无法中断；`read` 内建命令等待输入时不响应 Ctrl-C。这些都需要 brush 上游支持中断。agent 命令不受影响（超时和 Ctrl-C 会放弃整条命令行）。
 9. **WSL 特有**：PATH 中的 `/mnt/c` 目录经 9p 访问很慢，"命令不存在"的判定约 79 ms；首次列 PATH 约 0.4 s（在后台预热）。
 10. **Ctrl+G 建议使用独立会话**：`LocalChatEngine` 只维护一份 KV，切换会话时从最长公共前缀开始重算，所以 Ctrl+G 之后的下一个 `#` 任务要重新 prefill 主对话。
-11. **保守的风险分级**：写入目标是运行时计算的路径（`for f in *.txt; do mv …`、`find -exec cp {} {}.bak`）一律评为 Dangerous，需要键入 `yes`。效果未知的命令（§2.2 #2）在 auto 模式下也要确认。反过来，`make`、`cargo build/run`、`npm run` 这类构建和运行命令同样会执行项目中的代码，但它们在规则表中，仍按"工作区内的 Mutating"处理，auto 模式下不询问。
+11. **风险分级的取舍**（方便优先，§16 #14）：工作区内运行时才确定的写入目标（`for f in *.txt; do mv …`、`find . -exec cp {} {}.bak`）评为 Mutating，删除和可能离开工作区的目标仍为 Dangerous。效果未知的命令（规则表之外的命令、本地程序、其他解释器执行的脚本或内联代码）和分析不了的脚本（二进制、超过 256 KiB、无法解析）按 Mutating 处理，auto 模式下在工作区内自动执行；`make`、`cargo build/run`、`npm run` 这类构建和运行命令同样会执行项目中的代码。受保护路径的读取只在路径是字面量或分析时已知的变量值、参数时才要求确认，运行时才能确定的值（`$(…)`、glob、未知变量）不要求。反过来，用变量拼出的写入目标（`OUT=build/x; echo > "$OUT"`）仍按运行时计算的路径评为 Dangerous。
 12. **审批卡片出现时会丢弃预输入**：为防止之前缓冲的按键误答审批，出现卡片时清空终端输入缓冲；设计文档里写的是"agent 运行期间用户的输入先缓冲"。
 13. **`list_dir` 只检查起始目录**：`list_dir ~/.ssh` 需要审批，但 `list_dir ~`（depth ≥ 2）会列出 `~/.ssh` 里的文件名和大小（不含内容）。
 14. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
@@ -263,7 +278,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | 命令历史 | reedline | reedline 接 brush 的历史；`HISTFILE` 默认为 `<data>/state/shell_history` | `history` 内建命令与编辑器共用同一份历史 |
 | `-c`/脚本 | 纯 bash | 非登录时不加载任何 rc | brush 在非交互模式下遇到 `BASH_ENV` 会报"未实现"，会产生额外输出 |
 | 会话状态保护 | 禁止 exit/logout/exec | 权限分析里把它们定为 Forbidden；修改 PATH、`trap`、别名、函数等属于 Mutating 且 `changes_session` | 与审批矩阵统一处理 |
-| agent 超时 | 中断 | 中断整条命令行（超时发 SIGTERM，Ctrl-C 发 SIGINT，2 s 后 SIGKILL），不继续执行后续命令 | brush 没有取消接口；与 bash 按 Ctrl-C 的行为一致 |
+| agent 超时 | 中断 | 中断整条命令行（超时发 SIGTERM，Ctrl-C 发 SIGINT，2 s 后 SIGKILL），不继续执行后续命令；按环境变量 `NOSH_AGENT_RUN` 同时找到脱离了进程树的进程 | brush 没有取消接口；与 bash 按 Ctrl-C 的行为一致 |
 | `ai` 内建 | 内建命令 | 用户没有同名命令（别名/函数/PATH）时才生效 | 避免遮蔽用户自己的 `ai` |
 | `nosh -a` 输出 | — | 回答写 stdout，工具卡片和统计写 stderr；stdout 不是 TTY 时不加 `┃` 前缀 | 便于重定向和管道 |
 | 引擎 | 默认共享 engine 进程 | 进程内推理（相当于 `engine.shared = false`） | MVP 范围 |
@@ -272,6 +287,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 | `list_dir` 输出 | 遵循 .gitignore，深度 ≤ 3 | 树形列表；同一次列表中所有文件大小使用最大文件的单位 | 模型会把 "781.2 KB" 排在 "11.4 MB" 前面（§3 调优记录） |
 | 用户 allow/deny 规则 | glob 规则；allow 不能覆盖 Forbidden | 逐条匹配简单命令：allow 要求行内每一条简单命令都匹配（可以放行 Dangerous），deny 匹配任一简单命令或包装之后的命令；含隐藏字符的命令不适用 allow | 设计没有规定匹配的粒度；按整行匹配时 `ls; rm -rf x` 能借 `ls*` 规则放行 |
 | 隐藏字符 | — | 含控制字符、双向控制符、零宽字符的命令评为 Dangerous，并在卡片上显示为转义 | 防止审批卡片显示的内容与实际执行的不一致 |
+| 受保护路径的读取 | 读取需要确认 | 字面路径，以及分析时已知的变量值、函数和脚本参数；无法确定的值不要求确认；已知值不用于降低写入目标的分级 | 方便优先（§16 #14）；流不敏感的分析在分支或循环之后可能拿到过时的值，只能用来增加确认，不能用来放行 |
 | builtin 中断 | — | 交互和 agent 会话中每个 builtin 执行前让出一次调度 | brush 在只含 builtin 的循环里从不让出，超时和 Ctrl-C 无法生效；代价约 1 µs/次，`-c` 和脚本不受影响 |
 
 ## 8. 对 M2 的建议
