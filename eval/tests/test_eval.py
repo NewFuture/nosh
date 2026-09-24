@@ -467,9 +467,13 @@ class ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = self.sample()
+            data["trials"][0]["answer"] = "answer  \n```"
             report.save(data, root)
-            report.validate(json.loads((root / "report.json").read_text()))
+            loaded = json.loads((root / "report.json").read_text())
+            report.validate(loaded)
+            self.assertEqual(loaded["trials"][0]["answer"], "answer  \n```")
             self.assertIn("````text", (root / "report.md").read_text())
+            self.assertFalse(any(line.endswith(" ") for line in (root / "report.md").read_text().splitlines()))
             self.assertIn("Not measured", (root / "report.md").read_text())
         data["trials"].append(data["trials"][0])
         with self.assertRaises(ValueError):

@@ -220,13 +220,15 @@ def markdown(report: dict) -> str:
                  "Answer/trace differences are not automatically inference nondeterminism. Interface inputs do not include "
                  "all internally retained assistant tokens: unchanged interface records are not proof of identical token prompts. "
                  "See per-trial interface inputs where available.",
-                 "", "## Per-trial answers and evidence"])
+                 "", "## Per-trial answers and evidence",
+                 "", "Display copies below omit line-end whitespace; JSON retains the recorded answer text."])
     for trial in report["trials"]:
         rows.extend(["", f"### {trial['scenario_id']} / seed {trial['seed']} / repeat {trial['repeat']}: {trial['status']}", ""])
         rows.extend(f"- {reason}" for reason in trial.get("reasons", []))
         answer = trial.get("answer", "")
+        displayed = "\n".join(line.rstrip() for line in answer.splitlines())
         fence = "`" * max(3, 1 + max((len(s) for s in re.findall(r"`+", answer)), default=0))
-        rows.extend([f"{fence}text", answer or "(no answer)", fence])
+        rows.extend([f"{fence}text", displayed or "(no answer)", fence])
         if trial.get("metric_notes"):
             rows.append("Measurement notes: " + "; ".join(trial["metric_notes"]))
     if report.get("error"):
