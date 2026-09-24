@@ -49,6 +49,9 @@ pub enum HubError {
         expected: String,
         actual: String,
     },
+    /// The file changed (or could not be read) while it was being hashed.
+    #[error("{0}: {msg}", msg = crate::tr!("校验期间文件有变化，请重试", "it changed while it was being verified; try again"))]
+    Changed(String),
     #[error("not enough disk space: need {needed} bytes, {available} available")]
     InsufficientSpace { needed: u64, available: u64 },
     #[error("{0}")]
@@ -403,10 +406,21 @@ impl ModelHub {
             let before = store::FileStamp::of(&path);
             let res = match hash::sha256_file(&path, |_| {}) {
                 Ok(sha) if sha.eq_ignore_ascii_case(&f.sha256) => {
-                    if let Some(stamp) = &before {
-                        let _ = store::record_verified_as(&dir, &entry.id, f, "local", "", stamp);
+                    // As in `store::check_dir`: a change while hashing fails;
+                    // a read-only store merely cannot record the result.
+                    let unchanged = before.as_ref().is_some_and(|stamp| {
+                        store::record_verified_as(&dir, &entry.id, f, "local", "", stamp)
+                            .unwrap_or(true)
+                    });
+                    if unchanged {
+                        Ok(())
+                    } else {
+                        Err(tr!(
+                            "校验期间文件有变化，请重试",
+                            "the file changed while it was being verified; try again"
+                        )
+                        .to_string())
                     }
-                    Ok(())
                 }
                 Ok(sha) => Err(format!("SHA-256 mismatch (got {sha})")),
                 Err(e) => Err(e.to_string()),
@@ -604,6 +618,33 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
             hub.resolve_path(&other, None).unwrap().weights,
             other.join("a.gguf")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_stores_still_verify() {
+        use std::os::unix::fs::PermissionsExt;
+        let w = b"GGUF-tiny-weights".to_vec();
+        let t = b"{\"model\":{}}".to_vec();
+        let root = tempdir("hub-readonly");
+        let hub = ModelHub::with_root(&root, test_registry(&w, &t));
+        let entry = hub.registry().default_model().clone();
+        let dir = hub.user_model_dir(&entry);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(&entry.weights().name), &w).unwrap();
+        fs::write(dir.join(&entry.tokenizer().name), &t).unwrap();
+        // The manifest cannot be written there; unchanged files still verify.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let found = hub.find(None);
+        let mut failures = Vec::new();
+        let verified = hub.verify(None, |f, r| {
+            if let Err(e) = r {
+                failures.push(format!("{}: {e}", f.name));
+            }
+        });
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(found.unwrap().is_some());
+        assert!(verified.unwrap(), "{failures:?}");
     }
 
     #[test]

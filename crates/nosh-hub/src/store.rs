@@ -219,8 +219,13 @@ pub fn check_dir(dir: &Path, entry: &ModelEntry) -> Result<Option<ResolvedModel>
                         actual: sha,
                     });
                 }
-                if let Some(stamp) = before {
-                    let _ = record_verified_as(dir, &entry.id, f, "local", "", &stamp);
+                // The hash only holds if the file did not change meanwhile; a
+                // read-only store merely cannot record it (`Err`).
+                let unchanged = before.is_some_and(|stamp| {
+                    record_verified_as(dir, &entry.id, f, "local", "", &stamp).unwrap_or(true)
+                });
+                if !unchanged {
+                    return Err(HubError::Changed(path.display().to_string()));
                 }
             }
             _ => return Ok(None),
