@@ -19,30 +19,36 @@ fn is_word(s: &str) -> bool {
         && !s.contains("--")
 }
 
-/// `true` when `argv` starts with a destructive command followed by at least
-/// three plain words, none of which is an option or an existing path.
+/// `true` when `argv` starts with a destructive command, has no option, and
+/// has at least three plain words that are not all existing paths: running
+/// `rm README all temp files` would delete `README`, while plain words that
+/// all name existing files are a deliberate list. The mode, owner or group of
+/// `chmod`/`chown`/`chgrp` and the revision of `git reset`/`git checkout` come
+/// first and need not exist.
 pub fn looks_like_prose(argv: &[String], cwd: &Path) -> bool {
     let Some(name) = argv.first() else {
         return false;
     };
     let base = name.rsplit('/').next().unwrap_or(name);
-    let args: &[String] = if base == "git" {
+    let (args, first_is_file): (&[String], bool) = if base == "git" {
         match argv.get(1).map(String::as_str) {
-            Some("reset" | "clean" | "rm" | "checkout") => &argv[2..],
+            Some("reset" | "checkout") => (&argv[2..], false),
+            Some("clean" | "rm") => (&argv[2..], true),
             _ => return false,
         }
+    } else if matches!(base, "chmod" | "chown" | "chgrp") {
+        (&argv[1..], false)
     } else if DESTRUCTIVE.contains(&base) || base.starts_with("mkfs.") {
-        &argv[1..]
+        (&argv[1..], true)
     } else {
         return false;
     };
-    if args
-        .iter()
-        .any(|a| a.starts_with('-') || cwd.join(a).exists() || Path::new(a).is_absolute())
-    {
+    if args.iter().any(|a| a.starts_with('-')) {
         return false;
     }
-    args.iter().filter(|a| is_word(a)).count() >= 3
+    let words: Vec<&String> = args.iter().filter(|a| is_word(a)).collect();
+    let skip = usize::from(!first_is_file && args.first().is_some_and(|a| is_word(a)));
+    words.len() >= 3 && words[skip..].iter().any(|w| !cwd.join(w).exists())
 }
 
 #[cfg(test)]
@@ -62,17 +68,40 @@ mod tests {
             &v("git reset everything to yesterday"),
             &dir
         ));
+        assert!(looks_like_prose(&v("rm /missing/one all temp files"), &dir));
         assert!(!looks_like_prose(&v("rm -rf build"), &dir));
+        assert!(!looks_like_prose(&v("rm -rf all temp files"), &dir));
         assert!(!looks_like_prose(&v("rm a.txt"), &dir));
+        assert!(!looks_like_prose(&v("rm /a /b /c"), &dir));
         assert!(!looks_like_prose(&v("ls all my files"), &dir));
         assert!(!looks_like_prose(&v("mv one two"), &dir));
     }
 
     #[test]
-    fn existing_path_disables_guard() {
+    fn only_existing_paths_make_a_file_list() {
         let dir = std::env::temp_dir().join(format!("nosh-guard-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("files")).unwrap();
-        assert!(!looks_like_prose(&v("rm all temp files"), &dir));
+        for name in ["alpha", "beta", "gamma"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        assert!(!looks_like_prose(&v("rm alpha beta gamma"), &dir));
+        // Running these would delete `alpha`.
+        assert!(looks_like_prose(&v("rm alpha all temp files"), &dir));
+        assert!(looks_like_prose(&v("rm ./alpha and the rest"), &dir));
+        assert!(looks_like_prose(&v("rm root alpha beta"), &dir));
+        for line in [
+            "chmod go-w alpha beta",
+            "chown root alpha beta",
+            "chgrp staff alpha beta",
+            "git reset HEAD alpha beta",
+            "git checkout main alpha beta",
+        ] {
+            assert!(!looks_like_prose(&v(line), &dir), "{line}");
+        }
+        assert!(looks_like_prose(&v("chown root alpha and the rest"), &dir));
+        assert!(looks_like_prose(
+            &v("git checkout main alpha and the docs"),
+            &dir
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

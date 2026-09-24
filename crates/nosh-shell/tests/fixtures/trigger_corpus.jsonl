@@ -37,7 +37,7 @@
 {"id":"exec-037","category":"valid_command","input":"rm -rf all temp files","expected":"execute","reason":"Options bypass the natural-language guard by design; explicitly confirmed for issue #5."}
 {"id":"exec-038","category":"valid_command","input":"rm alpha beta gamma","expected":"execute","reason":"All three plain-word filenames exist in the controlled working directory."}
 {"id":"exec-039","category":"valid_command","input":"rm ./missing-one ./missing-two ./missing-three","expected":"execute"}
-{"id":"exec-040","category":"valid_command","input":"rm alpha all temp files","expected":"execute","reason":"One existing path is enough to bypass the current guard."}
+{"id":"exec-040","category":"valid_command","input":"chown root alpha beta","expected":"execute","reason":"The owner is not a file; the operands after it all exist."}
 {"id":"exec-041","category":"valid_command","input":"mv alpha beta backup","expected":"execute"}
 {"id":"exec-042","category":"valid_command","input":"dd if=input.txt of=data.bin bs=4096 count=1","expected":"execute"}
 {"id":"exec-043","category":"valid_command","input":"chmod u+x tools/runner","expected":"execute"}
@@ -168,7 +168,7 @@
 {"id":"exec-168","category":"valid_command","input":"echo \"what's using port 8080?\"","expected":"execute"}
 {"id":"exec-169","category":"valid_command","input":"printf '%s\\n' 'a;b' 'x|y' 'a&&b'","expected":"execute"}
 {"id":"exec-170","category":"valid_command","input":"echo \\#not-an-ai-request","expected":"execute"}
-{"id":"exec-171","category":"valid_command","input":"rm /missing/one all temp files","expected":"execute","reason":"An absolute path bypasses the current guard even if it does not exist."}
+{"id":"exec-171","category":"valid_command","input":"chmod go-w alpha beta","expected":"execute","reason":"A symbolic mode can look like a plain word but is not a file."}
 {"id":"exec-172","category":"valid_command","input":"rm -- all temp files","expected":"execute"}
 {"id":"exec-173","category":"valid_command","input":"rm -i all temp files","expected":"execute"}
 {"id":"exec-174","category":"valid_command","input":"mv -n all old files backup","expected":"execute"}
@@ -181,7 +181,7 @@
 {"id":"exec-181","category":"valid_command","input":"truncate --size=0 all old logs","expected":"execute"}
 {"id":"exec-182","category":"valid_command","input":"shred --iterations=0 all old secrets","expected":"execute"}
 {"id":"exec-183","category":"valid_command","input":"rmdir --ignore-fail-on-non-empty all empty folders","expected":"execute"}
-{"id":"exec-184","category":"valid_command","input":"unlink /missing/path please remove this","expected":"execute"}
+{"id":"exec-184","category":"valid_command","input":"git reset HEAD src build","expected":"execute","reason":"The revision is not a file; src and build exist."}
 {"id":"exec-185","category":"valid_command","input":"mkfs.ext4 -n erase this disk","expected":"execute"}
 {"id":"exec-186","category":"valid_command","input":"wipefs --no-act erase all signatures","expected":"execute"}
 {"id":"exec-187","category":"valid_command","input":"git reset --hard everything to yesterday","expected":"execute"}
@@ -398,3 +398,13 @@
 {"id":"guard-038","category":"destructive_prose","input":"git checkout bring back yesterday changes","expected":"guard"}
 {"id":"guard-039","category":"destructive_prose","input":"./tools/rm all temp files","expected":"guard"}
 {"id":"guard-040","category":"destructive_prose","input":"rm 请 删除 所有 临时 文件","expected":"guard","reason":"Chinese prose arguments to a destructive command belong to the guard group, not the Chinese AI-request group."}
+{"id":"guard-041","category":"destructive_prose","input":"rm alpha all temp files","expected":"guard","reason":"Only alpha exists: running the line would delete it."}
+{"id":"guard-042","category":"destructive_prose","input":"rm alpha beta and everything else","expected":"guard"}
+{"id":"guard-043","category":"destructive_prose","input":"rm README.md and all the logs","expected":"guard","reason":"A path is not a plain word, so it does not let the prose through."}
+{"id":"guard-044","category":"destructive_prose","input":"rm ./alpha and the rest of it","expected":"guard"}
+{"id":"guard-045","category":"destructive_prose","input":"rm /missing/one all temp files","expected":"guard","reason":"An absolute path does not let the prose through."}
+{"id":"guard-046","category":"destructive_prose","input":"unlink /missing/path please remove this","expected":"guard"}
+{"id":"guard-047","category":"destructive_prose","input":"mv alpha and beta into the backup","expected":"guard","reason":"backup is a directory: running the line would move alpha and beta into it."}
+{"id":"guard-048","category":"destructive_prose","input":"shred alpha and all the backups","expected":"guard"}
+{"id":"guard-049","category":"destructive_prose","input":"chown root alpha and the other files","expected":"guard"}
+{"id":"guard-050","category":"destructive_prose","input":"git checkout main alpha and the docs","expected":"guard"}

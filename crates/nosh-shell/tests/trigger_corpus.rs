@@ -308,13 +308,13 @@ fn corpus() -> Vec<Case> {
             case
         })
         .collect();
-    assert_eq!(cases.len(), 400, "update the documented corpus size too");
+    assert_eq!(cases.len(), 410, "update the documented corpus size too");
     for (category, count) in [
         (Category::ValidCommand, 200),
         (Category::ZhNl, 60),
         (Category::EnNl, 50),
         (Category::Typo, 50),
-        (Category::DestructiveProse, 40),
+        (Category::DestructiveProse, 50),
     ] {
         assert_eq!(
             cases.iter().filter(|c| c.category == category).count(),
