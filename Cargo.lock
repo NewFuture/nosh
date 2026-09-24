@@ -387,7 +387,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle?rev=9b1be4a321ef265f13d2c30be4f2037109c51d14#9b1be4a321ef265f13d2c30be4f2037109c51d14"
 dependencies = [
  "byteorder",
  "float8",
@@ -1890,6 +1889,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "gemm",
+ "half",
  "nosh-hub",
  "num_cpus",
  "serde",

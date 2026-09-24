@@ -1,0 +1,160 @@
+diff -ruN a/candle-core/src/quantized/mod.rs b/candle-core/src/quantized/mod.rs
+--- a/candle-core/src/quantized/mod.rs
++++ b/candle-core/src/quantized/mod.rs
+@@ -1,3 +1,6 @@
++// nosh patch: vendored from huggingface/candle rev 9b1be4a321ef265f13d2c30be4f2037109c51d14
++// with `QTensor::prepack_x86_and_release_storage` added (search "nosh patch");
++// see third_party/candle-core/NOSH_PATCH.md for what changed and when to drop it.
+ use crate::{
+     backend::BackendStorage, CpuStorage, DType, Device, Result, Shape, Storage, Tensor, D,
+ };
+@@ -691,6 +694,7 @@
+     }
+ 
+     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
++        self.check_raw()?;
+         let storage = self.storage.dequantize(self.shape.elem_count())?;
+         let none = crate::op::BackpropOp::none();
+         crate::tensor::from_storage(storage, self.shape.clone(), none, false).to_device(device)
+@@ -714,6 +718,7 @@
+     }
+ 
+     pub fn embedding(&self, ids: &Tensor) -> Result<Tensor> {
++        self.check_raw()?;
+         let (rows, hidden) = self.shape.dims2()?;
+         if !hidden.is_multiple_of(self.dtype().block_size()) {
+             crate::bail!(
+@@ -756,9 +761,57 @@
+     }
+ 
+     pub fn data(&self) -> Result<Cow<'_, [u8]>> {
++        self.check_raw()?;
+         self.storage.data()
+     }
+ 
++    /// nosh patch (third_party/candle-core/NOSH_PATCH.md): builds the x86 tile
++    /// layout now and drops the raw quantized blocks, which the packed matmuls
++    /// never read again. Only done when `repack_x86::select` accepts the tensor
++    /// for every batch size m: CPU storage on x86_64 with AVX2 or VNNI, a 2D
++    /// shape with n % 16 == 0 and k % 256 == 0, and a dtype whose tiles also
++    /// serve m == 1 (Q4K; Q8_0 unless the CPU only has AVX2). Otherwise nothing
++    /// changes. Returns whether the raw data was released.
++    ///
++    /// Afterwards only matmuls with f32 or bf16 inputs work; `dequantize`,
++    /// `embedding`, `data` and f16 matmuls return an error.
++    pub fn prepack_x86_and_release_storage(&mut self) -> Result<bool> {
++        #[cfg(target_arch = "x86_64")]
++        {
++            if self.repacked_qs.is_released() {
++                return Ok(true);
++            }
++            let QStorage::Cpu(storage) = &self.storage else {
++                return Ok(false);
++            };
++            let dtype = storage.dtype();
++            let Ok((n, k)) = self.shape.dims2() else {
++                return Ok(false);
++            };
++            // select() only tells m == 1 (gemv) from m > 1 apart.
++            if !(repack_x86::select(dtype, 1, n, k) && repack_x86::select(dtype, 2, n, k)) {
++                return Ok(false);
++            }
++            self.repacked_qs.x86_prepack(storage.as_ref(), n, k);
++            self.storage = QStorage::Cpu(dtype.cpu_zeros(0));
++            self.repacked_qs.mark_released();
++            Ok(true)
++        }
++        #[cfg(not(target_arch = "x86_64"))]
++        Ok(false)
++    }
++
++    fn check_raw(&self) -> Result<()> {
++        if self.repacked_qs.is_released() {
++            crate::bail!(
++                "the raw {:?} data of this {:?} tensor was released after x86 prepacking; only matmuls with f32/bf16 inputs are available",
++                self.dtype(),
++                self.shape
++            )
++        }
++        Ok(())
++    }
++
+     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
+         match &self.storage {
+             QStorage::Cuda(s) => match (&*x.storage(), &*ids.storage()) {
+@@ -1218,10 +1271,12 @@
+                     return Ok((crate::CpuStorage::F32(dst_storage), dst_shape));
+                 }
+ 
++                self.check_raw()?;
+                 self_storage.matmul_t(mkn, slice, &mut dst_storage)?;
+                 Ok((crate::CpuStorage::F32(dst_storage), dst_shape))
+             }
+             DType::F16 => {
++                self.check_raw()?;
+                 let slice = storage.as_slice::<f16>()?;
+                 let slice =
+                     &slice[layout.start_offset()..layout.start_offset() + src_shape.elem_count()];
+@@ -1250,6 +1305,7 @@
+                     &mut dst_storage,
+                 )?;
+                 if !used_packed {
++                    self.check_raw()?;
+                     self_storage.matmul_t(mkn, &lhs, &mut dst_storage)?;
+                 }
+                 let dst: Vec<half::bf16> = narrow_bf16(&dst_storage);
+diff -ruN a/candle-core/src/quantized/repack.rs b/candle-core/src/quantized/repack.rs
+--- a/candle-core/src/quantized/repack.rs
++++ b/candle-core/src/quantized/repack.rs
+@@ -1,3 +1,6 @@
++// nosh patch: vendored from huggingface/candle rev 9b1be4a321ef265f13d2c30be4f2037109c51d14
++// with an eager x86 prepack and a "raw data released" flag in `PackedCache`
++// (search "nosh patch"); see third_party/candle-core/NOSH_PATCH.md.
+ #[cfg(target_arch = "aarch64")]
+ use super::GgmlDType;
+ use super::QuantizedType;
+@@ -49,6 +52,8 @@
+     q6kx8: OnceLock<PackedStorage>,
+     #[cfg(target_arch = "aarch64")]
+     q8_0x4: OnceLock<PackedStorage>,
++    // nosh patch: the raw blocks were dropped after `x86_prepack`.
++    released: bool,
+ }
+ 
+ impl PackedCache {
+@@ -60,6 +65,27 @@
+         self.x86.get_or_init(init)
+     }
+ 
++    // nosh patch: builds every x86 layout `try_matmul_f32` can pick for this
++    // tensor, so the raw blocks are no longer needed afterwards.
++    #[cfg(target_arch = "x86_64")]
++    pub(crate) fn x86_prepack(&self, storage: &dyn QuantizedType, n: usize, k: usize) {
++        let dtype = storage.dtype();
++        self.x86
++            .get_or_init(|| super::repack_x86::pack(dtype, storage, n, k));
++        if dtype == super::GgmlDType::Q4K && super::repack_x86::amx_available() {
++            self.x86_amx
++                .get_or_init(|| super::repack_x86::pack_q4k_amx(storage, n, k));
++        }
++    }
++
++    pub(crate) fn mark_released(&mut self) {
++        self.released = true;
++    }
++
++    pub(crate) fn is_released(&self) -> bool {
++        self.released
++    }
++
+     pub(crate) fn new() -> Self {
+         Self {
+             #[cfg(target_arch = "x86_64")]
+@@ -76,6 +102,7 @@
+             q6kx8: OnceLock::new(),
+             #[cfg(target_arch = "aarch64")]
+             q8_0x4: OnceLock::new(),
++            released: false,
+         }
+     }
+ 

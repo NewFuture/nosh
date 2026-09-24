@@ -2,6 +2,7 @@
 resolver = "3"
 members = ["crates/*", "tests"]
 default-members = ["crates/*", "tests"]
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,10 +37,12 @@ crossterm = "0.29.0"
 nu-ansi-term = "0.50.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "signal", "time", "macros", "sync"] }
 
-# inference: pinned candle main rev (runtime AVX2/AVX-512 dispatch, tokenizers 0.23 + fancy-regex)
+# inference: pinned candle main rev (runtime AVX2/AVX-512 dispatch, tokenizers 0.23 + fancy-regex);
+# candle-core itself comes from third_party/candle-core (same rev plus one patch, see [patch] below)
 candle-core = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
 candle-nn = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
 gemm = "0.19.0"
+half = "2.7.1"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 
 # hub
@@ -59,6 +62,12 @@ unused_must_use = "deny"
 dbg_macro = "warn"
 todo = "warn"
 print_stderr = "allow"
+
+# candle-core at the pinned rev with `QTensor::prepack_x86_and_release_storage`
+# (drops raw Q4K blocks once their x86 tiles exist); candle-nn from the same git
+# source links against it. See third_party/candle-core/NOSH_PATCH.md.
+[patch."https://github.com/huggingface/candle"]
+candle-core = { path = "third_party/candle-core" }
 
 [profile.release]
 lto = "fat"
