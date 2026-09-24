@@ -8,7 +8,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -117,6 +117,33 @@ pub fn download_file(
     opts: &DownloadOptions,
     progress: &dyn Progress,
 ) -> Result<DownloadOutcome, HubError> {
+    download_file_with(file, dir, cands, opts, progress, &net::is_cancelled)
+}
+
+/// Sleeps for `d` in short steps; false as soon as `cancelled` is true.
+fn sleep_unless_cancelled(d: Duration, cancelled: &dyn Fn() -> bool) -> bool {
+    let end = Instant::now() + d;
+    loop {
+        if cancelled() {
+            return false;
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(LOCK_POLL));
+    }
+}
+
+/// [`download_file`] with the cancellation check used while waiting.
+fn download_file_with(
+    file: &FileEntry,
+    dir: &Path,
+    cands: &[Candidate],
+    opts: &DownloadOptions,
+    progress: &dyn Progress,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DownloadOutcome, HubError> {
     if cands.is_empty() {
         return Err(HubError::Network(format!(
             "no download source for {}",
@@ -124,7 +151,7 @@ pub fn download_file(
         )));
     }
     fs::create_dir_all(dir)?;
-    let _lock = acquire_lock(dir, file, progress, &net::is_cancelled)?;
+    let _lock = acquire_lock(dir, file, progress, cancelled)?;
     let final_path = dir.join(&file.name);
 
     // Another process may have finished while we waited for the lock.
@@ -208,6 +235,7 @@ pub fn download_file(
             &mut hasher,
             &mut offset,
             progress,
+            cancelled,
         ) {
             Ok(()) => used_hub = Some(c.hub),
             Err(e @ (HubError::Offline | HubError::Cancelled)) => {
@@ -226,7 +254,11 @@ pub fn download_file(
                 last_err = Some(e);
                 idx += 1;
                 let exp = failures.min(4) as u32;
-                std::thread::sleep(opts.backoff * 2u32.pow(exp));
+                // Ctrl-C only sets the flag: wake up for it.
+                if !sleep_unless_cancelled(opts.backoff * 2u32.pow(exp), cancelled) {
+                    progress.finish(false);
+                    return Err(HubError::Cancelled);
+                }
             }
         }
     }
@@ -264,6 +296,7 @@ fn fetch_chunk(
     hasher: &mut Sha256,
     offset: &mut u64,
     progress: &dyn Progress,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(), HubError> {
     let resp = net::get_range(&c.url, *offset, Some(end), opts.per_call_timeout)?;
     let limit = if resp.status == 200 {
@@ -291,7 +324,7 @@ fn fetch_chunk(
     let mut reader = resp.reader;
     let mut buf = vec![0u8; 256 * 1024];
     while *offset < limit {
-        if net::is_cancelled() {
+        if cancelled() {
             return Err(HubError::Cancelled);
         }
         let want = ((limit - *offset) as usize).min(buf.len());
@@ -476,6 +509,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, HubError::AllSourcesFailed(_)), "{err}");
+    }
+
+    #[test]
+    fn ctrl_c_ends_the_retry_backoff() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let body = data(1000);
+        let srv = TestServer::start(body.clone(), Behavior::Status(500));
+        let dir = tempdir("dl-backoff");
+        let f = entry(&body, "r.bin");
+        let mut o = opts();
+        // The first retry would wait 10 s.
+        o.backoff = Duration::from_secs(5);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let t0 = Instant::now();
+        std::thread::scope(|s| {
+            let c = cancel.clone();
+            s.spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                c.store(true, Ordering::SeqCst);
+            });
+            let r = download_file_with(
+                &f,
+                &dir,
+                &[cand(Hub::HuggingFace, srv.url("r.bin"))],
+                &o,
+                &NoProgress,
+                &|| cancel.load(Ordering::SeqCst),
+            );
+            assert!(matches!(r, Err(HubError::Cancelled)), "{r:?}");
+        });
+        let waited = t0.elapsed();
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert_eq!(srv.requests(), 1, "no retry after the cancel");
     }
 
     #[derive(Default)]
