@@ -514,10 +514,10 @@ fn barrier_threads() -> usize {
         .max(1)
 }
 
-/// Puts the thread counts of [`barrier_threads`] into the process
-/// environment, where candle and rayon read them: `CANDLE_NUM_THREADS`
-/// (physical cores unless set) and `RAYON_NUM_THREADS` (1, or
-/// `NOSH_RAYON_THREADS`). The previous values are kept for
+/// Puts nosh's inference thread counts into the process environment, where
+/// candle and rayon read them: `CANDLE_NUM_THREADS` (the physical cores
+/// unless set) for candle's barrier pool and `RAYON_NUM_THREADS` (1, or
+/// `NOSH_RAYON_THREADS`) for rayon. The previous values are kept for
 /// [`env_overrides`]. A binary calls this first thing in `main`.
 ///
 /// # Safety

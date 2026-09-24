@@ -162,7 +162,9 @@ fn md<'a>(ct: &'a gguf_file::Content, key: &str) -> Result<&'a gguf_file::Value>
 }
 
 /// Prepacks the Q4K matrices among `ts`, one thread each (see
-/// [`LoadOptions::prepack_q4k`]); other dtypes keep their raw data.
+/// [`LoadOptions::prepack_q4k`]); other dtypes keep their raw data. It is
+/// called once per layer with that layer's seven matrices and joins them
+/// before returning, so at most seven threads run at a time.
 fn prepack_q4k(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
     let t0 = std::time::Instant::now();
     let done: Vec<Result<Option<usize>>> = std::thread::scope(|s| {
