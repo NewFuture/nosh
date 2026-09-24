@@ -196,9 +196,17 @@ class Child:
         self.decoders = {name: codecs.getincrementaldecoder("utf-8")("replace") for name in ("stdout", "stderr", "transcript")}
         self.screen = Screen() if tty else None
         self.proc = None
+        self.pid = None
         self.fd = None
         self.bytes = 0
         self.pending_input = memoryview(stdin)
+        try:
+            self.start_process(argv, cwd, env, tty, stdin)
+        except (OSError, ValueError, KeyboardInterrupt):
+            self.close()
+            raise
+
+    def start_process(self, argv, cwd, env, tty, stdin):
         if tty:
             import fcntl
             import pty
@@ -239,7 +247,7 @@ class Child:
             raise DriverError("short terminal write")
 
     def reap(self):
-        if self.result.exit_code is None:
+        if self.pid is not None and self.result.exit_code is None:
             pid, status, usage = os.wait4(self.pid, os.WNOHANG)
             if pid:
                 self.result.exit_code = os.waitstatus_to_exitcode(status)
@@ -297,7 +305,7 @@ class Child:
     def close(self):
         stop_owned(self.token)
         self.reap()
-        if self.result.exit_code is None:
+        if self.pid is not None and self.result.exit_code is None:
             # The child may have been stopped before exec, before its environment
             # marker was installed. It is still our unreaped child, not a reused PID.
             os.kill(self.pid, signal.SIGKILL)

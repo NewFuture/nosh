@@ -310,6 +310,24 @@ class CheckTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux PTY and wait4")
 class DriverTests(unittest.TestCase):
+    def test_partial_pty_setup_failure_reaps_the_started_child(self):
+        import pty
+
+        started = []
+        fork = pty.fork
+        def track_fork():
+            pid, fd = fork()
+            if pid:
+                started.append(pid)
+            return pid, fd
+        with patch("pty.fork", side_effect=track_fork), patch("fcntl.ioctl", side_effect=PermissionError("blocked ioctl")):
+            with self.assertRaisesRegex(PermissionError, "blocked ioctl"):
+                driver.Child([sys.executable, "-c", "import time; time.sleep(60)"],
+                             Path.cwd(), {"PATH": "/usr/bin:/bin"}, True)
+        self.assertEqual(len(started), 1)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(started[0], os.WNOHANG)
+
     def test_screen_fragmented_queries_and_saved_cursor(self):
         screen = driver.Screen()
         self.assertEqual(screen.feed("abc\x1b["), b"")
