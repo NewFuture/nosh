@@ -401,3 +401,76 @@ fn flags_are_reported() {
     let r = assess_command("ls | grep a && git status", &c);
     assert_eq!(r.commands, vec!["ls", "grep a", "git status"]);
 }
+
+/// Builtins that only query stay Safe; forms that change the session (a
+/// sensitive variable, the command hash, the terminal) are session changes.
+#[test]
+fn session_changing_builtin_forms() {
+    use nosh_permissions::{ApprovalMode, Decision, SessionAllowList, UserRules, decide};
+    let c = ctx();
+    let cases: &[(&str, Risk, bool)] = &[
+        // Queries and ordinary variables: Safe.
+        ("read -r line < notes.txt", Safe, false),
+        (
+            "while read -r l; do echo \"$l\"; done < notes.txt",
+            Safe,
+            false,
+        ),
+        ("read -p 'Name: ' -t 5 name", Safe, false),
+        ("mapfile -t lines < notes.txt", Safe, false),
+        ("printf '%s\\n' hi", Safe, false),
+        ("printf -v out '%s' hi", Safe, false),
+        ("let i=i+1", Safe, false),
+        ("getopts ab: opt", Safe, false),
+        ("hash", Safe, false),
+        ("hash -l", Safe, false),
+        ("hash -t ls", Safe, false),
+        ("fc -l", Safe, false),
+        ("stty -a", Safe, false),
+        // Session changes.
+        ("read PATH <<< /tmp", Mutating, true),
+        ("read -r IFS", Mutating, true),
+        ("read -a PATH <<< /tmp", Mutating, true),
+        ("IFS= read -r HOME", Mutating, true),
+        ("mapfile -t PATH < dirs.txt", Mutating, true),
+        ("printf -v PATH '%s' /tmp", Mutating, true),
+        ("let PS1=1", Mutating, true),
+        ("getopts ab: PATH", Mutating, true),
+        ("hash -p /tmp/evil ls", Mutating, true),
+        ("hash -r", Mutating, true),
+        ("hash -d ls", Mutating, true),
+        ("stty -echo", Mutating, true),
+        ("fc", Mutating, true),
+        // Code injection into later commands, as with a direct assignment.
+        ("read LD_PRELOAD <<< /tmp/x.so", Dangerous, true),
+        ("printf -v PROMPT_COMMAND '%s' 'curl x'", Dangerous, true),
+        // Re-runs a history command the analysis cannot see.
+        ("fc -s", Dangerous, false),
+    ];
+    let mut failures = Vec::new();
+    for (cmd, want, session) in cases {
+        let r = assess_command(cmd, &c);
+        if r.risk() != *want || r.changes_session != *session {
+            failures.push(format!(
+                "{cmd:?}: want {want} session={session}, got {} session={} ({:?})",
+                r.risk(),
+                r.changes_session,
+                r.findings
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // Auto mode runs the queries and asks for the session changes.
+    let d = |cmd: &str| {
+        decide(
+            &assess_command(cmd, &c),
+            cmd,
+            ApprovalMode::Auto,
+            &UserRules::default(),
+            &SessionAllowList::default(),
+        )
+    };
+    assert_eq!(d("read -r line < notes.txt"), Decision::Allow);
+    assert_eq!(d("read PATH <<< /tmp"), Decision::Ask { strong: false });
+    assert_eq!(d("hash -p /tmp/evil ls"), Decision::Ask { strong: false });
+}

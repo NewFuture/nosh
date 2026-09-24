@@ -283,6 +283,153 @@ pub fn var_assignment_risk(name: &str) -> Option<(Risk, String)> {
     }
 }
 
+/// A builtin that assigns the variables `names`: ordinary ones are Safe,
+/// like `x=1`; sensitive ones (PATH, IFS, LD_PRELOAD, …) change the session.
+fn assigns_vars<'a>(what: &str, names: impl IntoIterator<Item = &'a str>) -> Verdict {
+    let worst = names
+        .into_iter()
+        .filter_map(var_assignment_risk)
+        .max_by_key(|(r, _)| *r);
+    match worst {
+        Some((risk, why)) => Verdict::new(risk, format!("{what}: {why}")).session(),
+        None => Verdict::safe(format!("{what} (variables)")),
+    }
+}
+
+/// Values of short options that take one (`-p PROMPT`, `-rp PROMPT`) and the
+/// operands. `names` lists the options whose value is a variable name.
+fn split_opts<'a>(args: &'a [Arg], valued: &str, names: &str) -> (Vec<&'a str>, Vec<&'a str>) {
+    let (mut named, mut ops) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < args.len() {
+        let v = args[i].value.as_str();
+        if v == "--" {
+            ops.extend(args[i + 1..].iter().map(|a| a.value.as_str()));
+            break;
+        }
+        match v.strip_prefix('-').filter(|s| !s.is_empty()) {
+            Some(cluster) => {
+                for (j, c) in cluster.char_indices() {
+                    if valued.contains(c) {
+                        let rest = &cluster[j + c.len_utf8()..];
+                        let value = if rest.is_empty() {
+                            i += 1;
+                            args.get(i).map(|a| a.value.as_str())
+                        } else {
+                            Some(rest)
+                        };
+                        if names.contains(c)
+                            && let Some(n) = value
+                        {
+                            named.push(n);
+                        }
+                        break;
+                    }
+                }
+            }
+            None => ops.push(v),
+        }
+        i += 1;
+    }
+    (named, ops)
+}
+
+/// Builtins listed as read-only whose other forms change the session.
+fn session_builtin(name: &str, args: &[Arg]) -> Option<Verdict> {
+    Some(match name {
+        "read" => {
+            let (arrays, ops) = split_opts(args, "adinNptu", "a");
+            let names = if ops.is_empty() && arrays.is_empty() {
+                vec!["REPLY"]
+            } else {
+                arrays.into_iter().chain(ops).collect()
+            };
+            assigns_vars("read", names)
+        }
+        "mapfile" | "readarray" => {
+            let (_, ops) = split_opts(args, "dnOsuCc", "");
+            assigns_vars(name, [*ops.last().unwrap_or(&"MAPFILE")])
+        }
+        "printf" => {
+            let (vars, _) = split_opts(args, "v", "v");
+            if vars.is_empty() {
+                Verdict::safe("prints text")
+            } else {
+                assigns_vars("printf -v", vars)
+            }
+        }
+        "getopts" => {
+            let ops: Vec<&str> = operands(args).iter().map(|a| a.value.as_str()).collect();
+            assigns_vars("getopts", ops.get(1).copied())
+        }
+        "let" => {
+            let names: Vec<&str> = args
+                .iter()
+                .filter_map(|a| {
+                    let v = a.value.trim_start_matches(['+', '-']);
+                    let end = v
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .unwrap_or(v.len());
+                    let rest = &v[end..];
+                    let assigns = (rest.starts_with('=') && !rest.starts_with("=="))
+                        || [
+                            "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=", "++",
+                            "--",
+                        ]
+                        .iter()
+                        .any(|op| rest.starts_with(op))
+                        || a.value.starts_with("++")
+                        || a.value.starts_with("--");
+                    (end > 0 && assigns).then_some(&v[..end])
+                })
+                .collect();
+            assigns_vars("let", names)
+        }
+        "hash" => {
+            if args.is_empty()
+                || has_flag(args, &['l', 't'], &[]) && !has_flag(args, &['p', 'd', 'r'], &[])
+            {
+                Verdict::safe("lists remembered command paths")
+            } else if has_flag(args, &['p'], &[]) {
+                Verdict::mutating("points a command name at another program (hash -p)").session()
+            } else {
+                Verdict::mutating("changes the remembered command paths (hash)").session()
+            }
+        }
+        "fc" => {
+            if has_flag(args, &['l'], &[]) {
+                Verdict::safe("lists history")
+            } else if has_flag(args, &['s'], &[]) {
+                Verdict::dangerous("re-runs a command from history (fc -s) that cannot be analyzed")
+            } else {
+                Verdict::mutating("edits and re-runs history commands (fc)").session()
+            }
+        }
+        "stty" => {
+            if args.is_empty()
+                || args.iter().all(|a| {
+                    matches!(
+                        a.value.as_str(),
+                        "-a" | "--all" | "-g" | "--save" | "size" | "speed"
+                    )
+                })
+            {
+                Verdict::safe("shows terminal settings")
+            } else {
+                Verdict::mutating("changes terminal settings (stty)").session()
+            }
+        }
+        "mesg" => {
+            if args.is_empty() {
+                Verdict::safe("shows whether messages are allowed")
+            } else {
+                Verdict::mutating("changes whether other users may write to the terminal").session()
+            }
+        }
+        _ => return None,
+    })
+}
+
 const READERS: &[&str] = &[
     "cat",
     "head",
@@ -520,6 +667,9 @@ fn first_word(args: &[Arg]) -> Option<&str> {
 }
 
 pub fn classify(name: &str, args: &[Arg]) -> Verdict {
+    if let Some(v) = session_builtin(name, args) {
+        return v;
+    }
     let ops = || operands(args);
     let targets = |v: Vec<&Arg>| v.into_iter().map(Target::of).collect::<Vec<_>>();
     match name {
