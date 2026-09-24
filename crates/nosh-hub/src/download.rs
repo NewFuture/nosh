@@ -135,6 +135,28 @@ fn sleep_unless_cancelled(d: Duration, cancelled: &dyn Fn() -> bool) -> bool {
     }
 }
 
+/// Hashes `len` bytes of `r` (all of it with `None`) into `h` in 64 MiB
+/// steps, returning `Cancelled` between steps once `cancelled` is true.
+fn hash_unless_cancelled(
+    r: &mut impl Read,
+    h: &mut Sha256,
+    len: Option<u64>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), HubError> {
+    let mut left = len.unwrap_or(u64::MAX);
+    while left > 0 {
+        if cancelled() {
+            return Err(HubError::Cancelled);
+        }
+        let n = hash::hash_reader(r, h, Some(left.min(64 << 20)), |_| {})?;
+        if n == 0 {
+            break;
+        }
+        left -= n;
+    }
+    Ok(())
+}
+
 /// [`download_file`] with the cancellation check used while waiting.
 fn download_file_with(
     file: &FileEntry,
@@ -158,8 +180,9 @@ fn download_file_with(
     if let Ok(m) = fs::metadata(&final_path)
         && m.len() == file.size
     {
-        let sha = hash::sha256_file(&final_path, |_| {})?;
-        if sha.eq_ignore_ascii_case(&file.sha256) {
+        let mut h = Sha256::new();
+        hash_unless_cancelled(&mut File::open(&final_path)?, &mut h, None, cancelled)?;
+        if hash::finalize_hex(h).eq_ignore_ascii_case(&file.sha256) {
             return Ok(DownloadOutcome {
                 path: final_path,
                 hub: None,
@@ -193,7 +216,8 @@ fn download_file_with(
             )
         ));
         part.seek(SeekFrom::Start(0))?;
-        hash::hash_reader(&mut part, &mut hasher, Some(offset), |_| {})?;
+        // Cancelling keeps the partial file for the next attempt.
+        hash_unless_cancelled(&mut part, &mut hasher, Some(offset), cancelled)?;
     }
 
     let need = file.size - offset;
@@ -543,6 +567,25 @@ mod tests {
         let waited = t0.elapsed();
         assert!(waited < Duration::from_secs(2), "{waited:?}");
         assert_eq!(srv.requests(), 1, "no retry after the cancel");
+    }
+
+    #[test]
+    fn ctrl_c_stops_hashing_the_bytes_already_there() {
+        let body = data(3000);
+        let srv = TestServer::start(body.clone(), Behavior::Normal);
+        let dir = tempdir("dl-hash-cancel");
+        let f = entry(&body, "h.bin");
+        let c = [cand(Hub::HuggingFace, srv.url("h.bin"))];
+        // Resuming: the partial file is kept and nothing is downloaded.
+        fs::write(partial_path(&dir, &f), &body[..1000]).unwrap();
+        let r = download_file_with(&f, &dir, &c, &opts(), &NoProgress, &|| true);
+        assert!(matches!(r, Err(HubError::Cancelled)), "{r:?}");
+        assert_eq!(fs::read(partial_path(&dir, &f)).unwrap(), &body[..1000]);
+        // A complete file left by another process is not hashed to the end.
+        fs::write(dir.join("h.bin"), &body).unwrap();
+        let r = download_file_with(&f, &dir, &c, &opts(), &NoProgress, &|| true);
+        assert!(matches!(r, Err(HubError::Cancelled)), "{r:?}");
+        assert_eq!(srv.requests(), 0);
     }
 
     #[derive(Default)]
