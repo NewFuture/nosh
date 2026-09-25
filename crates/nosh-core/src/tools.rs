@@ -28,7 +28,7 @@ pub enum ToolSet {
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: "run_command".into(),
-        description: "Run bash in the user's shell. Compute exact counts, sizes, sorting, grouping and sums with commands; do not calculate them yourself.".into(),
+        description: "Preferred first tool for clear tasks. Run bash or a python3 script that computes and prints the requested answer, including final grouped totals. Do not manually calculate from raw rows.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -43,7 +43,7 @@ pub fn run_command_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: "read_file".into(),
-        description: "Read a small amount of text to understand its contents (at most 400 lines). Not for bulk statistics; use run_command to compute those."
+        description: "Inspect a small amount of file content when needed (at most 400 numbered lines). Not for bulk statistics."
             .into(),
         parameters: json!({
             "type": "object",
@@ -60,7 +60,7 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn list_dir_spec() -> ToolSpec {
     ToolSpec {
         name: "list_dir".into(),
-        description: "List names and byte sizes, NOT line counts (respects .gitignore). Use run_command for exact statistics, search for file contents.".into(),
+        description: "Explore directory names and byte sizes when needed (respects .gitignore). No line counts. Not a prerequisite for run_command.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
