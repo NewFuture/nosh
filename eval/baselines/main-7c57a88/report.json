@@ -192,11 +192,13 @@
       4
     ],
     "repeat": 1,
-    "harness_revision": "f5641ad1bbc4f6d8fde72aacbb49ee42a19fb294",
+    "harness_revision": "6fbeef0a707c11b0818222a257f3ccf3c5bc4c65",
+    "harness_revision_before_rebase": "f5641ad1bbc4f6d8fde72aacbb49ee42a19fb294",
     "harness_content_sha256": "b2dc2bfe8e9db3338deb1307fe6de85fb5680bbfabda36544b587a61f03082e8",
     "grading_content_sha256": "83fef3ef53c08514b4f420671f6e00915d6b115d904ea1b8eb55d7c69f665f99",
     "regrade": {
-      "revision": "b50acc81f189206feee609d04b1f3df92eaef6c4",
+      "revision": "1bd9ec93806e54e44d9e36515ab94954475aa1db",
+      "revision_before_rebase": "b50acc81f189206feee609d04b1f3df92eaef6c4",
       "changed_verdicts": 2,
       "changes": [
         {
@@ -213,7 +215,7 @@
         }
       ],
       "observations_sha256": "619aee7de22122f7c5efa2ff8861eb89f31df953afdd05fd37848a3961de65e8",
-      "note": "All 50 captured trials were deterministically regraded after correcting two overly strict fact matchers: an explicitly excluded small file outside the ranked top-three list, and the equivalent spelling 'Python 3'. Fixture facts were rebuilt and verified against the recorded facts; archive commands were revalidated only against those disposable fixtures. No nosh process was run again and no model answer was replaced or selected from a retry."
+      "note": "All 50 captured trials were deterministically regraded after correcting two overly strict fact matchers: an explicitly excluded small file outside the ranked top-three list, and the equivalent spelling 'Python 3'. Fixture facts were rebuilt and verified against the recorded facts; archive commands were revalidated only against those disposable fixtures. No nosh process was run again and no model answer was replaced or selected from a retry. After rebasing the branch, harness/grader source references were repointed to content-identical commits verified against the recorded source hashes. Pre-rebase revisions remain in metadata and original judgments; the measured nosh build and all observations are unchanged."
     }
   },
   "trials": [
