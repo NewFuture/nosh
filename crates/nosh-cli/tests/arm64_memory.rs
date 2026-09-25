@@ -183,6 +183,8 @@ fn arm64_8k_rss_and_outputs() {
         "rayon_threads": 1,
         "limit_kib": LIMIT_KIB,
         "peak_rss_kib": { "retained": retained, "prepacked": packed },
+        // Diagnostic only; numerical acceptance is enforced by
+        // `prepacked_weights_match_retained_weights` (DESIGN section 13.2).
         "outputs_identical": retained_output == packed_output,
     });
     std::fs::write(
