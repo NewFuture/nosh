@@ -5,7 +5,7 @@ use std::process::Command;
 
 use nosh_llm::template;
 use nosh_llm::tokenizer::Tok;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const MODEL: &str = "minicpm5-2b:q4_k_m";
 const SYSTEM: &str = "You are a helpful assistant.";
@@ -61,32 +61,44 @@ fn word_after<'a>(line: &'a str, marker: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing value after {marker:?}"))
 }
 
-struct Run {
-    peak_rss_kib: u64,
-    cli_peak_mib: u64,
-    prompt_tokens: usize,
-    context_used: usize,
-    context_max: usize,
-    prepacked_tensors: usize,
-    released_mib: usize,
-    stdout: Vec<u8>,
+fn check_stats(log: &str, tokens: usize, prepack: bool) {
+    let number = |marker| {
+        word_after(log, marker)
+            .parse::<usize>()
+            .expect("numeric debug statistic")
+    };
+    let round = log
+        .lines()
+        .find(|line| line.starts_with("[round 1 |"))
+        .expect("generation statistics");
+    let (used, max) = word_after(round, " | ctx ")
+        .split_once('/')
+        .expect("used/max context");
+    let used: usize = used.parse().expect("used context");
+    assert_eq!(max, "8192");
+    assert!(used >= tokens && used <= 8192);
+    assert_eq!(
+        number(" | prompt "),
+        tokens,
+        "must prefill the full 8K sample"
+    );
+    assert_eq!(number(" | prepacked ") > 0, prepack);
+    assert_eq!(number("matrices, ") > 0, prepack);
+    let peak = number(" peak ");
+    assert!(peak > 0, "missing VmHWM");
+    assert!(
+        !prepack || peak <= 2560,
+        "VmHWM exceeds 2.5 GiB: {peak} MiB"
+    );
 }
 
-impl Run {
-    fn summary(&self) -> Value {
-        json!({
-            "peak_rss_kib": self.peak_rss_kib,
-            "cli_peak_mib": self.cli_peak_mib,
-            "prompt_tokens": self.prompt_tokens,
-            "context_used": self.context_used,
-            "context_max": self.context_max,
-            "prepacked_tensors": self.prepacked_tensors,
-            "released_mib": self.released_mib,
-        })
-    }
-}
-
-fn measure(dir: &Path, weights: &Path, prompt: &str, prepack: bool) -> Run {
+fn measure(
+    dir: &Path,
+    weights: &Path,
+    prompt: &str,
+    tokens: usize,
+    prepack: bool,
+) -> (u64, Vec<u8>) {
     let name = if prepack { "prepacked" } else { "retained" };
     let rss_file = dir.join(format!("{name}-rss-kib.txt"));
     let mut cmd = Command::new("/usr/bin/time");
@@ -121,39 +133,15 @@ fn measure(dir: &Path, weights: &Path, prompt: &str, prepack: bool) -> Run {
     std::fs::write(dir.join(format!("{name}.stderr")), &out.stderr).unwrap();
     let log = String::from_utf8(out.stderr).expect("UTF-8 debug log");
     assert!(out.status.success(), "{name}: {}\n{log}", out.status);
-    let load = log
-        .lines()
-        .find(|l| l.contains(" | prepacked "))
-        .expect("load statistics");
-    let round = log
-        .lines()
-        .find(|l| l.starts_with("[round 1 |"))
-        .expect("generation statistics");
-    let (used, max) = word_after(round, " | ctx ")
-        .split_once('/')
-        .expect("used/max context");
-    let run = Run {
-        peak_rss_kib: std::fs::read_to_string(rss_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .expect("RSS KiB"),
-        cli_peak_mib: word_after(round, " peak ").parse().expect("VmHWM MiB"),
-        prompt_tokens: word_after(round, " | prompt ")
-            .parse()
-            .expect("prompt tokens"),
-        context_used: used.parse().expect("used context"),
-        context_max: max.parse().expect("context capacity"),
-        prepacked_tensors: word_after(load, " | prepacked ")
-            .parse()
-            .expect("prepacked count"),
-        released_mib: word_after(load, "matrices, ")
-            .parse()
-            .expect("released MiB"),
-        stdout: out.stdout,
-    };
-    eprintln!("{name}: {}", run.summary());
-    run
+    check_stats(&log, tokens, prepack);
+    let rss = std::fs::read_to_string(rss_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("RSS KiB");
+    assert!(rss > 0, "missing GNU time RSS");
+    eprintln!("{name}: peak RSS {rss} KiB");
+    (rss, out.stdout)
 }
 
 #[test]
@@ -179,8 +167,8 @@ fn arm64_8k_rss_and_outputs() {
     let mut tok = Tok::load(&r.tokenizer).unwrap();
     let (prompt, tokens) = long_prompt(&mut tok);
     std::fs::write(dir.join("prompt.txt"), &prompt).unwrap();
-    let retained = measure(&dir, &r.weights, &prompt, false);
-    let packed = measure(&dir, &r.weights, &prompt, true);
+    let (retained, retained_output) = measure(&dir, &r.weights, &prompt, tokens, false);
+    let (packed, packed_output) = measure(&dir, &r.weights, &prompt, tokens, true);
     let report = json!({
         "model": MODEL,
         "model_sha256": r.entry.weights().sha256,
@@ -194,49 +182,41 @@ fn arm64_8k_rss_and_outputs() {
         "candle_threads": 2,
         "rayon_threads": 1,
         "limit_kib": LIMIT_KIB,
-        "retained": retained.summary(),
-        "prepacked": packed.summary(),
-        "outputs_identical": retained.stdout == packed.stdout,
+        "peak_rss_kib": { "retained": retained, "prepacked": packed },
+        "outputs_identical": retained_output == packed_output,
     });
     std::fs::write(
         dir.join("memory.json"),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
-    for run in [&retained, &packed] {
-        assert!(
-            run.peak_rss_kib > 0 && run.cli_peak_mib > 0,
-            "missing RSS statistics"
-        );
-        assert_eq!(
-            run.prompt_tokens, tokens,
-            "must actually prefill the full 8K sample"
-        );
-        assert_eq!(run.context_max, 8192);
-        assert!(run.context_used >= tokens && run.context_used <= 8192);
-    }
-    assert_eq!(retained.prepacked_tensors, 0);
-    assert_eq!(retained.released_mib, 0);
-    assert!(packed.prepacked_tensors > 0 && packed.released_mib > 0);
     assert!(
-        packed.peak_rss_kib <= LIMIT_KIB && packed.cli_peak_mib <= 2560,
-        "prepacked RSS exceeds 2.5 GiB: {} KiB (VmHWM {} MiB)",
-        packed.peak_rss_kib,
-        packed.cli_peak_mib
+        packed <= LIMIT_KIB,
+        "prepacked RSS exceeds 2.5 GiB: {packed} KiB"
     );
-    assert!(
-        packed.peak_rss_kib < retained.peak_rss_kib,
-        "prepacking did not reduce peak RSS"
-    );
+    assert!(packed < retained, "prepacking did not reduce peak RSS");
 }
 
 #[test]
-fn debug_statistics_fields_are_unambiguous() {
-    let load = "[model | prepacked 295 matrices, 1339 MiB raw released in 1.00s | RSS 1 MB]";
-    let round = "[round 1 | prompt 8065 tok (cached 0) prefill 1.0 tok/s | ctx 8082/8192 | RSS 1 MB peak 2130 MB]";
-    assert_eq!(word_after(load, " | prepacked "), "295");
-    assert_eq!(word_after(load, "matrices, "), "1339");
-    assert_eq!(word_after(round, " | prompt "), "8065");
-    assert_eq!(word_after(round, " | ctx "), "8082/8192");
-    assert_eq!(word_after(round, " peak "), "2130");
+fn debug_statistics_enforce_acceptance() {
+    let log = "[model | ctx 8192 | prepacked 295 matrices, 1340 MiB raw released in 0.38s | RSS 1617 MB]\n\
+        [round 1 | prompt 8065 tok (cached 0) prefill 20.3 tok/s | ctx 8131/8192 | RSS 2036 MB peak 2103 MB]";
+    check_stats(log, 8065, true);
+    let retained = log
+        .replace("295 matrices, 1340", "0 matrices, 0")
+        .replace("2103", "3492");
+    check_stats(&retained, 8065, false);
+    for invalid in [
+        log.replace("295 matrices", "0 matrices"),
+        log.replace("matrices, 1340", "matrices, 0"),
+        log.replace("prompt 8065", "prompt 2048"),
+        log.replace("8131/8192", "8131/4096"),
+        log.replace("8131/8192", "8000/8192"),
+        log.replace("8131/8192", "9000/8192"),
+        log.replace("peak 2103", "peak 0"),
+        log.replace("peak 2103", "peak 2561"),
+        log.replace(" peak ", " missing "),
+    ] {
+        assert!(std::panic::catch_unwind(|| check_stats(&invalid, 8065, true)).is_err());
+    }
 }

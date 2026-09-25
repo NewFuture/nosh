@@ -186,14 +186,7 @@ SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由
 
 上表是 **x86_64** 的体积和历史测量。**ARM + dotprod** 现在会预重排层内 Q4K/Q6K 及 output，并释放其原始块；token_embd 不动。Q6K 的 ARM decode 也使用重排布局，因此不受 x86 “Q6K 必须留给 decode”的限制。
 
-**ARM CI 实测（issue #9）**：MiniCPM5-2B Q4_K_M、KV f16、release、`ubuntu-24.04-arm` / Neoverse-N2（dotprod + i8mm；runner 报告 4 个 CPU，推理固定 2 线程，rayon 1 线程），8,065 token prompt + 64 token 生成，最终上下文 8,131/8,192。两次独立进程只切换 `--no-prepack`，GNU time 记录从加载到生成结束的 RSS 峰值：
-
-| 配置 | 峰值 RSS（KiB） | 峰值（GiB） | 结果 |
-|---|---|---|---|
-| `--no-prepack`：保留原始权重及懒重排缓存 | 3,576,060 | 3.41 | 对照 |
-| 默认预重排并释放 | 2,153,388 | **2.05** | 低于本次 ARM 验收上限 **2.5 GiB**；下降约 39.8% |
-
-释放 295 个矩阵、1,405,071,360 字节原始权重（约 1,340 MiB），生成文本相同；3.3K 和 8K teacher forcing 的全部数值通过线也通过（§13.2）。实测源码 `9737774`、Rust 1.98.1，日志、模型 SHA-256、输入与 JSON 结果见 [CI run 36102190771](https://github.com/NewFuture/nosh/actions/runs/36102190771) 的 `arm64-memory-*` artifact。该低线程数 CI 只验收内存和正确性，不作 ARM 速度结论；macOS 仅跑合成正确性。没有 dotprod 的 CPU 和其他架构仍保留原策略，不把这次测量外推到它们。
+**ARM CI 实测（issue #9）**：MiniCPM5-2B Q4_K_M、KV f16，8,065 token prompt + 64 token 生成，两个独立进程只切换 `--no-prepack`。释放 295 个矩阵、约 1,340 MiB 原始权重后，完整进程的 RSS 峰值从 **3.41 GiB 降至 2.05 GiB**（下降约 39.8%，低于 **2.5 GiB** 门槛）；生成文本相同，数值验收通过（§13.2）。完整环境、精确字节数和 [CI 实测](https://github.com/NewFuture/nosh/actions/runs/36102190771) 来源统一记录在 `MVP-REPORT.md` §5.4。该 CI 只验收内存和正确性，不作 ARM 速度结论；macOS 仅跑合成正确性，无 dotprod/其他架构不套用该内存数字。
 
 > - **没有采用的方案**（§16 #12）：
 >   - 不重排：约 2.2 GB，但明显变慢；

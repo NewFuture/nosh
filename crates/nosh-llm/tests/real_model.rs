@@ -311,23 +311,6 @@ impl Divergence {
             self.top5_sets
         );
     }
-
-    fn summary(&self) -> Value {
-        let mut c = self.cos.clone();
-        c.sort_by(f64::total_cmp);
-        json!({
-            "positions": c.len(),
-            "cosine_prompt": self.cos[0],
-            "cosine_median": c[c.len() / 2],
-            "cosine_min": c[0],
-            "mean_kl_nats": self.kl_mean,
-            "nll_reference": self.nll.0,
-            "nll_prepacked": self.nll.1,
-            "top5_set_matches": self.top5_sets,
-            "confident_positions": self.confident.0,
-            "confident_top1_matches": self.confident.1,
-        })
-    }
 }
 
 impl std::fmt::Display for Divergence {
@@ -459,6 +442,10 @@ fn prepacked_weights_match_retained_weights() {
     )
     .unwrap();
     let stats = model.prepack_stats();
+    eprintln!(
+        "prepack: {} matrices, {} raw bytes released",
+        stats.tensors, stats.released_bytes
+    );
     if cfg!(target_arch = "aarch64") {
         assert!(
             features.contains(&"dotprod"),
@@ -487,7 +474,6 @@ fn prepacked_weights_match_retained_weights() {
             "layers and Q6K output"
         );
     }
-    let mut results = Vec::new();
     for ((name, ids), want) in samples.iter().zip(&want) {
         let (prompt, tail) = ids.split_at(ids.len() - 48);
         let got = logits_along(&mut model, prompt, tail, 512);
@@ -497,27 +483,6 @@ fn prepacked_weights_match_retained_weights() {
             prompt.len(),
             tail.len()
         );
-        results.push(json!({
-            "sample": name,
-            "prompt_tokens": prompt.len(),
-            "teacher_forced_tokens": tail.len(),
-            "metrics": d.summary(),
-        }));
-        let report = json!({
-            "model": r.entry.id,
-            "model_sha256": r.entry.weights().sha256,
-            "cpu_features": features,
-            "kv": "f16",
-            "prefill_chunk": 512,
-            "released_tensors": stats.tensors,
-            "released_bytes": stats.released_bytes,
-            "samples": results,
-        });
-        std::fs::write(
-            dir.join("numerical.json"),
-            serde_json::to_vec_pretty(&report).unwrap(),
-        )
-        .unwrap();
         d.assert_acceptable();
     }
 }

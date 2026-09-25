@@ -286,21 +286,14 @@ impl Llama {
             eps: rms_eps,
         };
         let mut prepack = PrepackStats::default();
-        let output = {
-            let t = match tensor("output.weight") {
-                Ok(t) => t,
-                Err(_) => tensor("token_embd.weight")?,
-            };
-            #[cfg(target_arch = "aarch64")]
-            let t = {
-                let mut t = t;
-                if opts.prepack_weights {
-                    prepack_weights(std::slice::from_mut(&mut t), &mut prepack)?;
-                }
-                t
-            };
-            QMatMul::from_qtensor(t)?
+        let mut output = match tensor("output.weight") {
+            Ok(t) => t,
+            Err(_) => tensor("token_embd.weight")?,
         };
+        if cfg!(target_arch = "aarch64") && opts.prepack_weights {
+            prepack_weights(std::slice::from_mut(&mut output), &mut prepack)?;
+        }
+        let output = QMatMul::from_qtensor(output)?;
         let mut layers = Vec::with_capacity(n_layer);
         for i in 0..n_layer {
             let p = format!("blk.{i}");

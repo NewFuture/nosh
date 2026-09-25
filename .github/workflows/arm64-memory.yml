@@ -66,11 +66,11 @@ jobs:
           {
             echo "## ARM64 prepack acceptance"
             echo "Commit: $GITHUB_SHA. RSS limit: 2.5 GiB (2,621,440 KiB). No speed gate."
-            for report in memory numerical; do
+            for report in memory.json numerical.log; do
               echo "### $report"
-              if test -f "$NOSH_MEMORY_ARTIFACTS/$report.json"; then
-                echo '```json'
-                cat "$NOSH_MEMORY_ARTIFACTS/$report.json"
+              if test -f "$NOSH_MEMORY_ARTIFACTS/$report"; then
+                echo '```'
+                cat "$NOSH_MEMORY_ARTIFACTS/$report"
                 echo
                 echo '```'
               else

@@ -82,8 +82,9 @@ and runs release builds on Linux ARM with two inference threads and f16 KV:
   thresholds must pass; equal generated text alone is not sufficient.
 
 `NOSH_MEMORY_ARTIFACTS` selects the report directory (default: `target/arm64-memory`).
-The workflow uploads inputs, outputs, model/build provenance, RSS and numerical JSON
-even on failure. Model tests remain ignored in ordinary CI; missing models, missing
+The workflow uploads inputs, outputs, model/build provenance, RSS JSON and the existing
+numerical test log even on failure; numerical metrics use the shared `Divergence`
+display rather than a duplicate JSON reporter. Model tests remain ignored in ordinary CI; missing models, missing
 statistics or an ARM CPU without dotprod fail the explicit acceptance run.
 
 ## Updating the pinned rev
