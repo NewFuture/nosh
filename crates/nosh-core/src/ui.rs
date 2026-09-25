@@ -313,11 +313,12 @@ impl AgentUi for TermUi {
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
+        let label = label.replace(" · ", self.stderr.glyph(" · ", " | "));
         let risk_s = match risk {
-            Some(Risk::Safe) => style::green(label),
-            Some(Risk::Mutating) => style::yellow(label),
-            Some(_) => style::red(label),
-            None => style::dim(label),
+            Some(Risk::Safe) => style::green(&label),
+            Some(Risk::Mutating) => style::yellow(&label),
+            Some(_) => style::red(&label),
+            None => style::dim(&label),
         };
         eprintln!(
             "{} {} {}  {risk_s}",

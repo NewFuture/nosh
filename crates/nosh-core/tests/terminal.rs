@@ -12,10 +12,17 @@ use std::time::{Duration, Instant};
 
 use nosh_core::{AgentUi, JsonUi, TermUi};
 use nosh_hub::{BarProgress, Progress};
+use nosh_permissions::Risk;
 use nosh_shell::{style, term};
 
 const BEGIN: &str = "nosh-terminal-probe-begin\n";
 const END: &str = "nosh-terminal-probe-end";
+const TOOL_LABELS: [(Risk, &str); 4] = [
+    (Risk::Safe, "SAFE \u{b7} auto"),
+    (Risk::Mutating, "MUTATING \u{b7} approved"),
+    (Risk::Dangerous, "DANGEROUS \u{b7} allowed (yolo)"),
+    (Risk::Forbidden, "FORBIDDEN \u{b7} denied"),
+];
 
 struct Pty {
     master: File,
@@ -286,6 +293,12 @@ fn terminal_probe() {
             ui.text("Final answer.\n");
             ui.pause();
         }
+        "tool-labels" => {
+            let mut ui = TermUi::new(false);
+            for (risk, label) in TOOL_LABELS {
+                ui.tool_start("run_command", "echo \u{4e2d}\u{6587}", Some(risk), label);
+            }
+        }
         "input" | "input-pipe" => {
             let initial = std::env::var("NOSH_TERMINAL_INITIAL").unwrap();
             let answer = term::read_text("input> ", &initial);
@@ -313,6 +326,9 @@ fn terminal_probe() {
             let mut ui = JsonUi;
             ui.text("\u{1f469}\u{200d}\u{1f4bb}");
             ui.output("\x1b[31mraw\r\n", true);
+            for (risk, label) in TOOL_LABELS {
+                ui.tool_start("run_command", "echo \u{4e2d}\u{6587}", Some(risk), label);
+            }
         }
         "repl" => {
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
@@ -424,6 +440,52 @@ fn terminal_and_locale_matrix_has_safe_fallbacks() {
         "NO_COLOR alone does not disable cursor control"
     );
     assert!(!err.contains("\x1b[2m"));
+}
+
+#[test]
+fn tool_labels_follow_the_destination_without_rewriting_command_text() {
+    for (terminal, locale, stderr_tty, unicode) in [
+        ("xterm-256color", Some("C.UTF-8"), true, true),
+        ("dumb", Some("C.UTF-8"), true, false),
+        ("xterm-256color", Some("C"), true, false),
+        ("xterm-256color", None, true, false),
+        ("xterm-256color", Some("C.UTF-8"), false, false),
+    ] {
+        for no_color in ["", "1"] {
+            let (out, err) = Probe {
+                mode: "tool-labels",
+                terminal: Some(terminal),
+                locale,
+                no_color,
+                stderr_tty,
+                ..Probe::default()
+            }
+            .run();
+            assert!(out.is_empty());
+            let text = style::strip_ansi(&err);
+            let lines: Vec<_> = text.lines().collect();
+            assert_eq!(lines.len(), TOOL_LABELS.len() * 2);
+            let (bar, marker, separator) = if unicode {
+                ("\u{2503}", "\u{2699}", " \u{b7} ")
+            } else {
+                ("|", "*", " | ")
+            };
+            for (i, (_, label)) in TOOL_LABELS.iter().enumerate() {
+                assert_eq!(
+                    lines[2 * i],
+                    format!(
+                        "{bar} {marker} run_command  {}",
+                        label.replace(" \u{b7} ", separator)
+                    ),
+                    "{terminal} {locale:?} tty={stderr_tty} NO_COLOR={no_color:?}"
+                );
+                if !unicode {
+                    assert!(lines[2 * i].is_ascii());
+                }
+                assert_eq!(lines[2 * i + 1], format!("{bar}   $ echo \u{4e2d}\u{6587}"));
+            }
+        }
+    }
 }
 
 #[test]
@@ -594,19 +656,33 @@ fn prompts_use_the_controlling_terminal_without_consuming_piped_stdin() {
 #[test]
 fn json_output_keeps_original_text_on_both_pipes_and_terminals() {
     for stdout_tty in [false, true] {
-        let (out, err) = Probe {
-            mode: "json",
-            stdout_tty,
-            ..Probe::default()
+        for (terminal, locale) in [
+            ("xterm-256color", Some("C.UTF-8")),
+            ("dumb", Some("C.UTF-8")),
+            ("xterm-256color", Some("C")),
+        ] {
+            let (out, err) = Probe {
+                mode: "json",
+                terminal: Some(terminal),
+                locale,
+                stdout_tty,
+                ..Probe::default()
+            }
+            .run();
+            let events: Vec<serde_json::Value> = out
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(events.len(), 2 + TOOL_LABELS.len());
+            assert_eq!(events[0]["text"], "\u{1f469}\u{200d}\u{1f4bb}");
+            assert_eq!(events[1]["text"], "\x1b[31mraw\r\n");
+            assert_eq!(events[1]["stream"], "stderr");
+            for (event, (risk, label)) in events[2..].iter().zip(TOOL_LABELS) {
+                assert_eq!(event["risk"], risk.label());
+                assert_eq!(event["decision"], label);
+                assert_eq!(event["detail"], "echo \u{4e2d}\u{6587}");
+            }
+            assert!(!out.contains('\x1b') && err.is_empty());
         }
-        .run();
-        let events: Vec<serde_json::Value> = out
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(events[0]["text"], "\u{1f469}\u{200d}\u{1f4bb}");
-        assert_eq!(events[1]["text"], "\x1b[31mraw\r\n");
-        assert_eq!(events[1]["stream"], "stderr");
-        assert!(!out.contains('\x1b') && err.is_empty());
     }
 }

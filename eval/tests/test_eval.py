@@ -123,9 +123,10 @@ class ContractTests(unittest.TestCase):
                 text = f"| Previous answer.\n| {bullet}\n| Final answer.\n"
                 self.assertEqual(run.legacy_answer(text), f"Previous answer.\n{bullet}\nFinal answer.")
         for risk in ("SAFE", "MUTATING", "DANGEROUS", "FORBIDDEN"):
-            with self.subTest(risk=risk):
-                text = f"| Inspecting.\n| * run_command  {risk} · auto\n|   details\n| Final answer.\n"
-                self.assertEqual(run.legacy_answer(text), "Final answer.")
+            for separator in (" · ", " | "):
+                with self.subTest(risk=risk, separator=separator):
+                    text = f"| Inspecting.\n| * run_command  {risk}{separator}auto\n|   details\n| Final answer.\n"
+                    self.assertEqual(run.legacy_answer(text), "Final answer.")
 
     def test_legacy_answer_excludes_multiline_proposal_explanations(self):
         for bar, arrow in (("┃", "↳"), ("|", "->")):
