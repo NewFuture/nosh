@@ -19,6 +19,13 @@ nu-ansi-term.workspace = true
 reedline.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+vte.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Use poll instead of kqueue for /dev/tty when stdin is redirected.
+crossterm = { workspace = true, features = ["use-dev-tty"] }
 
 [dev-dependencies]
 serde.workspace = true

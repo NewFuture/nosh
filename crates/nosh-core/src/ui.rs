@@ -1,14 +1,14 @@
 //! Rendering of agent activity: the `┃` block in the terminal, JSON Lines for
 //! `nosh -a --json`, and a recorder for tests.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use nosh_permissions::Risk;
 use nosh_shell::{OutputSink, style};
 use serde_json::{Value, json};
 
 pub fn bar() -> String {
-    style::cyan("┃")
+    style::cyan(style::glyph("┃", "|"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,11 +31,12 @@ pub struct TaskSummary {
 impl TaskSummary {
     /// One line of engine statistics (`NOSH_STATS=1`).
     pub fn stats_line(&self) -> String {
+        let sep = style::glyph(" · ", " | ");
         let rss = nosh_llm::rss_mb()
-            .map(|(cur, peak)| format!(" · rss {cur:.0}/{peak:.0} MB"))
+            .map(|(cur, peak)| format!("{sep}rss {cur:.0}/{peak:.0} MB"))
             .unwrap_or_default();
         format!(
-            "stats: prompt {} (+{} cached) tok @ {:.0} tok/s · gen {} tok @ {:.1} tok/s · ttft {:.2}s · ctx {}/{}{rss}",
+            "stats: prompt {} (+{} cached) tok @ {:.0} tok/s{sep}gen {} tok @ {:.1} tok/s{sep}ttft {:.2}s{sep}ctx {}/{}{rss}",
             self.prompt_tokens,
             self.cached_tokens,
             self.prefill_tps,
@@ -81,53 +82,93 @@ impl OutputSink for UiSink<'_> {
 }
 
 const LIVE_LINES: usize = 8;
-/// Longest partial output line kept for display.
-const MAX_PARTIAL: usize = 4096;
 
-/// Largest char boundary of `s` at or below `n`.
-fn floor_boundary(s: &str, n: usize) -> usize {
-    let mut i = n.min(s.len());
-    while !s.is_char_boundary(i) {
-        i -= 1;
+#[derive(Default)]
+struct TextState {
+    line_open: bool,
+    started: bool,
+    carriage_return: bool,
+}
+
+impl TextState {
+    fn render(&mut self, s: &str, prefix: &str) -> String {
+        let mut out = String::new();
+        for ch in s.chars() {
+            if !self.line_open {
+                if ch == '\n' && !self.started {
+                    continue;
+                }
+                out.push_str(prefix);
+                self.line_open = true;
+            }
+            self.started = true;
+            out.push(ch);
+            if ch == '\n' {
+                self.line_open = false;
+            }
+        }
+        out
     }
-    i
+
+    fn push(&mut self, s: &str, prefix: &str) -> String {
+        let mut text = String::new();
+        for ch in s.chars() {
+            if std::mem::take(&mut self.carriage_return) && ch != '\n' {
+                text.push('\r');
+            }
+            if ch == '\r' {
+                self.carriage_return = true;
+            } else {
+                text.push(ch);
+            }
+        }
+        self.render(&style::visible_text(&text), prefix)
+    }
+
+    fn finish(&mut self, prefix: &str) -> String {
+        let mut out = if std::mem::take(&mut self.carriage_return) {
+            self.render("\\r", prefix)
+        } else {
+            String::new()
+        };
+        if self.line_open {
+            out.push('\n');
+            self.line_open = false;
+        }
+        out
+    }
 }
 
 /// Terminal renderer (stderr; the answer can go to stdout for `nosh -a`).
 pub struct TermUi {
     bar: String,
     answer_to_stdout: bool,
-    stdout_tty: bool,
-    stderr_tty: bool,
-    at_line_start: bool,
+    stdout: style::Terminal,
+    stderr: style::Terminal,
+    text: TextState,
+    text_is_think: bool,
     status_shown: bool,
-    text_started: bool,
-    line_buf: String,
+    output: [style::OutputBuffer; 2],
     shown: usize,
     hidden: usize,
-    tail: Vec<String>,
-    width: usize,
+    tail: Vec<(String, bool)>,
     pub show_think: bool,
 }
 
 impl TermUi {
     pub fn new(answer_to_stdout: bool) -> Self {
-        let width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(100);
         Self {
             bar: bar(),
             answer_to_stdout,
-            stdout_tty: std::io::stdout().is_terminal(),
-            stderr_tty: std::io::stderr().is_terminal(),
-            at_line_start: true,
+            stdout: style::stdout(),
+            stderr: style::stderr(),
+            text: TextState::default(),
+            text_is_think: false,
             status_shown: false,
-            text_started: false,
-            line_buf: String::new(),
+            output: Default::default(),
             shown: 0,
             hidden: 0,
             tail: Vec::new(),
-            width: width.max(40),
             show_think: false,
         }
     }
@@ -140,80 +181,90 @@ impl TermUi {
     }
 
     fn end_text_line(&mut self) {
-        if !self.at_line_start {
-            if self.answer_to_stdout {
-                println!();
-            } else {
-                eprintln!();
+        let prefix = self.text_prefix();
+        let out = self.text.finish(&prefix);
+        self.write_text(&out);
+    }
+
+    fn text_prefix(&self) -> String {
+        if self.answer_to_stdout && !self.text_is_think {
+            if !self.stdout.tty {
+                return String::new();
             }
-            self.at_line_start = true;
+            format!("{} ", self.stdout.paint("36", self.stdout.glyph("┃", "|")))
+        } else {
+            format!("{} ", self.bar)
         }
     }
 
-    fn write_prefixed(&mut self, s: &str, dim: bool) {
-        let to_stdout = self.answer_to_stdout && !dim;
-        let with_bar = !to_stdout || self.stdout_tty;
-        let mut out = String::new();
-        for ch in s.chars() {
-            if self.at_line_start {
-                if ch == '\n' && !self.text_started {
-                    continue;
-                }
-                if with_bar {
-                    out.push_str(&self.bar);
-                    out.push(' ');
-                }
-                self.at_line_start = false;
-            }
-            self.text_started = true;
-            out.push(ch);
-            if ch == '\n' {
-                self.at_line_start = true;
-            }
+    fn write_text(&self, out: &str) {
+        if out.is_empty() {
+            return;
         }
-        let out = if dim { style::dim(&out) } else { out };
-        if to_stdout {
+        if self.answer_to_stdout && !self.text_is_think {
             print!("{out}");
             let _ = std::io::stdout().flush();
         } else {
+            let out = if self.text_is_think {
+                style::dim(out)
+            } else {
+                out.to_string()
+            };
             eprint!("{out}");
             let _ = std::io::stderr().flush();
         }
     }
 
-    fn clip(&self, line: &str) -> String {
-        let line = style::safe_output_line(line);
-        let max = self.width.saturating_sub(6);
-        if line.chars().count() > max {
-            line.chars()
-                .take(max.saturating_sub(1))
-                .chain("…".chars())
-                .collect()
-        } else {
-            line
+    fn write_prefixed(&mut self, s: &str, think: bool) {
+        if self.text_is_think != think {
+            self.end_text_line();
+            self.text = TextState::default();
+            self.text_is_think = think;
         }
+        let prefix = self.text_prefix();
+        let out = self.text.push(s, &prefix);
+        self.write_text(&out);
+    }
+
+    fn columns(&self) -> Option<usize> {
+        self.stderr
+            .tty
+            .then(|| nosh_shell::term::stderr_columns().unwrap_or(100))
+    }
+
+    fn output_line(&self, line: &str, is_err: bool, columns: Option<usize>) -> String {
+        // Leave the last column unused to avoid terminal auto-wrap.
+        let max = columns.map_or(usize::MAX, |w| w.saturating_sub(1));
+        let prefix = style::clip_line(&format!("{}   ", self.stderr.glyph("┃", "|")), max, 0, "");
+        let offset = style::width(&prefix);
+        let text = style::clip_line(
+            line,
+            max.saturating_sub(offset),
+            offset,
+            self.stderr.glyph("…", "..."),
+        );
+        format!(
+            "{}{}",
+            self.stderr.paint("36", &prefix),
+            self.stderr.paint(if is_err { "31" } else { "2" }, &text,)
+        )
     }
 
     fn out_line(&mut self, line: &str, is_err: bool) {
         if self.shown < LIVE_LINES {
             self.shown += 1;
-            let shown = self.clip(line);
-            let s = if is_err {
-                style::red(&shown)
-            } else {
-                style::dim(&shown)
-            };
-            eprintln!("{}   {s}", self.bar);
+            eprintln!("{}", self.output_line(line, is_err, self.columns()));
         } else {
             // Only the count and the last two lines are kept (cheap per line).
             self.hidden += 1;
             let mut keep = if self.tail.len() >= 2 {
                 self.tail.remove(0)
             } else {
-                String::new()
+                (String::new(), is_err)
             };
-            keep.clear();
-            keep.push_str(&line[..floor_boundary(line, 1024)]);
+            keep.0.clear();
+            keep.0.push_str(line);
+            keep.1 = is_err;
             self.tail.push(keep);
         }
     }
@@ -226,44 +277,56 @@ impl AgentUi for TermUi {
     }
 
     fn prefill(&mut self, done: usize, total: usize) {
-        if !self.stderr_tty || total < 200 || done >= total {
+        if !self.stderr.ansi || total < 200 || done >= total {
             return;
         }
         self.end_text_line();
         let pct = done * 100 / total.max(1);
-        eprint!("\r\x1b[K{} {}", self.bar, style::dim(&format!("… {pct}%")));
+        let status = format!(
+            "{} {} {pct}%",
+            self.stderr.glyph("┃", "|"),
+            self.stderr.glyph("…", "...")
+        );
+        let status = style::clip_line(
+            &status,
+            self.columns().unwrap_or(100).saturating_sub(1),
+            0,
+            "",
+        );
+        eprint!("\r\x1b[K{}", style::dim(&status));
         let _ = std::io::stderr().flush();
         self.status_shown = true;
     }
 
     fn text(&mut self, s: &str) {
         self.clear_status();
-        self.write_prefixed(&style::visible(s), false);
+        self.write_prefixed(s, false);
     }
 
     fn think(&mut self, s: &str) {
         if self.show_think {
             self.clear_status();
-            self.write_prefixed(&style::visible(s), true);
+            self.write_prefixed(s, true);
         }
     }
 
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
+        let label = label.replace(" · ", self.stderr.glyph(" · ", " | "));
         let risk_s = match risk {
-            Some(Risk::Safe) => style::green(label),
-            Some(Risk::Mutating) => style::yellow(label),
-            Some(_) => style::red(label),
-            None => style::dim(label),
+            Some(Risk::Safe) => style::green(&label),
+            Some(Risk::Mutating) => style::yellow(&label),
+            Some(_) => style::red(&label),
+            None => style::dim(&label),
         };
         eprintln!(
             "{} {} {}  {risk_s}",
             self.bar,
-            style::cyan("⚙"),
+            style::cyan(style::glyph("⚙", "*")),
             style::bold(tool)
         );
-        for (i, l) in detail.lines().enumerate() {
+        for (i, l) in detail.split('\n').enumerate() {
             let p = match (i, tool) {
                 (0, "run_command") => "$ ",
                 (_, "run_command") => "  ",
@@ -274,33 +337,20 @@ impl AgentUi for TermUi {
         self.shown = 0;
         self.hidden = 0;
         self.tail.clear();
-        self.line_buf.clear();
+        self.output = Default::default();
     }
 
     fn output(&mut self, chunk: &str, is_err: bool) {
-        let mut rest = chunk;
-        while let Some(i) = rest.find('\n') {
-            let line = &rest[..i];
-            rest = &rest[i + 1..];
-            if self.line_buf.is_empty() {
-                self.out_line(line, is_err);
-            } else {
-                let mut full = std::mem::take(&mut self.line_buf);
-                full.push_str(
-                    &line[..floor_boundary(line, MAX_PARTIAL.saturating_sub(full.len()))],
-                );
-                self.out_line(&full, is_err);
-            }
+        for line in self.output[usize::from(is_err)].push(chunk) {
+            self.out_line(&line, is_err);
         }
-        // A line without a newline is kept only up to a bound.
-        let room = MAX_PARTIAL.saturating_sub(self.line_buf.len());
-        self.line_buf.push_str(&rest[..floor_boundary(rest, room)]);
     }
 
     fn tool_end(&mut self, summary: &str) {
-        if !self.line_buf.is_empty() {
-            let rest = std::mem::take(&mut self.line_buf);
-            self.out_line(&rest, false);
+        for is_err in [false, true] {
+            if let Some(rest) = self.output[usize::from(is_err)].finish() {
+                self.out_line(&rest, is_err);
+            }
         }
         if self.hidden > 0 {
             let more = self.hidden.saturating_sub(self.tail.len());
@@ -308,29 +358,33 @@ impl AgentUi for TermUi {
                 eprintln!(
                     "{}   {}",
                     self.bar,
-                    style::dim(&format!("… {more} more lines"))
+                    style::dim(&format!("{} {more} more lines", style::glyph("…", "...")))
                 );
             }
-            for l in std::mem::take(&mut self.tail) {
-                eprintln!("{}   {}", self.bar, style::dim(&self.clip(&l)));
+            for (line, is_err) in std::mem::take(&mut self.tail) {
+                eprintln!("{}", self.output_line(&line, is_err, self.columns()));
             }
         }
         if !summary.is_empty() {
-            eprintln!("{}   {}", self.bar, style::dim(summary));
+            eprintln!(
+                "{}   {}",
+                self.bar,
+                style::dim(&style::visible_text(summary))
+            );
         }
-        self.text_started = false;
+        self.text = TextState::default();
     }
 
     fn notice(&mut self, msg: &str) {
         self.clear_status();
         self.end_text_line();
-        eprintln!("{} {}", self.bar, style::dim(msg));
+        eprintln!("{} {}", self.bar, style::dim(&style::visible_text(msg)));
     }
 
     fn error(&mut self, msg: &str) {
         self.clear_status();
         self.end_text_line();
-        eprintln!("{} {}", self.bar, style::red(msg));
+        eprintln!("{} {}", self.bar, style::red(&style::visible_text(msg)));
     }
 
     fn proposed(&mut self, cmd: &str, explanation: Option<&str>) {
@@ -339,11 +393,13 @@ impl AgentUi for TermUi {
         eprintln!(
             "{} {} {}",
             self.bar,
-            style::cyan("↳"),
+            style::cyan(style::glyph("↳", "->")),
             style::bold(&style::visible(cmd))
         );
         if let Some(e) = explanation.filter(|e| !e.trim().is_empty()) {
-            eprintln!("{}   {}", self.bar, style::dim(&style::visible(e.trim())));
+            for line in e.trim().lines() {
+                eprintln!("{}   {}", self.bar, style::dim(&style::visible_text(line)));
+            }
         }
     }
 
@@ -351,22 +407,27 @@ impl AgentUi for TermUi {
         self.clear_status();
         self.end_text_line();
         let mark = match s.status.as_str() {
-            "completed" => style::green("✔"),
-            "cancelled" => style::yellow("✗"),
-            _ => style::yellow("⚠"),
+            "completed" => style::green(style::glyph("✔", "+")),
+            "cancelled" => style::yellow(style::glyph("✗", "x")),
+            _ => style::yellow(style::glyph("⚠", "!")),
         };
-        let mut line = format!("{} steps · {:.1} s", s.steps, s.secs);
+        let sep = style::glyph(" · ", " | ");
+        let mut line = format!("{} steps{sep}{:.1} s", s.steps, s.secs);
         if s.decode_tps > 0.0 {
-            line.push_str(&format!(" · {:.1} tok/s", s.decode_tps));
+            line.push_str(&format!("{sep}{:.1} tok/s", s.decode_tps));
         }
         if let Some(n) = &s.note {
             line = format!("{n} ({line})");
         }
-        eprintln!("{} {mark} {}", self.bar, style::dim(&line));
+        eprintln!(
+            "{} {mark} {}",
+            self.bar,
+            style::dim(&style::visible_text(&line))
+        );
         if stats_enabled() {
             eprintln!("{} {}", self.bar, style::dim(&s.stats_line()));
         }
-        self.text_started = false;
+        self.text = TextState::default();
     }
 }
 
@@ -431,6 +492,7 @@ impl AgentUi for RecordUi {
     fn text(&mut self, s: &str) {
         self.text.push_str(s);
     }
+
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.events.push(format!(
             "tool {tool} [{}] {label}: {detail}",
@@ -455,5 +517,61 @@ impl AgentUi for RecordUi {
     }
     fn finish(&mut self, s: &TaskSummary) {
         self.events.push(format!("finish {} {}", s.status, s.steps));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streamed_text_preserves_unicode_and_normalizes_split_crlf() {
+        let text = "\r\n\u{4f60}\u{597d}\r\n\u{1f469}\u{200d}\u{1f4bb} e\u{301}\r";
+        for split in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+            let mut state = TextState::default();
+            let out = state.push(&text[..split], "| ")
+                + &state.push(&text[split..], "| ")
+                + &state.finish("| ");
+            assert_eq!(
+                out,
+                "| \u{4f60}\u{597d}\n| \u{1f469}\u{200d}\u{1f4bb} e\u{301}\\r\n"
+            );
+        }
+    }
+
+    #[test]
+    fn output_fits_even_narrow_terminals() {
+        let ui = TermUi::new(false);
+        for line in [
+            "\u{4e2d}".repeat(50),
+            "x\t".repeat(30),
+            "\u{1f600}".repeat(40),
+        ] {
+            for columns in 1..100 {
+                let shown = style::strip_ansi(&ui.output_line(&line, false, Some(columns)));
+                assert!(style::width(&shown) < columns, "{columns}: {shown:?}");
+            }
+            let shown = style::strip_ansi(&ui.output_line(&line, false, None));
+            assert!(
+                !shown.ends_with("..."),
+                "redirected text has no terminal-width cap"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_output_and_folded_tail_keep_their_streams() {
+        let mut ui = TermUi::new(false);
+        ui.shown = LIVE_LINES;
+        ui.output("out", false);
+        ui.output("err\n", true);
+        ui.output("put\n", false);
+        assert_eq!(ui.tail, [("err".into(), true), ("output".into(), false)]);
+        ui.output("error without newline", true);
+        assert!(ui.output[0].finish().is_none());
+        assert_eq!(
+            ui.output[1].finish().as_deref(),
+            Some("error without newline")
+        );
     }
 }

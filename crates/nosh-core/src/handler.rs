@@ -219,7 +219,25 @@ impl AiHandler for ShellAi {
             return None;
         }
         let env = agent.environment().clone();
-        eprint!("{}", style::dim(tr!("… 生成命令中", "… suggesting")));
+        let animated = style::stderr().ansi;
+        let status = format!(
+            "{} {}",
+            style::glyph("…", "..."),
+            tr!("生成命令中", "suggesting")
+        );
+        if animated {
+            let status = style::clip_line(
+                &status,
+                nosh_shell::term::stderr_columns()
+                    .unwrap_or(80)
+                    .saturating_sub(1),
+                0,
+                "",
+            );
+            eprint!("{}", style::dim(&status));
+        } else {
+            eprintln!("{status}");
+        }
         let r = crate::suggest::suggest(
             agent.engine_mut(),
             &env,
@@ -228,7 +246,9 @@ impl AiHandler for ShellAi {
             Trigger::Builtin,
             sampling,
         );
-        eprint!("\r\x1b[K");
+        if animated {
+            eprint!("\r\x1b[K");
+        }
         match r {
             Ok(Some(s)) => Some(s.command),
             Ok(None) => {

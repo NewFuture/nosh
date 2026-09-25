@@ -177,6 +177,7 @@ pub fn order_by_preference(cands: &[Candidate], preferred: &[Hub]) -> Vec<Candid
 }
 
 pub fn format_probe_summary(probes: &[ProbeResult]) -> String {
+    let terminal = crate::terminal::stderr();
     let mut sorted: Vec<&ProbeResult> = probes.iter().collect();
     sorted.sort_by(|a, b| {
         b.throughput
@@ -187,17 +188,21 @@ pub fn format_probe_summary(probes: &[ProbeResult]) -> String {
         .iter()
         .map(|p| match (p.throughput, &p.error) {
             (Some(t), None) => format!("{} {:.1} MB/s", p.hub, t / 1e6),
-            (_, Some(e)) => format!("{} ✗ ({})", p.hub, short(e)),
-            _ => format!("{} ✗", p.hub),
+            (_, Some(e)) => format!("{} {} ({})", p.hub, terminal.glyph("✗", "x"), short(e)),
+            _ => format!("{} {}", p.hub, terminal.glyph("✗", "x")),
         })
         .collect::<Vec<_>>()
-        .join(" · ")
+        .join(terminal.glyph(" · ", " | "))
 }
 
 fn short(s: &str) -> String {
     let s = s.lines().next().unwrap_or_default();
     if s.chars().count() > 40 {
-        format!("{}…", s.chars().take(40).collect::<String>())
+        format!(
+            "{}{}",
+            s.chars().take(40).collect::<String>(),
+            crate::terminal::stderr().glyph("…", "...")
+        )
     } else {
         s.to_string()
     }
@@ -351,6 +356,12 @@ mod tests {
             probe(Hub::HuggingFace, Some(3.1e6)),
             probe(Hub::ModelScope, Some(21.4e6)),
         ]);
-        assert_eq!(s, "modelscope.cn 21.4 MB/s · huggingface.co 3.1 MB/s");
+        assert_eq!(
+            s,
+            format!(
+                "modelscope.cn 21.4 MB/s{}huggingface.co 3.1 MB/s",
+                crate::terminal::stderr().glyph(" · ", " | ")
+            )
+        );
     }
 }

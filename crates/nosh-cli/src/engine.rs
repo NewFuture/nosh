@@ -1,6 +1,5 @@
 //! Finding, downloading (with first-run confirmation) and loading the model.
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use nosh_core::LoadedEngine;
@@ -90,8 +89,7 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
         )
     );
     if ask && term::available() {
-        eprint!("{question}");
-        match term::read_text("") {
+        match term::read_text(&question, "") {
             Some(a) if a.trim().is_empty() || a.trim().to_lowercase().starts_with('y') => {}
             _ => {
                 let _ = nosh_hub::paths::ensure_private_dir(&nosh_hub::paths::state_dir());
@@ -129,10 +127,11 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
         .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(declined_marker());
     eprintln!(
-        "{}",
+        "{} {}",
+        style::glyph("✔", "+"),
         tr!(
-            "✔ SHA-256 校验通过。之后可以完全断网使用。",
-            "✔ SHA-256 verified. nosh can now run fully offline."
+            "SHA-256 校验通过。之后可以完全断网使用。",
+            "SHA-256 verified. nosh can now run fully offline."
         )
     );
     Ok(r)
@@ -167,15 +166,27 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
         Some(r) => r,
         None => download(setup, ask)?,
     };
-    let tty = std::io::stderr().is_terminal();
-    if tty {
-        eprint!(
-            "{}",
-            style::dim(&tr!(
-                format!("… 加载 {}", resolved.entry.display),
-                format!("… loading {}", resolved.entry.display)
-            ))
+    let terminal = style::stderr();
+    if terminal.tty {
+        let status = format!(
+            "{} {}",
+            style::glyph("…", "..."),
+            tr!(
+                format!("加载 {}", resolved.entry.display),
+                format!("loading {}", resolved.entry.display)
+            )
         );
+        if terminal.ansi {
+            let status = style::clip_line(
+                &status,
+                term::stderr_columns().unwrap_or(80).saturating_sub(1),
+                0,
+                "",
+            );
+            eprint!("{}", style::dim(&status));
+        } else {
+            eprintln!("{status}");
+        }
     }
     let engine = LocalChatEngine::load(
         &resolved,
@@ -185,7 +196,7 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
             ..LocalEngineOptions::default()
         },
     );
-    if tty {
+    if terminal.ansi {
         eprint!("\r\x1b[K");
     }
     let engine =

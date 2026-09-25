@@ -13,6 +13,7 @@ pub mod registry;
 pub mod select;
 pub mod sources;
 pub mod store;
+pub mod terminal;
 #[cfg(any(test, feature = "test-server"))]
 pub mod testserver;
 
