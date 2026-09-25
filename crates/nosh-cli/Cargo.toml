@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 candle-core.workspace = true
 clap.workspace = true
+libc.workspace = true
 nosh-core.workspace = true
 nosh-hub.workspace = true
 nosh-llm.workspace = true

@@ -6,3 +6,6 @@
 .DS_Store
 .idea/
 .vscode/
+/eval/results/
+/eval/baselines/*/logs/
+**/__pycache__/
