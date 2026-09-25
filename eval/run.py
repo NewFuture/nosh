@@ -430,6 +430,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",
                      "path": "<trial-home>/bin:/usr/bin:/bin", "tty_size": [40, 160], "process_per_trial": True,
+                     "process_niceness": os.getpriority(os.PRIO_PROCESS, 0),
                      "cargo_offline": True, "cargo_incremental": False, "cargo_jobs": 1, "npm_offline": True},
         "machine": machine_info(), "tools": tools, "toolchain": toolchain,
         "scenarios": suite["scenarios"], "seeds": args.seeds or suite["seeds"], "repeat": args.repeat,

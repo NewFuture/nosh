@@ -199,22 +199,74 @@ jobs:
         run: |
           "$EVAL_BINARY" model pull minicpm5-2b:q4_k_m --source hf
           "$EVAL_BINARY" model verify minicpm5-2b:q4_k_m
+      - name: prepare the pinned checkpoint artifact client
+        run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@2.3.2
       - name: collect the serial 250-trial campaign
         id: campaign
-        run: |
-          set +e
-          python3 -m eval.run \
-            --binary "$EVAL_BINARY" \
-            --model-path "$NOSH_HOME/models/minicpm5-2b-q4_k_m" \
-            --build-info "$EVAL_ARTIFACTS/build-info.json" \
-            --threads 2 --repeat 2 \
-            --label "main-${EVAL_SOURCE_REVISION:0:7}-expanded-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --output "$EVAL_ARTIFACTS/campaign"
-          status=$?
-          set -e
-          printf '%s\n' "$status" > "$EVAL_ARTIFACTS/exit-code.txt"
-          # A model verdict/repeatability failure is data, not a harness failure.
-          if (( status > 1 )); then exit "$status"; fi
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const {spawn, execFile} = require('node:child_process');
+            const {promisify} = require('node:util');
+            const execute = promisify(execFile);
+            const {DefaultArtifactClient} = require(path.join(
+              process.env.RUNNER_TEMP, 'evaluation-artifact-client/node_modules/@actions/artifact'));
+            const artifacts = new DefaultArtifactClient();
+            const root = process.env.EVAL_ARTIFACTS;
+            const log = fs.createWriteStream(path.join(root, 'campaign.log'));
+            const args = ['-n', '10', 'python3', '-u', '-m', 'eval.run',
+              '--binary', process.env.EVAL_BINARY,
+              '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
+              '--build-info', path.join(root, 'build-info.json'),
+              '--threads', '2', '--repeat', '2',
+              '--label', `main-${process.env.EVAL_SOURCE_REVISION.slice(0, 7)}-expanded-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
+              '--output', path.join(root, 'campaign')];
+            const child = spawn('nice', args, {stdio: ['ignore', 'pipe', 'pipe']});
+            child.stdout.on('data', data => { process.stdout.write(data); log.write(data); });
+            child.stderr.on('data', data => { process.stderr.write(data); log.write(data); });
+            let exited = false;
+            const finished = new Promise((resolve, reject) => {
+              child.once('error', error => { exited = true; reject(error); });
+              child.once('close', (code, signal) => { exited = true; resolve({code, signal}); });
+            });
+            function files(directory) {
+              return fs.readdirSync(directory, {withFileTypes: true}).flatMap(entry => {
+                const file = path.join(directory, entry.name);
+                if (entry.isSymbolicLink()) throw new Error('checkpoint contains a symlink');
+                return entry.isDirectory() ? files(file) : [file];
+              });
+            }
+            let outcome;
+            try {
+              // At most eight immutable checkpoints plus the final artifact.
+              for (let index = 1; index <= 8; index++) {
+                let timer;
+                outcome = await Promise.race([finished, new Promise(resolve => {
+                  timer = setTimeout(() => resolve(null), (index === 1 ? 5 : 45) * 60_000);
+                })]);
+                clearTimeout(timer);
+                if (outcome) break;
+                const snapshot = path.join(process.env.RUNNER_TEMP, `evaluation-checkpoint-${index}`);
+                const saved = await execute('python3', ['-m', 'eval.checkpoint', root, snapshot]);
+                core.info(saved.stdout.trim());
+                const uploaded = await artifacts.uploadArtifact(
+                  `evaluation-${process.env.GITHUB_RUN_ID}-checkpoint-${index}`,
+                  files(snapshot), snapshot, {retentionDays: 1, compressionLevel: 6});
+                core.info(`Durable checkpoint artifact ${uploaded.id}`);
+              }
+              outcome ??= await finished;
+              const code = outcome.code ?? 130;
+              fs.writeFileSync(path.join(root, 'exit-code.txt'), `${code}\n`);
+              if (code > 1) core.setFailed(`Evaluation infrastructure failed: exit ${code}, signal ${outcome.signal}`);
+            } finally {
+              if (!exited) {
+                child.kill('SIGINT');
+                await finished;
+              }
+              await new Promise(resolve => log.end(resolve));
+            }
       - name: verify completeness and attribute the harness
         if: always() && steps.campaign.outcome != 'skipped'
         run: |
@@ -248,6 +300,7 @@ jobs:
               "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "workflow_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
               "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
+              "process_niceness": 10,
               "original_report_hashes": raw_hashes,
               "attributed_report_hashes": {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")},
               "note": "One serial campaign. No selective retries or resampling. Source attribution does not change trials or judgments.",
@@ -272,5 +325,6 @@ jobs:
             target/evaluation-artifacts/environment.txt
             target/evaluation-artifacts/exit-code.txt
             target/evaluation-artifacts/provenance.json
+            target/evaluation-artifacts/campaign.log
             target/evaluation-artifacts/campaign
           if-no-files-found: error

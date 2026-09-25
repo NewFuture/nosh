@@ -45,6 +45,8 @@ gh workflow run ci.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
 
 只有手动设置 `evaluation=true` 才运行真实模型；普通 push/PR 和默认手动 CI 仍只运行原有测试。评测与常规 CI 使用不同 concurrency group，不会因后续代码 push 自动取消正在采样的评测。完整采样且没有运行器错误时，工作流可以成功，即使模型任务或双跑一致性未通过；原始退出码、失败样本和部分结果均保存在 `evaluation-<run-id>-<attempt>` artifact，工作流绿色不表示模型通过率 100%。基线正式入库前仍需核对全部 250 个身份、来源和失败原因。
 
+远端采样以 nice 10 运行，为 runner 心跳留出调度优先级。首个检查点在 5 分钟后保存，此后每 45 分钟保存一次，最多八份，并保留一天；最终 artifact 独立保存。检查点复制原子 JSON 报告和已结束试验的日志，从该 JSON 生成一致的 Markdown，不改变实时报告、判定或 seed。检查点及资源快照不是完整基线，也不能把不同机器/运行的片段拼成一次正式双跑；hosted runner 失联时保留这些证据，修复基础设施后重新运行完整 campaign。快照复制/压缩可能带来少量并发开销，耗时指标需要注明此运行条件。
+
 ## 场景与审批
 
 [`scenarios.json`](scenarios.json) 使用 v2 契约，包含入口、输入、夹具、审批策略、判定器、体验门槛和全局 seed/超时配置；运行器仍读取 v1 场景。REPL 输入原样发送，支持 `#`、无前缀自然语言及场景内多轮交互；`-a` 的 git 附件由实际 git 命令生成，`-s` 直接调用二进制。每轮 `completions` 显式声明 agent、失败的 shell 命令或本地纠错；失败命令必须实际出现声明的退出码及诊断，再发送求助，不用额外探针覆盖“上一条失败命令”。
