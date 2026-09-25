@@ -29,7 +29,7 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 
 ## 工具与命令建议
 
-agent 只有四个内置工具：`run_command`、`read_file`、`list_dir`、`search`。`search(pattern, path?, glob?)` 使用 ripgrep 的 Rust 内核，无需安装 `rg`；递归遵循 `.gitignore`，跳过隐藏、二进制文件和目录符号链接，返回相对路径、行号、匹配行，最多 200 行 / 6,000 字符，截断会明确提示。读取受保护路径仍需审批。计数、排序、分组和合计由 shell 命令计算，不从文件大小推算行数。
+agent 只有四个内置工具：`run_command`、`read_file`、`list_dir`、`search`。`search(pattern, path?, glob?)` 使用 ripgrep 的 Rust 内核，无需安装 `rg`；递归遵循 `.gitignore`，跳过隐藏、二进制文件和目录符号链接，返回相对路径、行号、匹配行，最多 200 行 / 6,000 字符，截断会明确提示。读取受保护路径仍需审批。通用提示词要求用尽量少的安全、可验证步骤完成请求，只检查相关上下文，修改前理解目标、修改后验证结果；不针对某个评测场景指定命令或工具顺序。
 
 `nosh -s` 和 Ctrl+G **不提供模型工具、不执行命令**：模型直接返回一个完整 shell program（可为多行循环或条件语句），经 brush 语法及命令名称检查后，分别只写入 stdout 或预填输入行。额外说明、多个候选和不完整语法会被拒绝；可接受单个 sh/bash 代码块。普通 agent 的最终建议只显示为文本。agent 命令触发终端读取或可识别的 sudo 密码错误时，harness 直接交回原命令并结束任务，提示用户检查后自行执行，不再调用模型或自动重试。
 

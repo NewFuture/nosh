@@ -1,6 +1,6 @@
 # Minimal tools / prompt experiments — blocked
 
-**The core tool changes are implemented, but the language-lines acceptance gate is not met. This is not a passing prompt optimization.** PR #17 remains Draft. The current code retains v4; no candidate was silently selected or reverted.
+**Historical v1–v4 result: the core tool changes are implemented, but the language-lines acceptance gate was not met. This was not a passing prompt optimization.** All four raw archives and their conclusions remain unchanged. A subsequent product decision replaces the experimental Full prompt with **v5/general**, not v2 or v4: two task-independent principles, a flat installed-command list and neutral tool descriptions. PR #17 remains Draft pending a fixed 50-trial full-suite audit; language-lines is no longer a standalone merge gate. No further wording iteration is planned.
 
 ## Fixed campaigns
 
@@ -16,7 +16,7 @@ Each candidate ran both scenarios with seeds 0–4 × repeat 2, serially, at **t
 
 ¹ Nine observable completed-task step counts; the tenth trial timed out at 240 seconds, remains in the denominator and has its complete available raw trace. It is not treated as a successful or missing sample.
 
-**Best observed candidate: v2**, based on its complete fixed samples (2/10 LOC, 10/10 suggestions), not on individual successes. It still fails both LOC targets: ≥8/10 and median ≤2 steps. Choosing v2, separating the prompt changes, or keeping only the core tool changes requires a product decision. Per the coordinating session's instruction, stop after v4: **the gated 50-trial full regression and independent 0.7 experiment were not started**, and there was no real-model rerun after merging main.
+**Best observed historical candidate: v2**, based on its complete fixed samples (2/10 LOC, 10/10 suggestions), not on individual successes. It still fails both historical LOC targets: ≥8/10 and median ≤2 steps. The campaign stopped after v4: **the gated 50-trial full regression and independent 0.7 experiment were not started**, and there was no real-model rerun at that stage after merging main. The subsequent product decision explicitly rejects these benchmark-oriented Full prompts rather than selecting v2; v5/general is a separately recorded full-suite campaign.
 
 ## What the traces show
 

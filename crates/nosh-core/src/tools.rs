@@ -28,7 +28,8 @@ pub enum ToolSet {
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: "run_command".into(),
-        description: "Preferred first tool for clear tasks. Run a short bash pipeline that computes and prints the requested answer, including final grouped totals. Do not manually calculate from raw rows.".into(),
+        description: "Run a bash command in the persistent shell; cwd and variables are shared."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -43,7 +44,7 @@ pub fn run_command_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: "read_file".into(),
-        description: "Inspect a small amount of file content when needed (at most 400 numbered lines). Not for bulk statistics."
+        description: "Read a small amount of file text with line numbers (at most 400 lines)."
             .into(),
         parameters: json!({
             "type": "object",
@@ -60,7 +61,8 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn list_dir_spec() -> ToolSpec {
     ToolSpec {
         name: "list_dir".into(),
-        description: "Explore directory names and byte sizes when needed (respects .gitignore). No line counts. Not a prerequisite for run_command.".into(),
+        description: "List directory names and byte sizes, not line counts. Respects .gitignore."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -75,7 +77,7 @@ pub fn list_dir_spec() -> ToolSpec {
 pub fn search_spec() -> ToolSpec {
     ToolSpec {
         name: "search".into(),
-        description: "Search file contents with a regex; returns relative paths, line numbers and matching lines. Recursive, respects .gitignore, skips hidden/binary files and directory symlinks. At most 200 matching lines. Use grep for stdin/pipelines.".into(),
+        description: "Recursively search file contents with a regex; returns relative paths, line numbers and matching lines. Respects .gitignore, skips hidden/binary files and directory symlinks. At most 200 matching lines.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
