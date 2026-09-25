@@ -64,6 +64,28 @@ so neither x86 nor ARM can silently repack them. Supported CPUs must release sto
 the test does not silently skip unexpected failures to release. CI logs CPU features,
 eligibility and errors on Linux x86_64, Linux aarch64 and Apple Silicon.
 
+## Real-model acceptance
+
+`.github/workflows/arm64-memory.yml` is manual only (`workflow_dispatch`). It downloads
+and verifies the registry-pinned MiniCPM5-2B Q4_K_M plus tokenizer, caches the model store,
+and runs release builds on Linux ARM with two inference threads and f16 KV:
+
+- `cargo test --release --locked -p nosh-cli --test arm64_memory arm64_8k_rss_and_outputs -- --ignored --exact --nocapture --test-threads 1`
+  launches `nosh debug gen` in separate processes with and without `--no-prepack`.
+  Both actually prefill 8064-8127 tokens (including the template), with a non-four-row
+  tail, and generate at most 64 tokens in an 8192-token context. GNU time records each
+  process's lifetime peak RSS; the prepacked run must stay at or below 2.5 GiB and below
+  the retained run. CLI VmHWM is also checked (its current `MB` label denotes MiB).
+- `cargo test --release --locked -p nosh-llm --test real_model prepacked_weights_match_retained_weights -- --ignored --exact --nocapture --test-threads 1`
+  compares retained/prepacked weights on the existing 3.3K sample and an 8065-token
+  prompt, each with 48 teacher-forced tokens. All design section 13.2 distribution
+  thresholds must pass; equal generated text alone is not sufficient.
+
+`NOSH_MEMORY_ARTIFACTS` selects the report directory (default: `target/arm64-memory`).
+The workflow uploads inputs, outputs, model/build provenance, RSS and numerical JSON
+even on failure. Model tests remain ignored in ordinary CI; missing models, missing
+statistics or an ARM CPU without dotprod fail the explicit acceptance run.
+
 ## Updating the pinned rev
 
 1. Copy `candle-core/src` of the new rev over `src/` and apply `nosh.patch` (fix conflicts

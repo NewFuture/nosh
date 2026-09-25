@@ -21,11 +21,6 @@ env:
 # prints the CPU features that pick candle's kernels, with what the prepack
 # tests found on them, also when an earlier step failed.
 jobs:
-  # Bootstrap the new manual workflow before it is registered on main.
-  arm64-memory-validation:
-    if: github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/arm64-memory.yml
-
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30

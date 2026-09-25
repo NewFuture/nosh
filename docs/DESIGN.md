@@ -114,7 +114,7 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 | G5 | 两个版本共用核心 | 同一套权限测试，在本地版和远程版两种装配下结果一致 |
 | G6 | 自动下载，断网运行 | 首次使用时自动下载并校验；就绪后运行期间不访问网络；支持气隙导入和远程推送 |
 | G7 | 安全可控 | 风险分四级；默认执行前确认；YOLO 可以写进配置（风险由用户自己承担）；有硬拒绝清单和审计 |
-| G8 | 低资源 | 8K 上下文时，推理进程 ≤ 3.0 GB（x86_64 已实现：实测 2.69 GiB，约 2.88 GB；aarch64 等平台不释放 Q4K 原始权重，约多 0.9 GB，尚未达标，见 §2.3、§17 #11）；纯 CPU 下目标速度 ≥ 12 tok/s；多个终端共用一份模型 |
+| G8 | 低资源 | 8K 上下文时，推理进程 ≤ 3.0 GB（x86_64 实测 2.69 GiB，约 2.88 GB；Linux aarch64 + dotprod 实测 2.05 GiB，约 2.21 GB，见 §2.3、§17 #11；macOS 已验证释放正确性，未测 RSS）；纯 CPU 下目标速度 ≥ 12 tok/s；多个终端共用一份模型 |
 
 **非目标**：
 - 自研推理框架、训练模型、接入云端模型；
@@ -163,15 +163,15 @@ SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由
 
 **权重的实测体积**（解析 GGUF 张量信息得到）：
 
-| 权重 | 原始（量化） | candle x86 重排布局 | 运行时使用 |
+| 权重 | 原始（量化） | candle x86 重排布局 | 运行时使用（x86） |
 |---|---|---|---|
 | Q4K 矩阵（attn_q/k/output、ffn_gate/up 等，252 个） | 915 MiB | 1,221 MiB（约 1.33 倍） | decode 和 prefill 都用重排布局 |
 | Q6K 矩阵：attn_v、ffn_down | 215 MiB | 328 MiB（约 1.52 倍） | decode（m=1）用原始权重，prefill（m>1）用重排布局 |
 | Q6K：output（lm_head） | 209 MiB | 不重排 | 只算最后一个位置，m 始终为 1 |
 | Q4K：token_embd | 143 MiB | 不重排 | 只用于 embedding 查表 |
 
-- **重排布局比原始更大**：candle 把 scale 和 min 展开成 f32，6-bit 值存成 u8，用内存换速度。
-- **原始权重仍然保留**：candle 把重排布局当作懒加载的缓存，原始数据才是唯一的数据源。
+- **x86 重排布局比原始更大**：candle 把 scale 和 min 展开成 f32，6-bit 值存成 u8，用内存换速度。ARM 的 Q4Kx8、Q6Kx8 则与原始量化数据等大。
+- **上游仍保留原始权重**：candle 把重排布局当作懒加载的缓存，原始数据才是唯一的数据源；nosh 的补丁在所有 m 都能使用缓存后释放原始数据。
 - 这是 candle 有意为之的设计，不是 bug。
 
 **常驻内存** ≈ 原始权重 + 重排布局 + KV + 工作区：
@@ -183,6 +183,17 @@ SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由
 | **MVP 实测**：原始权重与重排布局并存，KV 用 f32，场景中 1–3K 上下文 | RSS 峰值 3.2–3.8 GB | 与公式吻合：1,484 MiB 原始 + 1,549 MiB 重排 + KV + 工作区 ≈ 3.5 GB |
 | **目标（已决策）**：加载时提前重排 Q4K 并释放其原始权重，KV 用 f16，8K 上下文 | **约 2.9 GB（目标 ≤ 3.0 GB）** | 只释放 Q4K 的原始权重（约 0.9 GB）。Q6K 的原始权重要留给 decode 使用，速度与现状相同 |
 | **优化后实测**（PR #1 追加的提交） | 8K（7,884 token 的 prompt）：2,737–2,751 MiB（2.69 GiB，约 2.88 GB）；场景中 1–3K：2,342–2,520 MiB；4.4K：2,494–2,622 MiB | 8K 时的构成：保留的原始数据 567 MiB + Q4K tile 1,221 MiB + Q6K prefill tile 328 MiB + KV（f16）336 MiB + 其余约 300 MiB，与公式一致；速度没有回退 |
+
+上表是 **x86_64** 的体积和历史测量。**ARM + dotprod** 现在会预重排层内 Q4K/Q6K 及 output，并释放其原始块；token_embd 不动。Q6K 的 ARM decode 也使用重排布局，因此不受 x86 “Q6K 必须留给 decode”的限制。
+
+**ARM CI 实测（issue #9）**：MiniCPM5-2B Q4_K_M、KV f16、release、`ubuntu-24.04-arm` / Neoverse-N2（dotprod + i8mm；runner 报告 4 个 CPU，推理固定 2 线程，rayon 1 线程），8,065 token prompt + 64 token 生成，最终上下文 8,131/8,192。两次独立进程只切换 `--no-prepack`，GNU time 记录从加载到生成结束的 RSS 峰值：
+
+| 配置 | 峰值 RSS（KiB） | 峰值（GiB） | 结果 |
+|---|---|---|---|
+| `--no-prepack`：保留原始权重及懒重排缓存 | 3,576,060 | 3.41 | 对照 |
+| 默认预重排并释放 | 2,153,388 | **2.05** | 低于本次 ARM 验收上限 **2.5 GiB**；下降约 39.8% |
+
+释放 295 个矩阵、1,405,071,360 字节原始权重（约 1,340 MiB），生成文本相同；3.3K 和 8K teacher forcing 的全部数值通过线也通过（§13.2）。实测源码 `9737774`、Rust 1.98.1，日志、模型 SHA-256、输入与 JSON 结果见 [CI run 36102190771](https://github.com/NewFuture/nosh/actions/runs/36102190771) 的 `arm64-memory-*` artifact。该低线程数 CI 只验收内存和正确性，不作 ARM 速度结论；macOS 仅跑合成正确性。没有 dotprod 的 CPU 和其他架构仍保留原策略，不把这次测量外推到它们。
 
 > - **没有采用的方案**（§16 #12）：
 >   - 不重排：约 2.2 GB，但明显变慢；
@@ -698,12 +709,13 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 - **candle**（固定到 main 分支的某个 git rev）：
   - 不用 0.11.0 正式版：它只在编译期启用 AVX2，而且依赖带 onig（C 库）的 tokenizers 0.22。main 分支支持运行时的 AVX2/AVX-512 VNNI 分派和 x86 重排内核，MVP 实测 Q4K GEMV 快约 2.3 倍。
   - CPU 后端由 `gemm` 加手写 SIMD 实现，支持 Q4_K、Q6_K、Q8_0 等格式。
-  - 重排布局是 candle 懒加载的缓存，原始权重会一直保留（见 §2.3）。nosh 的做法是加载时提前重排 Q4K 权重，并释放它的原始数据；Q6K 的原始权重要留给 decode 使用。具体实现是一个 vendored 补丁：
+  - 上游 candle 把重排布局作为懒加载缓存，原始权重一直保留（见 §2.3）。nosh 在加载时预重排并释放已不再需要的原始数据：x86_64 只处理层内 Q4K，Q6K 仍留给 decode；aarch64 有 dotprod 时处理层内 Q4K/Q6K 和 output，token_embd 始终保留。具体实现是一个 vendored 补丁：
     - 位置：`third_party/candle-core`，基于锁定的 rev，通过 `[patch]` 引用；
-    - 只增加一个 API：`QTensor::prepack_x86_and_release_storage()`；
-    - 释放条件：只有当 `select` 在所有 m 下都接受该张量时才释放（x86_64、AVX2/VNNI、n%16==0、k%256==0）；有 AMX 时，AMX tile 也一并提前构建；
+    - 通用 API：`QTensor::prepack_and_release_storage()`；旧的 `prepack_x86_and_release_storage()` 保留为仅 x86 的兼容入口；
+    - 释放条件：CPU 上的二维矩阵，重排内核必须覆盖所有 m。x86_64 保持 AVX2/VNNI、n%16==0、k%256==0 的条件；有 AMX 时，AMX tile 也提前构建。aarch64 仅支持非空 Q4K/Q6K、dotprod、n%8==0、k%256==0；不支持 dotprod 时不释放，原有分派不变；
+    - ARM 把 m 拆成四行的倍数部分和 1–3 行尾部：主体继续使用现有 i8mm/dotprod 内核，尾部逐行用 dotprod GEMV，二者读同一份重排数据。无需新布局或补零缓冲；
     - 释放之后，读取原始数据的路径（dequantize、embedding、data 等）都返回明确的错误；
-    - 补丁约 80 行，来源、重打步骤和移除条件记录在 `NOSH_PATCH.md`；
+    - 来源、完整 diff、重打步骤和移除条件记录在 `NOSH_PATCH.md`、`nosh.patch`；合成回归覆盖所有 m=1..64，以及空输入、prefill 块边界、f32/bf16 和释放后的访问限制；
     - 同时向上游提议增加开关。
   - mistral.rs 作为参考；llama.cpp 绑定不符合纯 Rust 的要求，排除。
 - **fork `quantized_llama.rs`**：fork 成 `nosh_llm::model::llama`，做以下改造：
@@ -715,14 +727,14 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 使用自有 KV，按 1024 token 分段增长，支持 `truncate` / `snapshot` / `restore`；存为 f16（已实现）。decode 时按 256 个 key 一块、用 F16C 转成 f32 计算；prefill 时把用到的范围一次性转换到一块可复用的 scratch（8K 时 16 MiB） |
 | 4 | Q/K/V 和 gate/up 各自做一次 matmul | 使用融合 GEMV（M2） |
 | 5 | 注意力按"每个 token × 每个 head"逐行计算，每一行都要重新读一遍 K/V（MVP 在 1.5K 位置实测只有 57 GFLOP/s） | 使用自有的分块 GQA 内核：按"KV head × 一块 query token"划分工作，同组 head 共用一次 K/V 读取；decode 时按 key 区间切分，再合并局部 softmax。MVP 中 2K prompt 的 prefill 从 79 tok/s 提升到 124–140 tok/s |
-| 6 | 重排完成后，原始权重仍然常驻内存 | 加载时提前重排 Q4K 权重（按层并行，0.5–0.9 s），并释放其原始数据，省下 915 MiB；Q6K 保留原始权重给 decode 用；embedding 和 output 不重排（已实现） |
+| 6 | 重排完成后，原始权重仍然常驻内存 | 加载时按层预重排，最多七个矩阵并行。x86：只释放层内 Q4K，省下 915 MiB，Q6K 和 output 保持不变；ARM + dotprod：释放层内 Q4K/Q6K 和 output 的原始数据。embedding 在所有平台都保留量化原始数据；`--no-prepack` 可关闭提前重排与释放 |
 
 - **其他要点**：
   - 分块 prefill，每块 512 个 token，用来限制峰值内存，块与块之间可以取消；
   - 只计算最后一个位置的 logits；
   - llama 布局的 GGUF 使用交错式 RoPE；
   - **只保留一个计算线程池**：`CANDLE_NUM_THREADS` 设为物理核心数，`RAYON_NUM_THREADS=1`，而且只作用于 nosh 进程，在 shell 子进程中还原。这两个变量在 `main` 开头、任何线程启动之前设置，以免与其他线程读取环境变量时发生竞争。两个线程池争抢核心时，MVP 的 decode 只有 6.5 tok/s，调整后约 20 tok/s；
-  - 权重重排：Q4K 在加载时提前完成（按层并行，0.5–0.9 s，见上表 #6）；Q6K 用于 prefill 的重排布局仍在第一次 prefill 时懒加载生成。常驻 engine 可以避免每次冷启动都重做一遍；
+  - 权重重排：x86 的 Q4K、ARM + dotprod 的 Q4K/Q6K 在加载时完成（见上表 #6）；x86 的 Q6K prefill 布局仍在第一次 prefill 时懒加载。`LoadOptions::prepack_weights` / `LocalEngineOptions::prepack_weights` 控制提前重排；关闭后仍保留 candle 的懒重排，而非禁用重排内核。常驻 engine 可以避免每次冷启动都重做一遍；
   - 加载时自检架构、层数、量化类型以及词表是否一致。
 
 ### 7.2 分词与模板
@@ -762,7 +774,7 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 |---|---|---|
 | decode | CPU ≥ 12 tok/s；Metal ≥ 40 tok/s；CUDA ≥ 60 tok/s | 短上下文 23.6–25.6 tok/s；2.1K 为 19.5–19.9；4.4K 为 17.0–17.7；7.9K 为 13.1–13.8（内存优化后，KV 读取量减半，长上下文更快） |
 | prefill | CPU ≥ 100 tok/s | 2.1K 冷 prompt 136–156 tok/s；2.2K→4.3K 为 95–104；7.9K 冷 prompt 89–92 |
-| engine 常驻内存（8K） | ≤ 3.0 GB | 优化后 2.69 GiB（约 2.88 GB）✔；MVP 为 3.2–3.8 GB（见 §2.3） |
+| engine 常驻内存（8K） | ≤ 3.0 GB | x86_64：2.69 GiB（约 2.88 GB）；Linux ARM + dotprod：2.05 GiB（约 2.21 GB）✔，均为注明样本的 RSS 峰值；x86 MVP 为 3.2–3.8 GB（见 §2.3） |
 | 模型加载 | — | 1.8–2.1 s（页缓存已热，含 Q4K 的提前重排 0.5–0.9 s）；短 prompt 的首个 token 0.72–0.86 s |
 
 **加速手段**：
@@ -1109,6 +1121,7 @@ nosh/
 |---|---|---|
 | 单元与模糊测试 | 采样、增量解码、工具调用与 CDATA 解析、截断、AI 触发判定、状态差异；对解析器和协议帧做 fuzz | 全部通过，不出现 panic |
 | 推理正确性 | 模板对比 HF `apply_chat_template`；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
+| ARM 权重释放（issue #9） | 每个 PR 在 Linux ARM64/macOS 用 Q4K/Q6K 合成矩阵覆盖 m=1..64、prefill 边界及原始数据访问；独立手动工作流 `arm64-memory.yml` 下载并缓存固定模型，比较预重排开/关 | 支持 dotprod 的合格矩阵必须实际释放，其他条件保持原始数据；8K 峰值 RSS ≤ 2.5 GiB；相同 f16 KV 下的 3,329/8,065 token prompt 各加 48 步 teacher forcing，应用上一行的全部通过线。Linux ARM 实测：KL 和 NLL 差均为 0，余弦中位数 1，top-5 均 49/49，高置信 top-1 分别 30/30、48/48 |
 | Shell 兼容 | brush 兼容测试的子集；scp、rsync、git over ssh、VS Code Remote；常见 rc（oh-my-bash、starship、conda、nvm） | 全部通过；`nosh -c` 不输出任何额外内容 |
 | 共享会话与信号 | agent 和用户交替执行时状态连续；Ctrl-C 只中断前台；agent 不能 exit/exec；SIGTTIN 检测 | 全部通过 |
 | AI 触发 | 415 条标注语料：合法命令 200、中文自然语言 60、英文自然语言 55、拼写错误 50、安全网输入 50 | 所有样本逐条匹配期望动作，纠错需匹配完整命令；安全网误拦截 < 0.5%；中文自然语言 100% 交给 AI；破坏性命令误执行次数为 0；纠错命中率 ≥ 90% |
@@ -1139,7 +1152,7 @@ nosh/
 | candle 的关键优化还没发版 | 锁定 git rev；CI 设置性能回归门禁 |
 | 下载源不可达，或文件被替换 | 测速选源、多源并行、固定 SHA-256、离线导入与推送 |
 | Windows 的原生 shell 支持不成熟 | Windows 以 CLI（托管 pwsh）和远程客户端为主 |
-| candle 的重排布局与原始权重同时常驻（Q4K 重排后膨胀约 1.33 倍，Q6K 约 1.52 倍） | 已通过 vendored 补丁解决（§7.1）。残留风险：aarch64 等非 x86 平台仍多占约 0.9 GB；AMX 路径没有在真机上实测；candle 升级时需要按 `NOSH_PATCH.md` 重打补丁；向上游提议增加开关 |
+| candle 的重排布局与原始权重同时常驻（x86 Q4K 重排约 1.33 倍、Q6K 约 1.52 倍；ARM Q4K/Q6K 等大） | vendored 补丁释放 x86 层内 Q4K，以及 ARM + dotprod 的层内 Q4K/Q6K 和 output（§7.1）。残留风险：无 dotprod/其他架构未做本次优化或实测；macOS RSS、AMX 尚未实测；candle 升级时必须按 `NOSH_PATCH.md` 重打补丁并运行跨平台正确性与手动内存验收；向上游提议增加开关 |
 | brush 的作业控制与中断存在缺口（后台作业没有 pid、部分 Ctrl-C 场景无法中断） | 向上游贡献相关修复（见 §14 M2）；agent 命令用超时加信号兜底 |
 | 2B 模型的结果波动大（temperature 1.0 下，三个构建各跑 3 轮，每轮 10 个场景，完全正确的次数为 27、20、25） | 建立固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式采用更低的 temperature |
 
@@ -1176,7 +1189,7 @@ nosh/
 | 8 | OpenAI 兼容的本地 API、GUI 客户端 | 不做 | M3 之后 |
 | 9 | agent 模式默认的 temperature（官方推荐 1.0，候选 0.6–0.7） | 1.0 | M2 评测后 |
 | 10 | 是否对 Q8_0 模型也启用"释放原始权重"（还能再省约 2 GB，尚未测试） | 不启用 | M2 |
-| 11 | aarch64 等非 x86 平台是否做同样的内存优化 | 不做（这些平台仍多占约 0.9 GB） | M2 之后 |
+| 11 | aarch64 与其他非 x86 平台的内存优化 | aarch64 + dotprod 已实现 Q4K/Q6K（含 output）释放；Linux ARM 8K 实测 2.05 GiB，macOS 合成正确性通过（issue #9） | 无 dotprod、其他架构或 macOS RSS 有明确需求时另行实测，不套用 Linux ARM 的数字 |
 
 ## 附录 A：prompt 示例（token 视角）
 
