@@ -100,7 +100,7 @@ fn framed(output: &str) -> String {
 struct Probe<'a> {
     mode: &'a str,
     terminal: Option<&'a str>,
-    locale: &'a str,
+    locale: Option<&'a str>,
     no_color: &'a str,
     stdout_tty: bool,
     stderr_tty: bool,
@@ -115,7 +115,7 @@ impl Default for Probe<'_> {
         Self {
             mode: "text",
             terminal: Some("xterm-256color"),
-            locale: "C.UTF-8",
+            locale: Some("C.UTF-8"),
             no_color: "",
             stdout_tty: false,
             stderr_tty: false,
@@ -138,7 +138,9 @@ impl Probe<'_> {
             .args(["--exact", "terminal_probe", "--nocapture"])
             .env("NOSH_TERMINAL_PROBE", self.mode)
             .env("NOSH_TERMINAL_INITIAL", self.initial)
-            .env("LC_ALL", self.locale)
+            .env_remove("LC_ALL")
+            .env_remove("LC_CTYPE")
+            .env_remove("LANG")
             .env("NO_COLOR", self.no_color)
             .env("NOSH_LANG", "en")
             .env("NOSH_HOME", home.path())
@@ -168,12 +170,16 @@ impl Probe<'_> {
                 command.env_remove("TERM");
             }
         }
+        if let Some(locale) = self.locale {
+            command.env("LC_ALL", locale);
+        }
         if input.is_some() {
             let controlling_fd = if self.stderr_tty { 2 } else { 1 };
             // SAFETY: only async-signal-safe syscalls run between fork/exec.
             unsafe {
                 command.pre_exec(move || {
-                    if libc::setsid() == -1 || libc::ioctl(controlling_fd, libc::TIOCSCTTY, 0) == -1
+                    if libc::setsid() == -1
+                        || libc::ioctl(controlling_fd, libc::TIOCSCTTY as _, 0) == -1
                     {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -272,6 +278,12 @@ fn terminal_probe() {
         "status" => {
             let mut ui = TermUi::new(false);
             ui.prefill(1, 1000);
+            ui.pause();
+        }
+        "proposal" => {
+            let mut ui = TermUi::new(false);
+            ui.proposed("printf hello", Some("Suggested explanation.\nMore detail."));
+            ui.text("Final answer.\n");
             ui.pause();
         }
         "input" | "input-pipe" => {
@@ -380,7 +392,13 @@ fn terminal_and_locale_matrix_has_safe_fallbacks() {
         assert!(!out.contains('\x1b') && !err.contains('\x1b'));
         assert!(out.starts_with("\u{2503} answer\n"));
     }
-    for locale in ["C", "POSIX", "zh_CN.GB18030"] {
+    for locale in [
+        None,
+        Some(""),
+        Some("C"),
+        Some("POSIX"),
+        Some("zh_CN.GB18030"),
+    ] {
         let (out, _) = Probe {
             locale,
             stdout_tty: true,
@@ -406,6 +424,30 @@ fn terminal_and_locale_matrix_has_safe_fallbacks() {
         "NO_COLOR alone does not disable cursor control"
     );
     assert!(!err.contains("\x1b[2m"));
+}
+
+#[test]
+fn proposal_explanations_keep_the_detail_prefix_in_both_renderers() {
+    for (terminal, bar, arrow) in [
+        ("xterm-256color", "\u{2503}", "\u{21b3}"),
+        ("dumb", "|", "->"),
+    ] {
+        let (out, err) = Probe {
+            mode: "proposal",
+            terminal: Some(terminal),
+            stderr_tty: true,
+            no_color: "1",
+            ..Probe::default()
+        }
+        .run();
+        assert!(out.is_empty());
+        assert_eq!(
+            err,
+            format!(
+                "{bar} {arrow} printf hello\n{bar}   Suggested explanation.\n{bar}   More detail.\n{bar} Final answer.\n"
+            )
+        );
+    }
 }
 
 #[test]

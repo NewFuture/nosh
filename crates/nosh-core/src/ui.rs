@@ -396,11 +396,9 @@ impl AgentUi for TermUi {
             style::bold(&style::visible(cmd))
         );
         if let Some(e) = explanation.filter(|e| !e.trim().is_empty()) {
-            eprintln!(
-                "{} {}",
-                self.bar,
-                style::dim(&style::visible_text(e.trim()))
-            );
+            for line in e.trim().lines() {
+                eprintln!("{}   {}", self.bar, style::dim(&style::visible_text(line)));
+            }
         }
     }
 

@@ -123,7 +123,9 @@ def legacy_answer(text: str) -> str:
         if not line.startswith(("┃ ", "| ")):
             continue
         content = line[2:]
-        if content.startswith(("⚙ ", "╭─", "+-")) or re.match(r"\* [a-z_]+  ", content):
+        if content.startswith(("⚙ ", "╭─", "+-")) or re.match(
+            r"\* [a-z_]+  (?:SAFE|MUTATING|DANGEROUS|FORBIDDEN)(?: |$)", content
+        ):
             lines = []
         elif not driver.SUMMARY.match(line) and not content.startswith((
             "  ", "stats:", "✔ ", "⚠ ", "✗ ", "cwd →", "cwd ->",

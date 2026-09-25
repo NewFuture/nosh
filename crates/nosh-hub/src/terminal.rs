@@ -24,7 +24,7 @@ impl Terminal {
 
     fn with_env(tty: bool, term: Option<&str>, locale: Option<&str>, no_color: bool) -> Self {
         let ansi = tty && term.is_some_and(|t| !matches!(t, "" | "dumb" | "unknown"));
-        let utf8 = locale.is_none_or(|l| l.to_ascii_lowercase().replace('-', "").contains("utf8"));
+        let utf8 = locale.is_some_and(|l| l.to_ascii_lowercase().replace('-', "").contains("utf8"));
         Self {
             tty,
             ansi,
@@ -83,9 +83,16 @@ mod tests {
             t.ansi && t.unicode && !t.color,
             "NO_COLOR does not disable cursor control"
         );
-        for locale in ["C", "POSIX", "zh_CN.GB18030", "en_US.ISO-8859-1"] {
-            let t = Terminal::with_env(true, Some("xterm"), Some(locale), false);
-            assert!(t.ansi && !t.unicode, "{locale}");
+        for locale in [
+            None,
+            Some(""),
+            Some("C"),
+            Some("POSIX"),
+            Some("zh_CN.GB18030"),
+            Some("en_US.ISO-8859-1"),
+        ] {
+            let t = Terminal::with_env(true, Some("xterm"), locale, false);
+            assert!(t.ansi && !t.unicode, "{locale:?}");
         }
         for term in ["linux", "vt100", "vt220"] {
             assert!(!Terminal::with_env(true, Some(term), Some("C.UTF-8"), false).unicode);

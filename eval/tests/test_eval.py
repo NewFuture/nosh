@@ -117,6 +117,26 @@ class ContractTests(unittest.TestCase):
                   "| I did not change it.\n| ! 2 steps | 1.0 s\n")
         self.assertEqual(run.legacy_answer(denied), "I did not change it.")
 
+    def test_ascii_tool_headers_require_a_complete_risk_label(self):
+        for bullet in ("* item  with details", "* item  SAFETY first", "* item  safe"):
+            with self.subTest(bullet=bullet):
+                text = f"| Previous answer.\n| {bullet}\n| Final answer.\n"
+                self.assertEqual(run.legacy_answer(text), f"Previous answer.\n{bullet}\nFinal answer.")
+        for risk in ("SAFE", "MUTATING", "DANGEROUS", "FORBIDDEN"):
+            with self.subTest(risk=risk):
+                text = f"| Inspecting.\n| * run_command  {risk} · auto\n|   details\n| Final answer.\n"
+                self.assertEqual(run.legacy_answer(text), "Final answer.")
+
+    def test_legacy_answer_excludes_multiline_proposal_explanations(self):
+        for bar, arrow in (("┃", "↳"), ("|", "->")):
+            with self.subTest(bar=bar):
+                text = (
+                    f"{bar} {arrow} printf hello\n"
+                    f"{bar}   Suggested explanation.\n{bar}   More detail.\n"
+                    f"{bar} Final answer.\n"
+                )
+                self.assertEqual(run.legacy_answer(text), "Final answer.")
+
 
 @unittest.skipUnless(sys.platform == "linux", "Linux fixtures and process interfaces")
 class FixtureTests(unittest.TestCase):
