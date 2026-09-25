@@ -211,84 +211,106 @@ fn static_word(w: &ast::Word) -> Option<String> {
     walk(&pieces, &mut s).then_some(s)
 }
 
-fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
-    fn list(cl: &ast::CompoundList, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>, deep: bool) {
+    fn list(
+        cl: &ast::CompoundList,
+        out: &mut Vec<SimpleCmd>,
+        defined: &mut Vec<String>,
+        deep: bool,
+    ) {
         for ast::CompoundListItem(aol, _) in &cl.0 {
-            pipeline(&aol.first, out, defined);
+            pipeline(&aol.first, out, defined, deep);
             for x in &aol.additional {
                 match x {
-                    ast::AndOr::And(p) | ast::AndOr::Or(p) => pipeline(p, out, defined),
+                    ast::AndOr::And(p) | ast::AndOr::Or(p) => pipeline(p, out, defined, deep),
                 }
             }
         }
     }
-    fn pipeline(p: &ast::Pipeline, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+    fn pipeline(
+        p: &ast::Pipeline,
+        out: &mut Vec<SimpleCmd>,
+        defined: &mut Vec<String>,
+        deep: bool,
+    ) {
         for c in &p.seq {
-            match c {
-                ast::Command::Simple(sc) => {
-                    let Some(w) = &sc.word_or_name else {
-                        continue;
-                    };
-                    let Some(name) = static_word(w) else {
-                        continue;
-                    };
-                    let mut argv = vec![name.clone()];
-                    if let Some(suffix) = &sc.suffix {
-                        for item in &suffix.0 {
-                            if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
-                                argv.push(static_word(w).unwrap_or_else(|| w.value.clone()));
-                            }
+            command(c, out, defined, deep);
+        }
+    }
+    fn command(c: &ast::Command, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>, deep: bool) {
+        match c {
+            ast::Command::Simple(sc) => {
+                let Some(w) = &sc.word_or_name else {
+                    return;
+                };
+                let Some(name) = static_word(w) else {
+                    return;
+                };
+                let mut argv = vec![name.clone()];
+                if let Some(suffix) = &sc.suffix {
+                    for item in &suffix.0 {
+                        if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
+                            argv.push(static_word(w).unwrap_or_else(|| w.value.clone()));
                         }
                     }
-                    out.push(SimpleCmd {
-                        name,
-                        span: w.loc.as_ref().map(|l| (l.start.index, l.end.index)),
-                        argv,
-                    });
                 }
-                ast::Command::Compound(cc, _) => compound(cc, out, defined),
-                ast::Command::Function(fd) => {
-                    if let Some(n) = static_word(&fd.fname) {
-                        defined.push(n);
-                    }
-                }
-                ast::Command::ExtendedTest(..) => {}
+                out.push(SimpleCmd {
+                    name,
+                    span: w.loc.as_ref().map(|l| (l.start.index, l.end.index)),
+                    argv,
+                });
             }
+            ast::Command::Compound(cc, _) => compound(cc, out, defined, deep),
+            ast::Command::Function(fd) => {
+                if let Some(n) = static_word(&fd.fname) {
+                    defined.push(n);
+                }
+                if deep {
+                    compound(&fd.body.0, out, defined, deep);
+                }
+            }
+            ast::Command::ExtendedTest(..) => {}
         }
     }
-    fn compound(cc: &ast::CompoundCommand, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+    fn compound(
+        cc: &ast::CompoundCommand,
+        out: &mut Vec<SimpleCmd>,
+        defined: &mut Vec<String>,
+        deep: bool,
+    ) {
         use ast::CompoundCommand as C;
         match cc {
-            C::BraceGroup(b) => list(&b.list, out, defined),
-            C::Subshell(s) => list(&s.list, out, defined),
-            C::ForClause(f) => list(&f.body.list, out, defined),
-            C::ArithmeticForClause(f) => list(&f.body.list, out, defined),
+            C::BraceGroup(b) => list(&b.list, out, defined, deep),
+            C::Subshell(s) => list(&s.list, out, defined, deep),
+            C::ForClause(f) => list(&f.body.list, out, defined, deep),
+            C::ArithmeticForClause(f) => list(&f.body.list, out, defined, deep),
             C::CaseClause(c) => {
                 for item in &c.cases {
                     if let Some(cmd) = &item.cmd {
-                        list(cmd, out, defined);
+                        list(cmd, out, defined, deep);
                     }
                 }
             }
             C::IfClause(i) => {
-                list(&i.condition, out, defined);
-                list(&i.then, out, defined);
+                list(&i.condition, out, defined, deep);
+                list(&i.then, out, defined, deep);
                 for e in i.elses.iter().flatten() {
                     if let Some(c) = &e.condition {
-                        list(c, out, defined);
+                        list(c, out, defined, deep);
                     }
-                    list(&e.body, out, defined);
+                    list(&e.body, out, defined, deep);
                 }
             }
             C::WhileClause(w) | C::UntilClause(w) => {
-                list(&w.0, out, defined);
-                list(&w.1.list, out, defined);
+                list(&w.0, out, defined, deep);
+                list(&w.1.list, out, defined, deep);
             }
+            C::Coprocess(c) if deep => command(&c.body, out, defined, deep),
             C::Arithmetic(_) | C::Coprocess(_) => {}
         }
     }
     for cl in &prog.complete_commands {
-        list(cl, out, defined);
+        list(cl, out, defined, deep);
     }
 }
 
@@ -321,7 +343,7 @@ pub fn is_suggestion_program(text: &str, shell: &EmbeddedShell) -> bool {
     }
     let mut commands = Vec::new();
     let mut defined = Vec::new();
-    collect(&program, &mut commands, &mut defined);
+    collect(&program, &mut commands, &mut defined, true);
     commands
         .iter()
         .all(|c| defined.contains(&c.name) || shell.resolve(&c.name) != Resolution::NotFound)
@@ -368,7 +390,7 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
     };
     let mut cmds = Vec::new();
     let mut defined = Vec::new();
-    collect(&prog, &mut cmds, &mut defined);
+    collect(&prog, &mut cmds, &mut defined, false);
     let missing: Vec<&SimpleCmd> = cmds
         .iter()
         .filter(|c| !defined.contains(&c.name) && shell.resolve(&c.name) == Resolution::NotFound)

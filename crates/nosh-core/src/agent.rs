@@ -792,7 +792,6 @@ impl Agent {
 fn needs_handoff(r: &nosh_shell::CommandResult, sudo_rewritten: bool) -> bool {
     r.needed_terminal
         || (sudo_rewritten
-            && r.exit_code != 0
             && r.stderr.lines().any(|line| {
                 matches!(line.trim(),
                     "sudo: a password is required" |
@@ -826,6 +825,11 @@ mod tests {
         };
         assert!(needs_handoff(&result, true));
         assert!(!needs_handoff(&result, false));
+        result.exit_code = 0;
+        assert!(
+            needs_handoff(&result, true),
+            "a later successful command must not mask sudo's diagnostic"
+        );
         result.stderr = "sudo: user is not in the sudoers file\n".into();
         assert!(!needs_handoff(&result, true));
         result.needed_terminal = true;

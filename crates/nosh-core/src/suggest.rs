@@ -86,6 +86,9 @@ mod tests {
             "```sh\necho ok",
             "```python\nprint('ok')\n```",
             "echo \u{202e}bad",
+            "f() { nosh_missing_command; }",
+            "{ f() { nosh_missing_command; }; f; }",
+            "coproc { nosh_missing_command; }",
         ] {
             assert_eq!(extract_command(text, &shell), None, "{text}");
         }
@@ -98,6 +101,7 @@ mod tests {
             "for f in *.txt; do\n  echo \"$f\"\ndone",
             "if test -d src; then\n  echo yes\nelse\n  echo no\nfi",
             "cd src && echo ok",
+            "{ f() { echo ok; }; f; }",
         ] {
             assert_eq!(extract_command(program, &shell).as_deref(), Some(program));
             assert_eq!(
