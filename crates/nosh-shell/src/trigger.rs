@@ -304,6 +304,29 @@ fn replace_spans(line: &str, edits: &mut [((usize, usize), String)]) -> String {
     out.into_iter().collect()
 }
 
+/// A single complete shell program, with resolvable literal command names.
+/// Parsing alone accepts prose such as "Here is the command" as a command.
+pub fn is_suggestion_program(text: &str, shell: &EmbeddedShell) -> bool {
+    let Ok(program) = shell.parse(text) else {
+        return false;
+    };
+    if program
+        .complete_commands
+        .iter()
+        .map(|c| c.0.len())
+        .sum::<usize>()
+        != 1
+    {
+        return false;
+    }
+    let mut commands = Vec::new();
+    let mut defined = Vec::new();
+    collect(&program, &mut commands, &mut defined);
+    commands
+        .iter()
+        .all(|c| defined.contains(&c.name) || shell.resolve(&c.name) != Resolution::NotFound)
+}
+
 /// Classifies an input line.
 pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> Action {
     let t = line.trim();

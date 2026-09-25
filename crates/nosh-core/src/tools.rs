@@ -13,21 +13,22 @@ use serde_json::json;
 pub const OUTPUT_CHARS: usize = 6000;
 pub const READ_FILE_LINES: usize = 400;
 pub const LIST_DIR_ENTRIES: usize = 300;
+pub const SEARCH_MATCHES: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
-    /// run_command, read_file, list_dir, propose_command.
+    /// run_command, read_file, list_dir, search.
     Full,
-    /// Piped attachments: read_file and list_dir only.
+    /// Piped attachments: read_file, list_dir and search.
     ReadOnly,
-    /// Suggestions: propose_command only.
+    /// Suggestions: no tools, just a shell program.
     Suggest,
 }
 
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: "run_command".into(),
-        description: "Run a bash command in the user's shell session and return its output.".into(),
+        description: "Run bash in the user's shell. Compute exact counts, sizes, sorting, grouping and sums with commands; do not calculate them yourself.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -42,7 +43,7 @@ pub fn run_command_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: "read_file".into(),
-        description: "Read a text file (not a directory) with line numbers, at most 400 lines."
+        description: "Read a small amount of text to understand its contents (at most 400 lines). Not for bulk statistics; use run_command to compute those."
             .into(),
         parameters: json!({
             "type": "object",
@@ -59,7 +60,7 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn list_dir_spec() -> ToolSpec {
     ToolSpec {
         name: "list_dir".into(),
-        description: "List file names and sizes in a directory (respects .gitignore). For counting lines or searching, use run_command.".into(),
+        description: "List names and byte sizes, NOT line counts (respects .gitignore). Use run_command for exact statistics, search for file contents.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -71,17 +72,18 @@ pub fn list_dir_spec() -> ToolSpec {
     }
 }
 
-pub fn propose_command_spec() -> ToolSpec {
+pub fn search_spec() -> ToolSpec {
     ToolSpec {
-        name: "propose_command".into(),
-        description: "Put a command into the user's input line for them to review and run. Use for suggestions and for commands that need a terminal or a password.".into(),
+        name: "search".into(),
+        description: "Search file contents with a regex; returns relative paths, line numbers and matching lines. Recursive, respects .gitignore, skips hidden/binary files and directory symlinks. At most 200 matching lines. Use grep for stdin/pipelines.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string"},
-                "explanation": {"type": "string"}
+                "pattern": {"type": "string", "description": "Regular expression"},
+                "path": {"type": "string", "description": "File or directory (default: cwd)"},
+                "glob": {"type": "string", "description": "File glob filter, e.g. *.rs"}
             },
-            "required": ["command"]
+            "required": ["pattern"]
         }),
     }
 }
@@ -92,10 +94,10 @@ pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
             run_command_spec(),
             read_file_spec(),
             list_dir_spec(),
-            propose_command_spec(),
+            search_spec(),
         ],
-        ToolSet::ReadOnly => vec![read_file_spec(), list_dir_spec()],
-        ToolSet::Suggest => vec![propose_command_spec()],
+        ToolSet::ReadOnly => vec![read_file_spec(), list_dir_spec(), search_spec()],
+        ToolSet::Suggest => vec![],
     }
 }
 
@@ -151,7 +153,7 @@ pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> Stri
         let _ = writeln!(s, "[state] {}", r.diff.describe());
     }
     if r.needed_terminal {
-        s.push_str("[note] the command tried to read from the terminal (e.g. a password prompt) and was stopped; use propose_command so the user can run it\n");
+        s.push_str("[note] the command needs a terminal and was stopped; handed back to the user for review, not automatically retried\n");
     }
     if r.timed_out {
         s.push_str("[note] the command timed out and was stopped\n");
@@ -268,6 +270,169 @@ fn resolve(cwd: &Path, p: &str) -> PathBuf {
 
 pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
     resolve(cwd, call.str_arg("path").unwrap_or("."))
+}
+
+/// The callback checks protected descendants before their contents are opened.
+pub fn search(
+    call: &ToolCall,
+    cwd: &Path,
+    mut authorize: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<String, String> {
+    use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkMatch};
+
+    let pattern = call
+        .str_arg("pattern")
+        .ok_or("missing required parameter 'pattern'")?;
+    let matcher =
+        grep_regex::RegexMatcher::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+    let root = tool_path(call, cwd);
+    let meta = std::fs::metadata(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    if !meta.is_file() && !meta.is_dir() {
+        return Err(format!(
+            "{}: not a regular file or directory",
+            root.display()
+        ));
+    }
+    if meta.is_dir()
+        && std::fs::symlink_metadata(&root)
+            .map_err(|e| e.to_string())?
+            .is_symlink()
+    {
+        return Err(format!(
+            "{}: directory symlinks are not followed",
+            root.display()
+        ));
+    }
+    let base = if meta.is_dir() {
+        root.as_path()
+    } else {
+        root.parent().unwrap_or(cwd)
+    };
+    // Use a matcher rather than WalkBuilder overrides: a positive glob must
+    // not override .gitignore or the default hidden-file exclusion.
+    let glob = call
+        .str_arg("glob")
+        .map(|glob| {
+            let mut builder = ignore::overrides::OverrideBuilder::new(base);
+            builder
+                .add(glob)
+                .map_err(|e| format!("invalid glob: {e}"))?;
+            builder.build().map_err(|e| format!("invalid glob: {e}"))
+        })
+        .transpose()?;
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(true)
+        .follow_links(false)
+        .require_git(false)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .build();
+
+    struct Matches<'a> {
+        path: &'a Path,
+        text: String,
+        count: usize,
+        remaining: usize,
+        budget: usize,
+        truncated: bool,
+    }
+    impl Sink for Matches<'_> {
+        type Error = std::io::Error;
+
+        fn matched(
+            &mut self,
+            _: &grep_searcher::Searcher,
+            m: &SinkMatch<'_>,
+        ) -> Result<bool, Self::Error> {
+            if self.count >= self.remaining {
+                self.truncated = true;
+                return Ok(false);
+            }
+            let line = String::from_utf8_lossy(m.bytes());
+            let prefix = format!("{}:{}:", self.path.display(), m.line_number().unwrap_or(0));
+            let available = self.budget.saturating_sub(self.text.chars().count());
+            let rendered = prefix
+                .chars()
+                .chain(line.trim_end_matches(['\r', '\n']).chars());
+            let mut rendered = rendered.peekable();
+            self.text
+                .extend(rendered.by_ref().take(available.saturating_sub(1)));
+            self.text.push('\n');
+            self.count += 1;
+            if rendered.peek().is_some() {
+                self.truncated = true;
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        fn binary_data(
+            &mut self,
+            _: &grep_searcher::Searcher,
+            _: u64,
+        ) -> Result<bool, Self::Error> {
+            self.text.clear();
+            self.count = 0;
+            self.truncated = false;
+            Ok(false)
+        }
+    }
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(0))
+        .heap_limit(Some(8 * 1024 * 1024))
+        .build();
+    let mut output = String::new();
+    let mut count = 0;
+    let mut truncated = false;
+    // Reserve room for the header and explicit truncation notice.
+    let budget = OUTPUT_CHARS - 120;
+    for entry in walker {
+        let entry = entry.map_err(|e| format!("search traversal: {e}"))?;
+        let path = entry.path();
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            continue;
+        }
+        if entry.depth() > 0 && !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if glob
+            .as_ref()
+            .is_some_and(|g| g.matched(path, false).is_ignore())
+        {
+            continue;
+        }
+        authorize(path)?;
+        let mut matches = Matches {
+            path: path.strip_prefix(base).unwrap_or(path),
+            text: String::new(),
+            count: 0,
+            remaining: SEARCH_MATCHES - count,
+            budget: budget.saturating_sub(output.chars().count()),
+            truncated: false,
+        };
+        searcher
+            .search_path(&matcher, path, &mut matches)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        output.push_str(&matches.text);
+        count += matches.count;
+        if matches.truncated {
+            truncated = true;
+            break;
+        }
+    }
+    let mut result = format!(
+        "[{count} matching lines; truncated={}]\n",
+        if truncated { "yes" } else { "no" }
+    );
+    if count == 0 {
+        result.push_str("(no matches)");
+    } else {
+        result.push_str(output.trim_end());
+    }
+    if truncated {
+        result.push_str("\n[truncated: refine pattern, path or glob]");
+    }
+    Ok(result)
 }
 
 /// `read_file`: numbered lines, binary files refused.
@@ -588,6 +753,154 @@ mod tests {
         assert_eq!(
             tool_path(&c, Path::new("/home/u/proj")),
             PathBuf::from("/home/u/etc/passwd")
+        );
+    }
+
+    #[test]
+    fn minimal_tool_sets() {
+        let names = |set| specs(set).into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(ToolSet::Full),
+            ["run_command", "read_file", "list_dir", "search"]
+        );
+        assert_eq!(
+            names(ToolSet::ReadOnly),
+            ["read_file", "list_dir", "search"]
+        );
+        assert!(specs(ToolSet::Suggest).is_empty());
+        let schema = search_spec().parameters;
+        assert_eq!(schema["required"], json!(["pattern"]));
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn search_respects_filters_and_returns_numbered_relative_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        for (path, content) in [
+            ("a.rs", "not here\nneedle one\n"),
+            ("src/b.rs", "needle two\n"),
+            ("c.txt", "needle three\n"),
+            (".hidden.rs", "needle\n"),
+            ("ignored.rs", "needle\n"),
+            ("binary.rs", "needle\0binary\n"),
+            (".gitignore", "ignored.rs\n"),
+        ] {
+            std::fs::write(root.join(path), content).unwrap();
+        }
+        let result = search(
+            &call("search", json!({"pattern": "needle", "glob": "*.rs"})),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(result.contains("a.rs:2:needle one"), "{result}");
+        assert!(
+            result.contains(&format!(
+                "{}:1:needle two",
+                Path::new("src").join("b.rs").display()
+            )),
+            "{result}"
+        );
+        assert!(
+            result.starts_with("[2 matching lines; truncated=no]"),
+            "{result}"
+        );
+        for excluded in ["c.txt", ".hidden", "ignored", "binary"] {
+            assert!(!result.contains(excluded), "{result}");
+        }
+        let all = search(&call("search", json!({"pattern": "needle"})), root, |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(all.starts_with("[3 matching lines;"), "{all}");
+        let single = search(
+            &call(
+                "search",
+                json!({"pattern": "needle", "path": "src/../a.rs"}),
+            ),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(single.contains("a.rs:2:needle one"), "{single}");
+        let zero = search(&call("search", json!({"pattern": "absent"})), root, |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(zero.contains("(no matches)"), "{zero}");
+    }
+
+    #[test]
+    fn search_reports_errors_and_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            json!({}),
+            json!({"pattern": "["}),
+            json!({"pattern": ".", "path": "missing"}),
+            json!({"pattern": ".", "glob": "["}),
+        ] {
+            assert!(search(&call("search", args), dir.path(), |_| Ok(())).is_err());
+        }
+        std::fs::write(dir.path().join("a"), "x\n".repeat(201)).unwrap();
+        let result = search(&call("search", json!({"pattern": "x"})), dir.path(), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            result.contains("200 matching lines; truncated=yes"),
+            "{result}"
+        );
+        assert!(
+            result.contains("a:200:x") && !result.contains("a:201:x"),
+            "{result}"
+        );
+        std::fs::write(dir.path().join("a"), "x".repeat(20_000)).unwrap();
+        let result = search(&call("search", json!({"pattern": "x"})), dir.path(), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(result.contains("truncated=yes") && result.chars().count() <= OUTPUT_CHARS);
+        let error = search(&call("search", json!({"pattern": "x"})), dir.path(), |_| {
+            Err("protected".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "protected");
+        let error = search(&call("search", json!({"pattern": "x"})), dir.path(), |p| {
+            std::fs::remove_file(p).unwrap();
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("a:"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_does_not_follow_descendant_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "needle").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            dir.path().join("linked-file"),
+        )
+        .unwrap();
+        let result = search(
+            &call("search", json!({"pattern": "needle"})),
+            dir.path(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(result.contains("(no matches)"), "{result}");
+        assert!(
+            search(
+                &call("search", json!({"pattern": "needle", "path": "linked-dir"})),
+                dir.path(),
+                |_| Ok(())
+            )
+            .is_err()
         );
     }
 

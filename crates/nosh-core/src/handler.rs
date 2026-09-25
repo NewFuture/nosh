@@ -231,7 +231,16 @@ impl AiHandler for ShellAi {
         eprint!("\r\x1b[K");
         match r {
             Ok(Some(s)) => Some(s.command),
-            Ok(None) => None,
+            Ok(None) => {
+                eprintln!(
+                    "{}",
+                    tr!(
+                        "nosh: 没有完整有效的命令建议",
+                        "nosh: no complete valid command suggestion"
+                    )
+                );
+                None
+            }
             Err(e) => {
                 eprintln!("nosh: {e}");
                 None

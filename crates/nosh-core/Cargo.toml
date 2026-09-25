@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 crossterm.workspace = true
 ignore.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
 libc.workspace = true
 memchr.workspace = true
 nosh-hub.workspace = true
@@ -18,6 +20,9 @@ nosh-llm.workspace = true
 nosh-permissions.workspace = true
 nosh-shell.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

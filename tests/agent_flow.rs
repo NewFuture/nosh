@@ -102,10 +102,7 @@ fn multi_step_task_uses_tool_results() {
     let spec = &specs.lock().unwrap()[0];
     assert!(spec.system.contains("<tool_def_sep>"));
     let names: Vec<_> = spec.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(
-        names,
-        ["run_command", "read_file", "list_dir", "propose_command"]
-    );
+    assert_eq!(names, ["run_command", "read_file", "list_dir", "search"]);
     assert!(
         ui.events
             .iter()
@@ -377,13 +374,10 @@ fn no_terminal_denies_unless_auto_allows() {
 }
 
 #[test]
-fn propose_command_ends_the_task_with_a_prefill() {
+fn advice_in_final_text_does_not_prefill_or_execute() {
     let _g = setup();
     let mut sh = shell();
-    let engine = MockChatEngine::new(vec![vec![call(
-        "propose_command",
-        json!({"command": "sudo apt install jq", "explanation": "needs a password"}),
-    )]]);
+    let engine = MockChatEngine::new(vec![vec![text("Try `sudo apt install jq`.")]]);
     let mut a = agent(engine, AgentConfig::default());
     let out = a.run_task(
         &mut sh,
@@ -393,7 +387,157 @@ fn propose_command_ends_the_task_with_a_prefill() {
     );
     assert_eq!(out.status, TaskStatus::Completed);
     assert_eq!(out.steps, 1);
-    assert_eq!(out.proposed.as_deref(), Some("sudo apt install jq"));
+    assert_eq!(out.proposed, None);
+    assert_eq!(out.commands_run, 0);
+}
+
+#[test]
+fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
+    let _g = setup();
+    let mut sh = shell();
+    // A real stop signal, without depending on the test runner having a PTY.
+    let command = "python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGTTIN)'";
+    let engine = MockChatEngine::new(vec![vec![
+        call("run_command", json!({"command": command})),
+        call("run_command", json!({"command": "echo must-not-run"})),
+    ]]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    let mut ui = RecordUi::default();
+    let out = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "terminal task"),
+        &mut Scripted::new([ApprovalResponse::Approve]),
+        &mut ui,
+    );
+    assert_eq!(out.status, TaskStatus::Completed, "{out:?} {:?}", ui.events);
+    assert_eq!(out.proposed.as_deref(), Some(command));
+    assert_eq!(out.steps, 1);
+    assert_eq!(out.commands_run, 1);
+    assert_eq!(received.lock().unwrap().len(), 1);
+    assert!(
+        ui.events
+            .iter()
+            .any(|e| e.contains(command) && e.contains("terminal")),
+        "{:?}",
+        ui.events
+    );
+    assert!(a.output(2).is_none());
+}
+
+#[test]
+fn suggest_and_ctrl_g_use_text_without_tools_or_execution() {
+    use nosh_shell::AiHandler;
+    let _g = setup();
+    let mut sh = shell();
+    let dir = tmpdir("suggest");
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    for response in [
+        "touch suggested",
+        "```bash\ntouch suggested\n```",
+        "for f in *.txt; do\n  echo \"$f\"\ndone",
+    ] {
+        let mut engine = MockChatEngine::new(vec![vec![text(response)]]);
+        let specs = engine.specs();
+        let result = nosh_core::suggest::suggest(
+            &mut engine,
+            &env(),
+            &sh,
+            "suggest",
+            Trigger::Cli,
+            nosh_llm::SamplingParams::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!result.command.contains("```"));
+        assert!(!dir.join("suggested").exists());
+        assert!(specs.lock().unwrap()[0].tools.is_empty());
+        assert_eq!(specs.lock().unwrap()[0].sampling.temperature, 1.0);
+    }
+    let mut engine = Some(MockChatEngine::new(vec![vec![text("touch suggested")]]));
+    let mut ai = ShellAi::new(
+        Box::new(move || {
+            Ok(nosh_core::LoadedEngine {
+                engine: Box::new(engine.take().unwrap()),
+                description: "mock".into(),
+            })
+        }),
+        AgentConfig::default(),
+        Box::new(Scripted::new([])),
+    );
+    assert_eq!(
+        ai.suggest(&mut sh, "create suggested").as_deref(),
+        Some("touch suggested")
+    );
+    assert!(!dir.join("suggested").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn search_checks_protected_roots_dotdot_symlinks_and_descendants() {
+    let _g = setup();
+    let dir = tmpdir("search-protected");
+    std::fs::create_dir(dir.join("private")).unwrap();
+    std::fs::create_dir(dir.join("public")).unwrap();
+    std::fs::write(dir.join("private/secret"), "needle").unwrap();
+    std::os::unix::fs::symlink(dir.join("private/secret"), dir.join("link")).unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    for path in ["public/../private/secret", "link", "."] {
+        let engine = MockChatEngine::new(vec![
+            vec![call("search", json!({"pattern": "needle", "path": path}))],
+            vec![text("Denied.")],
+        ]);
+        let received = engine.received();
+        let mut a = Agent::new(
+            Box::new(engine),
+            AgentConfig {
+                protected: vec![dir.join("private")],
+                ..Default::default()
+            },
+            env(),
+            ToolSet::ReadOnly,
+        );
+        let mut approval = Scripted::new([ApprovalResponse::Deny { reason: None }]);
+        a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Pipe, "search"),
+            &mut approval,
+            &mut RecordUi::default(),
+        );
+        assert_eq!(approval.seen.len(), 1, "{path}");
+        assert_eq!(approval.seen[0].tool, "search");
+        let results = tool_results(&received.lock().unwrap());
+        assert!(results[0].contains("[denied by user]"), "{results:?}");
+        assert!(!results[0].contains("needle"), "{results:?}");
+    }
+    let engine = MockChatEngine::new(vec![
+        vec![call(
+            "search",
+            json!({"pattern": "needle", "path": "private"}),
+        )],
+        vec![text("Found.")],
+    ]);
+    let received = engine.received();
+    let mut a = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            protected: vec![dir.join("private")],
+            ..Default::default()
+        },
+        env(),
+        ToolSet::ReadOnly,
+    );
+    let mut approval = Scripted::new([ApprovalResponse::Approve]);
+    a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Pipe, "search"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(approval.seen.len(), 1);
+    assert!(tool_results(&received.lock().unwrap())[0].contains("secret:1:needle"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -411,7 +555,7 @@ fn reads_through_dotdot_or_symlinks_still_ask() {
         )],
         vec![call("read_file", json!({"path": "host"}))],
         vec![call(
-            "propose_command",
+            "run_command",
             json!({"command": "rm -rf ~/x #\u{202e} sl"}),
         )],
         vec![text("ok")],

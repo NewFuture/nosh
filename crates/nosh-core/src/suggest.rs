@@ -1,7 +1,7 @@
 //! Suggestion mode (Ctrl+G, `nosh -s`): a short separate conversation with
-//! only `propose_command`; nothing is executed.
+//! no tools; one shell program is returned and nothing is executed.
 
-use nosh_llm::{ChatEngine, LlmError, Message, SamplingParams, SessionSpec};
+use nosh_llm::{ChatEngine, LlmError, Message, SamplingParams, SessionSpec, StopReason};
 use nosh_shell::{EmbeddedShell, Trigger};
 
 use crate::prompt::{self, Environment, TaskInput};
@@ -26,10 +26,7 @@ pub fn suggest(
         system: prompt::suggest_system_prompt(env),
         tools: tools::specs(ToolSet::Suggest),
         thinking: false,
-        sampling: SamplingParams {
-            temperature: 0.7,
-            ..sampling
-        },
+        sampling,
         max_new_tokens: 256,
     };
     let sid = engine.open(spec)?;
@@ -38,60 +35,32 @@ pub fn suggest(
     let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
     engine.close(sid);
     let out = res?;
-    let found = out
-        .tool_calls
-        .iter()
-        .find(|c| c.name == "propose_command")
-        .and_then(|c| {
-            let cmd = c.str_arg("command")?.trim();
-            (!cmd.is_empty()).then(|| Suggestion {
-                command: cmd.to_string(),
-                explanation: c.str_arg("explanation").map(str::to_string),
-            })
-        })
-        .or_else(|| {
-            extract_command(&out.text).map(|command| Suggestion {
-                command,
-                explanation: None,
-            })
-        });
-    // Never hand the user a command whose text is not what it looks like.
-    Ok(found.filter(|s| !s.command.chars().any(nosh_shell::style::is_hidden)))
+    if out.stop != StopReason::EndOfTurn || !out.tool_calls.is_empty() || !out.errors.is_empty() {
+        return Ok(None);
+    }
+    Ok(extract_command(&out.text, shell).map(|command| Suggestion {
+        command,
+        explanation: None,
+    }))
 }
 
-/// Falls back to the first code block (all of it: a command may span lines)
-/// or a `$ ` line of prose output.
-pub fn extract_command(text: &str) -> Option<String> {
-    let mut block: Option<Vec<&str>> = None;
-    for line in text.lines() {
-        if line.trim().starts_with("```") {
-            match block.take() {
-                Some(lines) => {
-                    let cmd = lines.join("\n").trim().to_string();
-                    if !cmd.is_empty() {
-                        return Some(cmd);
-                    }
-                }
-                None => block = Some(Vec::new()),
-            }
-            continue;
+/// Accept only a complete program, optionally inside one whole-response fence.
+pub fn extract_command(text: &str, shell: &EmbeddedShell) -> Option<String> {
+    let text = text.trim();
+    let body = if text.starts_with("```") {
+        let (tag, rest) = text.split_once('\n')?;
+        if !matches!(tag.trim(), "```" | "```sh" | "```bash") {
+            return None;
         }
-        if let Some(lines) = &mut block {
-            lines.push(line.trim_start().strip_prefix("$ ").unwrap_or(line));
-        }
+        rest.strip_suffix("```")?.trim()
+    } else {
+        text
+    };
+    if body.contains("```") || body.chars().any(nosh_shell::style::is_hidden) {
+        return None;
     }
-    // A block cut off before its closing fence.
-    if let Some(cmd) = block
-        .map(|lines| lines.join("\n").trim().to_string())
-        .filter(|c| !c.is_empty())
-    {
-        return Some(cmd);
-    }
-    text.lines()
-        .map(str::trim)
-        .find_map(|l| l.strip_prefix("$ "))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let body = body.strip_prefix("$ ").unwrap_or(body);
+    nosh_shell::trigger::is_suggestion_program(body, shell).then(|| body.to_string())
 }
 
 #[cfg(test)]
@@ -100,27 +69,41 @@ mod tests {
 
     #[test]
     fn extraction() {
-        assert_eq!(
-            extract_command("Use this:\n```bash\n$ du -sh * | sort -h\n```").as_deref(),
-            Some("du -sh * | sort -h")
-        );
-        assert_eq!(
-            extract_command("Run\n$ ls -la\nto list").as_deref(),
-            Some("ls -la")
-        );
-        assert_eq!(extract_command("no idea"), None);
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        for text in ["echo ok", "```sh\necho ok\n```", "```bash\n$ echo ok\n```"] {
+            assert_eq!(extract_command(text, &shell).as_deref(), Some("echo ok"));
+        }
+        for text in [
+            "",
+            "no idea",
+            "Use this:\n```bash\necho ok\n```",
+            "```bash\necho ok\n```\nThen check.",
+            "echo ok\nThis prints ok.",
+            "```sh\necho a\n```\n```sh\necho b\n```",
+            "echo a\n\necho b",
+            "echo '",
+            "for f in *; do echo \"$f\"",
+            "```sh\necho ok",
+            "```python\nprint('ok')\n```",
+            "echo \u{202e}bad",
+        ] {
+            assert_eq!(extract_command(text, &shell), None, "{text}");
+        }
     }
 
     #[test]
     fn multi_line_blocks_are_kept_whole() {
-        let text = "Rename them:\n```bash\nfor f in *.txt; do\n  mv \"$f\" \"${f%.txt}.md\"\ndone\n```\nThen check.";
-        assert_eq!(
-            extract_command(text).as_deref(),
-            Some("for f in *.txt; do\n  mv \"$f\" \"${f%.txt}.md\"\ndone")
-        );
-        assert_eq!(
-            extract_command("```\n$ cd src\n$ make\n```").as_deref(),
-            Some("cd src\nmake")
-        );
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        for program in [
+            "for f in *.txt; do\n  echo \"$f\"\ndone",
+            "if test -d src; then\n  echo yes\nelse\n  echo no\nfi",
+            "cd src && echo ok",
+        ] {
+            assert_eq!(extract_command(program, &shell).as_deref(), Some(program));
+            assert_eq!(
+                extract_command(&format!("```bash\n{program}\n```"), &shell).as_deref(),
+                Some(program)
+            );
+        }
     }
 }
