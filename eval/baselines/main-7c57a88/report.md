@@ -2,7 +2,7 @@
 
 Run: `main-7c57a88`. Observation: `legacy`. Source: `7c57a88641d634f84dc190afafcee3cdb1813c1f`. Binary SHA-256: `ea5b7f8624803ed547f97c3eda837284e16e7bae3c11ffd3e494b791e3b27318`.
 
-Harness source: `6fbeef0a707c11b0818222a257f3ccf3c5bc4c65`.
+Harness source: `f7b2d079cadbc214d56a76cdaa0c511e57484177`.
 
 Seeds: `[0, 1, 2, 3, 4]`; repeats: 1. Each scenario/seed starts a new process. The typo scenario does not load a model.
 
@@ -27,7 +27,7 @@ The suite rebuilds the MVP task intents, not the unavailable original fixtures. 
 
 ## Grading provenance
 All 50 captured trials were deterministically regraded after correcting two overly strict fact matchers: an explicitly excluded small file outside the ranked top-three list, and the equivalent spelling 'Python 3'. Fixture facts were rebuilt and verified against the recorded facts; archive commands were revalidated only against those disposable fixtures. No nosh process was run again and no model answer was replaced or selected from a retry. After rebasing the branch, harness/grader source references were repointed to content-identical commits verified against the recorded source hashes. Pre-rebase revisions remain in metadata and original judgments; the measured nosh build and all observations are unchanged.
-Grader: `1bd9ec93806e54e44d9e36515ab94954475aa1db`. Changed verdicts: 2. Original verdicts/reasons remain in each JSON trial; model outputs, seeds, timings and captured states were not replaced.
+Grader: `770f7ec1e884b76d76b436810f87cfa98da9ec7f`. Changed verdicts: 2. Original verdicts/reasons remain in each JSON trial; model outputs, seeds, timings and captured states were not replaced.
 
 ## Repeatability
 Not measured: this run has no repeated scenario/seed pairs. Use --repeat 2; do not infer repeatability from fixed seeds alone.

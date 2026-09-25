@@ -192,12 +192,12 @@
       4
     ],
     "repeat": 1,
-    "harness_revision": "6fbeef0a707c11b0818222a257f3ccf3c5bc4c65",
+    "harness_revision": "f7b2d079cadbc214d56a76cdaa0c511e57484177",
     "harness_revision_before_rebase": "f5641ad1bbc4f6d8fde72aacbb49ee42a19fb294",
     "harness_content_sha256": "b2dc2bfe8e9db3338deb1307fe6de85fb5680bbfabda36544b587a61f03082e8",
     "grading_content_sha256": "83fef3ef53c08514b4f420671f6e00915d6b115d904ea1b8eb55d7c69f665f99",
     "regrade": {
-      "revision": "1bd9ec93806e54e44d9e36515ab94954475aa1db",
+      "revision": "770f7ec1e884b76d76b436810f87cfa98da9ec7f",
       "revision_before_rebase": "b50acc81f189206feee609d04b1f3df92eaef6c4",
       "changed_verdicts": 2,
       "changes": [
