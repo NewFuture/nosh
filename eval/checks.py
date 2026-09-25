@@ -122,6 +122,8 @@ def mentioned_files(answer: str, known: dict | list) -> list[str]:
 def line_counts(answer: str, facts: dict) -> list[str]:
     reasons = []
     found: dict[str, list[int]] = {name: [] for name in LANGUAGES}
+    line_count = r"(?<![\d.-])(\d+)\s*(?:lines?\b|loc\b|行)"
+    language_label = "|".join(LANGUAGES.values())
     columns = None
     file_column = None
     section = None
@@ -141,15 +143,17 @@ def line_counts(answer: str, facts: dict) -> list[str]:
                 file_column = next((i for i, c in enumerate(cells) if re.search(r"\bfiles?\b|文件", c)), None)
                 section = None
         for language, pattern in LANGUAGES.items():
-            if not re.search(pattern, line):
+            label = re.search(pattern, line)
+            if not label:
                 continue
             number = None
             if columns is not None and len(cells) > columns and re.fullmatch(r"\d+", cells[columns]):
                 number = int(cells[columns])
             else:
-                match = re.search(pattern + r"\s*[:：-]\s*(\d+)\b", line)
+                description = re.split(language_label, line[label.end():], maxsplit=1)[0]
+                match = re.search(line_count, description)
                 if not match:
-                    match = re.search(pattern + r"[^\n\d]*(\d+)\s*(?:lines?\b|行)", line)
+                    match = re.fullmatch(r"\s*[:：-]\s*(\d+)\s*[.,;。]?\s*", description)
                 if match:
                     number = int(match.group(1))
             if number is not None:
@@ -165,7 +169,7 @@ def line_counts(answer: str, facts: dict) -> list[str]:
             if columns is not None and len(cells) > columns and re.fullmatch(r"\d+", cells[columns]):
                 if int(cells[columns]) != expected_lines:
                     reasons.append(f"incorrect total: {line.strip()}")
-            for number in re.findall(r"(\d+)\s*(?:lines?\b|行)", line):
+            for number in re.findall(line_count, line):
                 if section:
                     found[section].append(int(number))
                 if int(number) != expected_lines:

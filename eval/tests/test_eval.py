@@ -223,6 +223,42 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(checks.line_counts(sections, facts), [])
         self.assertTrue(checks.line_counts(sections.replace("Total: 15", "Total: 16"), facts))
 
+    def test_language_counts_match_line_units_after_file_counts(self):
+        facts = fixtures.create(self.base / "project", "project")
+        for unit in ("lines", "LOC", "行"):
+            for separator in ("\n", "; "):
+                for files_first in (True, False):
+                    with self.subTest(unit=unit, separator=separator, files_first=files_first):
+                        rows = []
+                        for language, count in facts["languages"].items():
+                            files = f"{facts['language_files'][language]} files"
+                            lines = f"{count} {unit}"
+                            values = f"{files}, {lines}" if files_first else f"{lines}, {files}"
+                            rows.append(f"{language}: {values}")
+                        answer = separator.join(rows) + f"\nTotal: 6 files, 29 {unit}"
+                        self.assertEqual(checks.line_counts(answer, facts), [])
+                        self.assertTrue(checks.line_counts(answer.replace(f"15 {unit}", f"16 {unit}"), facts))
+                        self.assertTrue(checks.line_counts(answer.replace(f"29 {unit}", f"30 {unit}"), facts))
+        chinese = "\n".join(
+            f"{language}：{facts['language_files'][language]}个文件，{count}行"
+            for language, count in facts["languages"].items()
+        )
+        self.assertEqual(checks.line_counts(chinese, facts), [])
+
+    def test_language_counts_do_not_treat_file_counts_as_unitless_loc(self):
+        facts = fixtures.create(self.base / "project", "project")
+        bare = "\n".join(f"{language}: {count}" for language, count in facts["languages"].items())
+        self.assertEqual(checks.line_counts(bare, facts), [])
+        files_only = "\n".join(f"{language}: {count} files" for language, count in facts["languages"].items())
+        reasons = checks.line_counts(files_only, facts)
+        self.assertTrue(all(f"no unambiguous {language} line count" in reasons for language in facts["languages"]))
+        mixed = "Python: 3 files; JavaScript: 1 file, 4 lines\nRust: 6 lines\nShell: 4 lines"
+        self.assertIn("no unambiguous python line count", checks.line_counts(mixed, facts))
+        for invalid in ("-15", "1.15"):
+            self.assertIn("no unambiguous python line count", checks.line_counts(
+                f"Python: 3 files, {invalid} lines\nJavaScript: 4 lines\nRust: 6 lines\nShell: 4 lines", facts,
+            ))
+
     def test_python_files_language_and_extras(self):
         root = self.base / "project"
         facts = fixtures.create(root, "project")
