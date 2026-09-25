@@ -8,6 +8,7 @@ use nosh_llm::{
     ChatEngine, Event, KvDtype, LocalChatEngine, LocalEngineOptions, Message, SessionSpec,
     ToolSpec, rss_mb,
 };
+use nosh_shell::style;
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum KvArg {
@@ -155,19 +156,24 @@ pub fn run(
                             let _ = out.flush();
                         }
                         Event::Think(t) => {
-                            let _ = write!(out, "\x1b[2m{t}\x1b[0m");
+                            let _ = write!(out, "{}", style::stdout().paint("2", &t));
                             let _ = out.flush();
                         }
                         Event::ToolCall(c) => {
                             let _ = writeln!(
                                 out,
-                                "\n⚙ {} {}",
+                                "\n{} {} {}",
+                                style::stdout().glyph("⚙", "*"),
                                 c.name,
                                 serde_json::Value::Object(c.args)
                             );
                         }
                         Event::CallError(e) => {
-                            let _ = writeln!(out, "\n✗ tool call error: {e}");
+                            let _ = writeln!(
+                                out,
+                                "\n{} tool call error: {e}",
+                                style::stdout().glyph("✗", "x")
+                            );
                         }
                         Event::Prefill { .. } => {}
                     },

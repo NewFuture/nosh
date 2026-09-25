@@ -22,6 +22,27 @@ fn dash_c_prints_exactly() {
 }
 
 #[test]
+fn user_command_output_is_never_restyled_or_transcoded() {
+    let script = "printf '\\033[31m\u{4e2d}\u{6587} \u{1f469}\u{200d}\u{1f4bb}\\033[0m\\r\\n\\377'";
+    let mut expected = "\x1b[31m\u{4e2d}\u{6587} \u{1f469}\u{200d}\u{1f4bb}\x1b[0m\r\n"
+        .as_bytes()
+        .to_vec();
+    expected.push(0xff);
+    for term in ["xterm-256color", "screen", "dumb", ""] {
+        let out = nosh()
+            .env("TERM", term)
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{term}: {:?}", out.stderr);
+        assert_eq!(out.stdout, expected, "{term}");
+        assert!(out.stderr.is_empty());
+    }
+}
+
+#[test]
 fn dash_c_exit_status_and_args() {
     let out = nosh().args(["-c", "exit 3"]).output().unwrap();
     assert_eq!(out.status.code(), Some(3));

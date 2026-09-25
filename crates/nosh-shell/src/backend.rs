@@ -1202,11 +1202,23 @@ impl Capture {
         }
         store.extend_from_slice(bytes);
         pend.extend_from_slice(bytes);
-        let valid = match std::str::from_utf8(pend) {
-            Ok(_) => pend.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => pend.len(),
-        };
+        let mut valid = 0;
+        while valid < pend.len() {
+            match std::str::from_utf8(&pend[valid..]) {
+                Ok(_) => {
+                    valid = pend.len();
+                    break;
+                }
+                Err(e) => {
+                    valid += e.valid_up_to();
+                    if let Some(bad) = e.error_len() {
+                        valid += bad;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
         if valid > 0 {
             let chunk = String::from_utf8_lossy(&pend[..valid]).into_owned();
             pend.drain(..valid);
@@ -1241,6 +1253,61 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct TextSink {
+        out: String,
+        err: String,
+    }
+
+    impl OutputSink for TextSink {
+        fn stdout(&mut self, chunk: &str) {
+            self.out.push_str(chunk);
+        }
+        fn stderr(&mut self, chunk: &str) {
+            self.err.push_str(chunk);
+        }
+    }
+
+    #[test]
+    fn live_capture_matches_stored_text_at_every_byte_boundary() {
+        for bytes in [
+            "ASCII \u{4e2d}\u{6587} \u{20bb7} \u{1f469}\u{200d}\u{1f4bb} e\u{301}".as_bytes(),
+            b"\xff\xe4\xbd\xa0\xff\xf0\x9f\x98\x80\xe4",
+            b"\xf0\x80\x80\x80\xed\xa0\x80\xc0\xaf",
+        ] {
+            for first in 0..=bytes.len() {
+                for second in first..=bytes.len() {
+                    let mut cap = Capture::new(usize::MAX);
+                    let mut sink = TextSink::default();
+                    for chunk in [&bytes[..first], &bytes[first..second], &bytes[second..]] {
+                        cap.push(false, chunk, &mut sink);
+                        cap.push(true, chunk, &mut sink);
+                    }
+                    cap.flush(&mut sink);
+                    assert_eq!(sink.out, cap.out_text(), "{bytes:?} at {first}/{second}");
+                    assert_eq!(sink.err, cap.err_text(), "{bytes:?} at {first}/{second}");
+                    assert_eq!(sink.out, String::from_utf8_lossy(bytes));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_keeps_streams_and_limits_independent() {
+        let mut cap = Capture::new(3);
+        let mut sink = TextSink::default();
+        cap.push(false, b"\xff\xe4", &mut sink);
+        cap.push(true, b"\xf0\x9f", &mut sink);
+        cap.push(false, b"\xbd\xa0", &mut sink);
+        cap.push(true, b"\x98\x80", &mut sink);
+        cap.flush(&mut sink);
+        assert!(cap.truncated);
+        assert_eq!(sink.out, "\u{fffd}\u{fffd}");
+        assert_eq!(sink.err, "\u{fffd}");
+        assert_eq!(sink.out, cap.out_text());
+        assert_eq!(sink.err, cap.err_text());
+    }
 
     #[test]
     fn diff_describes_changes() {

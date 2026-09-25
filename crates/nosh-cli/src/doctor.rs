@@ -26,7 +26,7 @@ fn memory_warning(model: &ModelEntry, available: u64) -> Option<String> {
 }
 
 fn ok(label: &str, msg: &str) {
-    eprintln!("{} {label:<10} {msg}", style::green("✔"));
+    eprintln!("{} {label:<10} {msg}", style::green(style::glyph("✔", "+")));
 }
 
 fn warn(label: &str, msg: &str) {
@@ -34,7 +34,7 @@ fn warn(label: &str, msg: &str) {
 }
 
 fn bad(label: &str, msg: &str) {
-    eprintln!("{} {label:<10} {msg}", style::red("✗"));
+    eprintln!("{} {label:<10} {msg}", style::red(style::glyph("✗", "x")));
 }
 
 fn meminfo(key: &str) -> Option<u64> {

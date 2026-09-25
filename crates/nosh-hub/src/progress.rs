@@ -24,7 +24,7 @@ impl Progress for NoProgress {
     fn finish(&self, _: bool) {}
 }
 
-/// Terminal progress bar on stderr (hidden automatically when stderr is not a TTY).
+/// Terminal progress on stderr, with plain status lines for logs and dumb terminals.
 #[derive(Default)]
 pub struct BarProgress {
     bar: Mutex<Option<ProgressBar>>,
@@ -38,6 +38,12 @@ impl BarProgress {
 
 impl Progress for BarProgress {
     fn start(&self, name: &str, total: u64, already: u64) {
+        let terminal = crate::terminal::stderr();
+        if !terminal.ansi {
+            *self.bar.lock().unwrap() = None;
+            eprintln!("{} {name}", crate::tr!("下载", "downloading"));
+            return;
+        }
         let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
         let tpl = if crate::lang::zh() {
             "{msg:24!} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} 剩余 {eta}"
@@ -47,7 +53,7 @@ impl Progress for BarProgress {
         bar.set_style(
             ProgressStyle::with_template(tpl)
                 .expect("valid template")
-                .progress_chars("█▌ "),
+                .progress_chars(terminal.glyph("█▌ ", "=> ")),
         );
         bar.set_message(name.to_string());
         bar.set_position(already);

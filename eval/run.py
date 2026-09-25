@@ -120,13 +120,18 @@ def environment(home: Path, threads: int, trace: Path | None) -> dict[str, str]:
 def legacy_answer(text: str) -> str:
     lines = []
     for line in driver.plain(text).splitlines():
-        if line.startswith(("┃ ⚙", "┃ ╭─")):
+        if not line.startswith(("┃ ", "| ")):
+            continue
+        content = line[2:]
+        if content.startswith(("⚙ ", "╭─", "+-")) or re.match(
+            r"\* [a-z_]+  (?:SAFE|MUTATING|DANGEROUS|FORBIDDEN)(?: |$)", content
+        ):
             lines = []
-        elif line.startswith("┃ ") and not line.startswith((
-            "┃   ", "┃ stats:", "┃ ✔", "┃ ⚠", "┃ ✗", "┃ cwd →", "┃ ↳", "┃ …",
-            "┃ │", "┃ ╰─", "┃ reason (optional",
+        elif not driver.SUMMARY.match(line) and not content.startswith((
+            "  ", "stats:", "✔ ", "⚠ ", "✗ ", "cwd →", "cwd ->",
+            "↳ ", "-> ", "…", "...", "│ ", "| ", "╰─", "reason (optional",
         )):
-            lines.append(line[2:])
+            lines.append(content)
     return "\n".join(lines).strip()
 
 
@@ -144,8 +149,8 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     summary = driver.SUMMARY.search(text)
     if summary:
         metrics.update(steps=int(summary[2]), task_s=float(summary[3]),
-                       task_status="completed" if summary[1] == "✔" else "incomplete")
-        ttft = re.search(r"┃ stats: .*?ttft ([\d.]+)s", text)
+                       task_status="completed" if summary[1] in ("✔", "+") else "incomplete")
+        ttft = re.search(r"(?m)^[┃|] stats: .*?ttft ([\d.]+)s", text)
         if ttft:
             metrics["ttft_s"] = float(ttft[1])
     if scenario["mode"] == "agent" and result.stdout:

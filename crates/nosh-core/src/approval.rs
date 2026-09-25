@@ -48,7 +48,7 @@ impl ApprovalChannel for NoTerminal {
                 "needs confirmation but there is no terminal; denied"
             ),
             req.risk,
-            req.command
+            style::visible(&req.command)
         );
         ApprovalResponse::Deny {
             reason: Some(
@@ -120,26 +120,34 @@ impl TerminalApproval {
         let _ = writeln!(
             err,
             "{b} {} {} {}",
-            style::dim("╭─"),
+            style::dim(style::glyph("╭─", "+-")),
             style::bold(&req.tool),
-            risk_color(req.risk, &format!("· {}", req.risk))
+            risk_color(
+                req.risk,
+                &format!("{} {}", style::glyph("·", "-"), req.risk)
+            )
         );
-        for (i, line) in req.command.lines().enumerate() {
+        for (i, line) in req.command.split('\n').enumerate() {
             let p = if i == 0 { "$ " } else { "  " };
-            let _ = writeln!(err, "{b} {} {p}{}", style::dim("│"), style::visible(line));
+            let _ = writeln!(
+                err,
+                "{b} {} {p}{}",
+                style::dim(style::glyph("│", "|")),
+                style::visible(line)
+            );
         }
         for r in req.reasons.iter().take(3) {
             let _ = writeln!(
                 err,
                 "{b} {} {}",
-                style::dim("│"),
+                style::dim(style::glyph("│", "|")),
                 style::dim(&format!("! {}", style::visible(r)))
             );
         }
     }
 
     fn deny_reason(&self) -> Option<String> {
-        eprint!(
+        let prompt = format!(
             "{} {}",
             self.bar,
             style::dim(tr!(
@@ -147,7 +155,7 @@ impl TerminalApproval {
                 "reason (optional, Enter to skip): "
             ))
         );
-        term::read_text("")
+        term::read_text(&prompt, "")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
@@ -159,14 +167,19 @@ impl ApprovalChannel for TerminalApproval {
         self.card(req);
         let b = &self.bar;
         if req.strong {
-            eprint!(
+            let prompt = format!(
                 "{b} {} ",
-                style::red_bold(tr!(
-                    "╰─ 危险操作：键入 yes 执行，其他任意输入拒绝 ›",
-                    "╰─ dangerous: type yes to run, anything else denies ›"
+                style::red_bold(&format!(
+                    "{} {} {}",
+                    style::glyph("╰─", "+-"),
+                    tr!(
+                        "危险操作：键入 yes 执行，其他任意输入拒绝",
+                        "dangerous: type yes to run, anything else denies"
+                    ),
+                    style::glyph("›", ">")
                 ))
             );
-            return match term::read_text("") {
+            return match term::read_text(&prompt, "") {
                 Some(s) if s.trim().eq_ignore_ascii_case("yes") => ApprovalResponse::Approve,
                 Some(_) => ApprovalResponse::Deny {
                     reason: self.deny_reason(),
@@ -181,12 +194,16 @@ impl ApprovalChannel for TerminalApproval {
         };
         eprint!(
             "{b} {}{}{} ",
-            style::dim(tr!(
-                "╰─ [y] 执行  [n] 拒绝  [e] 编辑",
-                "╰─ [y] run  [n] deny  [e] edit"
+            style::dim(&format!(
+                "{} {}",
+                style::glyph("╰─", "+-"),
+                tr!(
+                    "[y] 执行  [n] 拒绝  [e] 编辑",
+                    "[y] run  [n] deny  [e] edit"
+                )
             )),
             style::dim(grant),
-            style::dim(" ›")
+            style::dim(style::glyph(" ›", " >"))
         );
         let _ = std::io::stderr().flush();
         loop {
