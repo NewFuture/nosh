@@ -7,6 +7,7 @@ mod config;
 mod debug_cmd;
 mod doctor;
 mod engine;
+mod eval_trace;
 mod model_cmd;
 mod shell_cmd;
 

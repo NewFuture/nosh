@@ -1844,6 +1844,7 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "clap",
+ "libc",
  "nosh-core",
  "nosh-hub",
  "nosh-llm",

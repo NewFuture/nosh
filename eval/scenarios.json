@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "seeds": [0, 1, 2, 3, 4],
+  "timeout_s": 240,
+  "scenarios": [
+    {
+      "id": "largest-files",
+      "title": "Find the three largest files",
+      "mode": "repl",
+      "fixture": "big",
+      "inputs": ["# find the 3 largest files under this directory"],
+      "approval": "deny",
+      "check": "largest"
+    },
+    {
+      "id": "listening-port",
+      "title": "Identify the process listening on port 8080",
+      "mode": "repl",
+      "fixture": "port",
+      "inputs": ["# which process is listening on port 8080?"],
+      "approval": "deny",
+      "check": "port"
+    },
+    {
+      "id": "language-lines",
+      "title": "Count code lines grouped by language",
+      "mode": "repl",
+      "fixture": "project",
+      "inputs": ["# count the lines of code in this project, grouped by language"],
+      "approval": "deny",
+      "check": "lines"
+    },
+    {
+      "id": "rename-files",
+      "title": "Rename txt files with approval",
+      "mode": "repl",
+      "fixture": "rename",
+      "inputs": ["# rename every .txt file in this directory to .md"],
+      "approval": "rename",
+      "check": "rename"
+    },
+    {
+      "id": "chinese-python",
+      "title": "List Python files in Chinese",
+      "mode": "repl",
+      "fixture": "project",
+      "inputs": ["# 这个项目里有哪些 Python 文件？"],
+      "approval": "deny",
+      "check": "python"
+    },
+    {
+      "id": "typo-correction",
+      "title": "Correct typos without executing or loading the model",
+      "mode": "repl",
+      "fixture": "typo",
+      "inputs": ["gti status", "pyhton3 --version"],
+      "corrections": ["git status", "python3 --version"],
+      "approval": "deny",
+      "check": "typos"
+    },
+    {
+      "id": "explain-failure",
+      "title": "Explain a failed Python command",
+      "mode": "repl",
+      "fixture": "failure",
+      "inputs": ["python3 broken.py", "#"],
+      "approval": "deny",
+      "check": "failure"
+    },
+    {
+      "id": "summarize-git-log",
+      "title": "Summarize piped git history",
+      "mode": "agent",
+      "fixture": "history",
+      "input": "Summarize these eight commits. Mention the feature added by each commit and its component.",
+      "stdin_command": ["git", "log", "--stat", "-8"],
+      "approval": "deny",
+      "check": "history"
+    },
+    {
+      "id": "suggest-archive",
+      "title": "Suggest a command to archive logs",
+      "mode": "suggest",
+      "fixture": "logs",
+      "input": "compress the logs directory into logs.tar.gz",
+      "approval": "deny",
+      "check": "archive"
+    },
+    {
+      "id": "persistent-cwd",
+      "title": "Preserve the agent's changed working directory",
+      "mode": "repl",
+      "fixture": "big",
+      "inputs": ["# change the current directory to data and list the files there"],
+      "approval": "cwd",
+      "check": "cwd"
+    }
+  ]
+}
