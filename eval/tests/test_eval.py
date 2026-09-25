@@ -100,6 +100,23 @@ class ContractTests(unittest.TestCase):
                   "┃ I did not change it.\n┃ ⚠ 2 steps · 1.0 s\n")
         self.assertEqual(run.legacy_answer(denied), "I did not change it.")
 
+    def test_ascii_terminal_answers_and_metrics(self):
+        text = (
+            "| Let me inspect.\n| * list_dir  SAFE\n|   file.py\n"
+            "| Actual final answer.\n| * a Markdown bullet\n| + another bullet\n| > a quote\n"
+            "| + 2 steps | 1.0 s\n| stats: ttft 0.12s\n"
+        )
+        self.assertEqual(run.legacy_answer(text), "Actual final answer.\n* a Markdown bullet\n+ another bullet\n> a quote")
+        result = driver.Result(transcript=text)
+        observed = run.observe(result, {"mode": "repl", "check": "largest"}, Path("unused"), True, 0)
+        self.assertEqual(observed["metrics"]["steps"], 2)
+        self.assertEqual(observed["metrics"]["ttft_s"], 0.12)
+        self.assertEqual(observed["metrics"]["task_status"], "completed")
+        denied = ("| I will change it.\n| +- run_command - MUTATING\n| | $ mv a b\n"
+                  "| +- [y] run [n] deny > n\n| reason (optional, Enter to skip):\n"
+                  "| I did not change it.\n| ! 2 steps | 1.0 s\n")
+        self.assertEqual(run.legacy_answer(denied), "I did not change it.")
+
 
 @unittest.skipUnless(sys.platform == "linux", "Linux fixtures and process interfaces")
 class FixtureTests(unittest.TestCase):
@@ -501,13 +518,19 @@ out("y\r\n┃ answer\r\n┃ ✔ 1 steps · 0.1 s\r\n┃ stats: ttft 0.01s\r\n__N
 assert b"exit 0" in line()
 '''
         scenario = {"inputs": ["# task"], "check": "largest"}
-        result = driver.run_repl([sys.executable, "-c", script], Path.cwd(),
-                                 {"PATH": "/usr/bin:/bin"}, 5, scenario,
-                                 lambda command, card: command == "touch fixture")
-        self.assertIsNone(result.error, result.transcript)
-        self.assertEqual(result.exit_code, 0)
-        self.assertEqual(len(result.approvals), 1)
-        self.assertEqual(result.approvals[0]["answer"], "y")
+        ascii_script = script.translate(str.maketrans({
+            "┃": "|", "╭": "+", "╰": "+", "─": "-", "│": "|",
+            "·": "|", "›": ">", "✔": "+",
+        }))
+        for variant in (script, ascii_script):
+            with self.subTest(ascii=variant == ascii_script):
+                result = driver.run_repl([sys.executable, "-c", variant], Path.cwd(),
+                                         {"PATH": "/usr/bin:/bin"}, 5, scenario,
+                                         lambda command, card: command == "touch fixture")
+                self.assertIsNone(result.error, result.transcript)
+                self.assertEqual(result.exit_code, 0)
+                self.assertEqual(len(result.approvals), 1)
+                self.assertEqual(result.approvals[0]["answer"], "y")
 
 
 class ReportTests(unittest.TestCase):

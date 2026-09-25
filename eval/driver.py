@@ -19,7 +19,8 @@ import uuid
 PROMPT = "__NOSH_EVAL_PROMPT__ "
 OUTPUT_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78=>]")
-SUMMARY = re.compile(r"(?m)^┃ ([✔⚠✗]) .*?(\d+) steps · ([\d.]+) s")
+SUMMARY = re.compile(r"(?m)^[┃|] ([✔⚠✗+!x]) .*?(\d+) steps [·|] ([\d.]+) s")
+STATS = re.compile(r"(?m)^[┃|] stats:")
 
 
 def plain(text: str) -> str:
@@ -360,16 +361,16 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             denial_pending = False
             approval_offset = len(text)
             return
-        match = re.search(r"(?s)╭─ (.*?)╰─ ([^\n]*›) ", tail)
+        match = re.search(r"(?s)(?:╭─|\+-) (.*?)(?:╰─|\+-) ([^\n]*[›>])(?: |\n)", tail)
         if not match:
             return
         card, question = match.groups()
         command_lines = []
         for line in card.splitlines()[1:]:
-            line = re.sub(r"^┃ ", "", line)
-            if line.startswith("│ $ "):
+            line = re.sub(r"^[┃|] ", "", line)
+            if line.startswith(("│ $ ", "| $ ")):
                 command_lines.append(line[4:])
-            elif line.startswith("│   "):
+            elif line.startswith(("│   ", "|   ")):
                 command_lines.append(line[4:])
         command = "\n".join(command_lines)
         strong = "type yes" in question
@@ -394,7 +395,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                     return "press Enter to run" in text and child.screen.line().startswith(PROMPT + correction)
                 if scenario["check"] == "failure" and i == 0:
                     return "exit 1" in text and prompt()
-                return bool(SUMMARY.search(text)) and "┃ stats:" in text and prompt()
+                return bool(SUMMARY.search(text)) and bool(STATS.search(text)) and prompt()
 
             child.until(completed, deadline, f"completion of input {i + 1}", approvals)
             result.turns.append({"input": line, "output": plain(result.transcript[start:]),

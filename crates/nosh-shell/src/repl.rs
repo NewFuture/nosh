@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -129,9 +129,15 @@ impl ReplUi for TermUi {
     fn guard(&mut self, _line: &str) -> GuardChoice {
         eprint!(
             "{} ",
-            style::yellow(tr!(
-                "看起来像自然语言：↵ 交给 AI · Ctrl+E 仍按命令执行 · Esc 取消",
-                "Looks like natural language: ↵ ask AI · Ctrl+E run as command · Esc cancel"
+            style::yellow(style::glyph(
+                tr!(
+                    "看起来像自然语言：↵ 交给 AI · Ctrl+E 仍按命令执行 · Esc 取消",
+                    "Looks like natural language: ↵ ask AI · Ctrl+E run as command · Esc cancel"
+                ),
+                tr!(
+                    "看起来像自然语言：Enter 交给 AI | Ctrl+E 仍按命令执行 | Esc 取消",
+                    "Looks like natural language: Enter ask AI | Ctrl+E run as command | Esc cancel"
+                )
             ))
         );
         let _ = std::io::stderr().flush();
@@ -327,9 +333,11 @@ impl Pipeline {
             ),
             _ => {
                 let code = run.exit_code;
-                ui.notice(&style::dim(&tr!(
-                    format!("✗ exit {code} · Ctrl+G 或 # 交给 AI"),
-                    format!("✗ exit {code} · Ctrl+G or # to ask AI")
+                ui.notice(&style::dim(&format!(
+                    "{} exit {code} {} {}",
+                    style::glyph("✗", "x"),
+                    style::glyph("·", "|"),
+                    tr!("Ctrl+G 或 # 交给 AI", "Ctrl+G or # to ask AI")
                 )));
                 LineOutcome::Continue(None)
             }
@@ -439,8 +447,12 @@ impl ReplPrompt {
                 .map(|b| format!(" ({b})"))
                 .unwrap_or_default();
             (
-                format!("{}{} ", style::blue_bold(&left), style::dim(&branch)),
-                "❯ ".to_string(),
+                format!(
+                    "{}{} ",
+                    style::stdout().paint("1;34", &left),
+                    style::stdout().paint("2", &branch)
+                ),
+                style::stdout().glyph("❯ ", "> ").to_string(),
             )
         };
         let mut right = badge.mode.clone();
@@ -740,7 +752,7 @@ fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
         .with_columns(10)
         .with_selected_text_style(Color::Blue.bold().reverse())
         .with_selected_match_text_style(Color::Blue.bold().reverse());
-    let colors = style::enabled();
+    let colors = style::stdout().color;
     let mut hinter = reedline::DefaultHinter::default();
     if colors {
         hinter = hinter.with_style(Style::new().italic().fg(Color::DarkGray));
@@ -780,22 +792,63 @@ fn set_buffer(ed: &mut Reedline, text: &str) {
     ]);
 }
 
+fn read_plain_prompt(
+    prompt: &ReplPrompt,
+    initial: &str,
+    validator: &LineValidator,
+) -> std::io::Result<Signal> {
+    use reedline::Validator;
+    let mut full = String::new();
+    let mut initial = initial;
+    loop {
+        let label = if full.is_empty() {
+            format!("{}{}", prompt.left, prompt.indicator)
+        } else {
+            prompt.continuation.clone()
+        };
+        let label = style::strip_ansi(&label);
+        let line = match term::read_plain_line(&style::visible_text(&label), initial)? {
+            Signal::Success(line) => line,
+            signal => return Ok(signal),
+        };
+        initial = "";
+        if !full.is_empty() {
+            full.push('\n');
+        }
+        full.push_str(&line);
+        if matches!(validator.validate(&full), ValidationResult::Complete) {
+            return Ok(Signal::Success(full));
+        }
+    }
+}
+
 /// Runs the interactive shell until `exit` or Ctrl-D; returns the exit status.
 pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -> i32 {
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
     shell.warm_command_names();
-    let mut editor = build_editor(shell, &cfg);
+    let mut editor =
+        (style::stdout().ansi && std::io::stdin().is_terminal()).then(|| build_editor(shell, &cfg));
+    let validator = LineValidator {
+        shell: shell.shared().1,
+        prefix: cfg.trigger.ai_prefix.clone(),
+    };
     let mut pipeline = Pipeline::new(cfg);
     let mut ui = TermUi;
     let mut prefill: Option<String> = None;
     let code = loop {
         shell.pre_prompt();
-        if let Some(p) = prefill.take() {
-            set_buffer(&mut editor, &p);
-        }
         let prompt = ReplPrompt::build(shell, &ai.badge());
-        match editor.read_line(&prompt) {
+        let initial = prefill.take().unwrap_or_default();
+        let signal = if let Some(ed) = editor.as_mut() {
+            if !initial.is_empty() {
+                set_buffer(ed, &initial);
+            }
+            ed.read_line(&prompt)
+        } else {
+            read_plain_prompt(&prompt, &initial, &validator)
+        };
+        match signal {
             Ok(Signal::Success(line)) => {
                 if !line.trim().is_empty() {
                     shell.add_history(&line);
@@ -806,17 +859,20 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                 }
             }
             Ok(Signal::HostCommand(cmd)) if cmd == SUGGEST_COMMAND => {
+                let Some(editor) = editor.as_mut() else {
+                    continue;
+                };
                 let buf = editor.current_buffer_contents().to_string();
                 eprintln!();
                 if buf.trim().is_empty() {
-                    set_buffer(&mut editor, "");
+                    set_buffer(editor, "");
                     match pipeline.fix(shell, ai, &mut ui) {
                         LineOutcome::Continue(p) => prefill = p,
                         LineOutcome::Exit(c) => break c,
                     }
                 } else {
                     match isolate(|| ai.suggest(shell, &buf)).flatten() {
-                        Some(cmd) => set_buffer(&mut editor, &cmd),
+                        Some(cmd) => set_buffer(editor, &cmd),
                         None => {
                             ui.notice(&style::dim(tr!("nosh: 没有建议", "nosh: no suggestion")))
                         }

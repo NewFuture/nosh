@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 use nosh_hub::{BarProgress, FileState, HubError, ModelHub, PullOptions, SourceSelection, net, tr};
+use nosh_shell::style;
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCmd {
@@ -50,10 +51,11 @@ pub fn run(cmd: ModelCmd) -> i32 {
             };
             if let Ok(Some(found)) = hub.find(Some(&entry.id)) {
                 eprintln!(
-                    "{}",
+                    "{} {}",
+                    style::glyph("✔", "+"),
                     tr!(
-                        format!("✔ {} 已安装：{}", entry.display, found.dir.display()),
-                        format!("✔ {} is installed: {}", entry.display, found.dir.display())
+                        format!("{} 已安装：{}", entry.display, found.dir.display()),
+                        format!("{} is installed: {}", entry.display, found.dir.display())
                     )
                 );
                 return 0;
@@ -86,10 +88,11 @@ pub fn run(cmd: ModelCmd) -> i32 {
             match hub.pull(Some(&entry.id), &opts, &BarProgress::new()) {
                 Ok(r) => {
                     eprintln!(
-                        "{}",
+                        "{} {}",
+                        style::glyph("✔", "+"),
                         tr!(
-                            "✔ SHA-256 校验通过。之后可以完全断网使用。",
-                            "✔ SHA-256 verified. nosh can now run fully offline."
+                            "SHA-256 校验通过。之后可以完全断网使用。",
+                            "SHA-256 verified. nosh can now run fully offline."
                         )
                     );
                     eprintln!("  {}", r.dir.display());
@@ -128,8 +131,8 @@ pub fn run(cmd: ModelCmd) -> i32 {
         }
         ModelCmd::Verify { id } => {
             let res = hub.verify(id.as_deref(), |f, r| match r {
-                Ok(()) => println!("✔ {}", f.name),
-                Err(e) => println!("✗ {}: {e}", f.name),
+                Ok(()) => println!("{} {}", style::stdout().glyph("✔", "+"), f.name),
+                Err(e) => println!("{} {}: {e}", style::stdout().glyph("✗", "x"), f.name),
             });
             match res {
                 Ok(true) => 0,
@@ -144,10 +147,21 @@ pub fn run(cmd: ModelCmd) -> i32 {
             match hub.import(&gguf, tokenizer.as_deref(), &BarProgress::new()) {
                 Ok(r) => {
                     eprintln!(
-                        "{}",
+                        "{} {}",
+                        style::glyph("✔", "+"),
                         tr!(
-                            format!("✔ 已导入 {} → {}", r.entry.id, r.dir.display()),
-                            format!("✔ imported {} → {}", r.entry.id, r.dir.display())
+                            format!(
+                                "已导入 {} {} {}",
+                                r.entry.id,
+                                style::glyph("→", "->"),
+                                r.dir.display()
+                            ),
+                            format!(
+                                "imported {} {} {}",
+                                r.entry.id,
+                                style::glyph("→", "->"),
+                                r.dir.display()
+                            )
                         )
                     );
                     0

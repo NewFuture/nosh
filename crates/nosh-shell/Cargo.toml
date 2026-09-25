@@ -19,6 +19,9 @@ nu-ansi-term.workspace = true
 reedline.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+vte.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
