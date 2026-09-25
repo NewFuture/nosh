@@ -1,10 +1,10 @@
-# Minimal tools / prompt experiments — blocked
+# Minimal tools / prompt experiments
 
-**Historical v1–v4 result: the core tool changes are implemented, but the language-lines acceptance gate was not met. This was not a passing prompt optimization.** All four raw archives and their conclusions remain unchanged. A subsequent product decision replaces the experimental Full prompt with **v5/general**, not v2 or v4: two task-independent principles, a flat installed-command list and neutral tool descriptions. PR #17 remains Draft pending a fixed 50-trial full-suite audit; language-lines is no longer a standalone merge gate. No further wording iteration is planned.
+**Historical v1–v4 result: the core tool changes are implemented, but the language-lines acceptance gate was not met. This was not a passing prompt optimization.** All four raw archives and their conclusions remain unchanged. A subsequent product decision replaces the experimental Full prompt with **v5/general**, not v2 or v4: two task-independent principles, a flat installed-command list and neutral tool descriptions. Its [fixed 50-trial full-suite audit](v5-general.md) is complete: **34/50 versus formal main repeat 0's 36/50**, with five regressions and three improvements. PR #17 remains Draft pending a product decision on those regressions; language-lines is no longer a standalone merge gate. No further wording iteration is planned.
 
 ## Fixed campaigns
 
-Each candidate ran both scenarios with seeds 0–4 × repeat 2, serially, at **temperature 1.0**. All 80 planned trials finished recording; no retries, replacement samples, missing trials, grader changes or tool-use requirements were introduced. The formal baseline is unchanged. Its agent temperature was 1.0 but its suggestion temperature was **0.7**, so the suggestion comparison is an overall behavior comparison, not a temperature-controlled prompt-only experiment.
+Each v1–v4 candidate ran both scenarios with seeds 0–4 × repeat 2, serially, at **temperature 1.0**. All 80 planned trials finished recording; no retries, replacement samples, missing trials, grader changes or tool-use requirements were introduced. The formal baseline is unchanged. Its agent temperature was 1.0 but its suggestion temperature was **0.7**, so the suggestion comparison is an overall behavior comparison, not a temperature-controlled prompt-only experiment.
 
 | Candidate / measured source | language-lines pass / 10 | Median steps | Fail / error | suggest-archive pass / 10 | Median steps | First LOC tool | CI at measured source |
 |---|---:|---:|---|---:|---:|---|---|
@@ -26,6 +26,8 @@ Each candidate ran both scenarios with seeds 0–4 × repeat 2, serially, at **t
 - **v4:** 0/10 LOC. Wrong grouping, per-file rather than language totals and unchanged-command loops persisted; six trials reached 11 model steps. Suggestions were 9/10; the last trial generated the wrong archive destination/format. This is a regression, not an improvement hidden by the core-feature gains.
 
 Arbitrary Python programs require approval under the existing permissions policy, and this scenario's declared policy denies such calls. The experiment did not loosen permissions to make scripts pass. Some answers mix correct totals with incorrect or ambiguously labeled detail; the unchanged conservative grader checks the whole answer. No failures were manually reclassified.
+
+Although the experiments initially described these algorithmic instructions as generic, product review rejected the v2–v4 Full prompts as too specific to the targeted computation benchmark. None of those instructions form the final design; v5/general removes them rather than selecting the best historical sample.
 
 ## Independently verified core behavior
 
@@ -71,4 +73,4 @@ Builds used isolated `~/.cache/nosh-minimal-tools-target`, Rust 1.98.1, locked r
 
 After v4, main `826a825` (#16) was merged as `5a081ef`, retaining all terminal/UI/handler/dependency/README/DESIGN and eval-driver updates; both README additions were retained. The v4 prompt was not changed by this merge. Local fmt, clippy `-D warnings`, full workspace tests (including #16 terminal tests), and **41** Python tests passed. Current-head three-platform CI is reported in the PR; the evaluated binaries remain the pre-merge revisions above, not the final documentation/merge head.
 
-Limitations remain explicit: shell syntax/name checks do not prove intent; unavailable literal command names are rejected; dynamically expanded names are not statically resolved; streaming binary detection and an 8 MiB search line-buffer limit apply; existing terminal-process-group limitations persist; only specific English sudo diagnostics trigger the equivalent password handoff. No full-suite quality or temperature-0.7 conclusion is available.
+Limitations remain explicit: shell syntax/name checks do not prove intent; unavailable literal command names are rejected; dynamically expanded names are not statically resolved; streaming binary detection and an 8 MiB search line-buffer limit apply; existing terminal-process-group limitations persist; only specific English sudo diagnostics trigger the equivalent password handoff. No v1–v4 full-suite quality or independent temperature-0.7 conclusion is available; the subsequent v5/general full-suite results are reported separately above.

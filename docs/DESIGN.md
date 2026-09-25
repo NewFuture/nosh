@@ -521,6 +521,7 @@ Installed: {flat list of installed candidate commands}. Use command -v NAME to c
 - **保持简短**：2B 模型和 CPU 上的 prefill 都要求 prompt 精简。指令用英文写，回答用用户使用的语言。不放 few-shot 示例，依靠模型原生的工具调用能力和约束解码。
 - **命令清单**：只探测固定 36 个候选并按实际安装过滤为紧凑平铺列表，包含 find/grep/wc/sort/uniq/awk/sed/xargs/ps/pgrep 等基础程序；不分能力组，不发完整 PATH 索引。其他命令用 `command -v NAME` 检查；静态前缀在会话内不变。工具描述只陈述接口事实，没有任务关键词硬路由、特定计算策略或 critic 二遍。
 - **实验边界**：v1–v4 定向 prompt 实验未达到当时的语言行数门槛，原始记录保留在[实验报告](../eval/experiments/minimal-tools/README.md)，不作为设计规范。v5/general 回到上述任务无关原则，不选取历史最好样本；质量审计采用完整 10 场景 × 5 seeds × 1 轮及正式 main 的配对比较，不再以单一语言行数场景作为合并门槛。
+- **实测结论**：[v5/general 单轮审计](../eval/experiments/minimal-tools/v5-general.md)为 34/50，预先固定的正式 main repeat 0 为 36/50（5 项回退、3 项改善），不能宣称整体无回归。静态 Full 前缀为 861 tokens，低于 v4 的 1000，但仍高于 baseline 的 771；Suggest 为 114（baseline 301）。模型的事实核对、任务结束和工具选择限制仍存在，不能用某个场景的收益替代整体质量决策。
 - **建议模式**：工具集为空，单独短对话，要求只返回一个完整 bash program；temperature 使用传入的采样设置（默认 1.0），不再暗中覆盖为 0.7。
 - **项目说明**：如果项目根目录下有 `NOSH.md`，会在进入该项目后的第一个任务消息里截断附上。
 
