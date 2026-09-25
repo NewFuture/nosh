@@ -35,15 +35,15 @@ The machine/model match the earlier baseline: Ubuntu 26.04.1 on WSL2, Xeon Plati
 | suggest-archive | 6 | 6 | 3 |
 | persistent-cwd | 0 | 0 | 5 |
 
-Only the following three verdicts changed under grader `86982a4bd407b84ef00ff8b910eaf4d098a31eb4`:
+Only the following three verdicts changed under grader `554d7e87eb44ef47bd7b5eb0e7c0481f7448a62f`:
 
 | Trial (scenario / seed / repeat) | Original evidence and correction |
 |---|---|
 | largest-files / 1 / 0 | Numbered entries 1-3 are `dump.bin`, `video.bin`, `cache/archive.bin`, correctly ordered. A separate "For reference ... smaller file" bullet names `notes.txt`. Do not merge that reference block into the ranking; an actual fourth ranked entry or incorrect order still fails. |
-| language-lines / 2 / 0 | Explicit Python sections contain main/report = 10 lines and lib/maths = 5; the overall language table is 15/4/6/4 and grand total 29 across 6 files. Combine subtotals only for disjoint, complete named file scopes with one line subtotal each. Global contradictions, missing/overlapping scopes and incorrect totals still fail. |
+| language-lines / 2 / 0 | Explicit Python sections contain main/report = 10 lines and lib/maths = 5; the overall language table is 15/4/6/4 and grand total 29 across 6 files. When subtotals are claimed, combine them only for disjoint, complete named file scopes with one line subtotal each. Entirely unclaimed subtotals remain optional when overall language counts are explicit. Global contradictions, partial/overlapping subtotal scopes and incorrect totals still fail. |
 | chinese-python / 3 / 1 | A neutral **directory overview** lists all project files, followed by an explicit, correct three-Python-file section and a non-Python explanation. Only explicitly headed neutral overviews are excluded from classification; the Python section must independently include all expected files. |
 
-The four other judgment changes affect reasons only: language-lines / 3 / 0 remains a file-count-only failure; / 4 / 0 still incorrectly claims 34 total lines; / 0 / 1 still guesses one line per file and now also reports missing Python subtotals; / 4 / 1 still incorrectly claims 5 total files. Both chinese-python seed-0 answers explicitly put `check.sh` fourth under a Python heading and remain failures despite parenthetical Shell labels. No approval policy or task fact was relaxed.
+The three other judgment changes affect reasons only: language-lines / 3 / 0 remains a file-count-only failure; / 4 / 0 still incorrectly claims 34 total lines; / 4 / 1 still incorrectly claims 5 total files. Both chinese-python seed-0 answers explicitly put `check.sh` fourth under a Python heading and remain failures despite parenthetical Shell labels. No approval policy or task fact was relaxed.
 
 The raw JSON SHA-256 is `baab48aeeb668da4f06e127a04bf32595f371cb4aa91177145a0d3267075d54a`; raw Markdown is `b256316c3f8dac3118dd42c9c9027d0ee8ddc9fee8918c3676375a6a971b1b89`. Before editing, both were copied unchanged to ignored local storage. The ordered non-judgment trial payload has the same SHA-256 before and after regrading: `3d13836bc9345e69a92534fc4e59ad7361feffa98834e5242acc194818835be1`. This covers inputs, outputs, sampling, timings, states, facts, approvals and identities, excluding only `status`, `reasons` and `original_judgment`.
 
