@@ -1,0 +1,219 @@
+[
+  {
+    "version": "v1",
+    "archive": "v1-target.tar.gz",
+    "archive_sha256": "4dba3c0892cc6987c7fce6a542375f07533e12cf998eade1b72fe1e9252907a8",
+    "report_sha256": "38cdf39652bf4dc05bd54cb367aff9640698dfb8a659d25a645dc13ba81e3788",
+    "source_revision": "fee7dd62484c993651c441680ae996c0575d2e65",
+    "binary_sha256": "23b004653809df2fddc973056551b3297486cd2ac879a75aa2279c0f191b217a",
+    "summary": [
+      {
+        "scenario_id": "language-lines",
+        "planned": 10,
+        "pass": 1,
+        "fail": 9,
+        "error": 0,
+        "missing": 0,
+        "steps": 3.6,
+        "steps_samples": 10,
+        "confirmations": 0.1,
+        "confirmations_samples": 10,
+        "ttft_s": 5.8748764394999995,
+        "ttft_s_samples": 10,
+        "total_s": 29.903923054000188,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2437.1875,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 3.0,
+        "first_tools": {
+          "list_dir": 10
+        }
+      },
+      {
+        "scenario_id": "suggest-archive",
+        "planned": 10,
+        "pass": 4,
+        "fail": 6,
+        "error": 0,
+        "missing": 0,
+        "steps": 1,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 1.3352267875,
+        "ttft_s_samples": 10,
+        "total_s": 4.292112798502785,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2318.50390625,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 1.0,
+        "first_tools": {
+          "(none)": 10
+        }
+      }
+    ]
+  },
+  {
+    "version": "v2",
+    "archive": "v2-target.tar.gz",
+    "archive_sha256": "3f95cb4a335cde8da4396dba32517db6837057248c1de454ad1473b976c32440",
+    "report_sha256": "9f50720311013e6ab1ce337b89d40d9f65a1f57b00d95fd6e858f32b59042e51",
+    "source_revision": "5df7060f6b5a4a01dcb27b84592a00679a8ee262",
+    "binary_sha256": "aa6ffbfdc6a4bdcecd3432d7dcc1290ea1487cd48cfc9d91075374409b8caa7f",
+    "summary": [
+      {
+        "scenario_id": "language-lines",
+        "planned": 10,
+        "pass": 2,
+        "fail": 8,
+        "error": 0,
+        "missing": 0,
+        "steps": 4.8,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 6.193368463500001,
+        "ttft_s_samples": 10,
+        "total_s": 32.26577908400213,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2531.0234375,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 3.5,
+        "first_tools": {
+          "list_dir": 8,
+          "run_command": 2
+        }
+      },
+      {
+        "scenario_id": "suggest-archive",
+        "planned": 10,
+        "pass": 10,
+        "fail": 0,
+        "error": 0,
+        "missing": 0,
+        "steps": 1,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 1.46327186,
+        "ttft_s_samples": 10,
+        "total_s": 4.133032840007218,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2323.83203125,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 1.0,
+        "first_tools": {
+          "(none)": 10
+        }
+      }
+    ]
+  },
+  {
+    "version": "v3",
+    "archive": "v3-target.tar.gz",
+    "archive_sha256": "7d4897be17a5da4c03d239c90edc1298855f8e89dc30f476e00379ebb030d6a8",
+    "report_sha256": "743dff1ff4fbd36f32bb8c7541e835d9d3b62df13cf0cddc6989e366889a837e",
+    "source_revision": "1993da25c27b200f72f156a805de523418d6c8ff",
+    "binary_sha256": "5ee32c6b3dbe3d824a6ed8bc9e0f7895f73ea7ab61ef5fee6e5979ba4d56517c",
+    "summary": [
+      {
+        "scenario_id": "language-lines",
+        "planned": 10,
+        "pass": 1,
+        "fail": 8,
+        "error": 1,
+        "missing": 0,
+        "steps": 5.333333333333333,
+        "steps_samples": 9,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 5.890247467,
+        "ttft_s_samples": 9,
+        "total_s": 64.14411189150269,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2582.296875,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 4,
+        "first_tools": {
+          "run_command": 10
+        }
+      },
+      {
+        "scenario_id": "suggest-archive",
+        "planned": 10,
+        "pass": 10,
+        "fail": 0,
+        "error": 0,
+        "missing": 0,
+        "steps": 1,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 1.389965352,
+        "ttft_s_samples": 10,
+        "total_s": 4.014386970993655,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2323.828125,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 1.0,
+        "first_tools": {
+          "(none)": 10
+        }
+      }
+    ]
+  },
+  {
+    "version": "v4",
+    "archive": "v4-target.tar.gz",
+    "archive_sha256": "8aa06be01b10b015ac9dfb6fc9724062a79f614c158169f551bee11b94bcb3ac",
+    "report_sha256": "9131e8c8f278f9a59ab69bf67f1a29f64b37b609e2fb1bc658f6c9a63a633e4b",
+    "source_revision": "5a4c28c91e7d3385accd439e9fc730b45b78de3a",
+    "binary_sha256": "1902dc9cf2ef26cfd9aae5d1985d890a2acc7b5a5e541cce89dee2ade5c93ca2",
+    "summary": [
+      {
+        "scenario_id": "language-lines",
+        "planned": 10,
+        "pass": 0,
+        "fail": 10,
+        "error": 0,
+        "missing": 0,
+        "steps": 7.9,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 6.559431915499999,
+        "ttft_s_samples": 10,
+        "total_s": 97.18570676200034,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2566.64453125,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 11.0,
+        "first_tools": {
+          "run_command": 10
+        }
+      },
+      {
+        "scenario_id": "suggest-archive",
+        "planned": 10,
+        "pass": 9,
+        "fail": 1,
+        "error": 0,
+        "missing": 0,
+        "steps": 1,
+        "steps_samples": 10,
+        "confirmations": 0,
+        "confirmations_samples": 10,
+        "ttft_s": 1.3969068825000002,
+        "ttft_s_samples": 10,
+        "total_s": 4.079457594496489,
+        "total_s_samples": 10,
+        "peak_rss_mib": 2323.90625,
+        "peak_rss_mib_samples": 10,
+        "median_steps": 1.0,
+        "first_tools": {
+          "(none)": 10
+        }
+      }
+    ]
+  }
+]

@@ -94,6 +94,8 @@ Markdown 的步数/确认为均值，延迟/耗时为中位数，RSS 为最大�
 
 ## 基线生命周期
 
+工具精简与 prompt v1–v4 的[独立实验报告](experiments/minimal-tools/README.md)保留全部 80 次定向试验及原始日志。建议模式有已验证收益，但语言行数门槛未达，PR 保持 Draft；不覆盖下述正式基线，也不将未运行的全量回归视为通过。
+
 历史 main `7c57a88641d634f84dc190afafcee3cdb1813c1f` 的 [legacy 实测](baselines/main-7c57a88/report.md) 是 36/50 通过、14 失败、0 运行器错误，使用该 SHA 的干净源码归档构建并预先保留的二进制。该版本化记录保持不变，是**有限观测的原始 main 实测**，不是原生观测的双跑正式基线。
 
 观测支持经 #13 合入后，已在同一 WSL Ubuntu 机器、同一模型上完成 main **`4f602ab8d95d046162adb7d4b202ddf6d3e20bea`** 的[原生观测基线](baselines/main-4f602ab/report.md)：10 场景 × seeds `[0,1,2,3,4]` × 2 轮，单个串行 campaign，共 100 次，含 10 次本地纠错。精确干净源码在修改前隔离构建为 release，并用 [schema-v1 build-info](baselines/main-4f602ab/build-info.json) 核对二进制；报告提交和判定器修复不改变被测 main SHA。
