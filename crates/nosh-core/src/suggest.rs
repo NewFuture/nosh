@@ -110,4 +110,82 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn nested_programs_and_function_order_are_checked_without_execution() {
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        for program in [
+            "echo \"$(nosh_missing_command)\"",
+            "echo `nosh_missing_command`",
+            "cat <(nosh_missing_command)",
+            "cat > >(nosh_missing_command)",
+            "cat < <(nosh_missing_command)",
+            "x=$(nosh_missing_command)",
+            "x=($(nosh_missing_command))",
+            "x[$(nosh_missing_command)]=ok",
+            "echo \"${x[$(nosh_missing_command)]}\"",
+            "echo \"$((1 + $(nosh_missing_command)))\"",
+            "echo ok > \"$(nosh_missing_command)\"",
+            "cat <<EOF\n'$(nosh_missing_command)'\nEOF",
+            "cat <<< \"$(nosh_missing_command)\"",
+            "echo \"${x:-$(nosh_missing_command)}\"",
+            "echo \"$(echo \"$(nosh_missing_command)\")\"",
+            "for x in \"$(nosh_missing_command)\"; do echo \"$x\"; done",
+            "[[ \"$(nosh_missing_command)\" = ok ]]",
+            "case x in \"$(nosh_missing_command)\") echo ok;; esac",
+            "(f(){ nosh_missing_command; })",
+            "{ (f(){ echo ok; }); f; }",
+            "{ f; f(){ echo ok; }; }",
+            "{ f(){ echo ok; } & f; }",
+            "{ echo \"$(f(){ echo ok; })\"; f; }",
+            "{ cat <(f(){ echo ok; }); f; }",
+            "{ f(){ g; }; f; g(){ echo ok; }; }",
+        ] {
+            assert_eq!(extract_command(program, &shell), None, "{program}");
+        }
+        for program in [
+            "echo \"$(echo ok)\"",
+            "echo `echo ok`",
+            "cat <(echo ok)",
+            "cat < <(echo ok)",
+            "x=$(echo ok)",
+            "echo '$(nosh_missing_command)'",
+            "echo \\$\\(nosh_missing_command\\)",
+            "cat <<'EOF'\n$(nosh_missing_command)\nEOF",
+            "cat <<EOF\n'$(echo ok)'\nEOF",
+            "echo \"${x:-$(echo ok)}\"",
+            "echo \"$(echo \"$(echo ok)\")\"",
+            "{ f(){ g; }; g(){ echo ok; }; f; }",
+            "{ { f(){ g; }; }; g(){ echo ok; }; f; }",
+            "{ f(){ g(){ h; }; }; f; h(){ echo ok; }; g; }",
+            "{ f(){ echo ok; }; (f); f; }",
+            "{ f(){ g(){ echo ok; }; }; f; g; }",
+            "{ (f(){ echo ok; }; f); echo ok; }",
+            "{ f(){ f; }; echo ok; }",
+            "{ f(){ g; }; g(){ f; }; echo ok; }",
+            "{ if test -e flag; then f(){ echo ok; }; fi; f; }",
+            "{ eval 'f(){ echo ok; }'; f; }",
+            "{ source ./functions.sh; f; }",
+            "\"$command\"",
+        ] {
+            assert_eq!(
+                extract_command(program, &shell).as_deref(),
+                Some(program),
+                "{program}"
+            );
+        }
+    }
+
+    #[test]
+    fn checking_substitutions_never_runs_them() {
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let program = format!("echo \"$(echo touched > '{}')\"", marker.display());
+        assert_eq!(
+            extract_command(&program, &shell).as_deref(),
+            Some(program.as_str())
+        );
+        assert!(!marker.exists());
+    }
 }
