@@ -59,7 +59,7 @@
     "suite_sha256": "63022c9e5e04a25c3d0fe697560de680b6170be60eaa62aa3e1d1cbab96f2223",
     "harness_sha256": "96e75094aec0e033ecf3f1d61744c15fd2e650066e828824992594203e75f053",
     "harness_content_sha256": "96e75094aec0e033ecf3f1d61744c15fd2e650066e828824992594203e75f053",
-    "grading_content_sha256": "2a539e28a1ee43947549b495559d2ff27e1a47e4aa493e2103bd4de9523af913",
+    "grading_content_sha256": "0f165863b7345dffd4ecb40b280439cb2bf075d3595ff0dac2c61491edea85e9",
     "settings": {
       "threads": 8,
       "rayon_threads": 1,
@@ -221,7 +221,7 @@
     ],
     "repeat": 2,
     "regrade": {
-      "revision": "979b4b8c7aecd030ecb107672630579c68ed76c2",
+      "revision": "86982a4bd407b84ef00ff8b910eaf4d098a31eb4",
       "original_report_sha256": "baab48aeeb668da4f06e127a04bf32595f371cb4aa91177145a0d3267075d54a",
       "original_markdown_sha256": "b256316c3f8dac3118dd42c9c9027d0ee8ddc9fee8918c3676375a6a971b1b89",
       "original_grading_content_sha256": "4f3898cdf1985e1a0a752ff158a577dd59531cda83bb49d039b845346ed6123f",
@@ -233,7 +233,7 @@
       },
       "original_consistent_pairs": 44,
       "changed_verdicts": 3,
-      "changed_reasons_only": 3,
+      "changed_reasons_only": 4,
       "unchanged_observations_sha256": "3d13836bc9345e69a92534fc4e59ad7361feffa98834e5242acc194818835be1",
       "observation_digest_definition": "SHA-256 of UTF-8 JSON of the ordered trials, excluding status/reasons/original_judgment; ensure_ascii=False, sort_keys=True, separators=(',', ':').",
       "regraded_checks": [
@@ -13226,6 +13226,7 @@
       },
       "answer": "Here's the line count for each file by language:\n\n**Python (.py):**\n- main.py: 1 line\n- report.py: 1 line\n\n**Python-like (.py):**\n- maths.py: 1 line\n- tools/report.py: 1 line\n\n**Bash/Shell (.sh):**\n- scripts/check.sh: 1 line\n\n**Rust (.rs):**\n- src/main.rs: 1 line\n\n**JavaScript (.js):**\n- web/app.js: 1 line\n\nTotal files: 7, total lines: 7 (assuming 1 line per file based on the byte counts shown). Let me know if you'd like a more detailed count (e.g., actual line breaks within files).",
       "reasons": [
+        "ambiguous or incomplete python subtotal scopes",
         "incorrect total line count: 1",
         "no unambiguous python line count",
         "javascript: expected 4, found [1, 1]",

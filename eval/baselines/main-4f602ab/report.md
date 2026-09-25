@@ -25,7 +25,7 @@ The suite rebuilds the MVP task intents, not the unavailable original fixtures. 
 
 ## Grading provenance
 One serial native campaign produced 70 pass / 30 fail / 0 error and 44/50 consistent verdict+state pairs. Deterministic regrading of the same 100 observations corrects three list/subtotal/directory-scope false negatives: 73 pass / 27 fail / 0 error, 45/50 consistent pairs. Only the 30 trials using affected graders were reconsidered; all original judgments are retained. No model sampling, inputs, answers, metrics, approvals or final states were rerun or replaced. Reversing the recorded judgment/metadata changes and recomputing summaries reconstructs the original JSON and Markdown byte-for-byte. The remaining five inconsistent pairs do not satisfy issue #3's repeatability acceptance.
-Grader: `979b4b8c7aecd030ecb107672630579c68ed76c2`. Changed verdicts: 3. Original verdicts/reasons remain in each JSON trial; model outputs, seeds, timings and captured states were not replaced.
+Grader: `86982a4bd407b84ef00ff8b910eaf4d098a31eb4`. Changed verdicts: 3. Original verdicts/reasons remain in each JSON trial; model outputs, seeds, timings and captured states were not replaced.
 
 ## Repeatability
 45/50 pairs have the same verdict and final state; 0 pairs lack usable execution evidence.
@@ -1022,6 +1022,7 @@ The process listening on port 8080 is **python3** (PID 261610). It's bound to 12
 
 ### language-lines / seed 0 / repeat 1: fail
 
+- ambiguous or incomplete python subtotal scopes
 - incorrect total line count: 1
 - no unambiguous python line count
 - javascript: expected 4, found [1, 1]
