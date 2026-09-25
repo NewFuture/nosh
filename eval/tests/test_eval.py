@@ -272,6 +272,67 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(verdict(good + " web/app.js").passed)
         self.assertFalse(verdict(good + "\n共 **4个** Python 文件。").passed)
 
+    def test_python_files_reject_inverted_classification(self):
+        root = self.base / "project"
+        facts = fixtures.create(root, "project")
+        files = "\n".join(f"- {name}" for name in facts["python"])
+        for heading in ("这些都不是 Python 文件：", "Non-Python files:", "These are not Python files:"):
+            with self.subTest(heading=heading):
+                answer = f"文件清单：\n{heading}\n{files}"
+                verdict = checks.judge(
+                    {"check": "python"}, answer, facts, root, facts["before"], self.result, self.metrics,
+                )
+                self.assertFalse(verdict.passed)
+                self.assertTrue(any(reason.startswith("Python files classified as non-Python:")
+                                    for reason in verdict.reasons))
+
+    def test_failure_explanation_requires_a_repair_action(self):
+        root = self.base / "failure"
+        facts = fixtures.create(root, "failure")
+        self.result.turns = [{"output": "FileNotFoundError: config.json"}]
+        def verdict(answer):
+            return checks.judge(
+                {"check": "failure"}, answer, facts, root, facts["before"], self.result, self.metrics,
+            )
+        for answer in (
+            "config.json is missing from the current directory/relative path.",
+            "config.json is missing at this address.",
+            "config.json 的相对路径不存在。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIn("answer provides no recognized remedy", verdict(answer).reasons)
+        for answer in (
+            "config.json is missing. Create the file with valid JSON content.",
+            "config.json is missing. Correct the relative path in broken.py.",
+            "config.json is missing. Change to the directory containing it.",
+            "config.json 不存在，请创建该文件并写入有效的 JSON。",
+            "config.json 不存在，请修正脚本中的相对路径。",
+            "config.json 不存在，请切换到包含该文件的目录。",
+            "config.json 不存在，请在正确目录运行脚本。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(verdict(answer).passed)
+
+    def test_python_and_failure_baseline_verdicts_are_preserved(self):
+        baseline = json.loads(
+            (run.HERE / "baselines" / "main-7c57a88" / "report.json").read_text(encoding="utf-8")
+        )
+        scenarios = {s["id"]: s for s in baseline["metadata"]["scenarios"]}
+        trials = [t for t in baseline["trials"] if t["scenario_id"] in ("chinese-python", "explain-failure")]
+        self.assertEqual(len(trials), 10)
+        for trial in trials:
+            with self.subTest(scenario=trial["scenario_id"], seed=trial["seed"]):
+                scenario = scenarios[trial["scenario_id"]]
+                root = self.base / f"{trial['scenario_id']}-{trial['seed']}"
+                facts = fixtures.create(root, scenario["fixture"])
+                self.assertEqual(facts, trial["facts"])
+                result = driver.Result(exit_code=trial["exit_code"], turns=trial["turns"])
+                verdict = checks.judge(
+                    scenario, trial["answer"], facts, root,
+                    trial["final_state"]["files"], result, trial["metrics"],
+                )
+                self.assertEqual(verdict.passed, trial["status"] == "pass")
+
     def test_port_identity_allows_a_spelled_out_python_version_but_requires_pid(self):
         root = self.base / "port"
         facts = fixtures.create(root, "port")

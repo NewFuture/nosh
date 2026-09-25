@@ -330,18 +330,23 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
         names = [name for name in mentioned_files(answer, facts["before"]) if name.endswith(".py")]
         python_section = True
         incorrectly_classified = []
+        misclassified_python = []
         for line in answer.splitlines():
-            if re.search(r"non[- ]python|(?:非|不是|不属于)\s*python|(?:其他|其余).*文件|other.*files", line, re.I):
+            if re.search(r"(?:non[- ]|not\s+)python|(?:非|不是|不属于)\s*python|(?:其他|其余).*文件|other.*files", line, re.I):
                 python_section = False
             elif re.search(r"python\s*文件|python\s*files|个\s*python", line, re.I):
                 python_section = True
+            line_files = mentioned_files(line, facts["before"])
             if python_section:
-                incorrectly_classified.extend(name for name in mentioned_files(line, facts["before"])
-                                              if not name.endswith(".py"))
-        if set(names) != set(facts["python"]) or incorrectly_classified:
+                incorrectly_classified.extend(name for name in line_files if not name.endswith(".py"))
+            else:
+                misclassified_python.extend(name for name in line_files if name.endswith(".py"))
+        if set(names) != set(facts["python"]) or incorrectly_classified or misclassified_python:
             reasons.append(f"expected Python files {facts['python']}, found {names}")
             if incorrectly_classified:
                 reasons.append(f"non-Python files classified as Python: {incorrectly_classified}")
+            if misclassified_python:
+                reasons.append(f"Python files classified as non-Python: {misclassified_python}")
         if not re.search(r"[\u4e00-\u9fff]", answer):
             reasons.append("answer is not in Chinese")
         counts = re.findall(r"(\d+)\s*(?:个\s*)?python\s*(?:文件|files?\b)",
@@ -367,7 +372,11 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
             reasons.append("answer omits config.json")
         if not re.search(r"missing|not found|not exist|doesn't exist|no such file|FileNotFound|缺少|缺失|不存在|找不到|未找到", answer, re.I):
             reasons.append("answer does not explain the missing file")
-        if not re.search(r"creat|provid|add|path|director|放|创建|路径|提供", answer, re.I):
+        if not re.search(
+            r"\b(?:create|provide|add|copy|place|put|correct|fix|change|set|specify|modify)\b"
+            r"|创建|提供|添加|复制|放入|放到|放置|修正|修改|设置|指定|切换到|在正确目录(?:中)?运行",
+            answer, re.I,
+        ):
             reasons.append("answer provides no recognized remedy")
     elif kind == "history":
         aliases = {"pipeline": r"pipeline|管道", "approval": r"approv|确认|审批",
