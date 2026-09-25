@@ -673,10 +673,10 @@ impl Agent {
             return Exec::Aborted(text);
         }
         if needs_handoff(&r, report.rewritten.is_some()) {
-            text.push_str("\n[handoff] returned the original command to the user; do not retry it");
+            text.push_str("\n[handoff] returned the original command to the user; earlier parts of this shell program may already have run; do not retry it");
             ui.proposed(command, Some(tr!(
-                "命令需要终端或密码，已停止并交回输入行；请检查后自行运行，不会自动重试。",
-                "Command needs a terminal or password; stopped and returned for review. Run it yourself when ready; it will not be retried automatically."
+                "命令在等待终端或密码时已停止，但复合命令前面的部分可能已经执行；请检查当前状态和整条命令后再自行运行，不会自动重试。",
+                "Command stopped while waiting for a terminal or password, but earlier parts of this shell program may already have run. Check the current state and the entire command before running it yourself; it will not be retried automatically."
             )));
             return Exec::Handoff(command.to_string(), text);
         }

@@ -426,6 +426,49 @@ fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
 }
 
 #[test]
+fn compound_terminal_handoff_warns_about_partial_execution_without_replaying() {
+    let _g = setup();
+    let dir = tmpdir("compound-handoff");
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    let command = "printf 'charged\\n' >> marker; python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGTTIN)'";
+    let engine = MockChatEngine::new(vec![vec![
+        call("run_command", json!({"command": command})),
+        call("run_command", json!({"command": "touch must-not-run"})),
+    ]]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    let mut ui = RecordUi::default();
+    let out = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "compound terminal task"),
+        &mut Scripted::new([ApprovalResponse::Approve]),
+        &mut ui,
+    );
+    assert_eq!(out.status, TaskStatus::Completed, "{out:?} {:?}", ui.events);
+    assert_eq!(out.proposed.as_deref(), Some(command));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("marker")).unwrap(),
+        "charged\n"
+    );
+    assert!(!dir.join("must-not-run").exists());
+    assert!(a.output(2).is_none());
+    assert_eq!(out.steps, 1);
+    assert_eq!(out.commands_run, 1);
+    assert_eq!(received.lock().unwrap().len(), 1);
+    assert!(
+        ui.events.iter().any(|e| {
+            e.contains(command)
+                && e.contains("earlier parts of this shell program may already have run")
+                && e.contains("Check the current state and the entire command")
+        }),
+        "{:?}",
+        ui.events
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn suggest_and_ctrl_g_use_text_without_tools_or_execution() {
     use nosh_shell::AiHandler;
     let _g = setup();
