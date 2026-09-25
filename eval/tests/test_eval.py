@@ -308,6 +308,10 @@ class CheckTests(unittest.TestCase):
             "**Grand total: 29 lines across 6 files**"
         )
         self.assertEqual(checks.line_counts(sections, facts), [])
+        without_subtotals = "\n".join(line for line in sections.splitlines() if not line.startswith("- **Total:"))
+        self.assertEqual(checks.line_counts(without_subtotals, facts), [])
+        self.assertTrue(checks.line_counts(without_subtotals.replace("| Python | 15 |", "| Python | 10 |"), facts))
+        self.assertTrue(checks.line_counts(without_subtotals.replace("29 lines", "34 lines"), facts))
         for wrong in (
             sections.replace("29 lines", "34 lines"),
             sections.replace("6 files", "5 files"),

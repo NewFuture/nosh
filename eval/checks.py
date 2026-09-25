@@ -187,7 +187,7 @@ def line_counts(answer: str, facts: dict) -> list[str]:
                                if number != facts["file_count"])
     suffixes = {"python": ".py", "javascript": ".js", "rust": ".rs", "shell": ".sh"}
     for language, scopes in sections.items():
-        if len(scopes) > 1:
+        if len(scopes) > 1 and any(item["lines"] or item["counts"] for item in scopes):
             files = [name for item in scopes for name in item["files"]]
             expected_files = {name for name in facts["before"] if Path(name).suffix == suffixes[language]}
             # Add subsection totals only when their named files form a disjoint,
