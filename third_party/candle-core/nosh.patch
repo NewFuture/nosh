@@ -135,7 +135,7 @@ index 38e923c..c9d86d6 100644
                  }
                  let dst: Vec<half::bf16> = narrow_bf16(&dst_storage);
 diff --git a/candle-core/src/quantized/repack.rs b/candle-core/src/quantized/repack.rs
-index 46dcb8b..c053994 100644
+index 46dcb8b..e07856d 100644
 --- a/candle-core/src/quantized/repack.rs
 +++ b/candle-core/src/quantized/repack.rs
 @@ -1,3 +1,6 @@
@@ -154,7 +154,7 @@ index 46dcb8b..c053994 100644
  }
  
  impl PackedCache {
-@@ -60,6 +65,51 @@ impl PackedCache {
+@@ -60,6 +65,46 @@ impl PackedCache {
          self.x86.get_or_init(init)
      }
  
@@ -173,12 +173,7 @@ index 46dcb8b..c053994 100644
 +
 +    // nosh patch: only these ARM layouts serve every m, including GEMV tails.
 +    #[cfg(target_arch = "aarch64")]
-+    pub(crate) fn aarch64_prepack(
-+        &self,
-+        storage: &dyn QuantizedType,
-+        n: usize,
-+        k: usize,
-+    ) -> bool {
++    pub(crate) fn aarch64_prepack(&self, storage: &dyn QuantizedType, n: usize, k: usize) -> bool {
 +        if !crate::cpu::features::get().dotprod
 +            || !matches!(storage.dtype(), GgmlDType::Q4K | GgmlDType::Q6K)
 +            || n == 0
@@ -206,7 +201,7 @@ index 46dcb8b..c053994 100644
      pub(crate) fn new() -> Self {
          Self {
              #[cfg(target_arch = "x86_64")]
-@@ -76,6 +126,7 @@ impl PackedCache {
+@@ -76,6 +121,7 @@ impl PackedCache {
              q6kx8: OnceLock::new(),
              #[cfg(target_arch = "aarch64")]
              q8_0x4: OnceLock::new(),
@@ -214,7 +209,7 @@ index 46dcb8b..c053994 100644
          }
      }
  
-@@ -272,13 +323,14 @@ impl PackedKind {
+@@ -272,13 +318,14 @@ impl PackedKind {
              GgmlDType::Q4_0 if n.is_multiple_of(4) && (has_dotprod_gemv || has_tiled_matmul) => {
                  Some(Self::Q4_0x4)
              }
@@ -231,7 +226,7 @@ index 46dcb8b..c053994 100644
                  Some(Self::Q6Kx8)
              }
              GgmlDType::Q8_0 if n.is_multiple_of(4) && (has_dotprod_gemv || has_tiled_matmul) => {
-@@ -394,6 +446,27 @@ impl PackedKind {
+@@ -394,6 +441,32 @@ impl PackedKind {
          packed: &PackedStorage,
          dst: &mut [f32],
      ) -> Result<()> {
@@ -244,7 +239,12 @@ index 46dcb8b..c053994 100644
 +        if m > 1 && !m.is_multiple_of(4) && matches!(self, Self::Q4Kx8 | Self::Q6Kx8) {
 +            let tiled = m - m % 4;
 +            if tiled > 0 {
-+                self.matmul((tiled, k, n), &lhs[..tiled * k], packed, &mut dst[..tiled * n])?;
++                self.matmul(
++                    (tiled, k, n),
++                    &lhs[..tiled * k],
++                    packed,
++                    &mut dst[..tiled * n],
++                )?;
 +            }
 +            for row in tiled..m {
 +                self.matmul(

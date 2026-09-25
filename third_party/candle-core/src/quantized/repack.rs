@@ -80,12 +80,7 @@ impl PackedCache {
 
     // nosh patch: only these ARM layouts serve every m, including GEMV tails.
     #[cfg(target_arch = "aarch64")]
-    pub(crate) fn aarch64_prepack(
-        &self,
-        storage: &dyn QuantizedType,
-        n: usize,
-        k: usize,
-    ) -> bool {
+    pub(crate) fn aarch64_prepack(&self, storage: &dyn QuantizedType, n: usize, k: usize) -> bool {
         if !crate::cpu::features::get().dotprod
             || !matches!(storage.dtype(), GgmlDType::Q4K | GgmlDType::Q6K)
             || n == 0
@@ -455,7 +450,12 @@ impl PackedKind {
         if m > 1 && !m.is_multiple_of(4) && matches!(self, Self::Q4Kx8 | Self::Q6Kx8) {
             let tiled = m - m % 4;
             if tiled > 0 {
-                self.matmul((tiled, k, n), &lhs[..tiled * k], packed, &mut dst[..tiled * n])?;
+                self.matmul(
+                    (tiled, k, n),
+                    &lhs[..tiled * k],
+                    packed,
+                    &mut dst[..tiled * n],
+                )?;
             }
             for row in tiled..m {
                 self.matmul(
