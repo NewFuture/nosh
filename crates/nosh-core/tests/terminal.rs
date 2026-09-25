@@ -578,7 +578,7 @@ fn dumb_repl_executes_multiline_commands_without_escape_sequences() {
 
 #[test]
 fn prompts_use_the_controlling_terminal_without_consuming_piped_stdin() {
-    let (out, _) = Probe {
+    let (out, err) = Probe {
         mode: "input-pipe",
         stdin_pipe: true,
         stderr_tty: true,
@@ -587,8 +587,8 @@ fn prompts_use_the_controlling_terminal_without_consuming_piped_stdin() {
     }
     .run();
     let result: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(result["answer"], "yes");
-    assert_eq!(result["attachment"], "attachment\n");
+    assert_eq!(result["answer"], "yes", "{err:?}");
+    assert_eq!(result["attachment"], "attachment\n", "{err:?}");
 }
 
 #[test]
