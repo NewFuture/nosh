@@ -187,7 +187,6 @@ def line_counts(answer: str, facts: dict) -> list[str]:
                                if number != facts["file_count"])
     suffixes = {"python": ".py", "javascript": ".js", "rust": ".rs", "shell": ".sh"}
     for language, scopes in sections.items():
-        scopes = [item for item in scopes if item["lines"] or item["counts"]]
         if len(scopes) > 1:
             files = [name for item in scopes for name in item["files"]]
             expected_files = {name for name in facts["before"] if Path(name).suffix == suffixes[language]}
@@ -344,7 +343,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                     and FILE_NAME.search(line)):
                 if not reference or re.match(r"^\s*\d+[.)]\s+", line):
                     ranked.append(line)
-            elif ranked and line.strip() and not line[0].isspace():
+            elif ranked and line.strip():
                 # Only an explicitly smaller-file reference section is outside
                 # the ranking. Other prose must not hide corrected/additional ranks.
                 if not line.lstrip().startswith("|"):

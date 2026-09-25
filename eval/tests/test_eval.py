@@ -222,6 +222,14 @@ class CheckTests(unittest.TestCase):
         correction = "\n\nActually, the corrected ranking is:\n- notes.txt\n- video.bin\n- data/small.bin"
         self.assertFalse(verdict(ranking + correction).passed)
         self.assertFalse(verdict(ranking + reference + correction).passed)
+        for indent in ("    ", "\t"):
+            with self.subTest(indent=indent):
+                indented_correction = "\n".join(indent + line if line else "" for line in correction.splitlines())
+                self.assertFalse(verdict(ranking + reference + indented_correction).passed)
+                self.assertFalse(verdict(ranking + reference + f"\n\n{indent}Additional ranked files:\n"
+                                        f"{indent}- notes.txt").passed)
+                indented_reference = "\n".join(indent + line if line else "" for line in reference.splitlines())
+                self.assertTrue(verdict(ranking + indented_reference).passed)
         self.assertFalse(verdict(ranking + "\n- notes.txt" + reference).passed)
         self.assertFalse(verdict(ranking.replace("2. video.bin\n\n3. cache/archive.bin",
                                                "2. cache/archive.bin\n\n3. video.bin") + reference).passed)
@@ -312,6 +320,10 @@ class CheckTests(unittest.TestCase):
             sections.replace("Total: 5 lines in 1 file", "Total: 5 lines and 5 lines in 1 file"),
             sections.replace("**Python (in lib):**", "**Python (in lib):**\n- main.py: 5 lines"),
             sections.replace("| Python | 15 |", "| Python | 10 |"),
+            sections.replace("- **Total: 10 lines in 2 files**\n", "")
+                    .replace("Total: 5 lines in 1 file", "Total: 15 lines"),
+            sections.replace("- **Total: 5 lines in 1 file**\n", "")
+                    .replace("Total: 10 lines in 2 files", "Total: 15 lines"),
         ):
             with self.subTest(answer=wrong):
                 self.assertTrue(checks.line_counts(wrong, facts))
