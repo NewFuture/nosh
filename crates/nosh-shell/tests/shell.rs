@@ -45,6 +45,69 @@ fn which(name: &str) -> bool {
 }
 
 #[test]
+fn suggestion_tilde_paths_are_checked_without_execution() {
+    use nosh_shell::trigger::is_suggestion_program;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home with spaces");
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    let tool = home.join("bin/tool");
+    std::fs::write(&tool, "#!/bin/sh\necho ran > marker\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(home.join("bin/not-executable"), "not a program").unwrap();
+    let mut sh = shell();
+    assert_eq!(
+        sh.run_user_line(&format!(
+            "HOME='{0}'; OLDPWD='{0}'; cd '{0}'",
+            home.display()
+        ))
+        .exit_code,
+        0
+    );
+    // cd updates OLDPWD; reset it to the fixture using only a shell assignment.
+    assert_eq!(
+        sh.run_user_line(&format!("OLDPWD='{}'", home.display()))
+            .exit_code,
+        0
+    );
+
+    for program in ["~/bin/tool", "~+/bin/tool", "~-/bin/tool", "~/bin/\"tool\""] {
+        assert!(is_suggestion_program(program, &sh), "{program}");
+    }
+    for program in [
+        "~/bin/missing",
+        "~/bin/not-executable",
+        "'~/bin/tool'",
+        "\"~/bin/tool\"",
+        "\\~/bin/tool",
+    ] {
+        assert!(!is_suggestion_program(program, &sh), "{program}");
+    }
+    assert_eq!(
+        classify("~/bin/tool", &mut sh, &TriggerConfig::default()),
+        Action::Execute
+    );
+
+    let literal = home.join("~/bin");
+    std::fs::create_dir_all(&literal).unwrap();
+    std::fs::copy(&tool, literal.join("tool")).unwrap();
+    for program in ["'~/bin/tool'", "\"~/bin/tool\"", "\\~/bin/tool"] {
+        assert!(is_suggestion_program(program, &sh), "{program}");
+    }
+    for program in [
+        "{ HOME=/runtime-only; ~/bin/tool; }",
+        "{ OLDPWD=/runtime-only; ~-/bin/tool; }",
+        "~nosh_nonexistent_account/bin/tool",
+        "~+10/bin/tool",
+    ] {
+        assert!(is_suggestion_program(program, &sh), "{program}");
+    }
+    assert!(!home.join("marker").exists());
+}
+
+#[test]
 fn classify_lines() {
     let _g = serial();
     let mut sh = shell();

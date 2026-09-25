@@ -4,7 +4,10 @@ use std::{collections::BTreeMap, rc::Rc};
 
 use brush_parser::{ast, word};
 
-use crate::{EmbeddedShell, Resolution, trigger::static_word};
+use crate::{
+    EmbeddedShell, Resolution,
+    trigger::{static_word, static_word_with_tilde},
+};
 
 #[derive(Clone, Default)]
 struct Scope {
@@ -166,7 +169,17 @@ impl Check<'_> {
                 if !self.word(word, scope) {
                     return false;
                 }
-                let Some(name) = static_word(word) else {
+                let Some(name) = static_word_with_tilde(word, &|expr| {
+                    if scope.dynamic {
+                        return None;
+                    }
+                    match expr {
+                        word::TildeExpr::Home => self.shell.var("HOME"),
+                        word::TildeExpr::WorkingDir => self.shell.cwd().to_str().map(str::to_owned),
+                        word::TildeExpr::OldWorkingDir => self.shell.var("OLDPWD"),
+                        _ => None,
+                    }
+                }) else {
                     scope.dynamic = true;
                     scope.functions.clear();
                     return true;
@@ -235,8 +248,9 @@ impl Check<'_> {
                         key.as_ref().is_none_or(|w| self.word(w, scope)) && self.word(value, scope)
                     }),
                 };
-                // PATH assignments can change command lookup after expansion.
-                if matches!(&assignment.name, ast::AssignmentName::VariableName(name) if name == "PATH")
+                // Later lookups must not use stale PATH or tilde expansion state.
+                if matches!(&assignment.name, ast::AssignmentName::VariableName(name)
+                    if matches!(name.as_str(), "PATH" | "HOME" | "OLDPWD"))
                 {
                     scope.dynamic = true;
                 }

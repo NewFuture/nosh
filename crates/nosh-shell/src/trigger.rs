@@ -188,27 +188,43 @@ fn looks_like_question(argv: &[String]) -> bool {
 }
 
 pub(crate) fn static_word(w: &ast::Word) -> Option<String> {
+    static_word_with_tilde(w, &|_| None)
+}
+
+pub(crate) fn static_word_with_tilde(
+    w: &ast::Word,
+    expand_tilde: &impl Fn(&brush_parser::word::TildeExpr) -> Option<String>,
+) -> Option<String> {
     let opts = brush_parser::ParserOptions::default();
     let pieces = brush_parser::word::parse(&w.value, &opts).ok()?;
     let mut s = String::new();
-    fn walk(p: &[brush_parser::word::WordPieceWithSource], s: &mut String) -> bool {
+    fn walk(
+        p: &[brush_parser::word::WordPieceWithSource],
+        s: &mut String,
+        expand_tilde: &impl Fn(&brush_parser::word::TildeExpr) -> Option<String>,
+    ) -> bool {
         use brush_parser::word::WordPiece as W;
         for x in p {
             match &x.piece {
                 W::Text(t) | W::SingleQuotedText(t) => s.push_str(t),
                 W::EscapeSequence(t) => s.push_str(t.strip_prefix('\\').unwrap_or(t)),
                 W::DoubleQuotedSequence(inner) => {
-                    if !walk(inner, s) {
+                    if !walk(inner, s, expand_tilde) {
                         return false;
                     }
                 }
-                W::TildeExpansion(_) => s.push('~'),
+                W::TildeExpansion(expr) => {
+                    let Some(value) = expand_tilde(expr) else {
+                        return false;
+                    };
+                    s.push_str(&value);
+                }
                 _ => return false,
             }
         }
         true
     }
-    walk(&pieces, &mut s).then_some(s)
+    walk(&pieces, &mut s, expand_tilde).then_some(s)
 }
 
 fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
