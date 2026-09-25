@@ -6,7 +6,7 @@
   "archive_and_worktree_files_byte_verified": 181,
   "source_archive_sha256": "fb9b5dd0085136fecaaa550ec242fb87a4f65e52e646b968527eda60f59994fd",
   "binary_sha256": "9e3967568c72b67165fbfee2bf9f03a33cd2841828e263251285951910418c06",
-  "build_info_sha256": "6877626b688638ce71394d8cd80aacbd79ad4c059f98e32231de53df471ab7b0",
+  "build_info_sha256": "a4c56b165cadafe220ffc9a298a58028bba8c33f860e57d4876257a9183fe86f",
   "weights_sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd",
   "tokenizer_sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
   "harness_revision": "4f602ab8d95d046162adb7d4b202ddf6d3e20bea",
@@ -60,6 +60,8 @@
     "limited_observation_window": "Parent sampled /proc during 06:11:32-06:16:32Z: 10 samples, only the existing idle REPLs outside this campaign, at most about 0.00533 CPU cores of maintenance, minimum MemAvailable 21672060 KiB, zero swap use. A separate 20-interval vmstat window recorded zero swap-in/out, steal and I/O wait, and 38-66% idle CPU. These finite windows do not prove complete host isolation."
   },
   "preservation": {
+    "original_supplied_build_info_sha256": "6877626b688638ce71394d8cd80aacbd79ad4c059f98e32231de53df471ab7b0",
+    "build_info_line_endings": "The supplied build-info used CRLF; repository publication normalizes it to UTF-8/LF. Parsed JSON content is identical, and both physical hashes are retained.",
     "original_report_sha256": "baab48aeeb668da4f06e127a04bf32595f371cb4aa91177145a0d3267075d54a",
     "original_markdown_sha256": "b256316c3f8dac3118dd42c9c9027d0ee8ddc9fee8918c3676375a6a971b1b89",
     "regraded_report_sha256": "e8b8b5e1e6510d9fb3f21191b99e87759a1842c87ec8794d8fdf3aff9152344f",
