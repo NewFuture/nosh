@@ -486,17 +486,25 @@ fn read_only_tools_and_protected_paths() {
 #[test]
 fn nosh_settings_and_state_are_protected_where_they_live() {
     let _g = setup();
-    // NOSH_HOME holds the config and the state, instead of the XDG defaults.
-    let home = std::path::PathBuf::from(std::env::var_os("NOSH_HOME").unwrap());
+    // A relative NOSH_HOME is relative to the process cwd, while permission
+    // targets are absolute. It still has to protect the actual directory.
+    let original_home = std::env::var_os("NOSH_HOME").unwrap();
+    let relative_home =
+        std::path::PathBuf::from(format!(".nosh-agent-flow-{}", std::process::id()));
+    // SAFETY: tests in this process are serialized by `setup`.
+    unsafe { std::env::set_var("NOSH_HOME", &relative_home) };
     let mut sh = shell();
     let engine = MockChatEngine::new(vec![
         vec![call(
             "read_file",
-            json!({"path": home.join("config.toml").display().to_string()}),
+            json!({"path": relative_home.join("config.toml").display().to_string()}),
         )],
         vec![call(
             "run_command",
-            json!({"command": format!("echo x >> {}", home.join("state/history.jsonl").display())}),
+            json!({"command": format!(
+                "echo x >> {}",
+                relative_home.join("state/history.jsonl").display()
+            )}),
         )],
         vec![text("Left them alone.")],
     ]);
@@ -517,6 +525,8 @@ fn nosh_settings_and_state_are_protected_where_they_live() {
         &mut approval,
         &mut RecordUi::default(),
     );
+    // SAFETY: restores the value before releasing the serial test lock.
+    unsafe { std::env::set_var("NOSH_HOME", original_home) };
     assert_eq!(approval.seen.len(), 2, "even auto mode asks");
     assert_eq!(approval.seen[0].risk, Risk::Mutating, "protected read");
     assert_eq!(approval.seen[1].risk, Risk::Dangerous, "protected write");
