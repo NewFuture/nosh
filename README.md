@@ -27,6 +27,12 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 
 常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。配置文件位于 `~/.config/nosh/config.toml`，支持的键见设计文档 §11。
 
+## 命令建议与终端交接
+
+`nosh -s` 和 Ctrl+G 使用无工具的独立短对话，返回一个完整 shell program，经 brush 语法和可解析命令名校验后输出或预填，从不自动执行。接受单行、单一 shell fence 和完整多行结构；拒绝说明文字、多候选、不完整语法和隐藏控制字符。语法校验不能证明命令符合用户意图，执行前仍需检查。普通 agent 的建议只显示在最终文本中，不自动预填。
+
+agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。
+
 ## 终端与字符兼容
 
 当前 shell 面向 Linux（含 WSL）和 macOS；Windows 原生 shell 尚未实现。建议使用 UTF-8 locale 和支持 Unicode 的等宽字体。
