@@ -1,6 +1,6 @@
 # nosh MVP 报告
 
-> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施，审批确认策略和脱敏按设计 v0.8 的 §16 #14、#15 调整（§2.2、§2.3）。多平台 CI（issue #7，设计 v0.10）的结果和随之修复的平台问题见 §2.5。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
+> 对应 `docs/MVP-PLAN.md`（T0–T7）与 `docs/DESIGN.md` v0.4；§5.3 的内存优化按设计 v0.6（PR #2）§2.3 与 §16 #12 实施，审批确认策略和脱敏按设计 v0.8 的 §16 #14、#15 调整（§2.2、§2.3）。多平台 CI（issue #7，设计 v0.11）的结果和随之修复的平台问题见 §2.5。本报告记录实现范围、偏离设计之处、10 个端到端场景的结果、性能数据、已知问题和对 M2 的建议。
 
 ## 1. 结论
 
@@ -22,7 +22,7 @@
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
 | `nosh-cli` | `nosh`、`-c`、脚本、`-a`（管道附件，只读工具）、`-s`、`doctor`、`model`、`debug`；`--auto/--yolo/--offline/--model-path/--model/--no-download/--norc/--safe/--seed/--json`，`-l/-i/-e/-x/-u`；首次启动下载确认（默认 Y，前台下载）；`config.toml`（§11 常用项，未知项警告）；登录 shell 的 REPL panic 时 exec 回退 shell。 |
 
-测试：`cargo test --workspace` 共 180 个测试（macOS 上另有 2 个只在 macOS 上运行；权限的 555 条用例按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..`、符号链接和 nosh 自己的配置与状态目录）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理（这两项在 Linux 和 macOS 上都运行，§2.5）、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），并打印决定内核路径的 CPU 特性（§2.5），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色；之后增加了 Linux aarch64 和 macOS 两个 job（§2.5）。
+测试：`cargo test --workspace` 共 187 个测试（macOS 上另有 2 个只在 macOS 上运行；权限的 555 条用例和 AI 触发的 415 条语料按表驱动放在少数几个测试函数里），其中 `tests/agent_flow.rs` 用 MockChatEngine 覆盖多步任务、审批与拒绝理由、Dangerous 强确认与编辑后重新评估、`exec`/`exit` 拦截、错误回灌与放弃、截断与落盘、步数上限、无 TTY、`propose_command`、只读工具与受保护路径（含 `..`、符号链接和 nosh 自己的配置与状态目录）、超时，以及 REPL + agent 联动（`#`、`gti status`、agent `cd` 后用户 `pwd`、中文 not_found）；`crates/nosh-shell/tests/shell.rs` 覆盖快速输出下的超时、`$(…)` 与管道中进程的清理、脱离进程树的后台进程的清理（这两项在 Linux 和 macOS 上都运行，§2.5）、只含 builtin 的循环超时、作用域不泄漏、后台作业存活和提示符下 Ctrl-C；`crates/nosh-llm/tests/prepack.rs` 覆盖预重排后的矩阵乘法与原始路径一致、释放后访问原始数据报错（§5.3），并打印决定内核路径的 CPU 特性（§2.5），`tests/vendored_candle.rs` 防止重新 vendor 时丢失补丁；`crates/nosh-permissions/tests/scripts.rs` 覆盖脚本分析、子 shell 和工作区内运行时写入目标（§2.2），`tests/vars.rs` 覆盖经由变量和参数的受保护路径读取（§2.3）；`crates/nosh-cli/tests/cli.rs` 另外检查推理线程变量不进入 shell 和子进程（§2.4）。另有 6 个 `#[ignore]` 测试：4 个需要真实模型（本地已通过，含 f16 与 f32 KV 的对比），1 个注意力基准，1 个权限诊断输出。CI（ubuntu-latest：fmt、clippy -D warnings、test）每次提交都是绿色；之后增加了 Linux aarch64 和 macOS 两个 job（§2.5）。
 
 加分项：nosh 内 Ctrl+G 就地改写（空行时解释上一条失败的命令）已实现；agent 命令放后台进程组并通过 SIGTTIN 识别需要终端的命令已实现；多源并行分段下载、后台下载未实现。
 
@@ -89,7 +89,7 @@ T7 第一轮场景之后做了一次完整的代码审查，发现的问题全�
 
 ### 2.5 多平台 CI（issue #7）
 
-CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy（`-D warnings`）和全部测试，fmt 只在 x86_64 上跑（`d3190e8`）：
+CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy（`-D warnings`）和全部测试，fmt 和单独显示指标的 `ai trigger corpus` 步骤只在 x86_64 上跑；arm64 和 macOS 的 workspace test 同样覆盖这组语料（`82e65fd`，rebase 前为 `d3190e8`）：
 
 | job | runner | 触发 | 测试日志里的 CPU 特性 | candle 的内核路径 |
 |---|---|---|---|---|
