@@ -216,6 +216,12 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(verdict(ranking + reference).passed)
         self.assertFalse(verdict(ranking + "\n4. notes.txt" + reference).passed)
         self.assertFalse(verdict(ranking + "\n\nAdditional entries:\n4. notes.txt").passed)
+        self.assertFalse(verdict(ranking + "\n\nAdditional ranked files:\n- notes.txt").passed)
+        self.assertFalse(verdict(ranking + "\n\nAdditional ranked files:\n"
+                                "| File | Size |\n|---|---|\n| notes.txt | 100 bytes |").passed)
+        correction = "\n\nActually, the corrected ranking is:\n- notes.txt\n- video.bin\n- data/small.bin"
+        self.assertFalse(verdict(ranking + correction).passed)
+        self.assertFalse(verdict(ranking + reference + correction).passed)
         self.assertFalse(verdict(ranking + "\n- notes.txt" + reference).passed)
         self.assertFalse(verdict(ranking.replace("2. video.bin\n\n3. cache/archive.bin",
                                                "2. cache/archive.bin\n\n3. video.bin") + reference).passed)

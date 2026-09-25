@@ -345,9 +345,13 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                 if not reference or re.match(r"^\s*\d+[.)]\s+", line):
                     ranked.append(line)
             elif ranked and line.strip() and not line[0].isspace():
-                # Separate reference bullets are not the ranking; numbered
-                # continuations still count, including a fourth ranked file.
-                reference = True
+                # Only an explicitly smaller-file reference section is outside
+                # the ranking. Other prose must not hide corrected/additional ranks.
+                if not line.lstrip().startswith("|"):
+                    reference = bool(re.match(
+                        r"^\s*(?:for reference\b.*\bsmaller files?\b|(?:other\s+)?smaller files?\b).*:\s*$",
+                        line.replace("**", ""), re.I,
+                    ))
         names = mentioned_files("\n".join(ranked) if ranked else answer, facts["before"])
         if names != facts["largest"]:
             reasons.append(f"expected ordered top three {facts['largest']}, found {names}")
