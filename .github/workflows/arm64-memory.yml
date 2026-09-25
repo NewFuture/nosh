@@ -2,6 +2,7 @@ name: ARM64 memory
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: arm64-memory-${{ github.ref }}
