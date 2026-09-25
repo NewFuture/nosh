@@ -308,6 +308,11 @@
 {"id":"en-048","category":"en_nl","input":"can you inspect the 2 files in \"folder with spaces\"?","expected":"ai"}
 {"id":"en-049","category":"en_nl","input":"how many lines mention HTTP 500?","expected":"ai"}
 {"id":"en-050","category":"en_nl","input":"why won't this service restart?","expected":"ai"}
+{"id":"en-051","category":"en_nl","input":"can cargo build this?","expected":"ai"}
+{"id":"en-052","category":"en_nl","input":"can rustc compile this?","expected":"ai"}
+{"id":"en-053","category":"en_nl","input":"is cargo installed?","expected":"ai"}
+{"id":"en-054","category":"en_nl","input":"is src ready?","expected":"ai"}
+{"id":"en-055","category":"en_nl","input":"are tests passing?","expected":"ai","reason":"The fixture includes ar so this covers the are-to-ar spelling collision."}
 {"id":"fix-001","category":"typo","input":"gti status","expected":"correct","corrected":"git status"}
 {"id":"fix-002","category":"typo","input":"pyhton3 --version","expected":"correct","corrected":"python3 --version"}
 {"id":"fix-003","category":"typo","input":"sl -la","expected":"correct","corrected":"ls -la"}

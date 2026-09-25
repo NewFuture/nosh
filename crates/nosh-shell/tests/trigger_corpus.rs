@@ -33,6 +33,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 const COMMANDS: &[&str] = &[
+    "ar",
     "awk",
     "basename",
     "cargo",
@@ -308,11 +309,11 @@ fn corpus() -> Vec<Case> {
             case
         })
         .collect();
-    assert_eq!(cases.len(), 410, "update the documented corpus size too");
+    assert_eq!(cases.len(), 415, "update the documented corpus size too");
     for (category, count) in [
         (Category::ValidCommand, 200),
         (Category::ZhNl, 60),
-        (Category::EnNl, 50),
+        (Category::EnNl, 55),
         (Category::Typo, 50),
         (Category::DestructiveProse, 50),
     ] {

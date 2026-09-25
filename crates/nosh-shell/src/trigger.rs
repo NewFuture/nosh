@@ -158,29 +158,31 @@ fn looks_like_question(argv: &[String]) -> bool {
         "why" | "where" | "when" => auxiliary(&second),
         "how" => auxiliary(&second) || matches!(second.as_str(), "many" | "much"),
         "what" | "which" | "whose" => auxiliary(&second) || auxiliary(&third.to_ascii_lowercase()),
-        word if auxiliary(word) => matches!(
-            second.as_str(),
-            "i" | "you"
-                | "he"
-                | "she"
-                | "it"
-                | "we"
-                | "they"
-                | "there"
-                | "this"
-                | "that"
-                | "these"
-                | "those"
-                | "my"
-                | "your"
-                | "his"
-                | "her"
-                | "our"
-                | "their"
-                | "the"
-                | "a"
-                | "an"
-        ),
+        word if auxiliary(word) => {
+            matches!(
+                second.as_str(),
+                "i" | "you"
+                    | "he"
+                    | "she"
+                    | "it"
+                    | "we"
+                    | "they"
+                    | "there"
+                    | "this"
+                    | "that"
+                    | "these"
+                    | "those"
+                    | "my"
+                    | "your"
+                    | "his"
+                    | "her"
+                    | "our"
+                    | "their"
+                    | "the"
+                    | "a"
+                    | "an"
+            ) || argv.last().is_some_and(|arg| arg.ends_with('?'))
+        }
         _ => false,
     }
 }
