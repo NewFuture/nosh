@@ -30,5 +30,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Also part of `test`; run on its own so the metrics show on success.
+      - name: ai trigger corpus
+        run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked

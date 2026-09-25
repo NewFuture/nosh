@@ -1,0 +1,415 @@
+{"id":"exec-001","category":"valid_command","input":"ls -la","expected":"execute"}
+{"id":"exec-002","category":"valid_command","input":"pwd","expected":"execute"}
+{"id":"exec-003","category":"valid_command","input":"echo what is this","expected":"execute"}
+{"id":"exec-004","category":"valid_command","input":"git commit -m \"fix the bug\"","expected":"execute"}
+{"id":"exec-005","category":"valid_command","input":"printf '%s\\n' \"hello world\"","expected":"execute"}
+{"id":"exec-006","category":"valid_command","input":"echo \"你好，世界\"","expected":"execute","reason":"Chinese arguments do not turn a valid command into an AI request."}
+{"id":"exec-007","category":"valid_command","input":"git status --short","expected":"execute"}
+{"id":"exec-008","category":"valid_command","input":"git diff -- README.md","expected":"execute"}
+{"id":"exec-009","category":"valid_command","input":"git log --oneline -5","expected":"execute"}
+{"id":"exec-010","category":"valid_command","input":"git add 中文.txt","expected":"execute"}
+{"id":"exec-011","category":"valid_command","input":"git checkout -- README.md","expected":"execute"}
+{"id":"exec-012","category":"valid_command","input":"git reset --soft HEAD~1","expected":"execute"}
+{"id":"exec-013","category":"valid_command","input":"git clean -nd","expected":"execute"}
+{"id":"exec-014","category":"valid_command","input":"git rm --cached notes.txt","expected":"execute"}
+{"id":"exec-015","category":"valid_command","input":"ls \"folder with spaces\"","expected":"execute"}
+{"id":"exec-016","category":"valid_command","input":"ls ./目录","expected":"execute"}
+{"id":"exec-017","category":"valid_command","input":"cat README.md","expected":"execute"}
+{"id":"exec-018","category":"valid_command","input":"cat \"report final.txt\"","expected":"execute"}
+{"id":"exec-019","category":"valid_command","input":"head -n 20 app.log","expected":"execute"}
+{"id":"exec-020","category":"valid_command","input":"tail -f app.log","expected":"execute"}
+{"id":"exec-021","category":"valid_command","input":"grep -n \"what is this\" notes.txt","expected":"execute"}
+{"id":"exec-022","category":"valid_command","input":"rg 'TODO|FIXME' src","expected":"execute"}
+{"id":"exec-023","category":"valid_command","input":"find src -type f -name '*.rs'","expected":"execute"}
+{"id":"exec-024","category":"valid_command","input":"find all large files","expected":"execute","reason":"A resolvable non-destructive command keeps shell semantics even with prose-like arguments."}
+{"id":"exec-025","category":"valid_command","input":"help me understand this","expected":"execute"}
+{"id":"exec-026","category":"valid_command","input":"type git","expected":"execute"}
+{"id":"exec-027","category":"valid_command","input":"command -v python3","expected":"execute"}
+{"id":"exec-028","category":"valid_command","input":"which cargo","expected":"execute"}
+{"id":"exec-029","category":"valid_command","input":"whoami","expected":"execute"}
+{"id":"exec-030","category":"valid_command","input":"uname -a","expected":"execute"}
+{"id":"exec-031","category":"valid_command","input":"mkdir -p build/cache","expected":"execute"}
+{"id":"exec-032","category":"valid_command","input":"touch output.txt","expected":"execute"}
+{"id":"exec-033","category":"valid_command","input":"cp README.md backup/","expected":"execute"}
+{"id":"exec-034","category":"valid_command","input":"cp \"report final.txt\" \"folder with spaces/copy.txt\"","expected":"execute"}
+{"id":"exec-035","category":"valid_command","input":"mv notes.txt backup/notes.txt","expected":"execute"}
+{"id":"exec-036","category":"valid_command","input":"rm -f output.txt","expected":"execute"}
+{"id":"exec-037","category":"valid_command","input":"rm -rf all temp files","expected":"execute","reason":"Options bypass the natural-language guard by design; explicitly confirmed for issue #5."}
+{"id":"exec-038","category":"valid_command","input":"rm alpha beta gamma","expected":"execute","reason":"All three plain-word filenames exist in the controlled working directory."}
+{"id":"exec-039","category":"valid_command","input":"rm ./missing-one ./missing-two ./missing-three","expected":"execute"}
+{"id":"exec-040","category":"valid_command","input":"chown root alpha beta","expected":"execute","reason":"The owner is not a file; the operands after it all exist."}
+{"id":"exec-041","category":"valid_command","input":"mv alpha beta backup","expected":"execute"}
+{"id":"exec-042","category":"valid_command","input":"dd if=input.txt of=data.bin bs=4096 count=1","expected":"execute"}
+{"id":"exec-043","category":"valid_command","input":"chmod u+x tools/runner","expected":"execute"}
+{"id":"exec-044","category":"valid_command","input":"chmod 644 README.md","expected":"execute"}
+{"id":"exec-045","category":"valid_command","input":"chown 1000:1000 output.txt","expected":"execute"}
+{"id":"exec-046","category":"valid_command","input":"chgrp users README.md","expected":"execute"}
+{"id":"exec-047","category":"valid_command","input":"kill -TERM 12345","expected":"execute"}
+{"id":"exec-048","category":"valid_command","input":"killall -q node","expected":"execute"}
+{"id":"exec-049","category":"valid_command","input":"pkill -f 'node server.js'","expected":"execute"}
+{"id":"exec-050","category":"valid_command","input":"truncate -s 0 app.log","expected":"execute"}
+{"id":"exec-051","category":"valid_command","input":"shred -n 1 data.bin","expected":"execute"}
+{"id":"exec-052","category":"valid_command","input":"rmdir empty-dir","expected":"execute"}
+{"id":"exec-053","category":"valid_command","input":"unlink old.log","expected":"execute"}
+{"id":"exec-054","category":"valid_command","input":"mkfs -n /dev/example","expected":"execute"}
+{"id":"exec-055","category":"valid_command","input":"mkfs.ext4 -n /dev/example","expected":"execute"}
+{"id":"exec-056","category":"valid_command","input":"wipefs -n /dev/example","expected":"execute"}
+{"id":"exec-057","category":"valid_command","input":"ln -s README.md README.link","expected":"execute"}
+{"id":"exec-058","category":"valid_command","input":"stat README.md","expected":"execute"}
+{"id":"exec-059","category":"valid_command","input":"file data.bin","expected":"execute"}
+{"id":"exec-060","category":"valid_command","input":"readlink README.link","expected":"execute"}
+{"id":"exec-061","category":"valid_command","input":"sort -u input.txt","expected":"execute"}
+{"id":"exec-062","category":"valid_command","input":"uniq -c input.txt","expected":"execute"}
+{"id":"exec-063","category":"valid_command","input":"wc -l notes.txt","expected":"execute"}
+{"id":"exec-064","category":"valid_command","input":"cut -d ':' -f 1 input.txt","expected":"execute"}
+{"id":"exec-065","category":"valid_command","input":"tr '[:lower:]' '[:upper:]' < input.txt","expected":"execute"}
+{"id":"exec-066","category":"valid_command","input":"sed -n '1,10p' notes.txt","expected":"execute"}
+{"id":"exec-067","category":"valid_command","input":"awk '{print $1}' input.txt","expected":"execute"}
+{"id":"exec-068","category":"valid_command","input":"diff -u notes.txt output.txt","expected":"execute"}
+{"id":"exec-069","category":"valid_command","input":"cmp input.txt output.txt","expected":"execute"}
+{"id":"exec-070","category":"valid_command","input":"tee output.txt < input.txt","expected":"execute"}
+{"id":"exec-071","category":"valid_command","input":"xargs -n 1 echo < args.txt","expected":"execute"}
+{"id":"exec-072","category":"valid_command","input":"basename ./src/main.rs","expected":"execute"}
+{"id":"exec-073","category":"valid_command","input":"dirname ./src/main.rs","expected":"execute"}
+{"id":"exec-074","category":"valid_command","input":"realpath README.md","expected":"execute"}
+{"id":"exec-075","category":"valid_command","input":"du -sh .","expected":"execute"}
+{"id":"exec-076","category":"valid_command","input":"df -h","expected":"execute"}
+{"id":"exec-077","category":"valid_command","input":"free -m","expected":"execute"}
+{"id":"exec-078","category":"valid_command","input":"ps aux","expected":"execute"}
+{"id":"exec-079","category":"valid_command","input":"pgrep -f node","expected":"execute"}
+{"id":"exec-080","category":"valid_command","input":"pidof python3","expected":"execute"}
+{"id":"exec-081","category":"valid_command","input":"date '+%Y-%m-%d'","expected":"execute"}
+{"id":"exec-082","category":"valid_command","input":"env LANG=C git status","expected":"execute"}
+{"id":"exec-083","category":"valid_command","input":"printenv HOME","expected":"execute"}
+{"id":"exec-084","category":"valid_command","input":"id -u","expected":"execute"}
+{"id":"exec-085","category":"valid_command","input":"who","expected":"execute"}
+{"id":"exec-086","category":"valid_command","input":"hostname","expected":"execute"}
+{"id":"exec-087","category":"valid_command","input":"uptime","expected":"execute"}
+{"id":"exec-088","category":"valid_command","input":"ss -ltn","expected":"execute"}
+{"id":"exec-089","category":"valid_command","input":"ip addr show","expected":"execute"}
+{"id":"exec-090","category":"valid_command","input":"ping -c 1 example.invalid","expected":"execute"}
+{"id":"exec-091","category":"valid_command","input":"python3 -c 'print(\"what is this?\")'","expected":"execute"}
+{"id":"exec-092","category":"valid_command","input":"python script.py --help","expected":"execute"}
+{"id":"exec-093","category":"valid_command","input":"node -e 'console.log(\"你好\")'","expected":"execute"}
+{"id":"exec-094","category":"valid_command","input":"npm run test -- --runInBand","expected":"execute"}
+{"id":"exec-095","category":"valid_command","input":"npx prettier --check src","expected":"execute"}
+{"id":"exec-096","category":"valid_command","input":"pnpm install --offline","expected":"execute"}
+{"id":"exec-097","category":"valid_command","input":"yarn test","expected":"execute"}
+{"id":"exec-098","category":"valid_command","input":"cargo test --locked","expected":"execute"}
+{"id":"exec-099","category":"valid_command","input":"rustc --version","expected":"execute"}
+{"id":"exec-100","category":"valid_command","input":"go test ./...","expected":"execute"}
+{"id":"exec-101","category":"valid_command","input":"make -n build","expected":"execute"}
+{"id":"exec-102","category":"valid_command","input":"gcc -c main.c -o main.o","expected":"execute"}
+{"id":"exec-103","category":"valid_command","input":"cc --version","expected":"execute"}
+{"id":"exec-104","category":"valid_command","input":"docker ps --format '{{.Names}}'","expected":"execute"}
+{"id":"exec-105","category":"valid_command","input":"docker compose config","expected":"execute"}
+{"id":"exec-106","category":"valid_command","input":"kubectl get pods -n default","expected":"execute"}
+{"id":"exec-107","category":"valid_command","input":"ssh -o BatchMode=yes user@example.invalid","expected":"execute"}
+{"id":"exec-108","category":"valid_command","input":"scp README.md user@example.invalid:docs/","expected":"execute"}
+{"id":"exec-109","category":"valid_command","input":"rsync -an src/ backup/","expected":"execute"}
+{"id":"exec-110","category":"valid_command","input":"curl -I https://example.invalid","expected":"execute"}
+{"id":"exec-111","category":"valid_command","input":"wget --spider https://example.invalid","expected":"execute"}
+{"id":"exec-112","category":"valid_command","input":"tar -tf archive.tar","expected":"execute"}
+{"id":"exec-113","category":"valid_command","input":"gzip -c app.log > app.log.gz","expected":"execute"}
+{"id":"exec-114","category":"valid_command","input":"unzip -l archive.zip","expected":"execute"}
+{"id":"exec-115","category":"valid_command","input":"cat <<'EOF'\nwhat is this?\n你好\nEOF","expected":"execute"}
+{"id":"exec-116","category":"valid_command","input":"ls -la | grep '^d'","expected":"execute"}
+{"id":"exec-117","category":"valid_command","input":"cat input.txt | sort | uniq -c","expected":"execute"}
+{"id":"exec-118","category":"valid_command","input":"grep -q needle notes.txt && echo found","expected":"execute"}
+{"id":"exec-119","category":"valid_command","input":"test -f README.md || echo missing","expected":"execute"}
+{"id":"exec-120","category":"valid_command","input":"printf '%s\\n' one two | wc -l","expected":"execute"}
+{"id":"exec-121","category":"valid_command","input":"git status; git diff","expected":"execute"}
+{"id":"exec-122","category":"valid_command","input":"false || true","expected":"execute"}
+{"id":"exec-123","category":"valid_command","input":"echo start && pwd","expected":"execute"}
+{"id":"exec-124","category":"valid_command","input":"sleep 1 &","expected":"execute"}
+{"id":"exec-125","category":"valid_command","input":"echo out > output.txt","expected":"execute"}
+{"id":"exec-126","category":"valid_command","input":"echo err >&2","expected":"execute"}
+{"id":"exec-127","category":"valid_command","input":"cat < input.txt > output.txt","expected":"execute"}
+{"id":"exec-128","category":"valid_command","input":"printf '%s\\n' done >> output.txt","expected":"execute"}
+{"id":"exec-129","category":"valid_command","input":"grep needle notes.txt 2> errors.log","expected":"execute"}
+{"id":"exec-130","category":"valid_command","input":"{ echo first; echo second; } > output.txt","expected":"execute"}
+{"id":"exec-131","category":"valid_command","input":"(cd src && pwd)","expected":"execute"}
+{"id":"exec-132","category":"valid_command","input":"if test -f README.md; then cat README.md; else echo missing; fi","expected":"execute"}
+{"id":"exec-133","category":"valid_command","input":"for name in alpha beta; do echo \"$name\"; done","expected":"execute"}
+{"id":"exec-134","category":"valid_command","input":"while false; do echo waiting; done","expected":"execute"}
+{"id":"exec-135","category":"valid_command","input":"until true; do echo waiting; done","expected":"execute"}
+{"id":"exec-136","category":"valid_command","input":"case \"$MODE\" in debug) echo debug;; *) echo release;; esac","expected":"execute"}
+{"id":"exec-137","category":"valid_command","input":"f() { echo hi; }; f","expected":"execute"}
+{"id":"exec-138","category":"valid_command","input":"function greet { echo hello; }; greet","expected":"execute"}
+{"id":"exec-139","category":"valid_command","input":"(( count += 1 ))","expected":"execute"}
+{"id":"exec-140","category":"valid_command","input":"[[ -f README.md && -n \"$HOME\" ]]","expected":"execute"}
+{"id":"exec-141","category":"valid_command","input":"FOO=bar","expected":"execute"}
+{"id":"exec-142","category":"valid_command","input":"FOO=bar echo \"$FOO\"","expected":"execute"}
+{"id":"exec-143","category":"valid_command","input":"export APP_MODE=development","expected":"execute"}
+{"id":"exec-144","category":"valid_command","input":"unset APP_MODE","expected":"execute"}
+{"id":"exec-145","category":"valid_command","input":"readonly LIMIT=3","expected":"execute"}
+{"id":"exec-146","category":"valid_command","input":"set -- alpha beta","expected":"execute"}
+{"id":"exec-147","category":"valid_command","input":"set -o pipefail","expected":"execute"}
+{"id":"exec-148","category":"valid_command","input":"shopt -s nullglob","expected":"execute"}
+{"id":"exec-149","category":"valid_command","input":"alias ll='ls -l'","expected":"execute"}
+{"id":"exec-150","category":"valid_command","input":"unalias ll","expected":"execute"}
+{"id":"exec-151","category":"valid_command","input":"declare -a values=(one two)","expected":"execute"}
+{"id":"exec-152","category":"valid_command","input":"declare -A lookup=([key]=value)","expected":"execute"}
+{"id":"exec-153","category":"valid_command","input":"printf '%s\\n' \"${values[@]}\"","expected":"execute"}
+{"id":"exec-154","category":"valid_command","input":"echo \"${HOME:-unknown}\"","expected":"execute"}
+{"id":"exec-155","category":"valid_command","input":"echo \"$((2 + 3))\"","expected":"execute"}
+{"id":"exec-156","category":"valid_command","input":"echo \"$(pwd)\"","expected":"execute"}
+{"id":"exec-157","category":"valid_command","input":"echo `pwd`","expected":"execute"}
+{"id":"exec-158","category":"valid_command","input":"$CMD arg","expected":"execute"}
+{"id":"exec-159","category":"valid_command","input":"\"$CMD\" \"some text\"","expected":"execute"}
+{"id":"exec-160","category":"valid_command","input":"./tools/runner --help","expected":"execute"}
+{"id":"exec-161","category":"valid_command","input":"tools/runner \"hello there\"","expected":"execute"}
+{"id":"exec-162","category":"valid_command","input":"\"git\" status","expected":"execute"}
+{"id":"exec-163","category":"valid_command","input":"'ls' -la","expected":"execute"}
+{"id":"exec-164","category":"valid_command","input":"\\git status","expected":"execute"}
+{"id":"exec-165","category":"valid_command","input":"g\"i\"t diff","expected":"execute"}
+{"id":"exec-166","category":"valid_command","input":"echo 'what is this?'","expected":"execute"}
+{"id":"exec-167","category":"valid_command","input":"echo 'don'\\''t change this'","expected":"execute"}
+{"id":"exec-168","category":"valid_command","input":"echo \"what's using port 8080?\"","expected":"execute"}
+{"id":"exec-169","category":"valid_command","input":"printf '%s\\n' 'a;b' 'x|y' 'a&&b'","expected":"execute"}
+{"id":"exec-170","category":"valid_command","input":"echo \\#not-an-ai-request","expected":"execute"}
+{"id":"exec-171","category":"valid_command","input":"chmod go-w alpha beta","expected":"execute","reason":"A symbolic mode can look like a plain word but is not a file."}
+{"id":"exec-172","category":"valid_command","input":"rm -- all temp files","expected":"execute"}
+{"id":"exec-173","category":"valid_command","input":"rm -i all temp files","expected":"execute"}
+{"id":"exec-174","category":"valid_command","input":"mv -n all old files backup","expected":"execute"}
+{"id":"exec-175","category":"valid_command","input":"chmod -R make this executable","expected":"execute"}
+{"id":"exec-176","category":"valid_command","input":"chown --from=old:new all user files","expected":"execute"}
+{"id":"exec-177","category":"valid_command","input":"chgrp --reference=README.md all project files","expected":"execute"}
+{"id":"exec-178","category":"valid_command","input":"kill -9 the stuck server","expected":"execute"}
+{"id":"exec-179","category":"valid_command","input":"killall --signal TERM all node workers","expected":"execute"}
+{"id":"exec-180","category":"valid_command","input":"pkill --exact the test server","expected":"execute"}
+{"id":"exec-181","category":"valid_command","input":"truncate --size=0 all old logs","expected":"execute"}
+{"id":"exec-182","category":"valid_command","input":"shred --iterations=0 all old secrets","expected":"execute"}
+{"id":"exec-183","category":"valid_command","input":"rmdir --ignore-fail-on-non-empty all empty folders","expected":"execute"}
+{"id":"exec-184","category":"valid_command","input":"git reset HEAD src build","expected":"execute","reason":"The revision is not a file; src and build exist."}
+{"id":"exec-185","category":"valid_command","input":"mkfs.ext4 -n erase this disk","expected":"execute"}
+{"id":"exec-186","category":"valid_command","input":"wipefs --no-act erase all signatures","expected":"execute"}
+{"id":"exec-187","category":"valid_command","input":"git reset --hard everything to yesterday","expected":"execute"}
+{"id":"exec-188","category":"valid_command","input":"git clean -n all ignored files","expected":"execute"}
+{"id":"exec-189","category":"valid_command","input":"git rm --cached all generated files","expected":"execute"}
+{"id":"exec-190","category":"valid_command","input":"git checkout -- all tracked files","expected":"execute"}
+{"id":"exec-191","category":"valid_command","input":"rm 'all temp files'","expected":"execute","reason":"One quoted argument is not three plain-word arguments."}
+{"id":"exec-192","category":"valid_command","input":"mv \"old project\" \"new project\"","expected":"execute"}
+{"id":"exec-193","category":"valid_command","input":"kill 1234 5678 9012","expected":"execute"}
+{"id":"exec-194","category":"valid_command","input":"chmod 755 644 600","expected":"execute"}
+{"id":"exec-195","category":"valid_command","input":"chown user:group alpha beta gamma","expected":"execute"}
+{"id":"exec-196","category":"valid_command","input":"git reset alpha beta gamma","expected":"execute"}
+{"id":"exec-197","category":"valid_command","input":"git clean alpha beta gamma","expected":"execute"}
+{"id":"exec-198","category":"valid_command","input":"git rm alpha beta gamma","expected":"execute"}
+{"id":"exec-199","category":"valid_command","input":"git checkout alpha beta gamma","expected":"execute"}
+{"id":"exec-200","category":"valid_command","input":"./tools/rm -f all temp files","expected":"execute"}
+{"id":"zh-001","category":"zh_nl","input":"帮我看看 8080 端口被谁占用","expected":"ai"}
+{"id":"zh-002","category":"zh_nl","input":"请列出当前目录最大的 10 个文件","expected":"ai"}
+{"id":"zh-003","category":"zh_nl","input":"这个进程为什么一直占用 CPU？","expected":"ai"}
+{"id":"zh-004","category":"zh_nl","input":"怎样查看剩余磁盘空间？","expected":"ai"}
+{"id":"zh-005","category":"zh_nl","input":"帮我找出 ./src 中重复的图片","expected":"ai"}
+{"id":"zh-006","category":"zh_nl","input":"请解释这次 git 提交改了什么","expected":"ai"}
+{"id":"zh-007","category":"zh_nl","input":"为什么 npm install 失败了？","expected":"ai"}
+{"id":"zh-008","category":"zh_nl","input":"把昨天的日志打包成一个压缩文件","expected":"ai"}
+{"id":"zh-009","category":"zh_nl","input":"删除一周前的临时文件","expected":"ai"}
+{"id":"zh-010","category":"zh_nl","input":"怎样停止监听 3000 端口的服务？","expected":"ai"}
+{"id":"zh-011","category":"zh_nl","input":"帮我统计 README.md 一共有多少行","expected":"ai"}
+{"id":"zh-012","category":"zh_nl","input":"检查当前分支有没有未提交的改动","expected":"ai"}
+{"id":"zh-013","category":"zh_nl","input":"解释一下 0644 和 0755 的区别","expected":"ai"}
+{"id":"zh-014","category":"zh_nl","input":"这个目录能安全删除吗？","expected":"ai"}
+{"id":"zh-015","category":"zh_nl","input":"请查找包含 permission denied 的日志","expected":"ai"}
+{"id":"zh-016","category":"zh_nl","input":"帮我比较 input.txt 和 output.txt","expected":"ai"}
+{"id":"zh-017","category":"zh_nl","input":"如何撤销最后一次提交但保留文件？","expected":"ai"}
+{"id":"zh-018","category":"zh_nl","input":"检查 Docker 容器为什么没有网络","expected":"ai"}
+{"id":"zh-019","category":"zh_nl","input":"给这个 Python 项目创建虚拟环境","expected":"ai"}
+{"id":"zh-020","category":"zh_nl","input":"为什么会出现 HTTP 500 错误？","expected":"ai"}
+{"id":"zh-021","category":"zh_nl","input":"列出最近 24 小时修改过的文件","expected":"ai"}
+{"id":"zh-022","category":"zh_nl","input":"请只保留最近的 5 份备份","expected":"ai"}
+{"id":"zh-023","category":"zh_nl","input":"帮我确认系统的时区设置","expected":"ai"}
+{"id":"zh-024","category":"zh_nl","input":"怎样让 tools/runner 可以执行？","expected":"ai"}
+{"id":"zh-025","category":"zh_nl","input":"查找超过 100MB 的文件，不要删除","expected":"ai"}
+{"id":"zh-026","category":"zh_nl","input":"解释 \"No space left on device\" 是什么意思","expected":"ai"}
+{"id":"zh-027","category":"zh_nl","input":"为什么命令 'git status' 没有输出？","expected":"ai"}
+{"id":"zh-028","category":"zh_nl","input":"检查 ./目录 下面有没有空文件","expected":"ai"}
+{"id":"zh-029","category":"zh_nl","input":"请把文件名里的空格替换为下划线","expected":"ai"}
+{"id":"zh-030","category":"zh_nl","input":"我想知道这个服务启动了多久","expected":"ai"}
+{"id":"zh-031","category":"zh_nl","input":"这里的符号链接指向哪里？","expected":"ai"}
+{"id":"zh-032","category":"zh_nl","input":"为什么 ssh 一直提示连接超时？","expected":"ai"}
+{"id":"zh-033","category":"zh_nl","input":"帮我检查 DNS 是否正常","expected":"ai"}
+{"id":"zh-034","category":"zh_nl","input":"解释一下 exit code 137","expected":"ai"}
+{"id":"zh-035","category":"zh_nl","input":"怎样看某个文件的所有者？","expected":"ai"}
+{"id":"zh-036","category":"zh_nl","input":"显示这台机器的内存使用情况","expected":"ai"}
+{"id":"zh-037","category":"zh_nl","input":"找出 ./src 中没有被引用的模块","expected":"ai"}
+{"id":"zh-038","category":"zh_nl","input":"请把 app.log 最后 50 行中的错误归纳一下","expected":"ai"}
+{"id":"zh-039","category":"zh_nl","input":"为什么测试在第 3 步卡住了？","expected":"ai"}
+{"id":"zh-040","category":"zh_nl","input":"我需要一个只预览不修改的清理命令","expected":"ai"}
+{"id":"zh-041","category":"zh_nl","input":"帮我生成部署前的检查清单","expected":"ai"}
+{"id":"zh-042","category":"zh_nl","input":"当前环境里有几个 node 进程？","expected":"ai"}
+{"id":"zh-043","category":"zh_nl","input":"如何确认 5432 端口上的数据库可用？","expected":"ai"}
+{"id":"zh-044","category":"zh_nl","input":"列出 \"folder with spaces\" 里的子目录","expected":"ai"}
+{"id":"zh-045","category":"zh_nl","input":"帮我检查 ~/.config 中的配置文件","expected":"ai"}
+{"id":"zh-046","category":"zh_nl","input":"这些文件的权限是不是太宽松了？","expected":"ai"}
+{"id":"zh-047","category":"zh_nl","input":"请说明 don't overwrite 在文档里的意思","expected":"ai"}
+{"id":"zh-048","category":"zh_nl","input":"为什么日志写着 it's already running？","expected":"ai"}
+{"id":"zh-049","category":"zh_nl","input":"给我一个查找 2 天前日志的办法","expected":"ai"}
+{"id":"zh-050","category":"zh_nl","input":"把 ./backup 与当前目录的内容比较一下","expected":"ai"}
+{"id":"zh-051","category":"zh_nl","input":"这个压缩包里包含哪些文件？","expected":"ai"}
+{"id":"zh-052","category":"zh_nl","input":"8080 端口为什么被占用？","expected":"ai"}
+{"id":"zh-053","category":"zh_nl","input":"./src 目录为什么有 3 个重复文件？","expected":"ai"}
+{"id":"zh-054","category":"zh_nl","input":"帮我解释 Python 的 ModuleNotFoundError","expected":"ai"}
+{"id":"zh-055","category":"zh_nl","input":"请确认 v1.2.3 对应哪个提交","expected":"ai"}
+{"id":"zh-056","category":"zh_nl","input":"C++ 项目怎样生成编译数据库？","expected":"ai"}
+{"id":"zh-057","category":"zh_nl","input":"HTTP 502 是上游服务的问题吗？","expected":"ai"}
+{"id":"zh-058","category":"zh_nl","input":"2026-09-24 的日志如何按时间筛选？","expected":"ai"}
+{"id":"zh-059","category":"zh_nl","input":"为什么 can't connect 会出现在日志里？","expected":"ai"}
+{"id":"zh-060","category":"zh_nl","input":"“权限不足”应该怎么排查？","expected":"ai"}
+{"id":"en-001","category":"en_nl","input":"what's using port 8080","expected":"ai"}
+{"id":"en-002","category":"en_nl","input":"don't delete my files","expected":"ai"}
+{"id":"en-003","category":"en_nl","input":"where are the largest files?","expected":"ai"}
+{"id":"en-004","category":"en_nl","input":"how much disk space is left?","expected":"ai"}
+{"id":"en-005","category":"en_nl","input":"why is the server not responding?","expected":"ai"}
+{"id":"en-006","category":"en_nl","input":"can you list the files in ./src?","expected":"ai"}
+{"id":"en-007","category":"en_nl","input":"could you explain this git error?","expected":"ai"}
+{"id":"en-008","category":"en_nl","input":"would you help me inspect port 3000?","expected":"ai"}
+{"id":"en-009","category":"en_nl","input":"is there a process listening on 5432?","expected":"ai"}
+{"id":"en-010","category":"en_nl","input":"are these log files safe to remove?","expected":"ai"}
+{"id":"en-011","category":"en_nl","input":"please show the last 20 errors","expected":"ai"}
+{"id":"en-012","category":"en_nl","input":"show me the files changed yesterday","expected":"ai"}
+{"id":"en-013","category":"en_nl","input":"explain why the build failed","expected":"ai"}
+{"id":"en-014","category":"en_nl","input":"summarize the errors in ./app.log","expected":"ai"}
+{"id":"en-015","category":"en_nl","input":"describe what this script does","expected":"ai"}
+{"id":"en-016","category":"en_nl","input":"tell me which branch I am on","expected":"ai"}
+{"id":"en-017","category":"en_nl","input":"I need to find duplicate images","expected":"ai"}
+{"id":"en-018","category":"en_nl","input":"I'd like to archive the old logs","expected":"ai"}
+{"id":"en-019","category":"en_nl","input":"we're running out of disk space","expected":"ai"}
+{"id":"en-020","category":"en_nl","input":"there's a service using port 9000","expected":"ai"}
+{"id":"en-021","category":"en_nl","input":"isn't the database already running?","expected":"ai"}
+{"id":"en-022","category":"en_nl","input":"shouldn't this file be executable?","expected":"ai"}
+{"id":"en-023","category":"en_nl","input":"won't this command overwrite my data?","expected":"ai"}
+{"id":"en-024","category":"en_nl","input":"can't we keep the last 5 backups?","expected":"ai"}
+{"id":"en-025","category":"en_nl","input":"let's inspect the current environment","expected":"ai"}
+{"id":"en-026","category":"en_nl","input":"what's inside ./src?","expected":"ai"}
+{"id":"en-027","category":"en_nl","input":"why does ./tools/runner need permission?","expected":"ai"}
+{"id":"en-028","category":"en_nl","input":"how do I undo the last commit?","expected":"ai"}
+{"id":"en-029","category":"en_nl","input":"where did my output.txt go?","expected":"ai"}
+{"id":"en-030","category":"en_nl","input":"when was this file modified?","expected":"ai"}
+{"id":"en-031","category":"en_nl","input":"please compare input.txt with output.txt","expected":"ai"}
+{"id":"en-032","category":"en_nl","input":"can I safely remove ./build?","expected":"ai"}
+{"id":"en-033","category":"en_nl","input":"is my working tree clean?","expected":"ai"}
+{"id":"en-034","category":"en_nl","input":"could this be a DNS problem?","expected":"ai"}
+{"id":"en-035","category":"en_nl","input":"why are 3 worker processes still alive?","expected":"ai"}
+{"id":"en-036","category":"en_nl","input":"how can I search for \"permission denied\"?","expected":"ai"}
+{"id":"en-037","category":"en_nl","input":"explain the difference between 0644 and 0755","expected":"ai"}
+{"id":"en-038","category":"en_nl","input":"please find files larger than 100MB under ./src","expected":"ai"}
+{"id":"en-039","category":"en_nl","input":"show yesterday's errors","expected":"ai"}
+{"id":"en-040","category":"en_nl","input":"the container doesn't have internet access","expected":"ai"}
+{"id":"en-041","category":"en_nl","input":"my tests aren't finishing","expected":"ai"}
+{"id":"en-042","category":"en_nl","input":"our deploy didn't create output.txt","expected":"ai"}
+{"id":"en-043","category":"en_nl","input":"what changed between these two commits?","expected":"ai"}
+{"id":"en-044","category":"en_nl","input":"where's the configuration file?","expected":"ai"}
+{"id":"en-045","category":"en_nl","input":"whose process is holding this socket?","expected":"ai"}
+{"id":"en-046","category":"en_nl","input":"isn't ./backup enough for recovery?","expected":"ai"}
+{"id":"en-047","category":"en_nl","input":"please explain why exit code 137 occurred","expected":"ai"}
+{"id":"en-048","category":"en_nl","input":"can you inspect the 2 files in \"folder with spaces\"?","expected":"ai"}
+{"id":"en-049","category":"en_nl","input":"how many lines mention HTTP 500?","expected":"ai"}
+{"id":"en-050","category":"en_nl","input":"why won't this service restart?","expected":"ai"}
+{"id":"en-051","category":"en_nl","input":"can cargo build this?","expected":"ai"}
+{"id":"en-052","category":"en_nl","input":"can rustc compile this?","expected":"ai"}
+{"id":"en-053","category":"en_nl","input":"is cargo installed?","expected":"ai"}
+{"id":"en-054","category":"en_nl","input":"is src ready?","expected":"ai"}
+{"id":"en-055","category":"en_nl","input":"are tests passing?","expected":"ai","reason":"The fixture includes ar so this covers the are-to-ar spelling collision."}
+{"id":"fix-001","category":"typo","input":"gti status","expected":"correct","corrected":"git status"}
+{"id":"fix-002","category":"typo","input":"pyhton3 --version","expected":"correct","corrected":"python3 --version"}
+{"id":"fix-003","category":"typo","input":"sl -la","expected":"correct","corrected":"ls -la"}
+{"id":"fix-004","category":"typo","input":"dcoker ps","expected":"correct","corrected":"docker ps"}
+{"id":"fix-005","category":"typo","input":"kubcetl get pods","expected":"correct","corrected":"kubectl get pods"}
+{"id":"fix-006","category":"typo","input":"npn install","expected":"correct","corrected":"npm install"}
+{"id":"fix-007","category":"typo","input":"crago test","expected":"correct","corrected":"cargo test"}
+{"id":"fix-008","category":"typo","input":"grpe needle notes.txt","expected":"correct","corrected":"grep needle notes.txt"}
+{"id":"fix-009","category":"typo","input":"cta README.md","expected":"correct","corrected":"cat README.md"}
+{"id":"fix-010","category":"typo","input":"mkidr new-dir","expected":"correct","corrected":"mkdir new-dir"}
+{"id":"fix-011","category":"typo","input":"touhc output.txt","expected":"correct","corrected":"touch output.txt"}
+{"id":"fix-012","category":"typo","input":"chmdo +x tools/runner","expected":"correct","corrected":"chmod +x tools/runner"}
+{"id":"fix-013","category":"typo","input":"crul -I https://example.invalid","expected":"correct","corrected":"curl -I https://example.invalid"}
+{"id":"fix-014","category":"typo","input":"wegt https://example.invalid","expected":"correct","corrected":"wget https://example.invalid"}
+{"id":"fix-015","category":"typo","input":"ehco hello","expected":"correct","corrected":"echo hello"}
+{"id":"fix-016","category":"typo","input":"pritnf '%s\\n' hello","expected":"correct","corrected":"printf '%s\\n' hello"}
+{"id":"fix-017","category":"typo","input":"pythn script.py","expected":"correct","corrected":"python script.py"}
+{"id":"fix-018","category":"typo","input":"pyton3 script.py","expected":"correct","corrected":"python3 script.py"}
+{"id":"fix-019","category":"typo","input":"dockre compose config","expected":"correct","corrected":"docker compose config"}
+{"id":"fix-020","category":"typo","input":"kuebctl get nodes","expected":"correct","corrected":"kubectl get nodes"}
+{"id":"fix-021","category":"typo","input":"noed server.js","expected":"correct","corrected":"node server.js"}
+{"id":"fix-022","category":"typo","input":"rustcc --version","expected":"correct","corrected":"rustc --version"}
+{"id":"fix-023","category":"typo","input":"gti commit -m \"fix the bug\"","expected":"correct","corrected":"git commit -m \"fix the bug\""}
+{"id":"fix-024","category":"typo","input":"gti add 中文.txt","expected":"correct","corrected":"git add 中文.txt"}
+{"id":"fix-025","category":"typo","input":"sl \"folder with spaces\"","expected":"correct","corrected":"ls \"folder with spaces\""}
+{"id":"fix-026","category":"typo","input":"pythno3 -c 'print(\"你好\")'","expected":"correct","corrected":"python3 -c 'print(\"你好\")'"}
+{"id":"fix-027","category":"typo","input":"grpe -n \"what is this\" notes.txt","expected":"correct","corrected":"grep -n \"what is this\" notes.txt"}
+{"id":"fix-028","category":"typo","input":"dcoker run --rm image echo hello","expected":"correct","corrected":"docker run --rm image echo hello"}
+{"id":"fix-029","category":"typo","input":"FOO=bar gti status","expected":"correct","corrected":"FOO=bar git status"}
+{"id":"fix-030","category":"typo","input":"LANG=C grpe needle notes.txt","expected":"correct","corrected":"LANG=C grep needle notes.txt"}
+{"id":"fix-031","category":"typo","input":"gti status | cat","expected":"correct","corrected":"git status | cat"}
+{"id":"fix-032","category":"typo","input":"ls && gti diff","expected":"correct","corrected":"ls && git diff"}
+{"id":"fix-033","category":"typo","input":"sl && gti status","expected":"correct","corrected":"ls && git status"}
+{"id":"fix-034","category":"typo","input":"gti diff || echo clean","expected":"correct","corrected":"git diff || echo clean"}
+{"id":"fix-035","category":"typo","input":"(gti status)","expected":"correct","corrected":"(git status)"}
+{"id":"fix-036","category":"typo","input":"{ sl -la; gti status; }","expected":"correct","corrected":"{ ls -la; git status; }"}
+{"id":"fix-037","category":"typo","input":"if gti diff --quiet; then echo clean; fi","expected":"correct","corrected":"if git diff --quiet; then echo clean; fi"}
+{"id":"fix-038","category":"typo","input":"for item in alpha beta; do grpe needle \"$item\"; done","expected":"correct","corrected":"for item in alpha beta; do grep needle \"$item\"; done"}
+{"id":"fix-039","category":"typo","input":"printf '%s\\n' hello | grpe h","expected":"correct","corrected":"printf '%s\\n' hello | grep h"}
+{"id":"fix-040","category":"typo","input":"cta README.md > output.txt","expected":"correct","corrected":"cat README.md > output.txt"}
+{"id":"fix-041","category":"typo","input":"dcoker ps 2> errors.log","expected":"correct","corrected":"docker ps 2> errors.log"}
+{"id":"fix-042","category":"typo","input":"cta <<'EOF'\nhello world\nEOF","expected":"correct","corrected":"cat <<'EOF'\nhello world\nEOF"}
+{"id":"fix-043","category":"typo","input":"gti -C \"folder with spaces\" status","expected":"correct","corrected":"git -C \"folder with spaces\" status"}
+{"id":"fix-044","category":"typo","input":"sl ./目录","expected":"correct","corrected":"ls ./目录"}
+{"id":"fix-045","category":"typo","input":"echo 中文 && gti status","expected":"correct","corrected":"echo 中文 && git status","reason":"AST spans must remain correct after multibyte characters."}
+{"id":"fix-046","category":"typo","input":"printf '%s\\n' café | grpe é","expected":"correct","corrected":"printf '%s\\n' café | grep é"}
+{"id":"fix-047","category":"typo","input":"sudp git status","expected":"correct","corrected":"sudo git status"}
+{"id":"fix-048","category":"typo","input":"tial -n 10 app.log","expected":"correct","corrected":"tail -n 10 app.log"}
+{"id":"fix-049","category":"typo","input":"haed -n 5 app.log","expected":"correct","corrected":"head -n 5 app.log"}
+{"id":"fix-050","category":"typo","input":"is src","expected":"correct","corrected":"ls src","reason":"A short typo followed by a filename is not a natural-language question."}
+{"id":"guard-001","category":"destructive_prose","input":"rm all temp files","expected":"guard"}
+{"id":"guard-002","category":"destructive_prose","input":"rm all the temporary files","expected":"guard"}
+{"id":"guard-003","category":"destructive_prose","input":"rm please delete old caches","expected":"guard"}
+{"id":"guard-004","category":"destructive_prose","input":"mv all old photos elsewhere","expected":"guard"}
+{"id":"guard-005","category":"destructive_prose","input":"mv please move these recordings","expected":"guard"}
+{"id":"guard-006","category":"destructive_prose","input":"dd erase the entire disk","expected":"guard"}
+{"id":"guard-007","category":"destructive_prose","input":"dd overwrite all unused blocks","expected":"guard"}
+{"id":"guard-008","category":"destructive_prose","input":"chmod make these scripts executable","expected":"guard"}
+{"id":"guard-009","category":"destructive_prose","input":"chmod give everyone write access","expected":"guard"}
+{"id":"guard-010","category":"destructive_prose","input":"chown change the owner please","expected":"guard"}
+{"id":"guard-011","category":"destructive_prose","input":"chown give these documents away","expected":"guard"}
+{"id":"guard-012","category":"destructive_prose","input":"chgrp move these accounts together","expected":"guard"}
+{"id":"guard-013","category":"destructive_prose","input":"chgrp change the group please","expected":"guard"}
+{"id":"guard-014","category":"destructive_prose","input":"kill the node server","expected":"guard"}
+{"id":"guard-015","category":"destructive_prose","input":"kill all stuck workers","expected":"guard"}
+{"id":"guard-016","category":"destructive_prose","input":"killall stop all background services","expected":"guard"}
+{"id":"guard-017","category":"destructive_prose","input":"killall terminate every running worker","expected":"guard"}
+{"id":"guard-018","category":"destructive_prose","input":"pkill stop the database server","expected":"guard"}
+{"id":"guard-019","category":"destructive_prose","input":"pkill end all matching processes","expected":"guard"}
+{"id":"guard-020","category":"destructive_prose","input":"truncate clear all old logs","expected":"guard"}
+{"id":"guard-021","category":"destructive_prose","input":"truncate remove the log contents","expected":"guard"}
+{"id":"guard-022","category":"destructive_prose","input":"shred destroy these secret documents","expected":"guard"}
+{"id":"guard-023","category":"destructive_prose","input":"shred securely erase every password","expected":"guard"}
+{"id":"guard-024","category":"destructive_prose","input":"rmdir remove all unused folders","expected":"guard"}
+{"id":"guard-025","category":"destructive_prose","input":"rmdir delete those empty directories","expected":"guard"}
+{"id":"guard-026","category":"destructive_prose","input":"unlink remove that old link","expected":"guard"}
+{"id":"guard-027","category":"destructive_prose","input":"unlink delete this broken shortcut","expected":"guard"}
+{"id":"guard-028","category":"destructive_prose","input":"mkfs format the whole drive","expected":"guard"}
+{"id":"guard-029","category":"destructive_prose","input":"mkfs.ext4 erase all existing partitions","expected":"guard"}
+{"id":"guard-030","category":"destructive_prose","input":"wipefs remove every filesystem signature","expected":"guard"}
+{"id":"guard-031","category":"destructive_prose","input":"git reset everything to yesterday","expected":"guard"}
+{"id":"guard-032","category":"destructive_prose","input":"git reset discard all recent changes","expected":"guard"}
+{"id":"guard-033","category":"destructive_prose","input":"git clean remove all untracked files","expected":"guard"}
+{"id":"guard-034","category":"destructive_prose","input":"git clean clear every generated artifact","expected":"guard"}
+{"id":"guard-035","category":"destructive_prose","input":"git rm delete all obsolete modules","expected":"guard"}
+{"id":"guard-036","category":"destructive_prose","input":"git rm remove these unused assets","expected":"guard"}
+{"id":"guard-037","category":"destructive_prose","input":"git checkout restore all changed documents","expected":"guard"}
+{"id":"guard-038","category":"destructive_prose","input":"git checkout bring back yesterday changes","expected":"guard"}
+{"id":"guard-039","category":"destructive_prose","input":"./tools/rm all temp files","expected":"guard"}
+{"id":"guard-040","category":"destructive_prose","input":"rm 请 删除 所有 临时 文件","expected":"guard","reason":"Chinese prose arguments to a destructive command belong to the guard group, not the Chinese AI-request group."}
+{"id":"guard-041","category":"destructive_prose","input":"rm alpha all temp files","expected":"guard","reason":"Only alpha exists: running the line would delete it."}
+{"id":"guard-042","category":"destructive_prose","input":"rm alpha beta and everything else","expected":"guard"}
+{"id":"guard-043","category":"destructive_prose","input":"rm README.md and all the logs","expected":"guard","reason":"A path is not a plain word, so it does not let the prose through."}
+{"id":"guard-044","category":"destructive_prose","input":"rm ./alpha and the rest of it","expected":"guard"}
+{"id":"guard-045","category":"destructive_prose","input":"rm /missing/one all temp files","expected":"guard","reason":"An absolute path does not let the prose through."}
+{"id":"guard-046","category":"destructive_prose","input":"unlink /missing/path please remove this","expected":"guard"}
+{"id":"guard-047","category":"destructive_prose","input":"mv alpha and beta into the backup","expected":"guard","reason":"backup is a directory: running the line would move alpha and beta into it."}
+{"id":"guard-048","category":"destructive_prose","input":"shred alpha and all the backups","expected":"guard"}
+{"id":"guard-049","category":"destructive_prose","input":"chown root alpha and the other files","expected":"guard"}
+{"id":"guard-050","category":"destructive_prose","input":"git checkout main alpha and the docs","expected":"guard"}
