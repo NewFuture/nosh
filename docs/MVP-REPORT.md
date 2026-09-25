@@ -97,7 +97,7 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 | `linux-arm64` | `ubuntu-24.04-arm`（2 vCPU） | 每次 | neon dotprod i8mm fp16 bf16 | ARM 重排：m == 1 用 dotprod gemv，m 为 4 的倍数用 i8mm tile |
 | `macos` | `macos-latest`（macOS 26，Apple M1，3 vCPU） | PR、main、手动触发（单价约为 Linux x64 的 10 倍） | neon dotprod fp16 | ARM 重排：dotprod gemv 和 dotprod tile（没有 i8mm） |
 
-- 每个 job 的最后一步用 `--nocapture` 重跑 `crates/nosh-llm/tests/prepack.rs`，打印 CPU 特性（`nosh_llm::cpu::features()`，检测方式与 candle 相同）和各个 m 下与原始内核的误差；前面的步骤失败时也运行。`nosh doctor` 改用同一个函数，aarch64 上原来只显示 `neon`（`72fc014`）。
+- 每个 job 的最后一步用 `--nocapture` 重跑 `crates/nosh-llm/tests/prepack.rs`，打印 CPU 特性（`nosh_llm::cpu::features()`，检测方式与 candle 相同）和各个 m 下与原始内核的误差；前面的步骤失败时也运行。`nosh doctor` 改用同一个函数，aarch64 上原来只显示 `neon`（`9f9fa1e`）。
 - 每个 job 限时 30 分钟。缓存命中时 x86_64 约 2.5 分钟、arm64 约 5 分钟、macOS 约 2 分钟；macOS 第一次（没有缓存）约 4.5 分钟。
 - `prepack.rs` 在 ARM 上 `released=false`，需要释放的检查按预期跳过；预重排与懒加载的结果逐位相同，与原始内核的最大误差为 0（ARM 上 40 行和 48 行的矩阵在每个 m 下走同一个内核：m == 1 和 4 的倍数用重排内核，其他 m 用读原始块的 NEON 内核）。ARM 上释放原始权重见 issue #9。
 
@@ -105,13 +105,14 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 
 | # | 平台 | 问题 | 处理 | 提交 |
 |---|---|---|---|---|
-| 1 | Linux aarch64 | `cargo test` 编译失败：gemm-f16 的 aarch64 内核是启用 fp16 的函数，调用的 `#[inline]` 辅助函数里有 fp16 汇编（`fmla v.8h`）。debug 构建不内联，辅助函数单独编译时没有 fp16 特性，而 aarch64 Linux 的基线不含 fp16，汇编器报 "instruction requires: fullfp16"。clippy 不生成代码，所以查不出来；Apple 的基线含 fp16；release 构建会内联 | dev 构建只对 gemm-f16 开 opt-level 3。没有在 RUSTFLAGS 里加 `+fp16`，所以二进制仍能在没有 fp16 的 CPU 上运行（内核按运行时检测分派）。上游问题见 sarah-quinones/gemm#31 | `8dd4980` |
-| 2 | macOS | 没有 `/proc`，找不到 agent 命令启动的进程；brush 0.5 丢弃命令时也不杀子进程，所以超时和 Ctrl-C 之后命令继续运行（如 `yes`） | 用 libproc（`proc_listallpids`，`proc_pidinfo` 取 ppid 和 pgid）列出进程，用 `sysctl(KERN_PROCARGS2)` 读 `NOSH_AGENT_RUN`；按平台拆开的函数也消除了非 Linux 上的 `unused_mut` 警告 | `3ea9d4a` |
-| 3 | macOS | `/etc`、`/tmp`、`/var` 是指向 `/private` 的符号链接：指向 `/etc/hosts` 的链接解析成 `/private/etc/hosts` 后不再受保护；临时目录（`/var/folders/…`）下的受保护路径与解析后的形式对不上 | macOS 上比较路径时，两边（路径、受保护位置、工作区、home、`$TMPDIR`）都去掉 `/private`；`/System`、`/Library`、`/Applications`、`/Volumes`、`/private` 按系统目录处理，`/Users` 本身与 `/home` 相同。代码审查又发现，判断"顶层目录"（递归删除时为 Forbidden）时数的是原样路径的层数，`rm -rf /private/etc`、`rm -rf /private/var` 只算 Dangerous，而它们才是真正的目录；改为按去掉 `/private` 之后的形式计算，与 `rm -rf /etc` 一样为 Forbidden | `5c46930`、`03f32f5` |
-| 4 | macOS；`NOSH_HOME`、`XDG_CONFIG_HOME` | 受保护列表写死了 `~/.config/nosh` 和 `~/.local/share/nosh/state`，而 macOS 上 nosh 的配置和状态在 `~/Library/Application Support/nosh` | agent 的权限上下文加上 nosh 实际使用的配置和状态目录 | `a59af16` |
-| 5 | macOS | 测试默认了 Linux：清理测试读 `/proc`；临时目录在符号链接之后，而 `cd` 保留给定的路径；BSD `ls` 对不存在的文件退出 1，GNU 是 2 | 清理测试改用 `ps` 列进程，在 Linux 和 macOS 上都运行（`setsid` 那一步只在有 `setsid` 时做）；`tmpdir()` 返回 canonicalize 后的路径；按 `ls` 实际的退出码断言 | `3ea9d4a` |
-| 6 | x86_64（2 vCPU 的 runner） | `timeout_stops_processes_that_left_the_process_tree` 偶发失败：brush 把 `cmd &` 作为任务运行，agent 命令记录已有的子进程时，用户的后台作业可能还没 fork，于是被当成 agent 命令启动的进程一起停止 | 测试先等后台作业的进程出现（见 §6 #5） | `40fa512` |
-| 7 | aarch64 | vendored candle 的 `mark_released` 只在 x86_64 上调用，其他架构报 dead_code 警告 | 与 `x86_prepack` 一样限定为 x86_64，同步更新 `nosh.patch` | `cd27d74` |
+| 1 | Linux aarch64 | `cargo test` 编译失败：gemm-f16 的 aarch64 内核是启用 fp16 的函数，调用的 `#[inline]` 辅助函数里有 fp16 汇编（`fmla v.8h`）。debug 构建不内联，辅助函数单独编译时没有 fp16 特性，而 aarch64 Linux 的基线不含 fp16，汇编器报 "instruction requires: fullfp16"。clippy 不生成代码，所以查不出来；Apple 的基线含 fp16；release 构建会内联 | dev 构建只对 gemm-f16 开 opt-level 3。没有在 RUSTFLAGS 里加 `+fp16`，所以二进制仍能在没有 fp16 的 CPU 上运行（内核按运行时检测分派）。上游问题见 sarah-quinones/gemm#31 | `4ca3910` |
+| 2 | macOS | 没有 `/proc`，找不到 agent 命令启动的进程；brush 0.5 丢弃命令时也不杀子进程，所以超时和 Ctrl-C 之后命令继续运行（如 `yes`） | 用 libproc（`proc_listallpids`，`proc_pidinfo` 取 ppid 和 pgid）列出进程，用 `sysctl(KERN_PROCARGS2)` 读 `NOSH_AGENT_RUN`；按平台拆开的函数也消除了非 Linux 上的 `unused_mut` 警告 | `f2a48e0` |
+| 3 | macOS | `/etc`、`/tmp`、`/var` 是指向 `/private` 的符号链接：指向 `/etc/hosts` 的链接解析成 `/private/etc/hosts` 后不再受保护；临时目录（`/var/folders/…`）下的受保护路径与解析后的形式对不上 | macOS 上比较路径时，两边（路径、受保护位置、工作区、home、`$TMPDIR`）都去掉 `/private`；`/System`、`/Library`、`/Applications`、`/Volumes`、`/private` 按系统目录处理，`/Users` 本身与 `/home` 相同。代码审查又发现，判断"顶层目录"（递归删除时为 Forbidden）时数的是原样路径的层数，`rm -rf /private/etc`、`rm -rf /private/var` 只算 Dangerous，而它们才是真正的目录；改为按去掉 `/private` 之后的形式计算，与 `rm -rf /etc` 一样为 Forbidden | `8a05ecb`、`4b7391d` |
+| 4 | macOS；`NOSH_HOME`、`XDG_CONFIG_HOME` | 受保护列表写死了 `~/.config/nosh` 和 `~/.local/share/nosh/state`，而 macOS 上 nosh 的配置和状态在 `~/Library/Application Support/nosh` | agent 的权限上下文加上 nosh 实际使用的配置和状态目录 | `9e9c163` |
+| 5 | macOS | 测试默认了 Linux：清理测试读 `/proc`；临时目录在符号链接之后，而 `cd` 保留给定的路径；BSD `ls` 对不存在的文件退出 1，GNU 是 2 | 清理测试改用 `ps` 列进程，在 Linux 和 macOS 上都运行（`setsid` 那一步只在有 `setsid` 时做）；`tmpdir()` 返回 canonicalize 后的路径；按 `ls` 实际的退出码断言 | `f2a48e0` |
+| 6 | x86_64（2 vCPU 的 runner） | `timeout_stops_processes_that_left_the_process_tree` 偶发失败：brush 把 `cmd &` 作为任务运行，agent 命令记录已有的子进程时，用户的后台作业可能还没 fork，于是被当成 agent 命令启动的进程一起停止 | 测试先等后台作业的进程出现（见 §6 #5） | `264adde` |
+| 7 | aarch64 | vendored candle 的 `mark_released` 只在 x86_64 上调用，其他架构报 dead_code 警告 | 与 `x86_prepack` 一样限定为 x86_64，同步更新 `nosh.patch` | `336d165` |
+| 8 | macOS | `vars.rs` 的 5 个测试并行创建脚本夹具，目录名只用 pid 和墙钟纳秒；macOS 的墙钟分辨率可能让多个测试拿到同一个时间，先结束的测试删掉另一个测试的脚本，于是脚本内的受保护路径读取偶发漏报 | 在时间之外再加进程内原子序号；同样修正 `scripts.rs` 的夹具。20 轮、每轮 8 线程的压力测试通过 | `ffe034a` |
 
 推送前在 WSL 里做了交叉检查：`aarch64-apple-darwin` 和 `aarch64-unknown-linux-gnu` 两个目标的 `cargo clippy --workspace --all-targets -- -D warnings`，以及 aarch64 Linux 的 `cargo test --no-run`。ring 等 C 依赖用一个只生成空文件的编译器和链接器代替，因为这里不需要能运行的产物。第 1 项就是这样在本地复现并验证的：它只在生成代码时出现，只做 clippy 的交叉检查发现不了。
 
