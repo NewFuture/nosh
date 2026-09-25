@@ -17,9 +17,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# fmt runs once, on x86_64; every job runs clippy and the tests. The last step
+# prints the CPU features that pick candle's kernels, with what the prepack
+# tests found on them, also when an earlier step failed.
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,3 +39,44 @@ jobs:
         run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked
+      - name: cpu features and kernel paths
+        if: success() || failure()
+        run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1
+
+  # Linux arm64 (2 vCPU, 8 GB for private repositories), on every run.
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      - name: cpu features and kernel paths
+        if: success() || failure()
+        run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1
+
+  # Apple Silicon (M1, 3 vCPU, 7 GB). About 10x the per-minute price of Linux
+  # x64, so only for pull requests, main and manual runs.
+  macos:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      - name: cpu features and kernel paths
+        if: success() || failure()
+        run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1

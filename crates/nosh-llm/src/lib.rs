@@ -2,6 +2,7 @@
 //! candle-transformers), the MiniCPM5 chat template, sampling, token-id driven
 //! tool-call parsing and the [`ChatEngine`] implementations.
 
+pub mod cpu;
 pub mod engine;
 pub mod local;
 pub mod mock;

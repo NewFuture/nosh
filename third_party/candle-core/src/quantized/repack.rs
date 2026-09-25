@@ -78,6 +78,7 @@ impl PackedCache {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn mark_released(&mut self) {
         self.released = true;
     }

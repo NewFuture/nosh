@@ -5,6 +5,7 @@
 //! that may leave the workspace stay Dangerous.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nosh_permissions::{
     ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
@@ -12,15 +13,18 @@ use nosh_permissions::{
 
 use Risk::*;
 
+static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
 /// `<tmp>/home/proj` as workspace and cwd, with the scripts below.
 fn fixture() -> (Context, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "nosh-scripts-{}-{}",
+        "nosh-scripts-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
     ));
     let home = root.join("home");
     let ws = home.join("proj");

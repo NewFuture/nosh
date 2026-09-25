@@ -386,6 +386,28 @@ fn dangerous_recall_is_total() {
     assert!(missed.is_empty(), "missed: {missed:?}");
 }
 
+/// On macOS `/etc` and `/var` are symlinks to `/private/etc` and
+/// `/private/var`: deleting the real directories is as Forbidden as deleting
+/// `/etc` or `/var`, and what is below them stays Dangerous.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_real_system_directories() {
+    let c = ctx();
+    for (cmd, want) in [
+        ("rm -rf /private/etc", Forbidden),
+        ("rm -rf /private/var", Forbidden),
+        ("rm -rf /private/var/*", Forbidden),
+        ("rm -rf /private", Forbidden),
+        ("rm -rf /System", Forbidden),
+        ("rm -rf /Users", Forbidden),
+        ("rm -rf /private/var/db", Dangerous),
+        ("rm -rf /Library/Caches", Dangerous),
+    ] {
+        let r = assess_command(cmd, &c);
+        assert_eq!(r.risk(), want, "{cmd}: {:?}", r.findings);
+    }
+}
+
 #[test]
 #[ignore = "diagnostic dump"]
 fn dump_reports() {

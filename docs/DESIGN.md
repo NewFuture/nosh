@@ -1,8 +1,8 @@
 # nosh：纯 Rust 原生离线 AI Shell 设计文档
 
-> **代号**：nosh（Native Offline SHell，可以改名）　**版本**：v0.10　**日期**：2026-09-24　**默认模型**：MiniCPM5-2B（Apache-2.0）
+> **代号**：nosh（Native Offline SHell，可以改名）　**版本**：v0.11　**日期**：2026-09-25　**默认模型**：MiniCPM5-2B（Apache-2.0）
 >
-> nosh 是一个兼容 Bash、内置本地小模型、可以断网运行的 AI shell。v0.5–v0.8 根据 MVP 的实测结果和代码审查，补充了内存模型、性能数据和实现要点。修订记录见附录 E，产品决策见 §16。
+> nosh 是一个兼容 Bash、内置本地小模型、可以断网运行的 AI shell。v0.5–v0.8 根据 MVP 的实测结果和代码审查，补充了内存模型、性能数据和实现要点；v0.9 加入日常开发命令基准，v0.10 加入 AI 触发判定语料，v0.11 补充 aarch64 和 macOS 上的平台细节。修订记录见附录 E，产品决策见 §16。
 >
 > 标注"已核实"的数据来自 HF 模型卡、config.json、tokenizer.json、GGUF 头部实测，以及 candle 和 brush 的源码；标注"MVP 实测"的数据来自 `docs/MVP-REPORT.md`；标注"目标"或"估算"的数据还需要跑基准验证。
 
@@ -398,9 +398,9 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
   - 这种做法不需要维护命令名单。
 - **分工**：用户命令的作业控制完全交给 brush；agent 命令通过执行参数指定后台进程组和重定向。如果 brush 不支持这些参数，就向上游贡献。
 - **超时和中止时的清理**：
-  - brush 不提供子进程的 pid，所以 Linux 上从 `/proc` 读取进程树：命令开始后新出现的后代进程都会被清理；命令开始前就已存在的子进程（用户的后台作业）及其后代不受影响。
-  - double-fork 或 `setsid` 之后脱离进程树的进程，靠环境变量找回：每次 agent 命令都设置唯一的 `NOSH_AGENT_RUN=<pid>.<序号>`，带有这个值的进程一并清理。没有采用 subreaper。
-  - 局限：既清空环境、又脱离进程树的进程（如 `env -i setsid …`）找不到。
+  - brush 不提供子进程的 pid，所以从系统读取进程树（Linux 读 `/proc`，macOS 用 libproc 的 `proc_listallpids` 和 `proc_pidinfo`）：命令开始后新出现的后代进程都会被清理；命令开始前就已存在的子进程（用户的后台作业）及其后代不受影响。
+  - double-fork 或 `setsid` 之后脱离进程树的进程，靠环境变量找回：每次 agent 命令都设置唯一的 `NOSH_AGENT_RUN=<pid>.<序号>`，带有这个值的进程一并清理（Linux 读 `/proc/<pid>/environ`，macOS 用 `sysctl(KERN_PROCARGS2)`）。没有采用 subreaper。
+  - 局限：既清空环境、又脱离进程树的进程（如 `env -i setsid …`）找不到；其他用户的进程（例如经 `sudo` 启动、又脱离了进程树的）读不到环境；其他 Unix 平台不做这种清理。
 - **窗口大小和 SIGHUP**：按 bash 的规则处理。远程版中，按键、窗口变化和 Ctrl-C 都通过 `pty` 通道转发；客户端断开不算终端关闭。
 
 ### 4.5 CLI 模式与非交互约定
@@ -426,6 +426,8 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 | **Linux（核心）** | 完整支持：nosh shell（可以作为登录 shell）、CLI、全部权限能力与沙箱 | 服务端（主要场景），也可作客户端 |
 | macOS | 完整支持（沙箱能力不同） | 客户端，也可作服务端 |
 | Windows | CLI（托管 pwsh），以及在 pwsh 里用 Ctrl+G；nosh shell 为预览版 | 客户端 |
+
+**验证**：CI 在 Linux x86_64、Linux aarch64（`ubuntu-24.04-arm`）和 macOS（Apple Silicon，`macos-latest`，只在 PR、main 和手动触发时跑）上跑 clippy 和全部测试，并在日志里打印决定 candle 内核路径的 CPU 特性（issue #7）。
 
 **Windows 细节**：
 - 控制台和托管的 pwsh 统一使用 UTF-8；
@@ -620,7 +622,9 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 - **子命令和参数级的规则表**：覆盖 git、find、sed、awk、xargs、docker、kubectl、systemctl、npm、pip、apt 等常用命令。
 - **路径**：
   - 在工作区（会话开始时的 cwd，或者它所在的 git 根目录）之外写入时，风险升一级。
-  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`）读取需要确认，写入按 Dangerous 处理。shell 脚本里的读取同样检查。
+  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`，以及 nosh 自己的配置和状态目录）读取需要确认，写入按 Dangerous 处理。shell 脚本里的读取同样检查。
+  - nosh 的配置和状态目录按实际位置保护：Linux 默认是 `~/.config/nosh` 和 `~/.local/share/nosh/state`，macOS 在 `~/Library/Application Support/nosh`，设置了 `NOSH_HOME` 时就是该目录。
+  - macOS 上 `/etc`、`/tmp`、`/var` 是指向 `/private/…` 的符号链接，两种写法（包括解析符号链接之后的真实路径）按同一个位置判断：例如递归删除 `/private/etc`、`/private/var` 与删除 `/etc`、`/var` 一样为 Forbidden。
   - 读取目标来自变量或参数时（如 `cat "$KEY_PATH"`），用分析时能确定的值解析：会话变量、行内赋值、会话中或行内定义的函数的参数、脚本和 `bash -c` 的参数；子进程只继承导出的变量。解析出受保护路径时，与字面路径一样需要确认。
   - 确定不了的值（`$(…)`、glob、未知变量）不改变分级，也不额外确认（方便优先）。
   - 已知的值只用来增加确认，不用来放宽：分析不考虑执行顺序，经过分支或循环后值可能已经变了。所以用变量拼出的写入目标、删除目标和命令名，仍按原有规则处理（见下方的反混淆和运行时才确定的写入目标）。
@@ -1118,7 +1122,7 @@ nosh/
 | 阶段 | 周期（估算） | 交付内容 |
 |---|---|---|
 | **M0 验证** | 1–2 周 | 用 30–50 个任务评测 2B 模型处理 shell 任务的能力；实测 candle 的速度，并与 llama.cpp 对比；做一个 brush-core 嵌入的 PoC（在共享会话中执行 agent 命令，放在后台进程组并 tee 输出，验证它能与用户的前台作业共存） |
-| **M1 本地版 MVP**（✔ 已完成，见 PR #1 与 `docs/MVP-REPORT.md`） | 6 周 | **nosh shell**：AI 触发、安全网、本地纠错、登录 shell 兼容；终端与信号模型；故障隔离。**harness**：任务头。**权限** v1。**工具**：`run_command`、`read_file`、`list_dir`、`propose_command`。**推理**：fork 改造 #1–#3 和 #5、模板、采样、对话内前缀复用、资源自适应。**下载与离线导入**。**CLI**：`-a`、`-s`、管道。**平台**：Linux（macOS 尚未验证，见 issue #7）。**内存优化**（追加）：加载时重排 Q4K 并释放其原始权重，KV 改为 f16，x86_64 上 8K 上下文实测 2.69 GiB |
+| **M1 本地版 MVP**（✔ 已完成，见 PR #1 与 `docs/MVP-REPORT.md`） | 6 周 | **nosh shell**：AI 触发、安全网、本地纠错、登录 shell 兼容；终端与信号模型；故障隔离。**harness**：任务头。**权限** v1。**工具**：`run_command`、`read_file`、`list_dir`、`propose_command`。**推理**：fork 改造 #1–#3 和 #5、模板、采样、对话内前缀复用、资源自适应。**下载与离线导入**。**CLI**：`-a`、`-s`、管道。**平台**：Linux（之后 CI 增加了 Linux aarch64 和 macOS Apple Silicon，见 issue #7）。**内存优化**（追加）：加载时重排 Q4K 并释放其原始权重，KV 改为 f16，x86_64 上 8K 上下文实测 2.69 GiB |
 | **M2 完善 + 远程基础** | 5 周 | **推理**：共享 engine 与多会话 KV（修复 Ctrl+G 冲掉主对话缓存的问题）、磁盘前缀缓存、约束解码、PLD、融合 GEMV。**可靠性**：固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式的 temperature（0.6–0.7 与 1.0 对比）；为小模型优化工具输出。**交互**：Ctrl+G（nosh 内，以及嵌入其他 shell）、AI 输出块、上下文压缩、输出采集（中转 PTY）、后台下载、缓存 WSL 下 `/mnt/*` 的 PATH。**工具**：`search`、`write_file`、`ai undo`。**Windows**：托管 pwsh。**安全**：数据保留、管理员策略、运行时写入目标的预览。**brush 上游**：异步作业的 pid、可取消的执行接口、子进程放入独立进程组、SIGINT 中止循环、`read` 响应中断、进程创建钩子。**远程**：`nosh server` + `nosh connect`（SSH、pty/control 通道、带外审批、自动部署）；实现 `Redactor` 的脱敏规则（§6.5） |
 | **M3 远程完善与生态** | 4 周以上 | 断线保持与重连、多端附着、文件与模型推送；系统级共享 engine；CUDA 版；Landlock/seccomp 沙箱；自定义工具、钩子、MCP |
 
@@ -1299,3 +1303,4 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.8 | 根据 PR #1 的 Copilot 代码审查，以及用户"方便优先、避免过度确认"的要求（§16 #14）：§6 开头增加"方便优先"原则（只针对审批确认，shell 交互提示照常保留）；§6.2 新增"效果未知的命令"，按 Mutating 处理、不额外要求确认，shell 脚本会分析其内容；工作区内运行时才确定的写入目标，从 Dangerous 降为 Mutating；§8.2 的校验缓存改用纳秒级 mtime 加文件身份。**脱敏**（§16 #15）：本地 agent 受信任，不再脱敏，只保留扩展接口 `Redactor`（§3.4），接入远程 agent 时再实现。**第二至四轮审查的跟进**：§4.4 超时和中止时，按 `NOSH_AGENT_RUN` 找回脱离进程树的进程；§6.2 受保护路径的读取会解析分析时能确定的变量和参数，`read`、`hash` 等修改会话的用法算 Mutating；§7.1 线程变量在任何线程启动前设置；§8.1 显式指定的模型路径出错时直接报错，不回退到下载；`nosh doctor` 按模型的 `min_memory_mb` 检查内存。**第五、六轮审查的跟进**：§8.2 哈希期间文件有变化时校验算失败；§8.1 未识别的 GGUF 配无效的 `--model` 时报错；§11 配置文件存在但读不了时给出警告。**PR #2 审查的修正**：G8、§7.6 注明内存目标只在 x86_64 达成；§7.1 统一重排时机；§13.1 区分目标与实测的统计口径，并把首 token 与模型加载分开；§13.2 写明数值验收的样本和通过线；§14 M1 的平台改为 Linux |
 | v0.9 | 日常开发命令基准集（issue #6，方便优先）：§6.2 效果未知的命令增加例外，规则表之外、从 PATH 找到的命令只带一个 `--version` 或 `--help` 参数时按 Safe 处理，短选项、本地路径的可执行文件和规则表里已有等级的命令不适用；§13.2 权限测试加入 100 条在工作区内执行的日常开发命令（查询、构建和测试、常规写操作），查询在 confirm 模式下不需要确认，auto 模式下整组都不需要确认，confirm 模式下需要确认的比例为 54%（之前 64%），权限用例从 433 条增加到 555 条 |
 | v0.10 | AI 触发判定语料（issue #5）：§13.2 的 AI 触发从"至少 1,000 条"改为实际的 415 条标注语料（合法命令 200、中文自然语言 60、英文自然语言 55、拼写错误 50、安全网输入 50），通过标准增加"每条样本都符合期望、纠错匹配完整命令"；§4.2 命令名不存在时先识别常见英语问句（如 `can you …`、`can cargo …?`、`why is …`），不再误纠成 `cat`、`who`；安全网改为普通单词不全是已存在的路径就拦下，带选项的照常执行：之前只要有一个参数是已存在的路径或绝对路径就放行，会删掉 `README` 的 `rm README all temp files` 反而放过；`chmod`/`chown`/`chgrp` 的权限、属主、属组和 `git reset/checkout` 的提交不要求是路径 |
+| v0.11 | CI 增加 Linux aarch64 和 macOS（issue #7）：§4.4 macOS 上的进程跟踪（libproc、`sysctl(KERN_PROCARGS2)`），以及清理的局限；§4.6 写明 CI 验证的平台；§6.2 按实际位置保护 nosh 的配置和状态目录（macOS、`NOSH_HOME`），macOS 的 `/private` 别名按同一位置判断；§14 M1 的平台 |

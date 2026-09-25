@@ -1,5 +1,6 @@
 //! Path resolution (lexical) and classification for write/read targets.
 
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 use crate::Context;
@@ -55,6 +56,14 @@ const SYSTEM_DIRS: &[&str] = &[
     "/bin", "/sbin", "/usr", "/lib", "/lib32", "/lib64", "/var", "/opt", "/sys", "/proc", "/dev",
     "/root", "/snap", "/srv", "/mnt", "/media", "/run",
 ];
+/// Also system directories on macOS (and `/Users` itself, like `/home`).
+const MACOS_SYSTEM_DIRS: &[&str] = &[
+    "/System",
+    "/Library",
+    "/Applications",
+    "/Volumes",
+    "/private",
+];
 const TEMP_DIRS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 const NULL_PATHS: &[&str] = &[
     "/dev/null",
@@ -96,13 +105,43 @@ fn under(p: &Path, base: &Path) -> bool {
     p == base || p.starts_with(base)
 }
 
+/// `/etc/…`, `/tmp/…` or `/var/…` for `/private/etc/…`, `/private/tmp/…` or
+/// `/private/var/…`: on macOS the short forms are symlinks to the long ones.
+fn private_alias(p: &Path) -> Option<PathBuf> {
+    let rest = p.strip_prefix("/private").ok()?;
+    let first = rest.components().next()?.as_os_str();
+    ["etc", "tmp", "var"]
+        .iter()
+        .any(|d| first == *d)
+        .then(|| Path::new("/").join(rest))
+}
+
+/// The form paths are compared in. On macOS a path with its symlinks
+/// resolved, `$TMPDIR` or a canonicalized workspace can name `/etc`, `/tmp`
+/// or `/var` in the long `/private` form, so both sides use the short form.
+fn short(p: &Path) -> Cow<'_, Path> {
+    if cfg!(target_os = "macos")
+        && let Some(s) = private_alias(p)
+    {
+        return Cow::Owned(s);
+    }
+    Cow::Borrowed(p)
+}
+
+/// `/` or a directory right under it, such as `/etc`; on macOS also the real
+/// `/private/etc` and `/private/var` behind the `/etc` and `/var` symlinks.
+pub(crate) fn is_top_level(p: &Path) -> bool {
+    short(p).components().count() <= 2
+}
+
 pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
+    let p = &*short(p);
     let s = p.to_string_lossy();
     if NULL_PATHS.contains(&s.as_ref()) {
         return PathClass::Null;
     }
     for (base, label) in protected_list(ctx) {
-        if under(p, &base) {
+        if under(p, &short(&base)) {
             return PathClass::Protected(label);
         }
     }
@@ -115,27 +154,30 @@ pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
     if p == Path::new("/") {
         return PathClass::Root;
     }
-    if ctx.home_dir() == Some(p) && ctx.workspace != p {
+    let home = ctx.home_dir().map(short);
+    let workspace = short(&ctx.workspace);
+    if home.as_deref() == Some(p) && *workspace != *p {
         return PathClass::Home;
     }
-    if !ctx.workspace.as_os_str().is_empty()
-        && under(p, &ctx.workspace)
-        && ctx.workspace != Path::new("/")
-    {
+    if !workspace.as_os_str().is_empty() && under(p, &workspace) && *workspace != *Path::new("/") {
         return PathClass::Workspace;
     }
     let tmpdir = std::env::var("TMPDIR").ok();
     if TEMP_DIRS.iter().any(|t| under(p, Path::new(t)))
         || tmpdir
             .as_deref()
-            .is_some_and(|t| !t.is_empty() && under(p, Path::new(t)))
+            .is_some_and(|t| !t.is_empty() && under(p, &short(Path::new(t))))
     {
         return PathClass::Temp;
     }
-    if ctx.home_dir() == Some(p) {
+    if home.as_deref() == Some(p) {
         return PathClass::Home;
     }
-    if p == Path::new("/home") || SYSTEM_DIRS.iter().any(|d| under(p, Path::new(d))) {
+    let system = |dirs: &[&str]| dirs.iter().any(|d| under(p, Path::new(d)));
+    if p == Path::new("/home")
+        || system(SYSTEM_DIRS)
+        || (cfg!(target_os = "macos") && (p == Path::new("/Users") || system(MACOS_SYSTEM_DIRS)))
+    {
         return PathClass::System;
     }
     PathClass::Outside
@@ -224,5 +266,66 @@ mod tests {
         assert_eq!(k("/home"), PathClass::System);
         assert_eq!(k("~/other/f"), PathClass::Outside);
         assert_eq!(k("/data/f"), PathClass::Outside);
+    }
+
+    #[test]
+    fn private_aliases() {
+        let a = |p: &str| private_alias(Path::new(p));
+        assert_eq!(a("/private/etc/hosts"), Some(PathBuf::from("/etc/hosts")));
+        assert_eq!(
+            a("/private/var/folders/x/T"),
+            Some("/var/folders/x/T".into())
+        );
+        assert_eq!(a("/private/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(a("/private"), None);
+        assert_eq!(a("/private/etcetera"), None);
+        assert_eq!(a("/private/xarts/f"), None);
+        assert_eq!(a("/etc/hosts"), None);
+    }
+
+    #[test]
+    fn top_level_directories() {
+        let top = |p: &str| is_top_level(Path::new(p));
+        assert!(top("/") && top("/etc") && top("/private"));
+        assert!(!top("/etc/ssh") && !top("/private/var/db"));
+        // The real directories behind macOS's /etc and /var symlinks.
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(top("/private/etc"), macos);
+        assert_eq!(top("/private/var"), macos);
+    }
+
+    /// `/etc`, `/tmp` and `/var` are symlinks into `/private` on macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classifies_macos_private_paths() {
+        let c = ctx();
+        let k = |p: &str| classify_path(Path::new(p), &c);
+        assert!(matches!(k("/private/etc/hosts"), PathClass::Protected(_)));
+        assert_eq!(k("/private/tmp/x"), PathClass::Temp);
+        assert_eq!(k("/private/var/log/x"), PathClass::System);
+        assert_eq!(k("/private/xarts/x"), PathClass::System);
+        assert_eq!(k("/Library/LaunchDaemons/x.plist"), PathClass::System);
+        assert_eq!(k("/Users"), PathClass::System);
+        assert_eq!(k("/Users/other/f"), PathClass::Outside);
+        // A canonicalized workspace and home are compared in the short form.
+        let t = "/private/var/folders/x/T";
+        let c = Context::new(format!("{t}/proj"), format!("{t}/proj")).with_home(format!("{t}/h"));
+        let k = |p: &str| classify_path(Path::new(p), &c);
+        assert_eq!(k("/var/folders/x/T/proj/a"), PathClass::Workspace);
+        assert!(matches!(
+            k("/var/folders/x/T/h/.ssh/id"),
+            PathClass::Protected(_)
+        ));
+        // A link to a file in /etc resolves to /private/etc.
+        let dir = std::env::temp_dir().join(format!("nosh-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("hosts");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+        let c = Context::new(&dir, &dir);
+        let (class, real) = classify_path_real(&link, &c, true);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(class, PathClass::Protected(_)), "{class:?}");
+        assert_eq!(real, Path::new("/private/etc/hosts"));
     }
 }
