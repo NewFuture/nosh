@@ -511,8 +511,9 @@ impl AgentUi for RecordUi {
     fn error(&mut self, msg: &str) {
         self.events.push(format!("error {msg}"));
     }
-    fn proposed(&mut self, cmd: &str, _: Option<&str>) {
-        self.events.push(format!("proposed {cmd}"));
+    fn proposed(&mut self, cmd: &str, explanation: Option<&str>) {
+        self.events
+            .push(format!("proposed {cmd}: {}", explanation.unwrap_or("")));
     }
     fn finish(&mut self, s: &TaskSummary) {
         self.events.push(format!("finish {} {}", s.status, s.steps));

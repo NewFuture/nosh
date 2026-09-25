@@ -8,6 +8,7 @@ pub mod procs;
 pub mod repl;
 pub mod spell;
 pub mod style;
+mod suggestion;
 pub mod term;
 pub mod trigger;
 mod yielding;

@@ -187,28 +187,44 @@ fn looks_like_question(argv: &[String]) -> bool {
     }
 }
 
-fn static_word(w: &ast::Word) -> Option<String> {
+pub(crate) fn static_word(w: &ast::Word) -> Option<String> {
+    static_word_with_tilde(w, &|_| None)
+}
+
+pub(crate) fn static_word_with_tilde(
+    w: &ast::Word,
+    expand_tilde: &impl Fn(&brush_parser::word::TildeExpr) -> Option<String>,
+) -> Option<String> {
     let opts = brush_parser::ParserOptions::default();
     let pieces = brush_parser::word::parse(&w.value, &opts).ok()?;
     let mut s = String::new();
-    fn walk(p: &[brush_parser::word::WordPieceWithSource], s: &mut String) -> bool {
+    fn walk(
+        p: &[brush_parser::word::WordPieceWithSource],
+        s: &mut String,
+        expand_tilde: &impl Fn(&brush_parser::word::TildeExpr) -> Option<String>,
+    ) -> bool {
         use brush_parser::word::WordPiece as W;
         for x in p {
             match &x.piece {
                 W::Text(t) | W::SingleQuotedText(t) => s.push_str(t),
                 W::EscapeSequence(t) => s.push_str(t.strip_prefix('\\').unwrap_or(t)),
                 W::DoubleQuotedSequence(inner) => {
-                    if !walk(inner, s) {
+                    if !walk(inner, s, expand_tilde) {
                         return false;
                     }
                 }
-                W::TildeExpansion(_) => s.push('~'),
+                W::TildeExpansion(expr) => {
+                    let Some(value) = expand_tilde(expr) else {
+                        return false;
+                    };
+                    s.push_str(&value);
+                }
                 _ => return false,
             }
         }
         true
     }
-    walk(&pieces, &mut s).then_some(s)
+    walk(&pieces, &mut s, expand_tilde).then_some(s)
 }
 
 fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
@@ -224,36 +240,39 @@ fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<Stri
     }
     fn pipeline(p: &ast::Pipeline, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
         for c in &p.seq {
-            match c {
-                ast::Command::Simple(sc) => {
-                    let Some(w) = &sc.word_or_name else {
-                        continue;
-                    };
-                    let Some(name) = static_word(w) else {
-                        continue;
-                    };
-                    let mut argv = vec![name.clone()];
-                    if let Some(suffix) = &sc.suffix {
-                        for item in &suffix.0 {
-                            if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
-                                argv.push(static_word(w).unwrap_or_else(|| w.value.clone()));
-                            }
+            command(c, out, defined);
+        }
+    }
+    fn command(c: &ast::Command, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+        match c {
+            ast::Command::Simple(sc) => {
+                let Some(w) = &sc.word_or_name else {
+                    return;
+                };
+                let Some(name) = static_word(w) else {
+                    return;
+                };
+                let mut argv = vec![name.clone()];
+                if let Some(suffix) = &sc.suffix {
+                    for item in &suffix.0 {
+                        if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
+                            argv.push(static_word(w).unwrap_or_else(|| w.value.clone()));
                         }
                     }
-                    out.push(SimpleCmd {
-                        name,
-                        span: w.loc.as_ref().map(|l| (l.start.index, l.end.index)),
-                        argv,
-                    });
                 }
-                ast::Command::Compound(cc, _) => compound(cc, out, defined),
-                ast::Command::Function(fd) => {
-                    if let Some(n) = static_word(&fd.fname) {
-                        defined.push(n);
-                    }
-                }
-                ast::Command::ExtendedTest(..) => {}
+                out.push(SimpleCmd {
+                    name,
+                    span: w.loc.as_ref().map(|l| (l.start.index, l.end.index)),
+                    argv,
+                });
             }
+            ast::Command::Compound(cc, _) => compound(cc, out, defined),
+            ast::Command::Function(fd) => {
+                if let Some(n) = static_word(&fd.fname) {
+                    defined.push(n);
+                }
+            }
+            ast::Command::ExtendedTest(..) => {}
         }
     }
     fn compound(cc: &ast::CompoundCommand, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
@@ -302,6 +321,11 @@ fn replace_spans(line: &str, edits: &mut [((usize, usize), String)]) -> String {
         }
     }
     out.into_iter().collect()
+}
+
+/// Syntax and best-effort static checks; dynamic shell behavior is not executed.
+pub fn is_suggestion_program(text: &str, shell: &EmbeddedShell) -> bool {
+    crate::suggestion::validate(text, shell)
 }
 
 /// Classifies an input line.

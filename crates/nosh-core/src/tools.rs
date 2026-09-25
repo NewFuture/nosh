@@ -16,11 +16,11 @@ pub const LIST_DIR_ENTRIES: usize = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
-    /// run_command, read_file, list_dir, propose_command.
+    /// run_command, read_file, list_dir.
     Full,
     /// Piped attachments: read_file and list_dir only.
     ReadOnly,
-    /// Suggestions: propose_command only.
+    /// Suggestions: no tools, just a shell program.
     Suggest,
 }
 
@@ -71,31 +71,11 @@ pub fn list_dir_spec() -> ToolSpec {
     }
 }
 
-pub fn propose_command_spec() -> ToolSpec {
-    ToolSpec {
-        name: "propose_command".into(),
-        description: "Put a command into the user's input line for them to review and run. Use for suggestions and for commands that need a terminal or a password.".into(),
-        parameters: json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-                "explanation": {"type": "string"}
-            },
-            "required": ["command"]
-        }),
-    }
-}
-
 pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
     match set {
-        ToolSet::Full => vec![
-            run_command_spec(),
-            read_file_spec(),
-            list_dir_spec(),
-            propose_command_spec(),
-        ],
+        ToolSet::Full => vec![run_command_spec(), read_file_spec(), list_dir_spec()],
         ToolSet::ReadOnly => vec![read_file_spec(), list_dir_spec()],
-        ToolSet::Suggest => vec![propose_command_spec()],
+        ToolSet::Suggest => vec![],
     }
 }
 
@@ -151,7 +131,7 @@ pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> Stri
         let _ = writeln!(s, "[state] {}", r.diff.describe());
     }
     if r.needed_terminal {
-        s.push_str("[note] the command tried to read from the terminal (e.g. a password prompt) and was stopped; use propose_command so the user can run it\n");
+        s.push_str("[note] the command needs a terminal and was stopped; handed back to the user for review, not automatically retried\n");
     }
     if r.timed_out {
         s.push_str("[note] the command timed out and was stopped\n");

@@ -216,7 +216,7 @@ mod tests {
     fn forwards_messages_events_usage_and_session_operations() {
         let mock = MockChatEngine::new(vec![vec![
             mock::text("hello"),
-            mock::call("propose_command", json!({"command": "echo ok"})),
+            mock::call("run_command", json!({"command": "echo ok"})),
         ]]);
         let received = mock.received();
         let specs = mock.specs();

@@ -111,7 +111,7 @@ pub struct OutputRecord {
 enum Exec {
     Result(String),
     Denied(String),
-    Proposed(String, String),
+    Handoff(String, String),
     Aborted(String),
 }
 
@@ -370,29 +370,30 @@ impl Agent {
             }
             let mut denied = false;
             let mut aborted = false;
-            let mut proposed_only = step.tool_calls.len() == 1 && step.errors.is_empty();
+            let mut handed_off = false;
             for call in &step.tool_calls {
-                if denied || aborted {
+                if denied || aborted || handed_off {
                     pending.push(Message::Tool(
-                        "[skipped] an earlier call in this turn was denied or cancelled".into(),
+                        "[skipped] an earlier call was denied, cancelled or handed to the user"
+                            .into(),
                     ));
                     continue;
                 }
                 match self.exec_call(shell, call, approval, ui) {
                     Exec::Result(t) => {
-                        proposed_only = false;
                         if call.name == "run_command" {
                             out.commands_run += 1;
                         }
                         pending.push(Message::Tool(t));
                     }
                     Exec::Denied(t) => {
-                        proposed_only = false;
                         denied = true;
                         out.denied += 1;
                         pending.push(Message::Tool(t));
                     }
-                    Exec::Proposed(cmd, t) => {
+                    Exec::Handoff(cmd, t) => {
+                        handed_off = true;
+                        out.commands_run += 1;
                         out.proposed = Some(cmd);
                         pending.push(Message::Tool(t));
                     }
@@ -426,7 +427,7 @@ impl Agent {
                 self.carry = pending;
                 break;
             }
-            if proposed_only && out.proposed.is_some() {
+            if handed_off {
                 // The command is in the user's hands now.
                 out.status = TaskStatus::Completed;
                 self.carry = pending;
@@ -505,25 +506,6 @@ impl Agent {
         match call.name.as_str() {
             "run_command" => self.run_command(shell, call, approval, ui),
             "read_file" | "list_dir" => self.read_tool(shell, call, approval, ui),
-            "propose_command" => {
-                let Some(cmd) = call
-                    .str_arg("command")
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                else {
-                    return Exec::Result("error: missing required parameter 'command'".into());
-                };
-                if cmd.chars().any(nosh_shell::style::is_hidden) {
-                    return Exec::Result(
-                        "error: the command contains control or invisible characters; propose plain text".into(),
-                    );
-                }
-                ui.proposed(cmd, call.str_arg("explanation"));
-                Exec::Proposed(
-                    cmd.to_string(),
-                    "[proposed] The command was placed in the user's input line; the user will review and run it.".into(),
-                )
-            }
             _ => Exec::Result(format!("error: unknown tool '{}'", call.name)),
         }
     }
@@ -552,6 +534,11 @@ impl Agent {
         else {
             return Exec::Result("error: missing required parameter 'command'".into());
         };
+        if original.chars().any(nosh_shell::style::is_hidden) {
+            return Exec::Result(
+                "error: the command contains control or invisible characters".into(),
+            );
+        }
         let timeout = call
             .int_arg("timeout_sec")
             .map(|t| Duration::from_secs(t.clamp(1, 600) as u64))
@@ -685,6 +672,14 @@ impl Agent {
         if shell.interrupts().count() >= ints_before + 2 {
             return Exec::Aborted(text);
         }
+        if needs_handoff(&r, report.rewritten.is_some()) {
+            text.push_str("\n[handoff] returned the original command to the user; earlier parts of this shell program may already have run; do not retry it");
+            ui.proposed(command, Some(tr!(
+                "命令在等待终端或密码时已停止，但复合命令前面的部分可能已经执行；请检查当前状态和整条命令后再自行运行，不会自动重试。",
+                "Command stopped while waiting for a terminal or password, but earlier parts of this shell program may already have run. Check the current state and the entire command before running it yourself; it will not be retried automatically."
+            )));
+            return Exec::Handoff(command.to_string(), text);
+        }
         Exec::Result(text)
     }
 
@@ -760,6 +755,16 @@ impl Agent {
     }
 }
 
+fn needs_handoff(r: &nosh_shell::CommandResult, sudo_rewritten: bool) -> bool {
+    r.needed_terminal
+        || (sudo_rewritten
+            && r.stderr.lines().any(|line| {
+                matches!(line.trim(),
+                    "sudo: a password is required" |
+                    "sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper")
+            }))
+}
+
 fn add_usage(total: &mut Usage, u: &Usage) {
     total.prompt_tokens += u.prompt_tokens;
     total.cached_tokens += u.cached_tokens;
@@ -771,4 +776,29 @@ fn add_usage(total: &mut Usage, u: &Usage) {
     }
     total.context_used = u.context_used;
     total.context_max = u.context_max;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_handoff_requires_a_rewritten_sudo_and_explicit_diagnostic() {
+        let mut result = nosh_shell::CommandResult {
+            exit_code: 1,
+            stderr: "sudo: a password is required\n".into(),
+            ..Default::default()
+        };
+        assert!(needs_handoff(&result, true));
+        assert!(!needs_handoff(&result, false));
+        result.exit_code = 0;
+        assert!(
+            needs_handoff(&result, true),
+            "a later successful command must not mask sudo's diagnostic"
+        );
+        result.stderr = "sudo: user is not in the sudoers file\n".into();
+        assert!(!needs_handoff(&result, true));
+        result.needed_terminal = true;
+        assert!(needs_handoff(&result, false));
+    }
 }
