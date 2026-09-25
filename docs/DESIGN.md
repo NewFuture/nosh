@@ -1217,7 +1217,7 @@ nosh/
 |---|---|---|
 | **M0 验证** | 1–2 周 | 验证工作并入 MVP 计划与报告：模型任务能力、CPU 性能、brush 嵌入及共享会话。原设想的更大任务集和参考实现对比不因 MVP 完成而自动视为已覆盖 |
 | **M1 本地版 MVP（已完成）** | 6 周 | 按 [MVP 计划](MVP-PLAN.md) 交付 Linux shell、AI 触发/纠错、共享会话、权限 v1、四个工具、CPU 进程内推理、下载/导入与 CLI；没有共享进程、资源自适应或沙箱。后续完成 f16 KV、x86/ARM 权重释放及多平台 CI，结果见 [MVP 报告](MVP-REPORT.md) |
-| **M2 完善 + 远程基础（未完成）** | 5 周 | **推理**：共享 engine、多会话 KV、磁盘前缀缓存、资源自适应、约束解码、PLD、融合 GEMV。**可靠性**：补齐固定 seed 判定复现验收、比较 temperature、优化工具输出。**交互**：其他 shell 的 Ctrl+G、LLM 摘要、PTY 输出采集、后台下载、WSL PATH 缓存。**工具/安全**：`search/write_file/ai undo`、数据保留、项目/管理员策略、运行时写入预览。**平台/远程**：托管 pwsh、SSH pty/control、带外审批、自动部署、远程 Redactor；推动 brush 的 pid、取消、进程组、信号及进程创建钩子 |
+| **M2 完善 + 远程基础（未完成）** | 5 周 | **推理**：共享 engine、多会话 KV、磁盘前缀缓存、资源自适应、约束解码、PLD、融合 GEMV。**可靠性**：补齐固定 seed 判定复现验收、比较 temperature、优化工具输出。**交互**：其他 shell 的 Ctrl+G、LLM 摘要、PTY 输出采集、后台下载、WSL PATH 缓存。**工具/安全**：`grep/write_file/ai undo`、数据保留、项目/管理员策略、运行时写入预览。**平台/远程**：托管 pwsh、SSH pty/control、带外审批、自动部署、远程 Redactor；推动 brush 的 pid、取消、进程组、信号及进程创建钩子 |
 | **M3 远程完善与生态** | 4 周以上 | 断线保持与重连、多端附着、文件与模型推送；系统级共享 engine；CUDA 版；Landlock/seccomp 沙箱；自定义工具、钩子、MCP |
 
 原列在 M2 的 nosh 内 Ctrl+G、AI 输出块、基础工具结果压缩和固定 seed 评测运行器已提前落地；不要重复列为未开始任务。评测工具已存在与模型可靠性/复现验收已通过是不同状态。
