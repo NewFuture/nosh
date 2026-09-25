@@ -1,0 +1,86 @@
+name: ARM64 memory
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: arm64-memory-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_BUILD_JOBS: 2
+  CANDLE_NUM_THREADS: 2
+  RAYON_NUM_THREADS: 1
+
+jobs:
+  memory:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arm64-memory-release
+      - name: isolated model store and artifacts
+        run: |
+          echo "NOSH_HOME=$RUNNER_TEMP/nosh-arm64" >> "$GITHUB_ENV"
+          echo "NOSH_MEMORY_ARTIFACTS=$GITHUB_WORKSPACE/target/arm64-memory" >> "$GITHUB_ENV"
+          mkdir -p target/arm64-memory
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            lscpu
+            echo "release profile; CANDLE_NUM_THREADS=2; RAYON_NUM_THREADS=1"
+          } > target/arm64-memory/environment.txt
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/nosh-arm64/models
+          key: arm64-memory-model-${{ hashFiles('assets/registry.toml') }}
+      - name: release build
+        run: cargo build --release --locked -p nosh-cli
+      - name: download and verify pinned model
+        run: |
+          target/release/nosh model pull minicpm5-2b:q4_k_m --source hf
+          target/release/nosh model verify minicpm5-2b:q4_k_m
+          sha256sum target/release/nosh >> "$NOSH_MEMORY_ARTIFACTS/environment.txt"
+      - name: 8K peak RSS and generated outputs
+        env:
+          NOSH_OFFLINE: "1"
+        run: |
+          cargo test --release --locked -p nosh-cli --test arm64_memory arm64_8k_rss_and_outputs -- --ignored --exact --nocapture --test-threads 1 2>&1 | tee "$NOSH_MEMORY_ARTIFACTS/memory.log"
+      - name: teacher-forced numerical acceptance
+        if: success() || failure()
+        env:
+          NOSH_OFFLINE: "1"
+        run: |
+          cargo test --release --locked -p nosh-llm --test real_model prepacked_weights_match_retained_weights -- --ignored --exact --nocapture --test-threads 1 2>&1 | tee "$NOSH_MEMORY_ARTIFACTS/numerical.log"
+      - name: acceptance summary
+        if: always()
+        run: |
+          {
+            echo "## ARM64 prepack acceptance"
+            echo "Commit: $GITHUB_SHA. RSS limit: 2.5 GiB (2,621,440 KiB). No speed gate."
+            for report in memory.json numerical.log; do
+              echo "### $report"
+              if test -f "$NOSH_MEMORY_ARTIFACTS/$report"; then
+                echo '```'
+                cat "$NOSH_MEMORY_ARTIFACTS/$report"
+                echo
+                echo '```'
+              else
+                echo "No result produced; inspect the failed step and artifacts."
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm64-memory-${{ github.sha }}
+          path: target/arm64-memory
+          if-no-files-found: error

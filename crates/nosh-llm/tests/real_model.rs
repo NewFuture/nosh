@@ -3,6 +3,7 @@
 //! Uses `NOSH_MODEL_PATH` or the default model in the user store.
 
 use candle_core::Device;
+use candle_core::quantized::{GgmlDType, gguf_file};
 use nosh_llm::model::llama::{Llama, LoadOptions};
 use nosh_llm::template::{self, concat};
 use nosh_llm::tokenizer::Tok;
@@ -251,6 +252,9 @@ struct Divergence {
 }
 
 fn divergence(want: &[Vec<f32>], got: &[Vec<f32>], tail: &[u32]) -> Divergence {
+    assert!(!tail.is_empty());
+    assert_eq!(want.len(), tail.len() + 1);
+    assert_eq!(got.len(), want.len());
     let mut d = Divergence {
         cos: Vec::new(),
         kl_mean: 0.0,
@@ -260,6 +264,9 @@ fn divergence(want: &[Vec<f32>], got: &[Vec<f32>], tail: &[u32]) -> Divergence {
         confident: (0, 0),
     };
     for (i, (a, b)) in want.iter().zip(got).enumerate() {
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().chain(b).all(|v| v.is_finite()));
         let (pa, pb) = (softmax(a), softmax(b));
         d.cos.push(cosine(a, b));
         d.kl_mean += kl(&pa, &pb) / want.len() as f64;
@@ -279,6 +286,31 @@ fn divergence(want: &[Vec<f32>], got: &[Vec<f32>], tail: &[u32]) -> Divergence {
         }
     }
     d
+}
+
+impl Divergence {
+    fn assert_acceptable(&self) {
+        assert!(self.cos.iter().all(|v| v.is_finite()));
+        assert!(self.kl_mean.is_finite() && self.nll.0.is_finite() && self.nll.1.is_finite());
+        assert!(self.confident.0 > 0, "no confident reference predictions");
+        assert_eq!(
+            self.confident.0, self.confident.1,
+            "confident top-1 changed"
+        );
+        assert!(self.kl_mean < 0.03, "mean KL {}", self.kl_mean);
+        assert!((self.nll.1 - self.nll.0).abs() < 0.05, "NLL {:?}", self.nll);
+        let mut c = self.cos.clone();
+        c.sort_by(f64::total_cmp);
+        assert!(
+            c[c.len() / 2] > 0.995 && self.cos[0] > 0.995,
+            "cosine {c:?}"
+        );
+        assert!(
+            self.top5_sets * 10 >= self.cos.len() * 6,
+            "top-5 sets {}",
+            self.top5_sets
+        );
+    }
 }
 
 impl std::fmt::Display for Divergence {
@@ -304,6 +336,19 @@ impl std::fmt::Display for Divergence {
     }
 }
 
+fn validation_ids(tok: &mut Tok, doc: String) -> Vec<u32> {
+    let segs = template::render_conversation(
+        &[
+            Message::System("You are a helpful assistant.".into()),
+            Message::User(format!("Summarize this plan:\n\n{doc}")),
+        ],
+        &[],
+        false,
+        Some(false),
+    );
+    tok.encode_segments(&segs).unwrap()
+}
+
 /// f16 KV against f32 KV on a 3.3K-token prompt plus 48 decode steps.
 ///
 /// Raw-logit cosine cannot go much above 0.998 here for *any* change to the
@@ -322,22 +367,13 @@ fn f16_kv_matches_f32_kv() {
         .chars()
         .take(7000)
         .collect();
-    let segs = template::render_conversation(
-        &[
-            Message::System("You are a helpful assistant.".into()),
-            Message::User(format!("Summarize this plan:\n\n{doc}")),
-        ],
-        &[],
-        false,
-        Some(false),
-    );
-    let ids = tok.encode_segments(&segs).unwrap();
+    let ids = validation_ids(&mut tok, doc);
     // Decode steps are teacher-forced on the document's own last 48 tokens,
     // so both runs see the same inputs and the NLL has true targets.
     let (prompt, tail) = ids.split_at(ids.len() - 48);
     let opts = LoadOptions {
         kv_dtype: KvDtype::F32,
-        prepack_q4k: true,
+        prepack_weights: true,
     };
     let mut model = Llama::load(&r.weights, 8192, opts, &Device::Cpu).unwrap();
     let want = logits_along(&mut model, prompt, tail, 512);
@@ -348,15 +384,105 @@ fn f16_kv_matches_f32_kv() {
         prompt.len(),
         tail.len()
     );
-    assert_eq!(d.confident.0, d.confident.1, "confident top-1 changed");
-    assert!(d.kl_mean < 0.03, "mean KL {}", d.kl_mean);
-    assert!((d.nll.1 - d.nll.0).abs() < 0.05, "NLL {:?}", d.nll);
-    let mut c = d.cos.clone();
-    c.sort_by(|a, b| a.total_cmp(b));
-    assert!(c[c.len() / 2] > 0.995 && d.cos[0] > 0.995, "cosine {c:?}");
-    assert!(
-        d.top5_sets * 10 >= d.cos.len() * 6,
-        "top-5 sets {}",
-        d.top5_sets
+    d.assert_acceptable();
+}
+
+#[test]
+#[ignore = "needs the real model; manual ARM64 memory workflow"]
+fn prepacked_weights_match_retained_weights() {
+    let r = resolved();
+    assert_eq!(r.entry.id, "minicpm5-2b:q4_k_m");
+    let features = nosh_llm::cpu::features();
+    eprintln!(
+        "prepack numerical validation: {} {features:?}",
+        std::env::consts::ARCH
     );
+    let dir = std::env::var_os("NOSH_MEMORY_ARTIFACTS").map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/arm64-memory"),
+        std::path::PathBuf::from,
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut tok = Tok::load(&r.tokenizer).unwrap();
+    let doc = include_str!("../../../docs/MVP-PLAN.md");
+    let short = validation_ids(&mut tok, doc.chars().take(7000).collect());
+    let mut long = validation_ids(&mut tok, doc.repeat(4));
+    assert!(long.len() >= 8065 + 48);
+    long.truncate(8065 + 48);
+    let samples = [("3k", short), ("8k", long)];
+    for (name, ids) in &samples {
+        std::fs::write(
+            dir.join(format!("teacher-forcing-{name}.json")),
+            serde_json::to_vec(ids).unwrap(),
+        )
+        .unwrap();
+    }
+    let opts = LoadOptions {
+        kv_dtype: KvDtype::F16,
+        prepack_weights: false,
+    };
+    let mut model = Llama::load(&r.weights, 8192, opts, &Device::Cpu).unwrap();
+    assert_eq!(model.prepack_stats().tensors, 0);
+    assert_eq!(model.prepack_stats().released_bytes, 0);
+    let want: Vec<_> = samples
+        .iter()
+        .map(|(_, ids)| {
+            let (prompt, tail) = ids.split_at(ids.len() - 48);
+            logits_along(&mut model, prompt, tail, 512)
+        })
+        .collect();
+    drop(model);
+    let mut model = Llama::load(
+        &r.weights,
+        8192,
+        LoadOptions {
+            prepack_weights: true,
+            ..opts
+        },
+        &Device::Cpu,
+    )
+    .unwrap();
+    let stats = model.prepack_stats();
+    eprintln!(
+        "prepack: {} matrices, {} raw bytes released",
+        stats.tensors, stats.released_bytes
+    );
+    if cfg!(target_arch = "aarch64") {
+        assert!(
+            features.contains(&"dotprod"),
+            "ARM validation needs dotprod"
+        );
+        let mut file = std::fs::File::open(&r.weights).unwrap();
+        let ct = gguf_file::Content::read(&mut file).unwrap();
+        assert_eq!(ct.tensor_infos["output.weight"].ggml_dtype, GgmlDType::Q6K);
+        let mut expected = (0, 0);
+        for (name, info) in &ct.tensor_infos {
+            if !(name.starts_with("blk.") || name == "output.weight")
+                || !matches!(info.ggml_dtype, GgmlDType::Q4K | GgmlDType::Q6K)
+            {
+                continue;
+            }
+            let (n, k) = info.shape.dims2().unwrap();
+            assert!(n > 0 && n.is_multiple_of(8) && k > 0 && k.is_multiple_of(256));
+            expected.0 += 1;
+            expected.1 += info.shape.elem_count() / info.ggml_dtype.block_size()
+                * info.ggml_dtype.type_size();
+        }
+        assert!(expected.0 > 0 && expected.1 > 0);
+        assert_eq!(
+            (stats.tensors, stats.released_bytes),
+            expected,
+            "layers and Q6K output"
+        );
+    }
+    for ((name, ids), want) in samples.iter().zip(&want) {
+        let (prompt, tail) = ids.split_at(ids.len() - 48);
+        let got = logits_along(&mut model, prompt, tail, 512);
+        let d = divergence(want, &got, tail);
+        eprintln!(
+            "{name}: prompt {} + {} teacher-forced tokens: {d}",
+            prompt.len(),
+            tail.len()
+        );
+        d.assert_acceptable();
+    }
 }

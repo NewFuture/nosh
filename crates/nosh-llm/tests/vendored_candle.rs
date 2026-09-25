@@ -40,7 +40,10 @@ fn the_patch_file_lists_every_patched_source() {
     }
     let notes = vendored("NOSH_PATCH.md");
     for topic in [
+        "prepack_and_release_storage",
         "prepack_x86_and_release_storage",
+        "aarch64",
+        "dotprod",
         "dummy_metal.rs",
         "nosh.patch",
     ] {

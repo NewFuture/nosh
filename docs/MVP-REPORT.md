@@ -9,6 +9,7 @@
 - 10 个真实模型场景用最终构建各跑 3 次（共 30 次）：25 次完全正确，3 次结论正确但回答里有小错（总数算错、先给出错误的中间表格、措辞），2 次失败（模型声称已经切换目录，实际没有执行 `cd`；列出改名计划后反问"是否继续"，没有执行）。temperature 1.0 下模型波动明显：两个较早构建上的三轮结果分别是 27/2/1 和 20/7/3（完全正确/有小错/失败，见 §3）。内存优化后的构建再跑 3 轮：26/4/0。
 - 代码审查发现的 11 个缺陷和 4 个小问题已全部修复（§2.1），涉及审批规则、符号链接、agent 命令的超时与中断、隐藏字符和下载取消等；PR #1 上三次 Copilot 代码审查的 5 条、8 条和 5 条意见也已处理（§2.2–§2.4）。
 - **平台**（issue #7，§2.5）：CI 增加 Linux aarch64 和 macOS（Apple Silicon）两个 job，三个平台的 clippy 和全部测试都通过。随之修复了 aarch64 Linux 上 debug 构建编译不过（gemm-f16）、macOS 上 agent 命令超时或中止后进程不停止，以及 macOS 上的两处权限缺口。
+- **ARM 内存优化**（issue #9，§5.4）：dotprod CPU 在加载时释放层内 Q4K/Q6K 和 output 的原始数据，embedding 不动。Linux ARM 的实际 8K 样本 RSS 峰值从 3.41 GiB 降至 **2.05 GiB**，满足 ≤ 2.5 GiB；数值验收及 Linux ARM/macOS 合成正确性通过。
 - 性能（WSL2，Xeon 8370C 8 核，Q4_K_M，release 构建）：decode 19–25 tok/s，prefill 102–147 tok/s，热对话首 token 0.5–1.0 s，无 rc 启动到提示符约 8 ms。
 - **后续固定 seed 基线**（§3.1）：精确 main `4f602ab` 的 100 次原生观测原始为 70 通过 / 30 失败 / 0 错误，透明修复判定作用域后为 73 / 27 / 0。50/50 对最终状态一致，但判定加状态仅 45/50；#3 的复现验收未满足，不将动态输入差异直接认定为推理不确定性。
 
@@ -17,7 +18,7 @@
 | crate | 内容 |
 |---|---|
 | `nosh-hub` | 内置 registry（2B Q4_K_M/Q8_0、1B Q4_K_M + tokenizer，固定 revision 和 SHA-256）；按地区（locale/时区）+ 并行 HEAD/2 MB 测速选源（HF / hf-mirror / ModelScope）；64 MiB 分块 Range 下载、`.partial` 断点续传、文件锁、磁盘空间检查、失败换源与退避、边下边算 SHA-256、原子 rename；离线开关（`--offline`、`NOSH_OFFLINE`、`HF_HUB_OFFLINE`，全部网络访问经过唯一出口 `net`）；`nosh model pull/list/verify/import/path`。 |
-| `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核；KV 默认 f16，加载时预先重排 Q4K 权重并释放原始数据，见 §5.3）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`（`--kv f16/f32`、`--no-prepack` 用于对比）。 |
+| `nosh-llm` | fork 自 candle `quantized_llama` 的 MiniCPM5 模型（量化 embedding、RoPE 表、自有 KV 与注意力内核；KV 默认 f16；x86 在加载时预重排层内 Q4K 并释放原始数据，ARM + dotprod 扩展到层内 Q6K 及 output，见 §5.3、§5.4）；tokenizer（分段编码，不可信片段不解析 special token）；手写 MiniCPM5 模板（与 HF `apply_chat_template` 逐字节一致的 golden 测试）；采样（temperature/top-p/min-p、复读检测后启用 1.05 惩罚、`<function` 内降温到 0.3、`--seed`）；按 token ID 驱动的流式工具调用解析（CDATA、实体、按 schema 转类型）；`LocalChatEngine`（token 级对话日志 + 最长公共前缀复用 KV、分块 prefill、可取消）和 `MockChatEngine`；`nosh debug gen`（`--kv f16/f32`、`--no-prepack` 用于对比）。 |
 | `nosh-permissions` | 基于 brush-parser 的 AST 分析：管道、列表、子 shell、`$(…)`、进程替换、重定向、函数定义、fork 炸弹；展开 `sudo`/`doas`/`env`/`timeout`/`nice`/`xargs`/`find -exec`/`bash -c`/`eval`/`watch` 等包装器和会话里的别名、函数；`$'\x..'` 混淆、动态命令名；规则表（git/docker/kubectl/systemctl/包管理器/网络工具等）；路径分级（受保护路径、工作区、临时目录、系统目录）；confirm/auto/yolo 决策矩阵、用户 allow/deny、"本会话同类放行"；效果未知的命令按 Mutating 处理，本地 shell 脚本读取内容后用同一个分析器分析（§16 #14，见 §2.2）；读取目标用已知的变量值和函数、脚本参数检查受保护路径（§2.3）。433 条表驱动用例，Dangerous 召回率 100%。 |
 | `nosh-shell` | 嵌入 brush-core：交互/登录/`-c`/脚本/stdin 模式，rc 与 profile 加载；reedline REPL（brush 历史桥接、补全、续行校验、hinter、PS1 或 `cwd ❯` 提示符 + 右侧审批模式/YOLO 标记、Ctrl-C/Ctrl-D、Ctrl+G）；输入流水线（`#`、解析失败与单词内撇号判定、整行静态命令名检查、本地拼写纠错、破坏性命令安全网、失败提示与含中文时自动交给 AI、`ai` 内建命令）；`run_agent_command`（同一 `Shell`、stdin 为 `/dev/null`、管道采集 10 MB 上限、后台进程组、防卡住环境变量只作用于单次执行、超时与 Ctrl-C（连同脱离了进程树的后台进程一起停止，§2.3）、SIGTTIN 识别、状态差异）。 |
 | `nosh-core` | 静态 system prompt + `[task …]`/`[recent]` 任务头（含 NOSH.md）；工具 `run_command`/`read_file`/`list_dir`/`propose_command`；任务循环（错误回灌同类最多 2 次、拒绝理由、步数上限后要求总结、上下文 85% 时压缩旧工具输出、Ctrl-C 取消/中止）；输出截断（头 60% + 尾 40%，6,000 字符，完整输出原样存入 `state/outputs/`，文件权限 0600；脱敏只保留 `Redactor` 扩展接口，§16 #15）；终端审批卡片（y/n/e/a，Dangerous 键入 `yes`，Ctrl-C 拒绝，无 TTY 拒绝并把命令写到 stderr）；终端渲染（`┃` 块、8 行实时输出区、`ai out <n>`）与 JSON Lines；REPL 处理器（懒加载模型、`ai mode/think/clear/ctx/status/out`、Ctrl+G 建议）。 |
@@ -100,7 +101,7 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 
 - 每个 job 的最后一步用 `--nocapture` 重跑 `crates/nosh-llm/tests/prepack.rs`，打印 CPU 特性（`nosh_llm::cpu::features()`，检测方式与 candle 相同）和各个 m 下与原始内核的误差；前面的步骤失败时也运行。`nosh doctor` 改用同一个函数，aarch64 上原来只显示 `neon`（`9f9fa1e`）。
 - 每个 job 限时 30 分钟。缓存命中时 x86_64 约 2.5 分钟、arm64 约 5 分钟、macOS 约 2 分钟；macOS 第一次（没有缓存）约 4.5 分钟。
-- `prepack.rs` 在 ARM 上 `released=false`，需要释放的检查按预期跳过；预重排与懒加载的结果逐位相同，与原始内核的最大误差为 0（ARM 上 40 行和 48 行的矩阵在每个 m 下走同一个内核：m == 1 和 4 的倍数用重排内核，其他 m 用读原始块的 NEON 内核）。ARM 上释放原始权重见 issue #9。
+- #7 当时的 `prepack.rs` 在 ARM 上 `released=false`，需要释放的检查按预期跳过；40 行和 48 行在 ARM 上走同一类内核，不能作为真正的 packed/raw 对照。#9 已改为不满足 tile 对齐的奇数行 raw 对照，并强制支持的 ARM CPU 实际释放，最新结果见 §5.4。
 
 发现并修复的问题：
 
@@ -316,9 +317,48 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 
 **调优记录**：第一版 f16 decode 用 `half` 的切片转换（每次调用 4 个值），并把整个 key 区间（8K 时 1 MB）一次转换出来，超出 L2，注意力内核慢 40–68%，7.9K 上下文的 decode 从 85 变成 88–90 ms/token；改为 F16C 转换、按 256 个 key 分块后，内核与 f32 持平，端到端反而更快。
 
+### 5.4 ARM 重排后释放（issue #9）
+
+**实现**：通用 API `QTensor::prepack_and_release_storage()` 在 aarch64 + dotprod 上支持二维 Q4K/Q6K、n%8==0、k%256==0。完整四行块继续走原有内核，尾部 1–3 行逐行 GEMV；预建好同一份缓存再释放原始数据。nosh 对层矩阵和 output 调用，token_embd 不动；x86 的释放条件、Q6K decode、output 和 AMX 策略不变。旧 x86 API 保留兼容入口。`--no-prepack` 保留原始数据，但**仍允许懒重排**，不是禁用重排内核。
+
+**合成正确性**：[CI run 36101297488](https://github.com/NewFuture/nosh/actions/runs/36101297488)（`2ce9ddd`）三平台均通过。Q4K/Q6K 各覆盖 204 个形状/批大小组合，包括每个 m=1..64、m=0、511/512/513，k=256/512，以及 ARM 合格而 x86 不合格的行数；对照采用 47/39 行，确保真正走原始内核。Linux ARM（dotprod + i8mm）最大相对误差分别为 2.3e-7、0；macOS（dotprod、无 i8mm）为 2.9e-7、8.5e-8。还验证了 f32/bf16、非零输入偏移、融合 GEMV、释放后原始访问报错、加载器 output/embedding 边界及无独立 output 的情况。
+
+**真实模型**：[CI run 36102190771](https://github.com/NewFuture/nosh/actions/runs/36102190771)，源码 `9737774`，Rust 1.98.1 release，MiniCPM5-2B Q4_K_M（SHA-256 `ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd`）。runner 是 `ubuntu-24.04-arm` / Neoverse-N2，报告 4 个 CPU，但推理固定 `CANDLE_NUM_THREADS=2`、`RAYON_NUM_THREADS=1`；KV f16、seed 42、temperature 0。
+
+8,065 token prompt（尾块 385 行）+ 64 token 生成，最终上下文 8,131/8,192。开/关预重排在两个独立进程中串行运行，GNU time 测完整进程生命周期，而不是只设置 `--ctx 8192`：
+
+| 指标 | `--no-prepack` | 默认预重排 |
+|---|---|---|
+| GNU time 峰值 RSS | 3,576,060 KiB（3.41 GiB） | **2,153,388 KiB（2.05 GiB）** |
+| CLI VmHWM | 3,492 MiB | 2,103 MiB |
+| 释放矩阵/原始字节 | 0 / 0 | 295 / 1,405,071,360（约 1,340 MiB） |
+| 生成输出 | 两份文本完全相同 | 两份文本完全相同 |
+
+峰值减少约 39.8%，通过 2.5 GiB（2,621,440 KiB）门槛。CLI 历史日志的 `MB` 标签实际按 MiB 计算；此处以 GNU time 的 KiB 为精确口径。不以这个受限线程数的 runner 作 ARM 速度验收，也不把 Linux RSS 数字当成 macOS 测量。
+
+**数值验收**：相同 f16 KV 下比较预重排开/关，两份模型顺序加载；使用已有真实文档样本，并增加长上下文。通过线不变，使用设计 §13.2 的全部指标，而非仅对比生成文字：
+
+| prompt + teacher forcing | 高置信 top-1 一致 | 平均 KL | 平均 NLL（保留 / 释放） | 余弦中位数 | top-5 集合一致 |
+|---|---|---|---|---|---|
+| 3,329 + 48 token | 30/30 | 0 | 2.736771 / 2.736771 | 1 | 49/49 |
+| 8,065 + 48 token | 48/48 | 0 | 0.527555 / 0.527555 | 1 | 49/49 |
+
+prompt 末位置的余弦分别为 1 和 0.9999999999999998，全部指标通过。`arm64-memory-*` artifact 包含输入、两份 CLI 输出、内存/数值 JSON、CPU 特性和二进制校验值；独立 `.github/workflows/arm64-memory.yml` 只在手动触发时下载并缓存模型，普通 PR 不跑真实模型。首次验证借用了已注册 CI 的手动入口；临时调用接线已移除，最终仅保留独立工作流。
+
+**x86 回归对照**：基线 `cd7a106` 与修改后 `d9c255a`，同一 WSL Ubuntu / Xeon Platinum 8370C（8 核 16 线程），Rust 1.98.1 release，8 推理线程、rayon 1 线程，同一个校验通过的模型，KV f16、seed 42、temperature 0。输入为 `MVP-PLAN.md` 前 7,000 个字符加固定摘要请求，实际 3,384 token prompt + 64 token 生成。在确认其他模型评测退出后串行交替跑三对，窗口为 2026-09-25 07:26:12–07:29:33 UTC（含预热）；先前可能受同机评测影响的样本不计入结果：
+
+| 中位数（每个构建三次） | 基线 | 修改后 |
+|---|---|---|
+| 加载 | 2.49 s | 2.31 s |
+| prefill | 130.9 tok/s | 133.0 tok/s |
+| decode | 17.9 tok/s | 18.3 tok/s |
+| 峰值 RSS | 2,563,496 KiB | 2,559,520 KiB |
+
+三对生成文本全部相同，仍仅释放 252 个层内 Q4K、约 915 MiB；此组对照未见性能回退，微小速度差异不作为加速结论。x86 原有内核和释放条件未改变，ARM CI 则没有速度门禁。
+
 ## 6. 已知问题
 
-1. **内存**（已按 v0.6 优化，§5.3）：8K 上下文 2.69 GiB，达到 v0.6 的目标（≤ 3.0 GB），但达不到 v0.4 的 2.3 GB，原因见 v0.6 §2.3（tile 比原始数据大，Q6K 的原始数据要留给 decode）。只在 x86 AVX2/VNNI 上释放 Q4K 原始数据；其他 CPU 和 Apple Silicon 仍保留原始数据（多约 0.9 GB）。AMX 的提前重排没有在带 AMX 的机器上实测。`minicpm5-2b:q8_0` 的 Q8_0 矩阵也满足释放条件（tile 与原始同样大小，可再省约 2 GB），但 nosh 目前只对 Q4K 调用，未测。
+1. **内存**：§5.3 的 x86 8K 实测仍为 2.69 GiB，达到 v0.6 的目标（≤ 3.0 GB），但达不到 v0.4 的 2.3 GB。ARM + dotprod 已通过 #9 释放 Q4K/Q6K 原始数据，Linux ARM 实测 2.05 GiB（§5.4）；macOS 已验证正确性但未测 RSS。无 dotprod/其他架构没有这次实测，不能外推。AMX 未在真机验证；Q8_0 模型也未启用 nosh 层面的预重排释放。
 2. **冷启动首 token 4.7–5.5 s**（MVP 6–7 s）：没有磁盘前缀缓存，每个新进程都要重新 prefill 约 1K token 的静态前缀；Q4K 重排已挪到加载阶段（加载多 0.3–0.5 s），首次前向仍有 Q6K prefill 的懒加载重排。
 3. **f16 KV 的 logits 与 f32 KV 余弦约 0.998**：低于原计划的 0.999，但 1 ULP 的扰动也是这个水平（§5.3），NLL、KL 与高置信预测不受影响。
 4. **2B 模型的可靠性**：偶尔写错命令（排序字段、`sort -h -n` 混用）、算错总数、先给出错误的中间结果、自相矛盾；偶尔声称做了实际没做的事（场景 10 说已切换目录），或者在该发起命令时反问用户（场景 4）；偶尔模仿任务头的格式输出 `[task …]` 之类的行。倾向于用 `list_dir`/`read_file` 逐个查看，而不是一条 `find`/`wc` 命令，因此步数偏多。temperature 1.0（官方推荐的设计默认值）放大了结果的波动：四个构建各跑 3 轮，完全正确的次数分别是 27、20、25、26。
@@ -334,7 +374,7 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 14. **尚未实现（MVP 范围外或加分项）**：后台下载、多源并行下载、`ai history/private/undo/model`、`thinking = "auto"`、`engine.*` 配置（MVP 在进程内推理，这些键会被接受但忽略）。
 15. **vendored candle-core**：`third_party/candle-core` 是锁定 rev 的副本加补丁；升级 candle 时要按 `NOSH_PATCH.md` 重新打补丁、重新生成 manifest。上游提供释放原始数据的选项后即可删除。
 16. **`nosh model import` 的理论竞态**：先对源文件算哈希，再硬链接或复制进模型库并记录 stamp，中间不复查；如果源文件恰好在这段时间内被改写，库里的文件会被当作已校验。目前只是理论问题，暂不处理（补上需要复制后再算一遍哈希）。
-17. **平台差异**（§2.5）：aarch64 上不释放 Q4K 原始权重（见 #1 和 issue #9）。macOS 上 `nosh doctor` 读不到内存（读的是 `/proc/meminfo`），显示为 unknown；CPU 型号在 macOS 和 aarch64 Linux 上只显示架构名（`/proc/cpuinfo` 里没有 `model name`）；`nosh debug gen` 的 RSS（读 `/proc/self/status`）在 macOS 上没有；`configure_thread_env` 检查"还没有其他线程"只在 Linux 的 debug 构建里做。这些不影响功能，暂不处理。
+17. **平台差异**（§2.5、§5.4）：aarch64 的权重释放已覆盖 dotprod CPU；无 dotprod 的策略不变。macOS 上 `nosh doctor` 读不到内存（读的是 `/proc/meminfo`），显示为 unknown；CPU 型号在 macOS 和 aarch64 Linux 上只显示架构名（`/proc/cpuinfo` 里没有 `model name`）；`nosh debug gen` 的 RSS（读 `/proc/self/status`）在 macOS 上没有；`configure_thread_env` 检查"还没有其他线程"只在 Linux 的 debug 构建里做。这些不影响功能，暂不处理。
 
 ## 7. 偏离设计之处与决策
 
@@ -344,7 +384,7 @@ CI 原来只有 ubuntu-latest（x86_64）。现在有三个 job，都跑 clippy�
 | 推理线程 | — | `RAYON_NUM_THREADS=1`、`CANDLE_NUM_THREADS=物理核心数`，在 `main` 开头、任何线程启动之前设置，只作用于 nosh 进程，在 shell 子进程中还原 | rayon 线程池与 candle 的 barrier pool 争抢核心，decode 只有 6.5 tok/s；调整后达到 20 tok/s。candle 只从环境变量读取这两个值，而修改环境变量必须在单线程时进行（§2.4） |
 | 注意力 | candle 算子 | 自有分块 GQA 内核（直接调用 candle 已依赖的 `gemm` crate），decode 按 key 切分 | 见 §5.2 |
 | KV | 预先分配 8K（v0.6：默认 f16） | f16（`half`），按 1024 token 增长；decode 按 256 个 key 分块转成 f32，prefill 每次调用整段转换到可复用的 scratch；`LoadOptions`/`nosh debug gen --kv f32` 可切回 f32 | 降低短对话的内存占用；转换方式见 §5.3 |
-| Q4K 权重 | v0.6：加载时提前重排并释放原始数据 | 加载时每层的 Q4K 矩阵各用一个线程重排；只在 candle 的 tile 服务所有 m 时释放，否则保留原始数据；`--no-prepack` 可关闭 | 把重排从首次前向挪到加载阶段并行完成，冷启动更快 |
+| 预重排权重 | v0.6：加载时提前重排 Q4K 并释放原始数据 | x86 保持层内 Q4K；ARM + dotprod 增加层内 Q6K 及 output。按层并行，只在 tile 服务所有 m 时释放，embedding 不动；`--no-prepack` 可关闭 | 把重排移到加载阶段，按平台释放原始副本；内存结果见 §5.3、§5.4 |
 | f16 KV 的验收 | top-5 一致、logits 余弦 > 0.999 | 检查高置信 top-1 一致、KL、NLL、余弦中位数 > 0.995、top-5 集合重合 | 任何 KV 改动（包括 1 ULP）都使余弦停在约 0.998（§5.3）。验收标准的调整已经用户确认（设计 v0.6 §13.2、决策 §16 #13，见 PR #2），保留 KV f16 |
 | 下载 | 单连接流式 | 64 MiB 分块 Range 请求，每块有超时 | 便于检测卡顿、从断点换源 |
 | 文件锁 | fs4 | std `File::try_lock`（fs4 只用来查询磁盘空间） | MSRV 1.89 |

@@ -1,5 +1,5 @@
 // nosh patch: vendored from huggingface/candle rev 9b1be4a321ef265f13d2c30be4f2037109c51d14
-// with `QTensor::prepack_x86_and_release_storage` added (search "nosh patch");
+// with `QTensor::prepack_and_release_storage` added (search "nosh patch");
 // see third_party/candle-core/NOSH_PATCH.md for what changed and when to drop it.
 use crate::{
     backend::BackendStorage, CpuStorage, DType, Device, Result, Shape, Storage, Tensor, D,
@@ -765,18 +765,17 @@ impl QTensor {
         self.storage.data()
     }
 
-    /// nosh patch (third_party/candle-core/NOSH_PATCH.md): builds the x86 tile
+    /// nosh patch (third_party/candle-core/NOSH_PATCH.md): builds the CPU tile
     /// layout now and drops the raw quantized blocks, which the packed matmuls
-    /// never read again. Only done when `repack_x86::select` accepts the tensor
-    /// for every batch size m: CPU storage on x86_64 with AVX2 or VNNI, a 2D
-    /// shape with n % 16 == 0 and k % 256 == 0, and a dtype whose tiles also
-    /// serve m == 1 (Q4K; Q8_0 unless the CPU only has AVX2). Otherwise nothing
-    /// changes. Returns whether the raw data was released.
+    /// never read again. Only done for CPU matrices whose tiles serve every m:
+    /// x86_64 with AVX2/VNNI, n % 16 == 0, k % 256 == 0, and Q4K (also Q8_0
+    /// with VNNI); aarch64 with dotprod, n % 8 == 0, k % 256 == 0, and Q4K/Q6K.
+    /// Otherwise nothing changes. Returns whether the raw data was released.
     ///
     /// Afterwards only matmuls with f32 or bf16 inputs work; `dequantize`,
     /// `embedding`, `data` and f16 matmuls return an error.
-    pub fn prepack_x86_and_release_storage(&mut self) -> Result<bool> {
-        #[cfg(target_arch = "x86_64")]
+    pub fn prepack_and_release_storage(&mut self) -> Result<bool> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             if self.repacked_qs.is_released() {
                 return Ok(true);
@@ -788,14 +787,31 @@ impl QTensor {
             let Ok((n, k)) = self.shape.dims2() else {
                 return Ok(false);
             };
-            // select() only tells m == 1 (gemv) from m > 1 apart.
-            if !(repack_x86::select(dtype, 1, n, k) && repack_x86::select(dtype, 2, n, k)) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                // select() only tells m == 1 (gemv) from m > 1 apart.
+                if !(repack_x86::select(dtype, 1, n, k) && repack_x86::select(dtype, 2, n, k)) {
+                    return Ok(false);
+                }
+                self.repacked_qs.x86_prepack(storage.as_ref(), n, k);
+            }
+            #[cfg(target_arch = "aarch64")]
+            if !self.repacked_qs.aarch64_prepack(storage.as_ref(), n, k) {
                 return Ok(false);
             }
-            self.repacked_qs.x86_prepack(storage.as_ref(), n, k);
             self.storage = QStorage::Cpu(dtype.cpu_zeros(0));
             self.repacked_qs.mark_released();
             Ok(true)
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        Ok(false)
+    }
+
+    /// nosh patch: compatibility entry point; still only acts on x86_64.
+    pub fn prepack_x86_and_release_storage(&mut self) -> Result<bool> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.prepack_and_release_storage()
         }
         #[cfg(not(target_arch = "x86_64"))]
         Ok(false)
@@ -804,7 +820,7 @@ impl QTensor {
     fn check_raw(&self) -> Result<()> {
         if self.repacked_qs.is_released() {
             crate::bail!(
-                "the raw {:?} data of this {:?} tensor was released after x86 prepacking; only matmuls with f32/bf16 inputs are available",
+                "the raw {:?} data of this {:?} tensor was released after prepacking; only matmuls with f32/bf16 inputs are available",
                 self.dtype(),
                 self.shape
             )

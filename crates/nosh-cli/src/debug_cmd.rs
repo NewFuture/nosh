@@ -40,7 +40,7 @@ pub enum DebugCmd {
         /// KV cache element type.
         #[arg(long, value_enum, default_value = "f16")]
         kv: KvArg,
-        /// Keep the raw Q4K weights instead of prepacking them at load.
+        /// Keep raw weights instead of prepacking eligible CPU matrices at load.
         #[arg(long)]
         no_prepack: bool,
     },
@@ -90,7 +90,7 @@ pub fn run(
                         KvArg::F16 => KvDtype::F16,
                         KvArg::F32 => KvDtype::F32,
                     },
-                    prepack_q4k: !no_prepack,
+                    prepack_weights: !no_prepack,
                     ..LocalEngineOptions::default()
                 },
             ) {
@@ -102,7 +102,7 @@ pub fn run(
             };
             let info = engine.info().clone();
             eprintln!(
-                "[{} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} Q4K matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
+                "[{} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
                 info.model_id,
                 info.layers,
                 info.context,
