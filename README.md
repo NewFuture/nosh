@@ -4,7 +4,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 
 > 状态：Linux 上的 MVP 已完成，结果见 [MVP 报告](docs/MVP-REPORT.md)。
 
-- **本身就是 shell**：兼容 Bash（内核为 brush-core）。合法的命令照常执行；以 `#` 开头或者命令出错时，交给 AI 处理。
+- **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`#` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。
 - **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。默认模型在 8K 上下文下常驻内存约 2.7 GiB（x86 AVX2/VNNI；详见 [MVP 报告 §5.3](docs/MVP-REPORT.md)）。
 - **安全**：agent 发起的命令要经过风险分级和审批。
@@ -25,7 +25,9 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 ./target/release/nosh                  # 启动 shell；--norc 跳过 ~/.bashrc，--safe 同时关闭 AI
 ```
 
-常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。配置文件位于 `~/.config/nosh/config.toml`，支持的键见设计文档 §11。
+常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
+
+`ai auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc）。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
 
 ## 命令建议与终端交接
 
@@ -51,10 +53,12 @@ agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交
 
 ## 文档
 
-- [设计文档](docs/DESIGN.md)
-- [MVP 实施计划](docs/MVP-PLAN.md)
-- [MVP 报告](docs/MVP-REPORT.md)
-- [固定 seed 的真实模型评测](eval/README.md)
+| 文档 | 内容 |
+|---|---|
+| [设计文档](docs/DESIGN.md) | 架构、当前实现边界、配置与后续方案；先读 [实现状态](docs/DESIGN.md#03-实现状态) |
+| [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
+| [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
+| [固定 seed 的真实模型评测](eval/README.md) | 运行方法、指标口径与版本化基线；基线已记录，判定复现验收尚未满足 |
 
 ## 许可
 
