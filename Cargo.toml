@@ -67,8 +67,8 @@ dbg_macro = "warn"
 todo = "warn"
 print_stderr = "allow"
 
-# candle-core at the pinned rev with `QTensor::prepack_x86_and_release_storage`
-# (drops raw Q4K blocks once their x86 tiles exist); candle-nn from the same git
+# candle-core at the pinned rev with `QTensor::prepack_and_release_storage`
+# (drops raw CPU blocks once their tiles serve every m); candle-nn from the same git
 # source links against it. See third_party/candle-core/NOSH_PATCH.md.
 [patch."https://github.com/huggingface/candle"]
 candle-core = { path = "third_party/candle-core" }

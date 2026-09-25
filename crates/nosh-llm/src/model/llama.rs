@@ -8,8 +8,9 @@
 //! 3. The KV cache is an append-only per-layer store grown in large steps, with
 //!    `truncate` for prefix reuse, instead of `Tensor::cat` per token. It holds
 //!    f16 by default (design §2.3).
-//! 4. Q4K layer matrices get their x86 tile layout while loading and drop their
-//!    raw blocks (design §2.3, vendored candle patch); upstream keeps both.
+//! 4. Layer matrices get their CPU tile layout while loading and drop their raw
+//!    blocks: Q4K on x86, Q4K/Q6K (also output) on ARM with dotprod (design §2.3,
+//!    vendored candle patch); upstream keeps both.
 //!
 //! Attention (causal GQA, no repeated K/V) and RoPE run on raw rows on candle's
 //! barrier pool; see [`super::attn`]. Only the last position's logits are
@@ -44,17 +45,17 @@ pub struct LlamaConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadOptions {
     pub kv_dtype: KvDtype,
-    /// Build the x86 tile layout of Q4K layer matrices while loading and drop
-    /// their raw blocks, where candle's tiles serve every batch size. The token
-    /// embedding, lm_head and Q6K matrices keep their raw data either way.
-    pub prepack_q4k: bool,
+    /// Build CPU tiles while loading and drop raw blocks where they serve every
+    /// batch size: Q4K layers on x86, Q4K/Q6K layers and output on ARM with
+    /// dotprod. The token embedding always keeps its raw data.
+    pub prepack_weights: bool,
 }
 
 impl Default for LoadOptions {
     fn default() -> Self {
         Self {
             kv_dtype: KvDtype::F16,
-            prepack_q4k: true,
+            prepack_weights: true,
         }
     }
 }
@@ -161,20 +162,23 @@ fn md<'a>(ct: &'a gguf_file::Content, key: &str) -> Result<&'a gguf_file::Value>
         .ok_or_else(|| candle_core::Error::Msg(format!("GGUF metadata {key} missing")))
 }
 
-/// Prepacks the Q4K matrices among `ts`, one thread each (see
-/// [`LoadOptions::prepack_q4k`]); other dtypes keep their raw data. It is
-/// called once per layer with that layer's seven matrices and joins them
-/// before returning, so at most seven threads run at a time.
-fn prepack_q4k(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
+/// Prepacks eligible matrices among `ts`, one thread each (see
+/// [`LoadOptions::prepack_weights`]); other dtypes keep their raw data. It is
+/// called per layer with its seven matrices (and separately for ARM output),
+/// joining them before returning, so at most seven threads run at a time.
+fn prepack_weights(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
     let t0 = std::time::Instant::now();
     let done: Vec<Result<Option<usize>>> = std::thread::scope(|s| {
         let jobs: Vec<_> = ts
             .iter_mut()
-            .filter(|t| t.dtype() == GgmlDType::Q4K)
+            .filter(|t| {
+                t.dtype() == GgmlDType::Q4K
+                    || (cfg!(target_arch = "aarch64") && t.dtype() == GgmlDType::Q6K)
+            })
             .map(|t| {
                 s.spawn(move || -> Result<Option<usize>> {
                     let bytes = t.storage_size_in_bytes();
-                    Ok(t.prepack_x86_and_release_storage()?.then_some(bytes))
+                    Ok(t.prepack_and_release_storage()?.then_some(bytes))
                 })
             })
             .collect();
@@ -281,12 +285,23 @@ impl Llama {
             weight: tensor("output_norm.weight")?.dequantize(device)?,
             eps: rms_eps,
         };
-        let output = match tensor("output.weight") {
-            Ok(t) => QMatMul::from_qtensor(t)?,
-            Err(_) => QMatMul::from_qtensor(tensor("token_embd.weight")?)?,
+        let mut prepack = PrepackStats::default();
+        let output = {
+            let t = match tensor("output.weight") {
+                Ok(t) => t,
+                Err(_) => tensor("token_embd.weight")?,
+            };
+            #[cfg(target_arch = "aarch64")]
+            let t = {
+                let mut t = t;
+                if opts.prepack_weights {
+                    prepack_weights(std::slice::from_mut(&mut t), &mut prepack)?;
+                }
+                t
+            };
+            QMatMul::from_qtensor(t)?
         };
         let mut layers = Vec::with_capacity(n_layer);
-        let mut prepack = PrepackStats::default();
         for i in 0..n_layer {
             let p = format!("blk.{i}");
             let mut read = |n: &str| tensor(&format!("{p}.{n}.weight"));
@@ -299,8 +314,8 @@ impl Llama {
                 read("ffn_up")?,
                 read("ffn_down")?,
             ];
-            if opts.prepack_q4k {
-                prepack_q4k(&mut m, &mut prepack)?;
+            if opts.prepack_weights {
+                prepack_weights(&mut m, &mut prepack)?;
             }
             let [wq, wk, wv, wo, w_gate, w_up, w_down] = m.map(QMatMul::from_qtensor);
             let (wq, wk, wv, wo) = (wq?, wk?, wv?, wo?);
@@ -567,6 +582,103 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let err = r.err().expect("load fails").to_string();
         assert!(err.contains("malformed GGUF"), "{err}");
+    }
+
+    #[test]
+    fn prepacking_covers_layers_and_arm_output_but_not_embeddings() {
+        use gguf_file::Value as V;
+        let meta = [
+            ("general.architecture", V::String("llama".into())),
+            ("llama.attention.head_count", V::U32(2)),
+            ("llama.attention.head_count_kv", V::U32(1)),
+            ("llama.block_count", V::U32(1)),
+            ("llama.embedding_length", V::U32(256)),
+            ("llama.feed_forward_length", V::U32(256)),
+            ("llama.attention.layer_norm_rms_epsilon", V::F32(1e-5)),
+            ("llama.vocab_size", V::U32(16)),
+        ];
+        let matrix = |n, dtype| {
+            let values: Vec<f32> = (0..n * 256).map(|i| (i % 31) as f32 / 31.0 - 0.5).collect();
+            QTensor::quantize(
+                &Tensor::from_vec(values, (n, 256), &Device::Cpu).unwrap(),
+                dtype,
+            )
+            .unwrap()
+        };
+        for has_output in [true, false] {
+            let mut tensors = vec![
+                ("token_embd.weight", matrix(16, GgmlDType::Q4K)),
+                ("blk.0.attn_q.weight", matrix(256, GgmlDType::Q4K)),
+                ("blk.0.attn_k.weight", matrix(128, GgmlDType::Q4K)),
+                ("blk.0.attn_v.weight", matrix(128, GgmlDType::Q6K)),
+                ("blk.0.attn_output.weight", matrix(256, GgmlDType::Q4K)),
+                ("blk.0.ffn_gate.weight", matrix(256, GgmlDType::Q4K)),
+                ("blk.0.ffn_up.weight", matrix(256, GgmlDType::Q4K)),
+                ("blk.0.ffn_down.weight", matrix(256, GgmlDType::Q6K)),
+            ];
+            if has_output {
+                tensors.push(("output.weight", matrix(16, GgmlDType::Q6K)));
+            }
+            for name in [
+                "output_norm.weight",
+                "blk.0.attn_norm.weight",
+                "blk.0.ffn_norm.weight",
+            ] {
+                let norm = Tensor::ones(256, DType::F32, &Device::Cpu).unwrap();
+                tensors.push((name, QTensor::quantize(&norm, GgmlDType::F32).unwrap()));
+            }
+            let mut file = std::io::Cursor::new(Vec::new());
+            let metadata: Vec<_> = meta.iter().map(|(k, v)| (*k, v)).collect();
+            let weights: Vec<_> = tensors.iter().map(|(k, v)| (*k, v)).collect();
+            gguf_file::write(&mut file, &metadata, &weights).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "nosh-prepack-{}-{has_output}.gguf",
+                std::process::id()
+            ));
+            std::fs::write(&path, file.into_inner()).unwrap();
+
+            let mut expected = PrepackStats::default();
+            for (name, t) in &mut tensors {
+                let layer = name.starts_with("blk.")
+                    && (t.dtype() == GgmlDType::Q4K
+                        || (cfg!(target_arch = "aarch64") && t.dtype() == GgmlDType::Q6K));
+                let output = cfg!(target_arch = "aarch64")
+                    && (*name == "output.weight" || (!has_output && *name == "token_embd.weight"));
+                let bytes = t.storage_size_in_bytes();
+                if (layer || output) && t.prepack_and_release_storage().unwrap() {
+                    expected.tensors += 1;
+                    expected.released_bytes += bytes;
+                }
+            }
+            let mut plain = Llama::load(
+                &path,
+                64,
+                LoadOptions {
+                    prepack_weights: false,
+                    ..LoadOptions::default()
+                },
+                &Device::Cpu,
+            )
+            .unwrap();
+            assert_eq!(plain.prepack_stats().released_bytes, 0);
+            let want = plain.forward(&[0, 1, 2]).unwrap().to_vec1::<f32>().unwrap();
+            drop(plain);
+            let mut packed = Llama::load(&path, 64, LoadOptions::default(), &Device::Cpu).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(packed.prepack_stats().tensors, expected.tensors);
+            assert_eq!(
+                packed.prepack_stats().released_bytes,
+                expected.released_bytes
+            );
+            assert!(!packed.tok_embd.data().unwrap().is_empty());
+            let got = packed
+                .forward(&[0, 1, 2])
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert!(got.iter().all(|v| v.is_finite()));
+            assert_eq!(got, want, "output.weight present: {has_output}");
+        }
     }
 
     #[test]

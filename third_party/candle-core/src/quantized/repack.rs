@@ -1,5 +1,5 @@
 // nosh patch: vendored from huggingface/candle rev 9b1be4a321ef265f13d2c30be4f2037109c51d14
-// with an eager x86 prepack and a "raw data released" flag in `PackedCache`
+// with eager CPU prepacking and a "raw data released" flag in `PackedCache`
 // (search "nosh patch"); see third_party/candle-core/NOSH_PATCH.md.
 #[cfg(target_arch = "aarch64")]
 use super::GgmlDType;
@@ -52,7 +52,7 @@ pub(crate) struct PackedCache {
     q6kx8: OnceLock<PackedStorage>,
     #[cfg(target_arch = "aarch64")]
     q8_0x4: OnceLock<PackedStorage>,
-    // nosh patch: the raw blocks were dropped after `x86_prepack`.
+    // nosh patch: the raw blocks were dropped after eager prepacking.
     released: bool,
 }
 
@@ -78,7 +78,30 @@ impl PackedCache {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    // nosh patch: only these ARM layouts serve every m, including GEMV tails.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn aarch64_prepack(
+        &self,
+        storage: &dyn QuantizedType,
+        n: usize,
+        k: usize,
+    ) -> bool {
+        if !crate::cpu::features::get().dotprod
+            || !matches!(storage.dtype(), GgmlDType::Q4K | GgmlDType::Q6K)
+            || n == 0
+            || k == 0
+            || !k.is_multiple_of(QK_K)
+        {
+            return false;
+        }
+        let Some(kind) = PackedKind::select(storage.dtype(), (1, k, n)) else {
+            return false;
+        };
+        self.get_or_init(kind, || kind.pack(storage, n));
+        true
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub(crate) fn mark_released(&mut self) {
         self.released = true;
     }
@@ -300,13 +323,14 @@ impl PackedKind {
             GgmlDType::Q4_0 if n.is_multiple_of(4) && (has_dotprod_gemv || has_tiled_matmul) => {
                 Some(Self::Q4_0x4)
             }
-            GgmlDType::Q4K if n.is_multiple_of(8) && (has_dotprod_gemv || has_tiled_matmul) => {
+            // nosh patch: dotprod handles arbitrary m via GEMV tail rows.
+            GgmlDType::Q4K if n.is_multiple_of(8) && (features.dotprod || has_tiled_matmul) => {
                 Some(Self::Q4Kx8)
             }
             GgmlDType::Q5K if n.is_multiple_of(8) && (has_dotprod_gemv || has_tiled_matmul) => {
                 Some(Self::Q5Kx8)
             }
-            GgmlDType::Q6K if n.is_multiple_of(8) && (has_dotprod_gemv || has_tiled_matmul) => {
+            GgmlDType::Q6K if n.is_multiple_of(8) && (features.dotprod || has_tiled_matmul) => {
                 Some(Self::Q6Kx8)
             }
             GgmlDType::Q8_0 if n.is_multiple_of(4) && (has_dotprod_gemv || has_tiled_matmul) => {
@@ -422,6 +446,27 @@ impl PackedKind {
         packed: &PackedStorage,
         dst: &mut [f32],
     ) -> Result<()> {
+        // nosh patch: keep full tiles on their existing kernel; tail rows only
+        // read the same packed cache, so raw weights can be released for all m.
+        let (m, k, n) = mkn;
+        if m == 0 {
+            return Ok(());
+        }
+        if m > 1 && !m.is_multiple_of(4) && matches!(self, Self::Q4Kx8 | Self::Q6Kx8) {
+            let tiled = m - m % 4;
+            if tiled > 0 {
+                self.matmul((tiled, k, n), &lhs[..tiled * k], packed, &mut dst[..tiled * n])?;
+            }
+            for row in tiled..m {
+                self.matmul(
+                    (1, k, n),
+                    &lhs[row * k..(row + 1) * k],
+                    packed,
+                    &mut dst[row * n..(row + 1) * n],
+                )?;
+            }
+            return Ok(());
+        }
         let features = crate::cpu::features::get();
         match (self, packed) {
             #[cfg(target_arch = "aarch64")]

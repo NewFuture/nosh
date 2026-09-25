@@ -337,7 +337,7 @@ fn f16_kv_matches_f32_kv() {
     let (prompt, tail) = ids.split_at(ids.len() - 48);
     let opts = LoadOptions {
         kv_dtype: KvDtype::F32,
-        prepack_q4k: true,
+        prepack_weights: true,
     };
     let mut model = Llama::load(&r.weights, 8192, opts, &Device::Cpu).unwrap();
     let want = logits_along(&mut model, prompt, tail, 512);

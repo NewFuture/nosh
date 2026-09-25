@@ -34,8 +34,8 @@ pub struct LocalEngineOptions {
     pub prefill_chunk: usize,
     pub seed: Option<u64>,
     pub kv_dtype: KvDtype,
-    /// See [`LoadOptions::prepack_q4k`].
-    pub prepack_q4k: bool,
+    /// See [`LoadOptions::prepack_weights`].
+    pub prepack_weights: bool,
 }
 
 impl Default for LocalEngineOptions {
@@ -46,7 +46,7 @@ impl Default for LocalEngineOptions {
             prefill_chunk: 512,
             seed: None,
             kv_dtype: load.kv_dtype,
-            prepack_q4k: load.prepack_q4k,
+            prepack_weights: load.prepack_weights,
         }
     }
 }
@@ -132,7 +132,7 @@ impl LocalChatEngine {
             opts.context_length,
             LoadOptions {
                 kv_dtype: opts.kv_dtype,
-                prepack_q4k: opts.prepack_q4k,
+                prepack_weights: opts.prepack_weights,
             },
             &device,
         )?;
