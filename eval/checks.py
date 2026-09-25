@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import tarfile
 
+from . import driver, fixtures
 from .driver import PROMPT
 
 FILE_NAME = re.compile(r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:bin|txt|md|py|js|rs|sh)(?![\w-]|\.\w)")
@@ -18,12 +19,29 @@ LANGUAGES = {
     "rust": r"\brust\b",
     "shell": r"\b(?:shell|bash|sh)\b",
 }
+HISTORY_ALIASES = {
+    "pipeline": r"pipeline|管道", "approval": r"approv|确认|审批",
+    "seed": r"seed|种子", "checksum": r"checksum|sha.?256|校验",
+    "truncate": r"truncat|截断", "suggest": r"suggest|建议",
+    "timeout": r"time.?out|超时", "offline": r"offline|离线",
+}
+PROJECT_CHECKS = {
+    "rust-build", "rust-test", "rust-clean", "node-build", "node-test", "python-test",
+    "git-diff", "git-commit", "recent-history", "versions", "clarification",
+    "build-failure", "test-failure", "port-failure",
+}
+RUST_ARTIFACT = re.compile(
+    r"target/(?:CACHEDIR\.TAG|\.rustc_info\.json|(?:debug|release)/(?:\.cargo(?:-artifact|-build)?-lock|eval_math(?:\.d)?"
+    r"|deps/eval_math-[0-9a-f]+(?:\.d|\.rmeta)?"
+    r"|\.fingerprint/eval_math-[0-9a-f]+/(?:invoked\.timestamp|(?:dep-|output-)?(?:test-)?bin-eval_math(?:\.json)?)))"
+)
 
 
 @dataclass
 class Verdict:
     passed: bool
     reasons: list[str]
+    details: dict | None = None
 
 
 def shell_parts(command: str) -> list[str]:
@@ -35,7 +53,165 @@ def shell_parts(command: str) -> list[str]:
     return list(lex)
 
 
+def command_groups(command: str, root: Path, tools: dict | None = None) -> list[list[str]]:
+    parts = shell_parts(command)
+    if parts[:1] == ["cd"]:
+        separator = parts.index("&&") if "&&" in parts else -1
+        directory = parts[1:separator]
+        if directory[:1] == ["--"]:
+            directory = directory[1:]
+        if separator < 0 or len(directory) != 1 or (root / directory[0]).resolve() != root:
+            raise ValueError("only an initial cd to the fixture root is supported")
+        parts = parts[separator + 1:]
+    groups, group = [], []
+    for word in parts:
+        if word in ("&&", ";"):
+            if not group:
+                raise ValueError("empty command")
+            groups.append(group)
+            group = []
+        elif word in ("&", "|", "||") or re.fullmatch(r"[;&|]+", word):
+            raise ValueError("unsupported command operator")
+        else:
+            group.append(word)
+    if group:
+        groups.append(group)
+    elif parts and parts[-1] != ";":
+        raise ValueError("incomplete command")
+    for group in groups:
+        if group[:1] == ["env"]:
+            group.pop(0)
+        while group and group[0] in ("CARGO_NET_OFFLINE=true", "CARGO_INCREMENTAL=0", "CARGO_BUILD_JOBS=1"):
+            group.pop(0)
+        if not group:
+            raise ValueError("missing command")
+        if "/" in group[0]:
+            matches = [name for name, info in (tools or {}).items() if group[0] == info["path"]]
+            if len(matches) != 1:
+                raise ValueError("executable is not a recorded tool")
+            group[0] = matches[0]
+    return groups
+
+
+def project_action(parts: list[str], root: Path) -> str | None:
+    if parts[:1] == ["cargo"] and len(parts) >= 2:
+        verb, args = parts[1], parts[2:]
+        common = {"--offline", "--locked", "--frozen", "--quiet", "-q", "--verbose", "-v"}
+        if verb in ("build", "test") and "--" in args:
+            split = args.index("--")
+            if verb != "test" or any(a not in ("--nocapture", "--test-threads=1") for a in args[split + 1:]):
+                return None
+            args = args[:split]
+        flags = common | ({"--release", "--workspace", "--all-targets"} if verb != "clean" else set())
+        if verb in ("build", "test", "clean") and all(arg in flags for arg in args):
+            return "rust-" + verb
+    if parts[:1] == ["npm"]:
+        args = [p for p in parts[1:] if p not in ("--offline", "--silent", "-s", "--no-audit", "--no-fund")]
+        if args == ["run", "build"]:
+            return "node-build"
+        if args in (["test"], ["run", "test"]):
+            return "node-test"
+    if parts[:2] == ["node", "--test"]:
+        if all(p in ("--test-reporter=tap", "test/math.test.js") for p in parts[2:]):
+            return "node-test"
+    if parts[:1] == ["python3"]:
+        args = [p for p in parts[1:] if p != "-B"]
+        if args[:2] == ["-m", "unittest"]:
+            rest = [p for p in args[2:] if p not in ("-v", "-q")]
+            if rest in ([], ["discover"], ["discover", "-s", "tests"],
+                        ["discover", "-s", "tests", "-p", "test*.py"]):
+                return "python-test"
+    if parts[:2] == ["git", "add"] and len(parts) > 2:
+        if all(p in (".", "./", "--", "-A", "--all", "-u", "--update", "maths.py", "README.md") for p in parts[2:]):
+            return "git-add"
+    if parts[:2] == ["git", "commit"]:
+        args = parts[2:]
+        messages = 0
+        i = 0
+        while i < len(args):
+            if args[i] in ("-a", "--all", "--quiet", "-q"):
+                i += 1
+            elif args[i] in ("-m", "--message", "-am", "-ma") and i + 1 < len(args) and args[i + 1].strip():
+                messages += 1
+                i += 2
+            else:
+                return None
+        if messages:
+            return "git-commit"
+    if parts[:1] == ["rm"]:
+        flags = [p for p in parts[1:] if p.startswith("-")]
+        paths = [p for p in parts[1:] if not p.startswith("-")]
+        if (all(p in ("-r", "-f", "-rf", "-fr", "--recursive", "--force", "--") for p in flags)
+                and any(p in ("-r", "-rf", "-fr", "--recursive") for p in flags)
+                and len(paths) == 1 and (root / paths[0]).resolve() == root / "target"
+                and not (root / "target").is_symlink()):
+            return "rust-clean"
+    return None
+
+
+def artifact(name: str, item: dict, kind: str) -> bool:
+    if "symlink" in item:
+        return False
+    if kind.startswith("rust") or kind == "build-failure":
+        return bool(RUST_ARTIFACT.fullmatch(name))
+    return kind == "node-build" and name in ("dist/math.js", "dist/main.js")
+
+
+def protected_files(files: dict, kind: str) -> dict:
+    return {name: item for name, item in files.items() if not artifact(name, item, kind)}
+
+
+def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) -> dict:
+    kind = scenario["check"]
+    state = {"files": after, "cwd": result.pwd}
+    if kind in PROJECT_CHECKS:
+        state["files"] = protected_files(after, kind)
+        state["artifacts"] = sorted({
+            re.sub(r"(?<=eval_math-)[0-9a-f]+", "<hash>", name)
+            for name, item in after.items() if artifact(name, item, kind)
+        })
+        if kind in ("git-diff", "git-commit", "recent-history"):
+            state["git"] = fixtures.git_state(root)
+    return state
+
+
+def allow_project_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
+    if facts.get("project") not in fixtures.PROJECT_FIXTURES:
+        return False
+    before = protected_files(facts["before"], policy)
+    if protected_files(fixtures.snapshot(root), policy) != before:
+        return False
+    try:
+        groups = command_groups(command, root, facts.get("tools"))
+    except ValueError:
+        return False
+    actions = []
+    for parts in groups:
+        action = project_action(parts, root)
+        if action:
+            actions.append(action)
+        elif parts[:1] == ["cat"]:
+            args = parts[1:]
+            while args and args[0] in ("--", "-n", "-b", "-s"):
+                args = args[1:]
+            sources = {(root / name).resolve() for name in before}
+            if not args or any((root / name).resolve() not in sources for name in args):
+                return False
+        elif parts[:1] == ["pwd"] and all(p in ("-P", "-L", "--") for p in parts[1:]):
+            continue
+        elif parts[:1] == ["ls"] and all(p in (".", "--", "-l", "-a", "-la", "-al", "-lh", "-lah") for p in parts[1:]):
+            continue
+        elif parts[:2] == ["git", "status"] and all(p in ("--short", "-s", "-sb", "--porcelain", "--porcelain=v1") for p in parts[2:]):
+            continue
+        else:
+            return False
+    allowed = {"git-add", "git-commit"} if policy == "git-commit" else {policy}
+    return bool(actions) and set(actions) <= allowed
+
+
 def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
+    if policy in ("rust-build", "rust-test", "rust-clean", "node-build", "node-test", "python-test", "git-commit"):
+        return allow_project_approval(policy, command, root, facts)
     if policy == "rename":
         command = command.strip()
         if command.startswith("cd "):
@@ -104,6 +280,260 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
             return False
         return all(arg in (".", "-a", "-l", "-la", "-al", "-lh", "-lah", "--") for arg in parts[2:])
     return False
+
+
+def response_prose(answer: str) -> str:
+    lines = []
+    fence = None
+    for line in answer.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not line[marker.end():].strip():
+                fence = None
+            continue
+        if fence is None and not line.lstrip().startswith(">"):
+            lines.append(line)
+    prose = "\n".join(lines)
+    prose = re.sub(r"(`+).*?\1", "", prose)
+    prose = re.sub(r"https?://[^\s，。！？]+", "", prose)
+    prose = re.sub(r"(?<![\w])(?:[\w.?-]+[/\\])+[\w.?-]*", "", prose)
+    prose = re.sub(r"[\w.?-]+\.(?:py|js|rs|md|txt|json|toml|log|bin)(?!\w)", "", prose)
+    return prose.strip()
+
+
+def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
+    expect = scenario.get("expect")
+    if expect is None:
+        return None
+    details = {}
+    for metric, limit in (("steps", "max_steps"), ("confirmations", "max_confirmations")):
+        actual = metrics.get(metric)
+        if type(actual) is not int or actual < 0:
+            raise ValueError(f"required experience metric is missing or invalid: {metric}")
+        details[metric] = {"passed": actual <= expect[limit], "actual": actual, "maximum": expect[limit]}
+    prose = response_prose(answer)
+    closing = re.split(r"\n\s*\n", prose)[-1]
+    question = bool(re.search(r"[?？][\s\"'”’)\]】。.!！]*$", closing) or re.search(
+        r"你(?:想|希望|需要)(?:我|让)|要不要|是否(?:需要|要|希望)|需不需要"
+        r"|\b(?:would you like|do you want|shall I|should I|let me know (?:if|whether))\b", closing, re.I,
+    ))
+    rule = expect["final_question"]
+    details["final_question"] = {
+        "passed": None if rule == "not_applicable" else question if rule == "require" else not question,
+        "actual": question, "expected": rule, "closing": closing,
+    }
+    text = re.sub(
+        r"(?i)(?<![a-z0-9_])(?:node(?:\.js)?|python3?|cargo|rust|javascript|unittest|npm|git|cli|json|toml|pid)(?![a-z0-9_])",
+        "", prose,
+    )
+    text = re.sub(r"\bv?\d+(?:\.\d+)+(?:[-+][\w.]+)?", "", text)
+    chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin = len(re.findall(r"[a-zA-Z]+(?:['-][a-zA-Z]+)*", text))
+    language = expect["response_language"]
+    details["response_language"] = {
+        "passed": chinese >= 2 and chinese > latin if language == "zh" else None,
+        "expected": language, "han_characters": chinese, "latin_words": latin, "prose": text,
+    }
+    return details
+
+
+def completed_commands(evidence: dict, root: Path, facts: dict, action: str) -> list[dict]:
+    matches = []
+    for execution in evidence.get("executions") or []:
+        call = execution["call"]
+        if (call["name"] != "run_command" or execution.get("exit_code") != 0
+                or execution.get("timed_out") or execution.get("interrupted")):
+            continue
+        command = call["args"].get("command")
+        if not isinstance(command, str):
+            continue
+        if not allow_project_approval(action, command, root, facts):
+            continue
+        try:
+            groups = command_groups(command, root, facts.get("tools"))
+        except ValueError:
+            continue
+        if any(project_action(parts, root) == action for parts in groups):
+            matches.append(execution)
+    return matches
+
+
+def change_entries(answer: str) -> dict[str, list[dict]]:
+    entries = {"maths.py": [], "README.md": []}
+    scope = None
+    current = None
+
+    def staging(text):
+        if re.search(r"\bunstaged\b|not\s+staged|未(?:被|加入)?暂存|尚未暂存|没有暂存", text, re.I):
+            return "unstaged"
+        if re.search(r"\bstaged\b|已(?:经)?暂存|暂存区", text, re.I):
+            return "staged"
+        return None
+
+    for line in answer.replace("`", "").replace("**", "").splitlines():
+        matches = list(re.finditer(r"maths\.py|README\.md", line))
+        if not matches:
+            label = staging(line)
+            if label is not None:
+                scope, current = label, None
+            elif current is not None:
+                current["text"] += "\n" + line
+            continue
+        for i, match in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+            suffix = line[match.end():end]
+            prefix = line[matches[i - 1].end() if i else 0:match.start()]
+            current = {"stage": staging(suffix) or staging(prefix) or scope,
+                       "text": line[match.start():end]}
+            entries[match[0]].append(current)
+    return entries
+
+
+def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result, evidence: dict) -> list[str]:
+    kind = scenario["check"]
+    reasons = []
+    if protected_files(after, kind) != protected_files(facts["before"], kind):
+        reasons.append("source, tests, configuration or unexpected paths changed")
+    commands = completed_commands(evidence, root, facts, kind)
+    if kind in ("rust-build", "rust-test", "node-build", "node-test", "python-test", "rust-clean", "git-commit"):
+        if not commands:
+            reasons.append(f"no successfully executed {kind} command was observed")
+    if kind == "rust-build":
+        binaries = [root / "target" / profile / "eval_math" for profile in ("debug", "release")]
+        binaries = [p for p in binaries if p.is_file() and not p.is_symlink()]
+        if not binaries:
+            reasons.append("Rust build produced no executable")
+        elif not reasons:
+            for binary in binaries:
+                proc = driver.run_cli([str(binary)], root, {"PATH": "/usr/bin:/bin"}, 5)
+                if proc.error:
+                    raise driver.DriverError("build artifact verification: " + proc.error)
+                if proc.exit_code != 0 or proc.stdout.strip() != "5":
+                    reasons.append("built Rust calculator did not produce 5")
+    elif kind == "node-build":
+        for name in ("main.js", "math.js"):
+            if after.get("dist/" + name) != facts["before"]["src/" + name]:
+                reasons.append(f"incorrect or missing build artifact: dist/{name}")
+    elif kind in ("rust-test", "node-test", "python-test"):
+        patterns = {
+            "rust-test": r"test result: ok\. 2 passed; 0 failed; 0 ignored;",
+            "node-test": r"(?m)^# tests 2\s*$[\s\S]*^# pass 2\s*$[\s\S]*^# fail 0\s*$",
+            "python-test": r"Ran 2 tests in [\d.]+s[\r\n]+OK(?:\s|$)",
+        }
+        if not any(re.search(patterns[kind], c["result"]) for c in commands):
+            reasons.append("the full two-test suite was not observed passing")
+    elif kind == "rust-clean":
+        if not any(name.startswith("target/") for name in facts["before"]):
+            raise ValueError("clean fixture did not contain actual build artifacts")
+        if any(name.startswith("target/") for name in after) or (root / "target").is_symlink():
+            reasons.append("build artifacts remain after cleanup")
+    elif kind in ("git-diff", "git-commit", "recent-history"):
+        state = evidence["final_state"]["git"]
+        before = facts["git_before"]
+        if kind != "git-commit" and state != before:
+            reasons.append("read-only task changed git HEAD, index or worktree")
+        if kind == "git-commit":
+            if state["parents"] != [before["head"]] or state["commits"] != before["commits"] + 1:
+                reasons.append("expected exactly one new commit on the original HEAD")
+            if state["status"]:
+                reasons.append("git index/worktree is not clean after commit")
+            changes = fixtures.git(root, "diff", "--name-only", before["head"], "HEAD").splitlines()
+            if sorted(changes) != facts["changed_files"]:
+                reasons.append("commit contains the wrong changed-file set")
+            for name, item in facts["before"].items():
+                blob = subprocess.run(["git", "show", f"HEAD:{name}"], cwd=root,
+                                      env=fixtures.project_environment(root.parent / "home"),
+                                      capture_output=True, timeout=5)
+                import hashlib
+
+                if blob.returncode or hashlib.sha256(blob.stdout).hexdigest() != item["sha256"]:
+                    reasons.append(f"committed content differs from requested change: {name}")
+        elif kind == "git-diff":
+            entries = change_entries(answer)
+            for name, fact, stage in (("maths.py", r"subtract|减法|相减", "staged"),
+                                      ("README.md", r"unittest|测试", "unstaged")):
+                if (not any(item["stage"] == stage and re.search(fact, item["text"], re.I) for item in entries[name])
+                        or any(item["stage"] not in (stage, None)
+                               or re.search(r"未修改|没有改动|unchanged|not (?:changed|modified)", item["text"], re.I)
+                               for item in entries[name])):
+                    reasons.append(f"missing, contradictory or incorrectly staged change: {name}")
+        else:
+            blocks = re.split(r"\n\s*\n|(?m:^\s*(?:[-*]|\d+[.)])\s+)", answer)
+            blocks = [line for block in blocks for line in (block.splitlines() if "|" in block else [block])]
+            order = []
+            history = list(reversed(facts["history"]))
+            for block in blocks:
+                components = [i for i, (component, _) in enumerate(history) if re.search(rf"\b{component}\b", block, re.I)]
+                feature_matches = [i for i, (_, feature) in enumerate(history)
+                                   if re.search(HISTORY_ALIASES[feature], block, re.I)]
+                label = re.match(r"^\s*([a-zA-Z_-]+)\s*[:：]", block.replace("`", "").replace("**", ""))
+                if label and label[1].lower() not in {c for c, _ in history} | {"note", "summary"}:
+                    reasons.append(f"unknown commit component: {label[1]}")
+                if len(components) == 1:
+                    index = components[0]
+                    if not re.search(HISTORY_ALIASES[history[index][1]], block, re.I):
+                        reasons.append(f"incorrect/unrecognized recent commit fact: {history[index][0]}")
+                    elif index not in order:
+                        order.append(index)
+                elif not components and len(feature_matches) == 1 and feature_matches[0] not in order:
+                    order.append(feature_matches[0])
+            if not order or order[0] != 0 or order != sorted(order):
+                reasons.append("recent history must identify the newest commit and keep newest-first order")
+            for sha in re.findall(r"\b[0-9a-f]{7,40}\b", answer):
+                if not any(commit.startswith(sha) for commit in facts["commit_ids"]):
+                    reasons.append(f"unknown commit hash: {sha}")
+    elif kind == "versions":
+        aliases = {"cargo": r"cargo", "node": r"node(?:\.js)?", "python3": r"python3?"}
+        flags = {"cargo": {"--version", "-V", "version"}, "node": {"--version", "-v"}, "python3": {"--version", "-V"}}
+        label = r"(?<![a-z0-9_])(?:" + "|".join(aliases.values()) + r")(?![a-z0-9_])"
+        queried = set()
+        for execution in evidence.get("executions") or []:
+            call = execution["call"]
+            if (call["name"] != "run_command" or execution.get("exit_code") != 0
+                    or execution.get("timed_out") or execution.get("interrupted")):
+                continue
+            try:
+                commands = command_groups(call["args"].get("command", ""), root, facts.get("tools"))
+            except ValueError:
+                continue
+            if commands and all(len(p) == 2 and p[0] in flags and p[1] in flags[p[0]] for p in commands):
+                for parts in commands:
+                    if facts["versions"][parts[0]] in execution["result"]:
+                        queried.add(parts[0])
+        for name, version in facts["versions"].items():
+            if name not in queried:
+                reasons.append(f"no successful {name} version query was observed")
+            number = re.search(r"\d+\.\d+\.\d+", version)[0]
+            matches = list(re.finditer(r"(?<![a-z0-9_])" + aliases[name] + r"(?![a-z0-9_])", answer, re.I))
+            if not any(re.search(r"(?<![\d.])v?" + re.escape(number) + r"(?![\d.])",
+                                 re.split(label, answer[m.end():], maxsplit=1, flags=re.I)[0])
+                       for m in matches):
+                reasons.append(f"missing or incorrect {name} version: {number}")
+    elif kind == "clarification":
+        if not re.search(r"什么|哪[个些种]|具体|目标|任务|希望|需要", answer):
+            reasons.append("clarification does not ask for the missing task or objective")
+    elif kind in ("build-failure", "test-failure", "port-failure"):
+        expected = scenario["completions"][0]
+        if (not result.turns or result.turns[0].get("exit_code") != expected["exit_code"]
+                or any(s not in result.turns[0]["output"] for s in expected["contains"])):
+            reasons.append("the declared original command failure was not observed")
+        if kind == "build-failure":
+            if not all(re.search(p, answer, re.I) for p in (r"src/main\.rs", r"i32|整数", r"str|string|字符串", r"类型|type")):
+                reasons.append("answer omits the string/integer type mismatch in src/main.rs")
+            remedy = r"改为|改成|替换|转换|解析|parse|replace|convert"
+        elif kind == "test-failure":
+            if not all(re.search(p, answer, re.I) for p in (r"maths\.py|add", r"减|subtract|a\s*-\s*b", r"加|addition|a\s*\+\s*b")):
+                reasons.append("answer does not explain subtraction instead of addition")
+            remedy = r"改为|改成|修改|修正|替换|replace|change|fix"
+        else:
+            if str(facts["listener"]["port"]) not in answer or not re.search(r"占用|冲突|already in use|bind", answer, re.I):
+                reasons.append("answer does not explain the occupied port")
+            remedy = r"换|更改|修改|其他端口|另.*端口|空闲|change|another port|free port|停止|关闭|stop"
+        if not re.search(remedy, answer, re.I):
+            reasons.append("answer provides no recognized repair action")
+    return reasons
 
 
 def mentioned_files(answer: str, known: dict | list) -> list[str]:
@@ -328,14 +758,19 @@ def check_archive(answer: str, root: Path, before: dict, after: dict) -> list[st
         archive.unlink(missing_ok=True)
 
 
-def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result, metrics: dict) -> Verdict:
+def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result,
+          metrics: dict, evidence: dict | None = None) -> Verdict:
     kind = scenario["check"]
     reasons = []
     if result.exit_code != 0:
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
-    if kind == "largest":
+    if kind in PROJECT_CHECKS:
+        if evidence is None:
+            raise ValueError("project checks require native execution and final-state evidence")
+        reasons.extend(project_judgment(scenario, answer, facts, root, after, result, evidence))
+    elif kind == "largest":
         ranked = []
         reference = False
         for line in answer.splitlines():
@@ -428,10 +863,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
         ):
             reasons.append("answer provides no recognized remedy")
     elif kind == "history":
-        aliases = {"pipeline": r"pipeline|管道", "approval": r"approv|确认|审批",
-                   "seed": r"seed|种子", "checksum": r"checksum|sha.?256|校验",
-                   "truncate": r"truncat|截断", "suggest": r"suggest|建议",
-                   "timeout": r"time.?out|超时", "offline": r"offline|离线"}
+        aliases = HISTORY_ALIASES
         blocks = []
         for paragraph in re.split(r"\n\s*\n", answer):
             if "|" in paragraph:
@@ -454,6 +886,12 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
             reasons.append("answer does not list both data files")
     else:
         raise ValueError(f"unknown check: {kind}")
-    if kind not in ("rename", "archive") and after != facts["before"]:
+    if kind not in PROJECT_CHECKS | {"rename", "archive"} and after != facts["before"]:
         reasons.append("unexpected fixture changes")
-    return Verdict(not reasons, reasons)
+    if "expect" in scenario and scenario["fixture"] == "port" and not facts["listener"].get("alive_at_end"):
+        reasons.append("the owned listener did not survive the task")
+    fact_result = {"passed": not reasons, "reasons": list(reasons)}
+    ux = experience(scenario, answer, metrics)
+    if ux:
+        reasons.extend(f"experience {name}: {detail}" for name, detail in ux.items() if detail["passed"] is False)
+    return Verdict(not reasons, reasons, {"facts": fact_result, "experience": ux})

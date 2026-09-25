@@ -25,7 +25,9 @@ class ContractTests(unittest.TestCase):
 
     def test_default_suite_and_seeds(self):
         suite = run.load_suite(run.HERE / "scenarios.json")
-        self.assertEqual(len(suite["scenarios"]), 10)
+        self.assertEqual(len(suite["scenarios"]), 25)
+        self.assertEqual(sum(s["group"] == "mvp" for s in suite["scenarios"]), 10)
+        self.assertEqual(sum(s["group"] == "expanded" for s in suite["scenarios"]), 15)
         self.assertEqual(suite["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(run.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
         for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):

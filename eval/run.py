@@ -20,11 +20,24 @@ from . import checks, driver, fixtures, report
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-CHECKS = {"largest", "port", "lines", "rename", "python", "typos", "failure", "history", "archive", "cwd"}
+LEGACY_CHECKS = {"largest", "port", "lines", "rename", "python", "typos", "failure", "history", "archive", "cwd"}
 CHECK_FIXTURES = {
     "largest": "big", "port": "port", "lines": "project", "rename": "rename",
     "python": "project", "typos": "typo", "failure": "failure", "history": "history",
     "archive": "logs", "cwd": "big",
+    "rust-build": "rust", "rust-test": "rust", "rust-clean": "rust-built",
+    "node-build": "node", "node-test": "node", "python-test": "python",
+    "git-diff": "dirty-git", "git-commit": "dirty-git", "recent-history": "history",
+    "versions": "python", "clarification": "python",
+    "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
+}
+CHECKS = set(CHECK_FIXTURES)
+NATIVE_CHECKS = CHECKS - LEGACY_CHECKS
+APPROVAL_CHECKS = {
+    "rename": {"rename"}, "cwd": {"cwd"},
+    "rust-build": {"rust-build", "build-failure"}, "rust-test": {"rust-test"},
+    "rust-clean": {"rust-clean"}, "node-build": {"node-build"}, "node-test": {"node-test"},
+    "python-test": {"python-test", "test-failure"}, "git-commit": {"git-commit"},
 }
 
 
@@ -38,7 +51,7 @@ def seeds(value: list) -> list[int]:
 
 def load_suite(path: Path) -> dict:
     suite = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(suite, dict) or suite.get("schema_version") != 1:
+    if not isinstance(suite, dict) or type(suite.get("schema_version")) is not int or suite["schema_version"] not in (1, 2):
         raise ValueError("unsupported scenario schema")
     if set(suite) - {"schema_version", "seeds", "timeout_s", "scenarios"}:
         raise ValueError("unknown suite fields")
@@ -53,20 +66,27 @@ def load_suite(path: Path) -> dict:
     for scenario in scenarios:
         if not isinstance(scenario, dict):
             raise ValueError("scenario must be an object")
-        if set(scenario) - {"id", "title", "mode", "fixture", "inputs", "input",
-                            "corrections", "stdin_command", "approval", "check"}:
+        fields = {"id", "title", "mode", "fixture", "inputs", "input",
+                  "corrections", "stdin_command", "approval", "check"}
+        if suite["schema_version"] == 2:
+            fields |= {"group", "expect", "completions"}
+        if set(scenario) - fields:
             raise ValueError("unknown scenario fields")
         sid = scenario.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid) or sid in ids:
             raise ValueError(f"invalid/duplicate scenario id: {sid}")
         ids.add(sid)
-        if scenario.get("fixture") not in fixtures.FIXTURES or scenario.get("check") not in CHECKS:
+        if (not isinstance(scenario.get("fixture"), str) or not isinstance(scenario.get("check"), str)
+                or scenario["fixture"] not in fixtures.FIXTURES or scenario["check"] not in CHECKS):
             raise ValueError(f"unknown fixture or check: {sid}")
+        if suite["schema_version"] == 1 and scenario["check"] not in LEGACY_CHECKS:
+            raise ValueError(f"new checks require scenario schema v2: {sid}")
         if scenario["fixture"] != CHECK_FIXTURES[scenario["check"]]:
             raise ValueError(f"fixture does not supply the check's required facts: {sid}")
         if not isinstance(scenario.get("title"), str) or not scenario["title"].strip():
             raise ValueError(f"missing scenario title: {sid}")
-        if scenario.get("approval") not in ("deny", "rename", "cwd"):
+        policy = scenario.get("approval")
+        if not isinstance(policy, str) or (policy != "deny" and scenario["check"] not in APPROVAL_CHECKS.get(policy, set())):
             raise ValueError(f"unknown approval policy: {sid}")
         if scenario.get("mode") == "repl":
             inputs = scenario.get("inputs")
@@ -80,7 +100,33 @@ def load_suite(path: Path) -> dict:
                 raise ValueError(f"invalid corrections: {sid}")
             if (scenario["check"] == "typos") != (corrections is not None):
                 raise ValueError(f"only local correction cases must specify corrections: {sid}")
+            if suite["schema_version"] == 2:
+                completions = scenario.get("completions")
+                if not isinstance(completions, list) or len(completions) != len(inputs):
+                    raise ValueError(f"each REPL input requires a completion contract: {sid}")
+                for completion in completions:
+                    if not isinstance(completion, dict):
+                        raise ValueError(f"invalid completion contract: {sid}")
+                    kind = completion.get("kind")
+                    if kind not in ("agent", "shell", "correction"):
+                        raise ValueError(f"unknown input completion: {sid}")
+                    if kind == "shell":
+                        code = completion.get("exit_code")
+                        contains = completion.get("contains")
+                        if (set(completion) != {"kind", "exit_code", "contains"}
+                                or type(code) is not int or not 1 <= code <= 255
+                                or not isinstance(contains, list) or not contains
+                                or not all(isinstance(s, str) and s and "\n" not in s for s in contains)):
+                            raise ValueError(f"invalid failed-command completion: {sid}")
+                    elif set(completion) != {"kind"}:
+                        raise ValueError(f"unknown completion fields: {sid}")
+                    if (kind == "correction") != (corrections is not None):
+                        raise ValueError(f"correction completion does not match inputs: {sid}")
+                if corrections is None and completions[-1]["kind"] != "agent":
+                    raise ValueError(f"the final REPL input must ask the agent: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):
+            if any(key in scenario for key in ("inputs", "corrections", "completions")):
+                raise ValueError(f"REPL fields in a CLI scenario: {sid}")
             inputs = [scenario.get("input")]
             command = scenario.get("stdin_command")
             if command is not None and command != ["git", "log", "--stat", "-8"]:
@@ -89,22 +135,80 @@ def load_suite(path: Path) -> dict:
                 raise ValueError(f"stdin attachments require agent mode: {sid}")
         else:
             raise ValueError(f"unknown mode: {sid}")
-        if scenario["check"] in ("typos", "failure", "cwd") and scenario["mode"] != "repl":
+        if scenario["check"] in NATIVE_CHECKS | {"typos", "failure", "cwd"} and scenario["mode"] != "repl":
             raise ValueError(f"this check requires a shared interactive session: {sid}")
         if not all(isinstance(s, str) and s and "\0" not in s and "\r" not in s and "\n" not in s for s in inputs):
             raise ValueError(f"inputs must be nonempty single lines: {sid}")
+        if suite["schema_version"] == 2:
+            if scenario.get("group") not in ("mvp", "expanded"):
+                raise ValueError(f"invalid scenario group: {sid}")
+            expect = scenario.get("expect")
+            if not isinstance(expect, dict) or set(expect) != {
+                "max_steps", "max_confirmations", "response_language", "final_question",
+            }:
+                raise ValueError(f"all experience expectations must be declared: {sid}")
+            if any(type(expect[k]) is not int or expect[k] < 0 for k in ("max_steps", "max_confirmations")):
+                raise ValueError(f"experience limits must be nonnegative integers: {sid}")
+            nonprose = scenario["check"] == "typos" or scenario["mode"] == "suggest"
+            if (expect["response_language"] not in ("zh", "any", "not_applicable")
+                    or (expect["response_language"] == "not_applicable") != nonprose):
+                raise ValueError(f"invalid response language expectation: {sid}")
+            question = "not_applicable" if nonprose else "require" if scenario["check"] == "clarification" else "forbid"
+            if expect["final_question"] != question:
+                raise ValueError(f"invalid final-question expectation: {sid}")
+            if (expect["max_steps"] == 0) != (scenario["check"] == "typos"):
+                raise ValueError(f"only local correction has a zero-step budget: {sid}")
     return suite
 
 
-def environment(home: Path, threads: int, trace: Path | None) -> dict[str, str]:
-    env = {
-        "PATH": "/usr/bin:/bin", "HOME": str(home), "NOSH_HOME": str(home / "nosh"),
+def required_tools(scenarios: list[dict]) -> set[str]:
+    required = {"git", "bash", "python3", "tar", "ss"}
+    if any(s["fixture"].startswith("rust") for s in scenarios):
+        required |= {"cargo", "rustc", "cc"}
+    if any(s["fixture"] == "node" for s in scenarios):
+        required |= {"node", "npm"}
+    if any(s["check"] == "versions" for s in scenarios):
+        required |= {"cargo", "node"}
+    return required
+
+
+def discover_tools(scenarios: list[dict]) -> dict:
+    tools = {}
+    inherited_path = os.environ.get("PATH", "")
+    env = dict(os.environ, LANG="C.UTF-8", LC_ALL="C.UTF-8", RUSTUP_AUTO_INSTALL="0")
+    for name in sorted(required_tools(scenarios)):
+        search = ("/usr/bin:/bin:" + inherited_path if name in {"git", "bash", "python3", "tar", "ss"}
+                  else inherited_path + ":/usr/bin:/bin")
+        executable = shutil.which(name, path=search)
+        if not executable:
+            raise ValueError(f"missing required executable: {name}; prepare the toolchain before evaluation")
+        path = Path(executable).resolve()
+        if name in ("cargo", "rustc") and path.name == "rustup":
+            resolved = subprocess.check_output([str(path), "which", name], env=env, text=True, timeout=10).strip()
+            path = Path(resolved).resolve(strict=True)
+        proc = subprocess.run([str(path), "-V" if name == "ss" else "--version"],
+                              env=env, check=True, capture_output=True, text=True, timeout=10)
+        version = (proc.stdout or proc.stderr).strip()
+        if not version:
+            raise ValueError(f"{name} returned no version")
+        if name == "node":
+            major = re.match(r"v(\d+)\.", version)
+            if not major or int(major[1]) < 22:
+                raise ValueError("Node >= 22 is required for the dependency-free node:test fixture")
+        tools[name] = {"path": str(path), "version": version.splitlines()[0], "sha256": fixtures.file_hash(path)}
+    return tools
+
+
+def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None) -> dict[str, str]:
+    env = fixtures.project_environment(home, tools)
+    env.update({
+        "NOSH_HOME": str(home / "nosh"),
         "USER": "eval", "LOGNAME": "eval", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC",
         "TERM": "xterm-256color", "NO_COLOR": "1", "NOSH_STATS": "1",
         "NOSH_OFFLINE": "1", "HF_HUB_OFFLINE": "1", "PYTHONDONTWRITEBYTECODE": "1",
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         "CANDLE_NUM_THREADS": str(threads), "RAYON_NUM_THREADS": "1",
-    }
+    })
     config = home / "nosh"
     config.mkdir(mode=0o700)
     (config / "config.toml").write_text(
@@ -135,6 +239,47 @@ def legacy_answer(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def execution_evidence(events: list[dict]) -> list[dict]:
+    executions = []
+    pending: dict[tuple, list[dict]] = {}
+    for event in events:
+        key = (event.get("engine"), event.get("sid"))
+        if any(value is not None and type(value) is not int for value in key):
+            raise ValueError("invalid engine/session identity in trace")
+        if event["ev"] == "step_start":
+            if not isinstance(event.get("messages"), list):
+                raise ValueError("trace step is missing its messages")
+            waiting = pending.get(key, [])
+            for message in event["messages"]:
+                if (not isinstance(message, dict) or not isinstance(message.get("role"), str)
+                        or not isinstance(message.get("text"), str)):
+                    raise ValueError("invalid observed engine message")
+                if message["role"] != "tool" or not waiting:
+                    continue
+                execution = waiting.pop(0)
+                text = message["text"]
+                header = re.match(r"^\[exit_code=(-?\d+) duration=[\d.]+s truncated=(yes|no)([^\]]*)\]\n", text)
+                execution.update(result=text, state="returned")
+                if execution["call"]["name"] == "run_command":
+                    execution["state"] = "executed" if header else "not_executed"
+                    if header:
+                        execution.update(exit_code=int(header[1]), truncated=header[2] == "yes",
+                                         timed_out="timed_out=yes" in header[3],
+                                         interrupted="interrupted=yes" in header[3])
+        elif event["ev"] == "step_end":
+            if not isinstance(event.get("tool_calls"), list):
+                raise ValueError("trace step is missing its tool calls")
+            waiting = []
+            for call in event["tool_calls"]:
+                if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
+                    raise ValueError("invalid observed tool call")
+                execution = {"call": call, "result": None, "state": "unobserved", "exit_code": None}
+                executions.append(execution)
+                waiting.append(execution)
+            pending[key] = waiting
+    return executions
+
+
 def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, seed: int) -> dict:
     if re.search(r"(?m)^nosh: [^\n]*config\.toml:", driver.plain(result.stderr + result.transcript)):
         raise ValueError("nosh rejected part of the isolated configuration; see stderr/transcript")
@@ -146,10 +291,10 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     answer = result.stdout.strip() if scenario["mode"] == "suggest" else legacy_answer(result.transcript)
     notes = []
     text = driver.plain(result.transcript)
-    summary = driver.SUMMARY.search(text)
-    if summary:
-        metrics.update(steps=int(summary[2]), task_s=float(summary[3]),
-                       task_status="completed" if summary[1] in ("✔", "+") else "incomplete")
+    summaries = list(driver.SUMMARY.finditer(text))
+    if summaries:
+        metrics.update(steps=sum(int(s[2]) for s in summaries), task_s=sum(float(s[3]) for s in summaries),
+                       task_status="completed" if all(s[1] in ("✔", "+") for s in summaries) else "incomplete")
         ttft = re.search(r"(?m)^[┃|] stats: .*?ttft ([\d.]+)s", text)
         if ttft:
             metrics["ttft_s"] = float(ttft[1])
@@ -176,15 +321,19 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         notes.append("TTFT is not applicable: local spelling correction.")
     inputs = tools = sampling = None
     generated = []
+    executions = None
     if not legacy and scenario["check"] != "typos":
         if not trace.is_file():
             raise ValueError("native engine trace is missing; use --legacy explicitly for an older binary")
         events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
-        if not events or any(not isinstance(e, dict) or e.get("schema_version") != 1 for e in events):
+        if not events or any(not isinstance(e, dict) or type(e.get("schema_version")) is not int
+                             or e["schema_version"] != 1 or not isinstance(e.get("ev"), str) for e in events):
             raise ValueError("invalid engine trace schema")
         if "evaluation trace:" in result.stderr or "evaluation trace:" in result.transcript:
             raise ValueError("nosh reported an evaluation trace failure")
-        errors = [e["error"] for e in events if e.get("ev") == "step_error"]
+        errors = [e.get("error") for e in events if e["ev"] == "step_error"]
+        if any(not isinstance(error, str) for error in errors):
+            raise ValueError("invalid engine error observation")
         if errors:
             raise RuntimeError("model engine failed: " + "; ".join(errors))
         starts = [e for e in events if e["ev"] == "step_start"]
@@ -192,8 +341,22 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         opens = [e for e in events if e["ev"] == "open"]
         if not starts or len(starts) != len(ends) or not opens:
             raise ValueError("incomplete engine observations; no successful fallback")
-        if any(e["sampling"]["seed"] != seed for e in opens):
+        if any(not isinstance(e.get("sampling"), dict) or type(e["sampling"].get("seed")) is not int
+               or e["sampling"]["seed"] != seed for e in opens):
             raise ValueError("observed sampling seed differs from the requested seed")
+        for event in ends:
+            usage = event.get("usage")
+            if (not isinstance(event.get("text"), str) or not isinstance(usage, dict)
+                    or type(usage.get("ttft_s")) not in (int, float)
+                    or not math.isfinite(usage["ttft_s"]) or usage["ttft_s"] < 0):
+                raise ValueError("invalid generated text or step usage in trace")
+        for event in events:
+            if event["ev"] == "engine":
+                info = event.get("info")
+                if (not isinstance(info, dict) or type(info.get("load_s")) not in (int, float)
+                        or not math.isfinite(info["load_s"]) or info["load_s"] < 0):
+                    raise ValueError("invalid engine load observation")
+        executions = execution_evidence(events)
         metrics["steps"] = len(starts)
         metrics["ttft_s"] = ends[0]["usage"]["ttft_s"]
         metrics["load_s"] = sum(e["info"]["load_s"] for e in events if e["ev"] == "engine")
@@ -216,7 +379,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     if scenario["check"] != "typos" and metrics["steps"] is None and not result.error:
         raise ValueError("task completion/step measurement is missing")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
-            "sampling": sampling, "generated_answers": generated, "metric_notes": notes}
+            "executions": executions, "sampling": sampling, "generated_answers": generated, "metric_notes": notes}
 
 
 def model_files(path: Path) -> tuple[Path, Path]:
@@ -240,7 +403,7 @@ def machine_info() -> dict:
             "cpu": model, "logical_cpus": os.cpu_count()}
 
 
-def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path) -> dict:
+def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, toolchain: dict) -> dict:
     binary_hash = fixtures.file_hash(binary)
     build = {"source_revision": None, "source_clean": None, "binary_sha256": binary_hash,
              "provenance": "unverified external binary"}
@@ -250,11 +413,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path) ->
                 or not re.fullmatch(r"[0-9a-f]{40}", build.get("source_revision", ""))):
             raise ValueError("build info does not identify this exact binary and source revision")
         build["provenance"] = "recorded build; supplied binary hash verified"
-    tools = {"python": platform.python_version()}
-    for name, arg in (("git", "--version"), ("bash", "--version"), ("tar", "--version"), ("ss", "-V")):
-        proc = subprocess.run([name, arg], env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
-                              check=True, capture_output=True, text=True, timeout=5)
-        tools[name] = (proc.stdout or proc.stderr).splitlines()[0]
+    tools = {"python": platform.python_version(), **{name: info["version"] for name, info in toolchain.items()}}
     return {
         "run_id": args.label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"),
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -263,14 +422,16 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path) ->
         "model": {"weights": weights.name, "weights_sha256": fixtures.file_hash(weights),
                   "tokenizer_sha256": fixtures.file_hash(tokenizer)},
         "suite_sha256": fixtures.digest(suite),
+        "suite_schema_version": suite["schema_version"],
         "harness_sha256": fixtures.digest({p.name: fixtures.file_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),
         "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",
-                     "path": "/usr/bin:/bin", "tty_size": [40, 160], "process_per_trial": True},
-        "machine": machine_info(), "tools": tools,
+                     "path": "<trial-home>/bin:/usr/bin:/bin", "tty_size": [40, 160], "process_per_trial": True,
+                     "cargo_offline": True, "cargo_incremental": False, "cargo_jobs": 1, "npm_offline": True},
+        "machine": machine_info(), "tools": tools, "toolchain": toolchain,
         "scenarios": suite["scenarios"], "seeds": args.seeds or suite["seeds"], "repeat": args.repeat,
     }
 
@@ -281,6 +442,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         "scenario_id": scenario["id"], "seed": seed, "repeat": repeat, "status": "error",
         "metrics": {key: None for key in report.METRICS},
         "answer": "", "reasons": [], "inputs": None, "tool_calls": None, "final_state": None,
+        "grading": None, "executions": None,
     }
     result = None
     trace = None
@@ -289,7 +451,14 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
     try:
         root, home, facts = workspace.prepare(scenario)
         trace = home.parent / "engine.jsonl"
-        env = environment(home, args.threads, None if args.legacy else trace)
+        env = environment(home, args.threads, None if args.legacy else trace, workspace.tools)
+        if scenario["check"] in NATIVE_CHECKS:
+            facts["tools"] = workspace.tools
+        if scenario["check"] == "versions":
+            facts["versions"] = {name: meta["tools"][name] for name in ("cargo", "node", "python3")}
+        if scenario["check"] == "recent-history":
+            facts["git_before"] = fixtures.git_state(root)
+            facts["commit_ids"] = fixtures.git(root, "log", "--format=%H").splitlines()
         argv = [str(binary), "--offline", "--no-download", "--norc", "--seed", str(seed), "--model-path", str(weights)]
         timeout = meta["settings"]["timeout_s"]
         fixture = fixtures.listener(root) if scenario["fixture"] == "port" else contextlib.nullcontext(None)
@@ -307,20 +476,29 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                     data = subprocess.check_output(scenario["stdin_command"], cwd=root, env=env, timeout=5)
                 flags = ["-a", "--json"] if scenario["mode"] == "agent" else ["-s"]
                 result = driver.run_cli(argv + flags + [scenario["input"]], root, env, timeout, data)
-        after = fixtures.snapshot(root)
-        row.update(fixture_sha256=fixtures.digest({k: v for k, v in facts.items() if k != "listener"}),
-                   facts=facts, final_state={"files": after, "cwd": result.pwd},
-                   approvals=result.approvals, turns=result.turns, exit_code=result.exit_code)
+        row.update(approvals=result.approvals, turns=result.turns, exit_code=result.exit_code, facts=facts)
         row["metrics"].update(total_s=result.total_s, peak_rss_mib=result.peak_rss_mib,
                               confirmations=len(result.approvals))
+        after = fixtures.snapshot(root)
+        row.update(fixture_sha256=fixtures.digest({k: v for k, v in facts.items() if k != "listener"}),
+                   file_snapshot=after, final_state=checks.fixture_state(scenario, facts, root, after, result))
         if result.error:
             raise driver.DriverError(result.error)
+        if result.failure:
+            if not args.legacy and trace.is_file():
+                observed = observe(result, scenario, trace, False, seed)
+                row.update(observed)
+                if observed["metrics"]["task_status"] is None:
+                    raise driver.DriverError("an agent task ran but its completion marker was not observed")
+            row.update(status="fail", reasons=[result.failure],
+                       grading={"facts": {"passed": False, "reasons": [result.failure]}, "experience": None})
+            return row
         observed = observe(result, scenario, trace, args.legacy, seed)
         row.update(observed)
-        verdict = checks.judge(scenario, row["answer"], facts, root, after, result, row["metrics"])
+        verdict = checks.judge(scenario, row["answer"], facts, root, after, result, row["metrics"], row)
         if not verdict.passed and any(not a["allowed"] for a in result.approvals):
             verdict.reasons.append("The declared approval policy denied at least one command; see approval evidence.")
-        row.update(status="pass" if verdict.passed else "fail", reasons=verdict.reasons)
+        row.update(status="pass" if verdict.passed else "fail", reasons=verdict.reasons, grading=verdict.details)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         row["reasons"].append(f"{type(exc).__name__}: {exc}")
     finally:
@@ -375,9 +553,9 @@ def main(argv=None) -> int:
             if unknown:
                 raise ValueError(f"unknown scenarios: {sorted(unknown)}")
             suite = dict(suite, scenarios=[s for s in suite["scenarios"] if s["id"] in chosen])
-        for tool in ("git", "bash", "python3", "tar", "ss"):
-            if not shutil.which(tool, path="/usr/bin:/bin"):
-                raise ValueError(f"missing required executable: {tool}")
+        if args.legacy and any(s["check"] in NATIVE_CHECKS for s in suite["scenarios"]):
+            raise ValueError("selected scenarios require native execution evidence; --legacy is not supported")
+        toolchain = discover_tools(suite["scenarios"])
         binary = args.binary.expanduser().resolve(strict=True)
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("nosh binary is not executable; build it first with cargo build --release --locked")
@@ -385,10 +563,10 @@ def main(argv=None) -> int:
         previous = json.loads(args.compare.read_text(encoding="utf-8")) if args.compare else None
         if previous is not None:
             report.validate(previous)
-        meta = metadata(args, suite, binary, weights, tokenizer)
+        meta = metadata(args, suite, binary, weights, tokenizer, toolchain)
         output = (args.output or HERE / "results" / meta["run_id"]).absolute()
         work = (args.work_dir or Path(tempfile.gettempdir()) / f"nosh-eval-{os.getuid()}").absolute()
-        for resource in (binary, weights, tokenizer, output):
+        for resource in (binary, weights, tokenizer, output, *(Path(t["path"]) for t in toolchain.values())):
             if resource.resolve().is_relative_to(work.resolve()):
                 raise ValueError("binary, models and reports must be outside the disposable workspace")
         for parent in (work, *work.parents):
@@ -397,7 +575,7 @@ def main(argv=None) -> int:
         meta["settings"]["work_dir"] = str(work)
         output.mkdir(mode=0o700, parents=True, exist_ok=False)
         data = {"schema_version": report.SCHEMA_VERSION, "metadata": meta, "trials": []}
-        with fixtures.Workspace(work) as workspace:
+        with fixtures.Workspace(work, toolchain) as workspace:
             report.save(data, output, previous)
             for repeat in range(args.repeat):
                 for scenario in suite["scenarios"]:

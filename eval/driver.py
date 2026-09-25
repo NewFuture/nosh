@@ -21,6 +21,7 @@ OUTPUT_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78=>]")
 SUMMARY = re.compile(r"(?m)^[┃|] ([✔⚠✗+!x]) .*?(\d+) steps [·|] ([\d.]+) s")
 STATS = re.compile(r"(?m)^[┃|] stats:")
+SHELL_EXIT = re.compile(r"(?m)^\s*[✗x] exit (\d+) [·|] ")
 
 
 def plain(text: str) -> str:
@@ -150,6 +151,19 @@ class Result:
     turns: list[dict] = field(default_factory=list)
     pwd: str | None = None
     error: str | None = None
+    failure: str | None = None
+
+
+def input_contracts(scenario: dict) -> list[dict]:
+    if "completions" in scenario:
+        return scenario["completions"]
+    if scenario.get("corrections"):
+        return [{"kind": "correction"} for _ in scenario["inputs"]]
+    return [
+        {"kind": "shell", "exit_code": 1, "contains": ["FileNotFoundError"]}
+        if scenario["check"] == "failure" and i == 0 else {"kind": "agent"}
+        for i, _ in enumerate(scenario["inputs"])
+    ]
 
 
 def owned_pids(token: str) -> list[int]:
@@ -349,6 +363,10 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     def prompt():
         return child.screen.line().startswith(PROMPT.rstrip())
 
+    def idle_prompt():
+        line = child.screen.line()
+        return line.startswith(PROMPT.rstrip()) and line[len(PROMPT.rstrip()):].strip() in ("", "confirm")
+
     def approvals():
         nonlocal approval_offset, denial_pending
         text = plain(result.transcript)
@@ -384,7 +402,9 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
 
     try:
         child.until(prompt, deadline, "initial prompt")
+        contracts = input_contracts(scenario)
         for i, line in enumerate(scenario["inputs"]):
+            contract = contracts[i]
             start = len(result.transcript)
             child.send(b"\x15" + line.encode() + b"\r")
             correction = (scenario.get("corrections") or [])[i] if scenario.get("corrections") else None
@@ -393,14 +413,26 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                 text = plain(result.transcript[start:])
                 if correction:
                     return "press Enter to run" in text and child.screen.line().startswith(PROMPT + correction)
-                if scenario["check"] == "failure" and i == 0:
-                    return "exit 1" in text and prompt()
-                return bool(SUMMARY.search(text)) and bool(STATS.search(text)) and prompt()
+                returned = idle_prompt() and "\n" + PROMPT.rstrip() in text
+                agent_done = bool(SUMMARY.search(text)) and bool(STATS.search(text)) and idle_prompt()
+                return returned or agent_done or ("press Enter to run" in text and prompt())
 
             child.until(completed, deadline, f"completion of input {i + 1}", approvals)
-            result.turns.append({"input": line, "output": plain(result.transcript[start:]),
+            output = plain(result.transcript[start:])
+            hint = SHELL_EXIT.search(output)
+            result.turns.append({"input": line, "output": output, "kind": contract["kind"],
+                                 "exit_code": int(hint[1]) if hint else None,
                                  "edit_line": child.screen.line() if correction else None})
-        if scenario["check"] == "cwd":
+            if contract["kind"] == "shell":
+                if not hint or int(hint[1]) != contract["exit_code"] or SUMMARY.search(output):
+                    result.failure = f"input {i + 1}: expected shell exit {contract['exit_code']}, did not observe it"
+                elif any(fragment not in output for fragment in contract["contains"]):
+                    result.failure = f"input {i + 1}: expected failure diagnostics were not observed"
+            elif contract["kind"] == "agent" and not (SUMMARY.search(output) and STATS.search(output)):
+                result.failure = f"input {i + 1}: returned without an agent task (routing/completion failure)"
+            if result.failure:
+                break
+        if scenario["check"] == "cwd" and not result.failure:
             start = len(result.transcript)
             child.send(b"\x15printf '\\n__NOSH_EVAL_PWD_BEGIN__\\n'; pwd -P; printf '__NOSH_EVAL_PWD_END__\\n'\r")
             pattern = r"(?m)^__NOSH_EVAL_PWD_BEGIN__\n([^\n]+)\n__NOSH_EVAL_PWD_END__"
