@@ -842,7 +842,9 @@ CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
 
 显式指定的路径（第 1、2 项）解析失败时直接报错，不再往后查找，也不会下载。如果指定的是目录、里面有多个 GGUF，就按所请求模型（未指定时为默认模型）在 registry 中的文件名选择；没有匹配的文件时报错，并列出候选文件。GGUF 不在 registry 中、又显式给了无效的 `--model` 时，同样报错，不换成默认模型。
 
-registry 随 nosh 版本一起发布，以 SHA-256 固定文件内容；HF 使用提交 revision，ModelScope 的 `master` 仍需通过相同哈希校验。显式 `--model-path` 要求可解析的 GGUF 和同目录 tokenizer，但不执行 registry 文件哈希校验，只应指向可信文件。
+registry 随 nosh 版本一起发布，以 SHA-256 固定文件内容；HF 使用提交 revision，ModelScope 的 `master` 仍需通过相同哈希校验。
+
+显式 `--model-path` 不要求 tokenizer 与 GGUF 同目录。[`ModelHub::resolve_path`](../crates/nosh-hub/src/lib.rs) 先使用同目录的 `tokenizer.json`；缺失时，尝试从已解析的 registry 模型的已校验安装中取得 tokenizer（便携 → 用户 → 系统模型库）；仍未找到时，回退到该模型用户模型目录中的 tokenizer 文件，不存在才报错。显式 GGUF、同目录 tokenizer，以及最后的用户目录文件回退不执行 registry 哈希校验，只应使用可信文件。
 
 当前不自动更新模型，也没有 `model use/update/export` 子命令。切换模型用 `--model`、`NOSH_MODEL` 或 `[model] id`；显式检查更新、确认删除旧文件和打包导出属于后续模型管理设计。
 
@@ -1075,7 +1077,7 @@ conversation_idle_minutes = 30 # 1–1440
 
 [model]
 id = "minicpm5-2b:q4_k_m"
-# path = "/opt/models/MiniCPM5-2B-Q4_K_M.gguf"  # 可选；同目录需有 tokenizer.json
+# path = "/opt/models/MiniCPM5-2B-Q4_K_M.gguf"  # 可选；tokenizer 查找与校验见 §8.1
 context_length = 8192         # 1024–32768，不等于模型原生 128K 上限
 device = "auto"               # auto | cpu；当前都使用 CPU
 thinking = "off"              # off | on
@@ -1190,7 +1192,7 @@ nosh/
 | 类别 | 内容 | 通过标准 |
 |---|---|---|
 | 单元（当前）与 fuzz（规划） | 当前覆盖采样、增量解码、工具调用与 CDATA、截断、AI 触发、状态差异；解析器/协议帧 fuzz 留待建设 | 对应集合全部通过，不出现 panic |
-| 推理正确性 | 当前模板对照固定 golden 样例，非测试时调用 HF（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
+| 推理正确性 | 当前模板对照固定 golden 样例，测试时不调用 HF `apply_chat_template`（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
 | ARM 权重释放（issue #9） | 每个 PR 在 Linux ARM64/macOS 用 Q4K/Q6K 合成矩阵覆盖 m=1..64、prefill 边界及原始数据访问；独立手动工作流 `arm64-memory.yml` 下载并缓存固定模型，比较预重排开/关 | 支持 dotprod 的合格矩阵必须实际释放，其他条件保持原始数据；8K 峰值 RSS ≤ 2.5 GiB；相同 f16 KV 下的 3,329/8,065 token prompt 各加 48 步 teacher forcing，应用上一行的全部通过线。Linux ARM 实测：KL 和 NLL 差均为 0，余弦中位数 1，top-5 均 49/49，高置信 top-1 分别 30/30、48/48 |
 | Shell 兼容 | 当前有本地 shell/CLI 集成测试；完整 scp、rsync、git over ssh、VS Code Remote 和常见 rc 矩阵属于目标覆盖 | 已有用例全部通过；`nosh -c` 保持纯命令输出，不将上游兼容性等同于完整生态验证 |
 | 共享会话与信号 | agent 和用户交替执行时状态连续；Ctrl-C 只中断前台；agent 不能 exit/exec；SIGTTIN 检测 | 全部通过 |
