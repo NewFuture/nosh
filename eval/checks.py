@@ -122,11 +122,13 @@ def mentioned_files(answer: str, known: dict | list) -> list[str]:
 def line_counts(answer: str, facts: dict) -> list[str]:
     reasons = []
     found: dict[str, list[int]] = {name: [] for name in LANGUAGES}
+    sections: dict[str, list[dict]] = {name: [] for name in LANGUAGES}
     line_count = r"(?<![\d.-])(\d+)\s*(?:lines?\b|loc\b|行)"
     language_label = "|".join(LANGUAGES.values())
     columns = None
     file_column = None
     section = None
+    scope = None
     for raw in answer.lower().splitlines():
         line = raw.replace("**", "").replace("`", "")
         matched_languages = [name for name, pattern in LANGUAGES.items() if re.search(pattern, line)]
@@ -134,6 +136,9 @@ def line_counts(answer: str, facts: dict) -> list[str]:
         heading = line.rstrip().endswith(":") or bool(re.match(r"^\s*(?:#{1,6}\s|\*\*)", raw))
         if heading and not is_total:
             section = matched_languages[0] if len(matched_languages) == 1 else None
+            scope = {"files": set(), "lines": [], "counts": []} if section else None
+            if scope is not None:
+                sections[section].append(scope)
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) > 1:
             count_columns = [i for i, c in enumerate(cells)
@@ -142,6 +147,9 @@ def line_counts(answer: str, facts: dict) -> list[str]:
                 columns = count_columns[0]
                 file_column = next((i for i, c in enumerate(cells) if re.search(r"\bfiles?\b|文件", c)), None)
                 section = None
+                scope = None
+        if scope is not None:
+            scope["files"].update(mentioned_files(line, facts["before"]))
         for language, pattern in LANGUAGES.items():
             label = re.search(pattern, line)
             if not label:
@@ -164,19 +172,43 @@ def line_counts(answer: str, facts: dict) -> list[str]:
         if is_total and not matched_languages:
             if re.search(r"\b(?:overall|all languages|grand total)\b|总计|总共|全部", line):
                 section = None
-            expected_lines = facts["languages"][section] if section else facts["total"]
-            expected_files = facts["language_files"][section] if section else facts["file_count"]
+                scope = None
+            counts = [int(number) for number in re.findall(line_count, line)]
             if columns is not None and len(cells) > columns and re.fullmatch(r"\d+", cells[columns]):
-                if int(cells[columns]) != expected_lines:
-                    reasons.append(f"incorrect total: {line.strip()}")
-            for number in re.findall(line_count, line):
-                if section:
-                    found[section].append(int(number))
-                if int(number) != expected_lines:
-                    reasons.append(f"incorrect total line count: {number}")
-            for number in re.findall(r"(\d+)\s*(?:files?\b|个文件|文件)", line):
-                if int(number) != expected_files:
-                    reasons.append(f"incorrect total file count: {number}")
+                counts.append(int(cells[columns]))
+            files = [int(number) for number in re.findall(r"(\d+)\s*(?:files?\b|个文件|文件)", line)]
+            if scope is not None:
+                scope["lines"].extend(counts)
+                scope["counts"].extend(files)
+            else:
+                reasons.extend(f"incorrect total line count: {number}" for number in counts
+                               if number != facts["total"])
+                reasons.extend(f"incorrect total file count: {number}" for number in files
+                               if number != facts["file_count"])
+    suffixes = {"python": ".py", "javascript": ".js", "rust": ".rs", "shell": ".sh"}
+    for language, scopes in sections.items():
+        scopes = [item for item in scopes if item["lines"] or item["counts"]]
+        if len(scopes) > 1:
+            files = [name for item in scopes for name in item["files"]]
+            expected_files = {name for name in facts["before"] if Path(name).suffix == suffixes[language]}
+            # Add subsection totals only when their named files form a disjoint,
+            # complete partition; repeated or omitted scopes must not be hidden.
+            if (len(files) != len(set(files)) or set(files) != expected_files
+                    or any(not item["files"] or len(item["lines"]) != 1 for item in scopes)):
+                reasons.append(f"ambiguous or incomplete {language} subtotal scopes")
+                found[language].extend(number for item in scopes for number in item["lines"])
+            else:
+                found[language].append(sum(item["lines"][0] for item in scopes))
+            for item in scopes:
+                reasons.extend(f"incorrect {language} subtotal file count: {number}"
+                               for number in item["counts"] if number != len(item["files"]))
+        else:
+            for item in scopes:
+                found[language].extend(item["lines"])
+                reasons.extend(f"incorrect total line count: {number}" for number in item["lines"]
+                               if number != facts["languages"][language])
+                reasons.extend(f"incorrect total file count: {number}" for number in item["counts"]
+                               if number != facts["language_files"][language])
     for language, expected in facts["languages"].items():
         if not found[language]:
             reasons.append(f"no unambiguous {language} line count")
@@ -305,11 +337,17 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
     if kind == "largest":
-        ranked = [
-            line for line in answer.splitlines()
-            if re.match(r"^\s*(?:\d+[.)]\s+|[-*]\s+|\|)", line.replace("**", ""))
-            and FILE_NAME.search(line)
-        ]
+        ranked = []
+        reference = False
+        for line in answer.splitlines():
+            if (re.match(r"^\s*(?:\d+[.)]\s+|[-*]\s+|\|)", line.replace("**", ""))
+                    and FILE_NAME.search(line)):
+                if not reference or re.match(r"^\s*\d+[.)]\s+", line):
+                    ranked.append(line)
+            elif ranked and line.strip() and not line[0].isspace():
+                # Separate reference bullets are not the ranking; numbered
+                # continuations still count, including a fourth ranked file.
+                reference = True
         names = mentioned_files("\n".join(ranked) if ranked else answer, facts["before"])
         if names != facts["largest"]:
             reasons.append(f"expected ordered top three {facts['largest']}, found {names}")
@@ -329,6 +367,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     elif kind == "python":
         names = [name for name in mentioned_files(answer, facts["before"]) if name.endswith(".py")]
         python_section = True
+        classified_python = set()
         incorrectly_classified = []
         misclassified_python = []
         for line in answer.splitlines():
@@ -336,12 +375,19 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                 python_section = False
             elif re.search(r"python\s*文件|python\s*files|个\s*python", line, re.I):
                 python_section = True
+            elif re.fullmatch(
+                r"目录|目录结构|项目结构|文件树|directory|directory structure|directory listing|project structure|file tree",
+                line.strip().strip("*# ").rstrip(":："), re.I,
+            ):
+                python_section = None
             line_files = mentioned_files(line, facts["before"])
-            if python_section:
+            if python_section is True:
+                classified_python.update(name for name in line_files if name.endswith(".py"))
                 incorrectly_classified.extend(name for name in line_files if not name.endswith(".py"))
-            else:
+            elif python_section is False:
                 misclassified_python.extend(name for name in line_files if name.endswith(".py"))
-        if set(names) != set(facts["python"]) or incorrectly_classified or misclassified_python:
+        if (set(names) != set(facts["python"]) or classified_python != set(facts["python"])
+                or incorrectly_classified or misclassified_python):
             reasons.append(f"expected Python files {facts['python']}, found {names}")
             if incorrectly_classified:
                 reasons.append(f"non-Python files classified as Python: {incorrectly_classified}")

@@ -206,6 +206,27 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(verdict("dump.bin, archive.bin, video.bin").passed)
         self.assertFalse(verdict("Done.").passed)
 
+    def test_largest_separates_reference_list_but_keeps_all_ranked_items(self):
+        root = self.base / "big"
+        facts = fixtures.create(root, "big")
+        def verdict(answer):
+            return checks.judge({"check": "largest"}, answer, facts, root, facts["before"], self.result, self.metrics)
+        ranking = "1. data/dump.bin\n\n2. video.bin\n\n3. cache/archive.bin"
+        reference = "\n\nFor reference, there's also a smaller file:\n- notes.txt - 100 bytes"
+        self.assertTrue(verdict(ranking + reference).passed)
+        self.assertFalse(verdict(ranking + "\n4. notes.txt" + reference).passed)
+        self.assertFalse(verdict(ranking + "\n\nAdditional entries:\n4. notes.txt").passed)
+        self.assertFalse(verdict(ranking + "\n- notes.txt" + reference).passed)
+        self.assertFalse(verdict(ranking.replace("2. video.bin\n\n3. cache/archive.bin",
+                                               "2. cache/archive.bin\n\n3. video.bin") + reference).passed)
+        self.assertFalse(verdict(ranking.replace("cache/archive.bin", "notes.txt") + reference).passed)
+        bullets = "- data/dump.bin\n- video.bin\n- cache/archive.bin"
+        self.assertTrue(verdict(bullets + reference).passed)
+        self.assertFalse(verdict(bullets + "\n- notes.txt" + reference).passed)
+        table = "| File | Size |\n|---|---|\n| data/dump.bin | 21M |\n| video.bin | 12M |\n| cache/archive.bin | 4.8M |"
+        self.assertTrue(verdict(table + reference).passed)
+        self.assertFalse(verdict(table + "\n| notes.txt | 100 bytes |").passed)
+
     def test_language_counts_and_wrong_total(self):
         facts = fixtures.create(self.base / "project", "project")
         text = "| Language | Files | Lines |\n| Python | 3 | 15 |\n| JavaScript | 1 | 4 |\n| Rust | 1 | 6 |\n| Shell | 1 | 4 |\nTotal: 29 lines in 6 files."
@@ -259,6 +280,36 @@ class CheckTests(unittest.TestCase):
                 f"Python: 3 files, {invalid} lines\nJavaScript: 4 lines\nRust: 6 lines\nShell: 4 lines", facts,
             ))
 
+    def test_language_subtotals_require_disjoint_complete_file_scopes(self):
+        facts = fixtures.create(self.base / "project", "project")
+        sections = (
+            "**Python (.py files):**\n- main.py: 5 lines\n- tools/report.py: 5 lines\n"
+            "- **Total: 10 lines in 2 files**\n\n"
+            "**Shell:**\n- scripts/check.sh: 4 lines\n- **Total: 4 lines**\n\n"
+            "**Rust:**\n- src/main.rs: 6 lines\n- **Total: 6 lines**\n\n"
+            "**JavaScript:**\n- web/app.js: 4 lines\n- **Total: 4 lines**\n\n"
+            "**Python (in lib):**\n- lib/maths.py: 5 lines\n- **Total: 5 lines in 1 file**\n\n"
+            "**Overall totals by language:**\n"
+            "| Language | Lines |\n| Python | 15 |\n| Shell | 4 |\n| Rust | 6 |\n| JavaScript | 4 |\n"
+            "**Grand total: 29 lines across 6 files**"
+        )
+        self.assertEqual(checks.line_counts(sections, facts), [])
+        for wrong in (
+            sections.replace("29 lines", "34 lines"),
+            sections.replace("6 files", "5 files"),
+            sections.replace("Total: 10 lines", "Total: 11 lines"),
+            sections.replace("Total: 5 lines", "Total: 4 lines"),
+            sections.replace("2 files", "3 files"),
+            sections.replace("lib/maths.py", "main.py"),
+            sections.replace("- tools/report.py: 5 lines\n", ""),
+            sections.replace("- lib/maths.py: 5 lines\n", ""),
+            sections.replace("Total: 5 lines in 1 file", "Total: 5 lines and 5 lines in 1 file"),
+            sections.replace("**Python (in lib):**", "**Python (in lib):**\n- main.py: 5 lines"),
+            sections.replace("| Python | 15 |", "| Python | 10 |"),
+        ):
+            with self.subTest(answer=wrong):
+                self.assertTrue(checks.line_counts(wrong, facts))
+
     def test_python_files_language_and_extras(self):
         root = self.base / "project"
         facts = fixtures.create(root, "project")
@@ -285,6 +336,24 @@ class CheckTests(unittest.TestCase):
                 self.assertFalse(verdict.passed)
                 self.assertTrue(any(reason.startswith("Python files classified as non-Python:")
                                     for reason in verdict.reasons))
+
+    def test_python_files_separate_directory_overview_from_classification(self):
+        root = self.base / "project"
+        facts = fixtures.create(root, "project")
+        overview = "\n".join(f"- {name}" for name in facts["before"])
+        python = "\n".join(f"- {name}" for name in facts["python"])
+        def verdict(answer):
+            return checks.judge({"check": "python"}, answer, facts, root, facts["before"], self.result, self.metrics)
+        for heading in ("**目录：**", "## Directory structure"):
+            with self.subTest(heading=heading):
+                text = f"{heading}\n{overview}\n\n**Python 文件（共 3 个）：**\n{python}"
+                self.assertTrue(verdict(text).passed)
+                self.assertFalse(verdict(text + "\n- scripts/check.sh").passed)
+                self.assertFalse(verdict(f"{heading}\n{overview}").passed)
+                self.assertFalse(verdict(text.rsplit("\n", 1)[0]).passed)
+                self.assertFalse(verdict(text.replace("**Python 文件（共 3 个）：**",
+                                                     "**非 Python 文件：**")).passed)
+        self.assertFalse(verdict(f"包含以下 Python 文件：\n{python}\n- scripts/check.sh（Shell 脚本）").passed)
 
     def test_failure_explanation_requires_a_repair_action(self):
         root = self.base / "failure"
