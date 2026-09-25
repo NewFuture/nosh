@@ -198,6 +198,10 @@ impl Agent {
     fn spec(&self) -> SessionSpec {
         let system = match self.tools {
             ToolSet::Suggest => prompt::suggest_system_prompt(&self.env),
+            ToolSet::ReadOnly => format!(
+                "{}\nAttachment mode: run_command is unavailable. Answer from the attachment and the supplied read-only tools; do not request execution.",
+                prompt::system_prompt(&self.env)
+            ),
             _ => prompt::system_prompt(&self.env),
         };
         SessionSpec {

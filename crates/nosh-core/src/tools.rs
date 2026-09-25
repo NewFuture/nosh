@@ -28,7 +28,7 @@ pub enum ToolSet {
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: "run_command".into(),
-        description: "Preferred first tool for clear tasks. Run bash or a python3 script that computes and prints the requested answer, including final grouped totals. Do not manually calculate from raw rows.".into(),
+        description: "Preferred first tool for clear tasks. Run a short bash pipeline that computes and prints the requested answer, including final grouped totals. Do not manually calculate from raw rows.".into(),
         parameters: json!({
             "type": "object",
             "properties": {

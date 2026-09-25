@@ -602,6 +602,7 @@ fn read_only_tools_and_protected_paths() {
         vec![text("Read them.")],
     ]);
     let received = engine.received();
+    let specs = engine.specs();
     let mut a = Agent::new(
         Box::new(engine),
         AgentConfig::default(),
@@ -616,6 +617,11 @@ fn read_only_tools_and_protected_paths() {
         &mut RecordUi::default(),
     );
     let results = tool_results(&received.lock().unwrap());
+    assert!(
+        specs.lock().unwrap()[0]
+            .system
+            .contains("run_command is unavailable")
+    );
     assert!(results[0].contains("notes.txt"), "{}", results[0]);
     assert!(
         results[1].contains("    1  alpha\n    2  beta"),
