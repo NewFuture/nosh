@@ -1,96 +1,78 @@
 # nosh：纯 Rust 原生离线 AI Shell 设计文档
 
-> **代号**：nosh（Native Offline SHell，可以改名）　**版本**：v0.13　**日期**：2026-09-25　**默认模型**：MiniCPM5-2B（Apache-2.0）
+> **代号**：nosh（Native Offline SHell）　**版本**：v0.15　**日期**：2026-09-25　**默认模型**：MiniCPM5-2B（Apache-2.0）
 >
-> nosh 是一个兼容 Bash、内置本地小模型、可以断网运行的 AI shell。v0.5–v0.8 根据 MVP 的实测结果和代码审查，补充了内存模型、性能数据和实现要点；v0.9 加入日常开发命令基准，v0.10 加入 AI 触发判定语料，v0.11 补充 aarch64 和 macOS 上的平台细节，v0.12 将固定 seed 的真实模型评测集和基线口径入库，v0.13 记录精确 main 的 100 次原生观测基线及尚未满足的判定复现验收。修订记录见附录 E，产品决策见 §16。
+> **范围**：说明当前本地 MVP 的架构、行为与约束，并保留 M2/M3 的目标设计。当前实现按仓库提交 `826a825` 核对；设计决策不等于功能已经交付。
 >
-> 标注"已核实"的数据来自 HF 模型卡、config.json、tokenizer.json、GGUF 头部实测，以及 candle 和 brush 的源码；标注"MVP 实测"的数据来自 `docs/MVP-REPORT.md`；标注"目标"或"估算"的数据还需要跑基准验证。
+> **口径**：**当前**表示已有实现；**规划**表示尚未实现；**目标 / 估算**不是实测结论。模型事实来自模型配置、GGUF 元数据和上游源码；历史性能数据以 [MVP 报告](MVP-REPORT.md) 的平台、构建和测量条件为准，不外推到其他平台。
+
+## 阅读指南
+
+| 文档 | 职责 |
+|---|---|
+| [README](../README.md) | 当前可用功能、构建和快速上手 |
+| 本文 | 设计意图、当前实现边界、后续方案与验收标准 |
+| [MVP 实施计划](MVP-PLAN.md) | 已完成的 M0/M1 工作记录，保留当时的范围与任务拆分，不作为当前待办清单 |
+| [MVP 报告](MVP-REPORT.md) | 分阶段的实测结果、偏差、已知问题及其来源 |
+| [真实模型评测](../eval/README.md) | 可复现命令、场景、指标口径与版本化基线 |
+
+| 阅读目的 | 章节 |
+|---|---|
+| 了解产品与交付边界 | [§0 概述](#0-概述)、[§1 目标](#1-目标与非目标)、[§14 里程碑](#14-里程碑) |
+| 理解一次任务如何执行 | [§3 架构](#3-架构)、[§4 Shell](#4-shell-核心nosh-shell)、[§5 Harness](#5-harness两个版本共用)、[§6 权限](#6-权限两个版本共用) |
+| 理解模型、内存与下载 | [§2 模型](#2-默认模型minicpm5-2b)、[§7 推理](#7-推理引擎nosh-llm)、[§8 模型管理](#8-模型管理与离线nosh-hub) |
+| 查交互、配置和代码位置 | [§9 交互](#9-交互)、[§11 配置](#11-配置)、[§12 工程](#12-工程) |
+| 评估后续方案与约束 | [§10 进程与协议](#10-进程与协议)、[§13 验收](#13-测试与评估)、[§15 风险](#15-风险与对策)、[§16 决策](#16-决策记录2026-09-23)、[§17 待定事项](#17-待定事项) |
+
+维护时保留章节编号和决策编号；功能状态在相关章节更新，历史实测保留在报告与基线中。CLI、配置键、registry 和接口签名以链接到的源码为准，避免维护多份互相漂移的清单。
 
 ## 0. 概述
 
-- **本身就是 shell**：内核是兼容 Bash 的 brush-core。它能加载 `.bashrc` 和补全，支持作业控制，也可以设为登录 shell（核心平台是 Linux）。合法的命令照常执行；以 `#` 开头或者命令出错时，交给 AI 处理。
+- **本身就是 shell**：内核是兼容 Bash 的 brush-core，提供 rc 加载、补全和作业控制，核心平台是 Linux。普通命令直接执行；AI 触发、本地纠错与自然语言安全网的边界见 §4.2。
 - **上下文连续**：agent 和用户在同一个 shell 会话里执行命令，cwd、变量、函数、venv 等状态会一直延续。
-- **保留原生应用的能力**：同一个二进制也能当普通命令行程序用，例如执行一次性任务、接管道，或者在 bash/zsh/fish/pwsh 里按 Ctrl+G 生成命令。vim、htop 等原生程序在 nosh 里照常运行。
-- **两个版本，一套核心**：
-  - **本地版**：所有部分都在本机运行。
-  - **远程版**：shell 核心和推理放在 Linux 主机上（`nosh server`），各平台的客户端通过 SSH 连接（`nosh connect`）。
-
-  两个版本完全共用 harness、权限、工具和推理这几部分。
-- **内置模型，断网可用**：基于 candle + GGUF，默认使用 MiniCPM5-2B Q4_K_M（1.56 GB）。首次使用时自动下载（默认同意，按地区和测速结果选源），之后可以完全离线。
-- **安全**：agent 发起的命令要经过风险分级和审批；用户自己输入的命令不受影响。
+- **CLI 与交互共用核心**：支持一次性任务、管道附件、命令建议，以及 nosh 内的 Ctrl+G。用户运行的 vim、htop 等程序直接使用终端，不经过 agent 输出采集。
+- **本地优先，远程复用**：当前所有部分都在本机运行；规划中的远程版将 shell、harness、权限、工具和推理部署到 Linux 主机，客户端通过 SSH 连接。
+- **本地模型，断网可用**：基于 candle + GGUF。默认权重约 1.56 GB，含 tokenizer 首次下载约 1.57 GB；当前在前台下载，交互确认默认同意，之后推理无需联网。
+- **执行前判定**：agent 命令经过风险分析与审批策略；用户命令不走 agent 审批。风险分析不是操作系统沙箱，离线开关也不限制 shell 命令联网（§6、§8.3）。
 
 ### 0.1 使用方式
 
-**① 安装与首次启动**
+以下示例仅包含**当前支持**的入口，在 Linux / WSL 或 macOS 上使用。从源码构建的步骤见 [README](../README.md#构建与运行linux)；这里假定 `nosh` 已在 PATH 中。
 
 ```bash
-brew install nosh        # macOS / Linux；也可以用 cargo binstall nosh，或者下载 GitHub Releases 里的二进制
-winget install nosh      # Windows（也可以用 scoop）
-nosh                     # 进入 nosh shell
+nosh model pull                    # 下载并校验默认模型及 tokenizer
+nosh doctor                        # 检查 CPU、内存、模型与下载源
+nosh                               # 进入交互 shell
+nosh --norc                        # 跳过 rc
+nosh --safe                        # 跳过 rc，同时关闭 AI
 ```
 
-首次启动时，nosh 会询问是否下载模型（MiniCPM5-2B，1.56 GB），默认 Yes，直接按回车即可。下载在后台进行，shell 马上就能用；下载完成后可以完全离线。
-
-如果想把 nosh 设为默认 shell，建议先在终端配置里把启动命令改成 `nosh` 试用一段时间，确认没问题后再执行 `chsh -s "$(command -v nosh)"`。deb/rpm 包安装时会自动把 nosh 加入 `/etc/shells`。
-
-**② 在 nosh shell 里**
+**在 nosh shell 里**
 
 | 想做的事 | 怎么做 |
 |---|---|
-| 执行命令 | 直接输入，和 bash 一样；`.bashrc`、别名、补全照常可用 |
+| 执行命令 | 直接输入；兼容程度以 brush 和 §4.1 的限制为准 |
 | 让 AI 做事 | `# 找出当前目录下最大的 10 个文件` |
-| 直接用中文说 | `帮我看看 8080 端口被谁占了`：这不是命令，会自动交给 AI |
+| 直接用中文说 | `帮我看看 8080 端口被谁占了`：无法解析为现有命令时交给 AI |
 | 命令打错了 | 输入 `gti status`，输入行会自动变成 `git status`，回车即可执行 |
 | 命令执行失败 | 出现 `✗ exit 1` 提示后按 Ctrl+G，或者输入 `# 为什么失败`、`ai fix` |
 | 只要命令，不执行 | 输入一句话后按 Ctrl+G，输入行会被替换成命令，检查后自己按回车 |
 | 追问 | `# 再把它们打包`：在同一个对话里，可以引用上一步的结果 |
-| 审批 | `y` 执行；`n` 拒绝（可以附上理由）；`e` 编辑；`a` 本会话内同类命令放行。危险命令需要键入 `yes` |
+| 审批 | `y` 执行；`n` 拒绝（可以附理由）；`e` 编辑；`a` 本会话内同类放行。强确认需键入 `yes`，适用范围见 §6.3 |
 | 中断 | 按 Ctrl-C 中断当前命令，再按一次中止整个任务 |
-| 调整行为 | `ai mode auto`（减少确认）、`ai think on`（开启思考）、`ai auto off`（暂停出错时自动触发）、`ai private on`（无痕模式） |
+| 调整行为 | `ai mode auto`、`ai think on`、`ai auto off`；完整入口见 §9.1 |
 
-**③ 在其他 shell、脚本和 CI 里**
+**在其他 shell、脚本和 CI 里**
 
 ```bash
 nosh -a "把 logs 目录里 7 天前的日志打包"            # 一次性任务
-git diff --staged | nosh -a "写一条 commit message"  # 管道：stdin 的内容作为附件
+git diff --staged | nosh -a "写一条 commit message"  # stdin 作为附件，只提供只读工具
 nosh -s "解压 foo.tar.zst 到 /tmp"                   # 只输出一条命令
-eval "$(nosh init bash)"                             # 写进 ~/.bashrc，在 bash 里启用 Ctrl+G
-nosh -a --auto "清理 target 目录里的构建产物"         # CI 里没有 TTY，需要加 --auto，否则需要确认的操作会被拒绝
+nosh -a --auto "在工作区创建 build 目录"             # 无 TTY 时，仍需审批的操作会被拒绝
+nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已就绪
 ```
 
-其他 shell 的启用方式：
-- zsh：`eval "$(nosh init zsh)"`；
-- fish：`nosh init fish | source`；
-- PowerShell：在 `$PROFILE` 中加入 `nosh init pwsh | Invoke-Expression`。
-
-**④ 远程主机**
-
-```bash
-nosh connect dev@build-server                 # 首次会自动部署服务端，之后用法与本地一致
-nosh connect dev@build-server --attach 3      # 断线后回到原来的会话
-nosh connect dev@build-server --push-model    # 主机不能联网时，从本机推送模型
-```
-
-也可以不装客户端：`ssh dev@build-server` 登录后，直接运行 `nosh`。
-
-**⑤ 离线和内网部署**
-
-```bash
-nosh model pull && nosh model export -o nosh-models.tar   # 在联网的机器上执行
-nosh model import nosh-models.tar                          # 在目标机器上执行
-```
-
-也可以直接使用包含模型的离线发行包，解压即用。模型就绪后，运行期间不访问网络；需要强制离线时，加 `--offline` 或者设置 `NOSH_OFFLINE=1`。
-
-**⑥ 模型、配置与排障**
-
-- **模型**：`nosh model list`；`nosh model use minicpm5-1b:q4_k_m`（适合低内存设备）；`nosh model verify`；`nosh model update`。
-- **配置**：配置文件是 `~/.config/nosh/config.toml`，常用项见 §11，例如 `approval = "auto"`、`on_failure = "auto"`。
-- **排障**：
-  - `nosh doctor`：检查 CPU、内存（按所选模型的 `min_memory_mb` 另加 512 MiB 余量）、模型和下载源；
-  - `nosh doctor --rc`：检查 rc 的兼容性；
-  - `nosh --safe`：不加载 rc，也不启用 AI；
-  - `NOSH_DISABLE_AI=1`：只关闭 AI。
+模型管理支持 `pull/list/verify/import/path`；切换模型使用 `--model <id>` 或 `[model] id`，导入步骤见 §8.3，配置见 §11。当前访问远程主机的方法是先 `ssh host`，再在主机上运行 nosh。
 
 ### 0.2 术语
 
@@ -99,20 +81,34 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 | 会话 | 一个终端里的一个 nosh shell 实例，也就是一个 brush `Shell` 加上它的 harness 和权限状态 |
 | 对话 | 会话内与模型的多轮上下文，可以跨越多个任务（见 §5.2） |
 | 任务 | 一次 AI 触发（`#`、命令出错、`ai`、`nosh -a`）引发的一轮 agent 循环 |
-| 核心 | Shell + Harness + Permissions + Tools；在远程版中运行在服务端 |
-| engine | 推理进程，只负责"消息进、事件出"，不执行命令 |
+| 核心 | Shell + Harness + Permissions + Tools；规划中的远程版在服务端运行这些模块 |
+| engine / ChatEngine | 推理组件，只负责"消息进、事件出"，不执行命令；当前是进程内实现，独立共享进程属于 M2 |
 | 用户命令 / agent 命令 | 用户自己执行的命令，不需要审批 / 模型通过 `run_command` 发起的命令，需要经过权限判定 |
+
+### 0.3 实现状态
+
+| 领域 | 当前 | 规划或限制 |
+|---|---|---|
+| 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
+| 推理 | CPU、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、GPU 与资源自适应未实现 |
+| 工具与权限 | 四个内置工具；confirm/auto/yolo、用户规则与会话放行 | `search/write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
+| 交互与上下文 | nosh 内 Ctrl+G、输出块、旧工具结果压缩、空闲后新建对话 | 其他 shell 的快捷键集成、用户输出采集、LLM 摘要未实现 |
+| 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
+| 本地数据 | shell 历史、截断输出落盘；本地 `Redactor` 为空实现 | agent history/audit、自动清理、无痕模式和文件备份未实现 |
+| 评测 | 10 场景固定 seed 运行器及 main `4f602ab` 的 100 次基线 | 判定加状态仅 45/50 对一致，复现验收尚未满足（§13.2） |
 
 ## 1. 目标与非目标
 
+以下是产品目标，不是当前功能清单；交付边界见 §0.3 和 §14。
+
 | # | 目标 | 验收标准 |
 |---|---|---|
-| G1 | 纯 Rust 原生 | 代码 100% 是 Rust；推理用 candle，不自研框架；默认构建不依赖 CUDA 或 Python；产物是单个可执行文件 |
+| G1 | 纯 Rust 原生 | 运行时代码用 Rust；推理用 candle，不自研框架；默认构建不依赖 CUDA 或 Python；产物是单个可执行文件。评测脚本不属于运行时（§12） |
 | G2 | 本身就是 shell | 通过 brush 兼容测试的核心子集；能加载用户的 `.bashrc`；作为登录 shell 时，`nosh -c` 的行为与 bash 一致（scp、rsync、git over ssh 都能正常工作） |
 | G3 | 上下文连续 | agent 执行 `cd`、`export`、`source` 之后，状态保留在用户的会话里 |
 | G4 | 原生应用能力 | 支持一次性任务、管道，以及在其他 shell 里用快捷键获取建议；TUI 程序正常运行 |
 | G5 | 两个版本共用核心 | 同一套权限测试，在本地版和远程版两种装配下结果一致 |
-| G6 | 自动下载，断网运行 | 首次使用时自动下载并校验；就绪后运行期间不访问网络；支持气隙导入和远程推送 |
+| G6 | 自动下载，断网运行 | 首次使用时自动下载并校验；就绪后本地推理无需联网，下载/探测可强制关闭；支持气隙导入和远程推送。shell 命令联网不属于离线开关的控制范围 |
 | G7 | 安全可控 | 风险分四级；默认执行前确认；YOLO 可以写进配置（风险由用户自己承担）；有硬拒绝清单和审计 |
 | G8 | 低资源 | 8K 上下文时，推理进程 ≤ 3.0 GB（x86_64 实测 2.69 GiB，约 2.88 GB；Linux aarch64 + dotprod 实测 2.05 GiB，约 2.21 GB，见 §2.3、§17 #11；macOS 已验证释放正确性，未测 RSS）；纯 CPU 下目标速度 ≥ 12 tok/s；多个终端共用一份模型 |
 
@@ -157,7 +153,7 @@ nosh model import nosh-models.tar                          # 在目标机器上�
 | `minicpm5-1b:q4_k_m` | `MiniCPM5-1B-Q4_K_M.gguf` | 0.69 GB | 内存小于 4 GB 的设备 |
 | 分词器（与模型一起下载） | `tokenizer.json` | 9.9 MB | — |
 
-SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由 `xtask gen-registry` 从 HF 和 ModelScope 的 API 生成。校验失败时拒绝加载。
+SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/registry.toml) 为唯一维护入口，结构见附录 B。registry 模型校验失败时拒绝加载；显式模型路径的边界见 §8.1。`xtask gen-registry` 尚未实现，不是当前更新流程。
 
 ### 2.3 内存
 
@@ -199,21 +195,33 @@ SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由
 
 ### 3.1 分层
 
+**当前本地实现**：
+
 ```text
-形态层      nosh shell · nosh CLI（-a / -s / 管道 / init）· nosh connect · nosh server
+形态层      nosh shell · nosh CLI（-c / 脚本 / -a / -s / 管道）
 ──────────────────────────────────────────────────────────────────────────────
 共享核心    Session = Shell（brush-core、AI 触发）
                     + Harness（agent 循环、prompt、上下文）
-                    + Permissions（风险分析、策略、审批、审计）
-                    + Tools（run_command、read_file、search、write_file、propose_command …）
+                    + Permissions（风险分析、策略、终端审批）
+                    + Tools（run_command、read_file、list_dir、propose_command）
 ──────────────────────────────────────────────────────────────────────────────
 推理与模型  nosh-llm：ChatEngine（模板、分词、工具调用解析、采样、KV 缓存）
             nosh-hub：registry、选源下载、校验、离线导入
 ──────────────────────────────────────────────────────────────────────────────
-平台        candle（CPU SIMD / Metal / CUDA）· PTY · 作业控制 · IPC · SSH
+平台        candle CPU SIMD · 终端与作业控制 · 文件系统与下载网络层
 ```
 
 ### 3.2 部署形态
+
+**当前：每个 nosh 进程独立加载模型**。加载是惰性的；普通命令、`-c` 和脚本不需要模型。`LocalChatEngine` 保存多份对话日志，但只有一份活动 KV，切换建议对话后可能需要重新 prefill 主对话。
+
+```text
+终端 1 ─ nosh 进程：Shell + Harness + Permissions + Tools + LocalChatEngine
+终端 2 ─ nosh 进程：Shell + Harness + Permissions + Tools + LocalChatEngine
+一次调用 ─ nosh -a / -s：临时 shell 会话 + LocalChatEngine
+```
+
+**目标部署（M2/M3，尚未实现）**：
 
 ```text
 本地版
@@ -236,44 +244,23 @@ SHA-256、字节数和 revision 写在内置 registry 里（见附录 B），由
 1. **一套核心，两种装配**：本地版和远程版共用同一组 crate，策略和测试都只有一份。
 2. **嵌入 brush-core**：
    - agent 和用户共用同一个 `Shell` 实例，所以上下文是连续的。
-   - 风险分析和执行使用同一个解析器（brush-parser），杜绝"分析的命令和执行的命令不一样"。
+   - 风险分析和执行使用同一个解析器（brush-parser），减少语法解释差异；静态分析无法完整预测动态命令的效果（§6.2）。
 3. **权限在执行端判定**：本地版在 nosh 进程内判定，远程版在服务端判定。客户端只负责展示审批，并把用户的决定传回去。
-4. **推理进程与会话分离**：engine 不执行命令；多个会话共用一份模型。
+4. **推理进程与会话分离（M2）**：engine 不执行命令；多个会话共用一份模型。当前仅有组件边界，没有独立进程。
 5. **模型细节只留在 ChatEngine 里**：模板、special token、工具调用格式都不外泄，上层只看到结构化的事件。
-6. **shell 不依赖 AI**：模型在独立进程里惰性加载，AI 出了故障也不影响 shell 的使用（见 §3.6）。
+6. **shell 不依赖模型就绪**：当前惰性加载与错误隔离保证普通 shell 路径可用；进程级故障隔离仍依赖 M2（§3.6）。
 
-### 3.4 核心接口（草图）
+### 3.4 核心接口与代码入口
 
-```rust
-pub trait ShellBackend {                 // 实现：EmbeddedBash（brush-core）/ HostedPwsh（Windows）
-    fn run_user_line(&mut self, line: &str) -> Result<ExitStatus>;           // 前台执行，接管终端
-    fn run_agent_command(&mut self, cmd: &str, opts: AgentExecOpts,
-                         out: &mut dyn OutputSink) -> Result<CommandResult>;  // 同一会话，后台进程组，tee 输出
-    fn parse(&self, src: &str) -> Result<Program>;                           // 与执行同一个解析器
-    fn resolve(&self, name: &str) -> Resolution;                             // builtin / 函数 / 别名 / 文件
-    fn snapshot(&self) -> SessionState;                                      // cwd、PATH、venv、上条退出码…
-}
+| 边界 | 当前实现与契约 | 源码 |
+|---|---|---|
+| Shell | `EmbeddedShell` 持有 brush 会话；`run_user_line` 直连终端，`run_agent_command` 采集输出；`snapshot/resolve/parse` 提供状态和解析信息 | [backend.rs](../crates/nosh-shell/src/backend.rs) |
+| 风险与策略 | `assess_command` 接收命令和 `Context`，生成 `RiskReport`；`decide` 综合模式、用户规则和会话放行，返回 Allow / Ask / Deny | [analyze.rs](../crates/nosh-permissions/src/analyze.rs)、[policy.rs](../crates/nosh-permissions/src/policy.rs) |
+| 审批 | `ApprovalChannel::request` 接收请求，返回批准、拒绝、编辑或同类放行；当前实现为终端、无终端拒绝和测试脚本 | [approval.rs](../crates/nosh-core/src/approval.rs) |
+| 推理 | `ChatEngine` 提供 open / step / rewind / close、上下文查询、工具结果压缩与取消；事件为 Text / Think / ToolCall / CallError / Prefill | [engine.rs](../crates/nosh-llm/src/engine.rs) |
+| 输出出口 | `Redactor` 在完整采集输出落盘前处理文本；当前使用不复制、不修改文本的 `NoRedact` | [tools.rs](../crates/nosh-core/src/tools.rs) |
 
-pub trait PermissionEngine {
-    fn assess(&self, call: &ToolCall, shell: &dyn ShellBackend) -> RiskReport;
-    fn decide(&self, report: &RiskReport, policy: &Policy) -> Decision;       // Allow / Ask / Deny
-}
-pub trait ApprovalChannel {              // 本地：终端里的卡片；远程：control 通道
-    fn request(&self, req: ApprovalRequest) -> Result<ApprovalResponse>;
-}
-
-pub trait ChatEngine {                   // 实现：进程内 / 本地 IPC / 远程
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId>;
-    fn step(&mut self, sid: SessionId, append: Vec<Message>,
-            sink: &mut dyn FnMut(Event)) -> Result<StepOutcome>;             // Event：Text / Think / ToolCall / Progress
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<()>;
-    fn cancel(&self, sid: SessionId);
-}
-
-pub trait Redactor {                     // 扩展接口：本地版为空实现（受信任，不脱敏）；接入远程 agent 时再实现（§6.5）
-    fn redact<'a>(&self, text: &'a str) -> Cow<'a, str>;                     // agent 数据的出口（目前只有写盘）都经过它
-}
-```
+早期草图中的 `ShellBackend`、`PermissionEngine` 不是当前代码里的 trait；Windows 后端和 IPC 实现应在实际需要时沿上述边界扩展，不把草图当作现有 API。
 
 ### 3.5 典型流程：自然语言任务
 
@@ -296,17 +283,17 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 
 ### 3.6 故障隔离与降级
 
-原则：**shell 核心不依赖 AI**。任何 AI 故障都不能让 shell（尤其是登录 shell）变得不可用。
+目标：**shell 核心不依赖 AI**。当前可以隔离返回错误和可展开的 panic，但推理仍在同一进程中，不能隔离进程被 OOM 杀掉等故障。
 
-| 故障 | 处理 |
-|---|---|
-| 模型缺失且处于离线状态，或者模型文件损坏 | 触发 AI 时，提示导入或重新下载；出错触发退回普通的错误信息 |
-| engine 崩溃或被 OOM 杀掉 | 当前任务标记为失败并提示用户，然后按指数退避重启 engine。连续 3 次失败后，本会话停用 AI，并提示运行 `nosh doctor` |
-| 内存不足 | 加载前先做预检，按 §7.6 降级：先缩短上下文，再建议换 1B 模型，最后拒绝加载 |
-| 配置有错 | 给出警告，然后用默认值继续，不阻塞启动 |
-| AI 子系统 panic | 在独立的线程或任务里捕获并隔离，因此发布构建使用 `panic = "unwind"` |
-| shell 核心 panic | 打印诊断信息；如果当前是登录 shell，就 `exec` 到回退 shell（默认 `/bin/bash -l`） |
-| 远程断线 | 会话保持；重连后重新投递未决的审批，过期的按拒绝处理 |
+| 故障 | 当前处理 | 后续设计 |
+|---|---|---|
+| 模型缺失、损坏或显式路径无效 | AI 加载返回错误并提示用户；普通 shell 命令不依赖模型 | — |
+| engine 崩溃或被 OOM 杀掉 | 没有独立 engine 可重启，OOM 可能结束整个 nosh | M2：任务失败提示、指数退避重启，连续 3 次失败后本会话停用 AI |
+| 内存不足 | `doctor` 按模型最低内存加 512 MiB 余量告警；加载路径不自动降级 | M2：按 §7.6 缩短上下文、建议 1B 或拒绝加载 |
+| 配置有错 | 警告并按默认值处理；无法读取配置意味着其中的安全规则未生效（§11） | — |
+| AI 子系统 panic | REPL 的 AI 调用边界用 `catch_unwind` 捕获；release 保持 `panic = "unwind"` | M2：进一步进程隔离 |
+| shell 核心 panic | 已装配 AI 的登录 REPL 发生未隔离 panic 时，尝试 `exec` 回退 shell（默认 `/bin/bash -l`） | — |
+| 远程断线 | 当前无 nosh 远程协议 | M3：保留会话，重投未决审批，过期按拒绝处理 |
 
 **排障手段**：
 - `nosh --safe`：不加载 rc，也不启用 AI；
@@ -316,46 +303,55 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 
 ### 4.1 引擎
 
-- **brush-core**（Rust，MIT，0.5 版，2026-05 发布）：
-  - 有 2,500 多条兼容性测试，逐项与 bash 对比；
-  - 能加载 `.bashrc`、别名、函数、`PS1`/starship 和 bash-completion，支持作业控制；
-  - 交互部分基于 reedline；
-  - 可以注册 Rust 内建命令；
-  - brush-parser 已被 Zed 等项目采用。
+- **当前依赖**：`brush-core` 0.5、`brush-parser` 0.4、`brush-builtins` 0.2；精确版本由 [Cargo.toml](../Cargo.toml) 和 lockfile 管理。nosh 自己用 reedline 实现 REPL，连接 brush 的历史、补全和会话状态。
+- **兼容边界**：支持 rc、别名、函数、`PS1` 和作业控制，但并非 bash 的完全替代；上游兼容性测试不等于所有用户 rc 或终端组合都已验证。
 - **已知缺口**：`select`、`wait -n`、`disown`、部分 trap；Windows 原生支持还是实验性的。
-  - 对策：锁定版本；用 `nosh doctor --rc` 自检用户的 rc；把缺口的实现贡献给上游。
-  - 如果用户的 rc 实在不兼容，可以继续用自己的 bash，通过 `nosh init bash` 获得 Ctrl+G 和 `nosh -a`（见 §9.2）。
-- **Windows**：`nosh -a` 和 `nosh -s` 使用一个托管的常驻 pwsh 会话，通过 PTY 加哨兵识别命令结束、退出码和 cwd。nosh shell 在 Windows 上是预览版。
+  - 当前用 `--norc` / `--safe` 排除 rc 问题，详细的作业控制与信号限制见 [MVP 报告 §6](MVP-REPORT.md#6-已知问题)。
+  - rc 不兼容时，可以在自己的 bash 中调用 `nosh -a` / `nosh -s`；`doctor --rc` 与 `nosh init bash` 是规划能力，尚不可用。
+- **Windows（规划）**：托管常驻 pwsh，通过 PTY 加哨兵识别命令结束、退出码和 cwd；当前未实现这一后端，也没有原生 shell 预览版。
 - **排除的方案**：
   - 托管外部 bash：命令边界要靠哨兵识别，风险分析用的解析器与实际执行的不一致；
   - 自研 shell 语言；
   - nushell：不是 POSIX；
   - fish：GPL 许可，也不是为嵌入设计的。
 
-### 4.2 AI 触发：先当命令执行，`#` 或出错时交给 AI
+### 4.2 AI 触发与输入判定
 
-合法的命令永远按 shell 的方式执行，行为和延迟都与 bash 一致。只有以下情况才交给 AI：
+除显式 AI 入口、本地纠错和自然语言安全网外，输入交给 brush 执行，不调用模型。这里的“命令优先”是先解析和判定，不是先执行再撤销。以下表格按默认配置描述，只作用于交互输入；实现见 [trigger.rs](../crates/nosh-shell/src/trigger.rs) 和 [REPL 流水线](../crates/nosh-shell/src/repl.rs)。
 
 | 触发 | 条件 | 是否已执行 | 处理 |
 |---|---|---|---|
-| `#` 前缀 | 行首是 `#`（在 bash 里本来就是注释；前缀可配置） | 否 | 交给 AI |
+| `#` 前缀 | 忽略行首空白后以 `#` 开头；前缀可配置 | 否 | 有正文时交给 AI；单独输入前缀等同于 `ai fix` |
 | 解析失败 | 有语法错误；或者单词中间的撇号造成引号不闭合（如 `what's using port 8080`） | 否 | 自动交给 AI |
-| 命令不存在 | 有命令名无法解析（exit 127）；中文的自然语言都会落在这一类 | 否 | 自动交给 AI |
-| 执行失败 | 以非零状态退出 | 是 | 默认提示 `✗ exit 1 · Ctrl+G 或 # 交给 AI`；这一行里含中文时直接交给 AI；`on_failure` 可以设为 `auto` 或 `off` |
+| 命令不存在 | 静态检查发现命令名无法解析；自然语言通常落在这一类，不代表已经执行并返回 127 | 否 | 先尝试本地纠错，否则交给 AI |
+| 执行失败 | 非零退出且未被求助排除规则过滤 | 是 | 默认提示 `✗ exit 1 · Ctrl+G 或 # 交给 AI`；命中 CJK 字符范围时自动交给 AI；仍受 `on_failure` 和暂停开关控制 |
 
 **判定细节**：
 - **不完整的输入**：引号没闭合、`do` 缺少 `done` 等情况，照常显示续行提示符。唯一的例外是单词中间的撇号（`what's`、`don't`），并且这一行没有其他 shell 结构，这时当作自然语言处理。想强制续行，可以按 Alt+Enter。
-- **整行静态检查**：执行前，把解析出的所有简单命令逐个做名称解析，只要有一个不存在，整行都不执行。这样可以避免 `ls && gti push` 这类输入执行到一半才报错。以下两种情况不在检查范围内：
-  - 同一行里先定义的函数；
-  - 由变量展开得到的命令名。这类命令在运行时报 127 后，按"执行失败"处理。
+- **有限的整行静态检查**：遍历管道、列表、子 shell 和常见复合语句中可静态识别的命令名。默认配置下，发现未知名字会先尝试纠错或交给 AI，整行不执行，例如 `ls && gti push`；关闭自动路由后，无法纠错的输入仍可能直接执行。
+  - 动态命令名、参数或重定向中的命令/进程替换、别名与函数体、脚本及 `bash -c` 字符串不在这个名称预检的递归范围内；不能保证执行前发现所有未知命令。
+  - 同一行的函数定义只登记名称，不验证调用时该定义是否已经生效。
+  - 遍历不判断分支是否可达，例如 `false && nosh_missing_command` 也可能被拦截。它与 §6 的权限分析不是同一套遍历。
 - **纠错前识别问句**：命令名不存在时，先识别常见英语问句结构（如 `can you …`、`why is …`），避免把 `can`、`why` 误纠成 `cat`、`who`。真实存在的同名命令仍按命令执行；`is src` 这类短拼写错误仍可纠为 `ls src`。
-- **只在交互模式下生效**：在脚本、`source`、函数体和 `nosh -c` 里，严格按 bash 的语义执行，`#` 仍然是注释。
-- **`on_failure = "auto"` 的排除项**：不包括 Ctrl-C（130）、SIGPIPE（141），以及 `grep`、`diff`、`test` 这类用非零状态表示"没有结果"的命令。
+- **只在交互输入层生效**：脚本、`source`、函数体和 `nosh -c` 不经过 AI 输入分流，按 brush 的 shell 语义执行，`#` 仍然是注释。
+- **失败求助排除项**：hint 和 auto 都忽略 130、141，以及当前实现中的 148。`grep`、`rg`、`diff`、`test` 等名单内命令只在退出码为 **1** 时按“没有结果”处理，退出码 2 等错误仍可求助。名单匹配使用行尾文本片段的首词，不是完整 AST/别名/包装器分析。
+- **字符判定**：自动求助使用 `contains_cjk` 范围检查，除汉字外也包含日文假名、韩文和部分全角标点；这不是精确的中文语言识别，任务头的 `lang=zh` 也沿用这个判断（§5.4）。
+
+**开关边界**：
+
+| 开关 | 影响 | 不会关闭的路径 |
+|---|---|---|
+| `shell.trigger_on_error = false` | 关闭普通解析错误、无法纠错的未知命令自动转 AI | 本地纠错、单词内撇号分流、安全网、显式 AI 入口；执行失败由 `on_failure` 单独控制 |
+| `shell.on_failure = "off"` | 关闭已执行命令的失败提示与自动求助，包括 CJK 输入 | 执行前分流、显式 `ai fix` 等入口 |
+| `ai auto off` | 本会话暂停普通解析错误/未知命令的自动路由，以及执行失败后的自动求助 | 本地纠错、单词内撇号分流、安全网、显式入口；配置允许时仍显示失败提示 |
+| `NOSH_DISABLE_AI=1` / `--safe` | 关闭 nosh AI 输入分流、纠错和自然语言安全网；`--safe` 还跳过 rc | 用户普通 shell 命令照常执行；不是沙箱或危险命令禁用开关 |
+
+因此，`ai auto off` **不是全局禁用 AI**；上述撇号例外是当前实现边界，不应靠该命令保证不会加载模型。
 
 **AI 的三种处理结果**：
-1. **拼写或用法错误**（例如 `gti status`）：把修正后的命令放进输入行，由用户按回车执行，**从不自动执行**。会先在本地对 PATH、别名和历史做模糊匹配（编辑距离 ≤ 2），匹配上就不调用模型，耗时 < 50 ms。
+1. **拼写或用法错误**（例如 `gti status`）：把修正后的命令放进输入行，由用户按回车执行，**从不自动执行**。先做本地命令名模糊匹配（编辑距离 ≤ 2），匹配上就不调用模型；延迟目标与 WSL 的已知差异见 §13.1。
 2. **自然语言任务**：启动 agent，按当前的审批模式执行。
-3. **命令确实失败了**：解释原因并给出修复方法。如果没有开启输出采集，而且原命令属于 Safe，可以在征得同意后重跑一次，以获取错误输出。
+3. **命令确实失败了**：当前把命令、退出码和近期活动交给模型，不附原命令输出。模型若为诊断发起重跑，仍走普通工具和审批策略，Safe 不会额外确认；没有单独的“先同意重跑”机制，不能假定重跑会还原原始错误现场。
 
 **安全网**（建议保留，可以用 `shell.nl_guard = "off"` 关闭）：
 - **触发条件**：首词是破坏性命令（`rm`、`mv`、`dd`、`chmod`、`chown`、`kill`、`truncate`、`shred`、`git reset/clean` 等），并且参数看起来像自然语言：没有选项，至少有 3 个普通单词，而且这些单词不全是已存在的路径。
@@ -371,22 +367,24 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 
 **其他入口**：
 - **Ctrl+G**：把输入行里的自然语言就地改写成命令。
-- **内建命令 `ai`**：例如 `ai "任务"`、`ai mode …`、`ai fix`、`ai undo`，完整列表见 §9.1。管理命令不用 `/` 做前缀，以免与路径冲突。
+- **内建命令 `ai`**：例如 `ai "任务"`、`ai mode …`、`ai fix`，当前与规划命令分列于 §9.1。管理命令不用 `/` 做前缀，以免与路径冲突。
 
 ### 4.3 共享会话
 
-- **一个终端 = 一个会话 = 一个 brush `Shell`**：用户的命令和 agent 的命令都在其中执行，`cd`、`export`、函数、别名、venv 等状态都会延续。agent 结束后 cwd 默认保持不变（设置 `agent.restore_cwd = true` 可以恢复原目录），最终回答会注明状态变化。
-- **状态差异**：每条 agent 命令执行前后，对比 cwd、PATH、变量、函数和别名，差异随工具结果一起反馈给模型，例如"cwd → /srv/app；PATH 已修改"。
+- **一个终端 = 一个会话 = 一个 brush `Shell`**：用户的命令和 agent 的命令都在其中执行，`cd`、`export`、函数、别名、venv 等状态都会延续。agent 结束后默认保留它最后的 cwd（设置 `agent.restore_cwd = true` 可以恢复任务开始时的目录），界面会提示目录变化。
+- **状态差异**：按 `SessionState` 比较 cwd、PATH、变量、函数名称集合和别名，摘要随工具结果反馈，例如“cwd → /srv/app；PATH 已修改”；不是完整 shell 状态快照，同名函数体变化不在该差异摘要中。
 - **会话状态保护**：
-  - agent 禁止执行 `exit`、`logout`、`exec`；
-  - 以下操作需要确认：修改 `PATH`、`set -e/-u`、`trap`、`ulimit`、`umask`、别名、函数，或者 `unset` 关键变量。
-- **防止卡住的环境变量**（`PAGER=cat`、`GIT_TERMINAL_PROMPT=0` 等）：只作用于单次 agent 执行，不写进会话。
+  - agent 禁止用 `exit`、`logout`、`exec` 直接结束或替换共享父 shell；脚本、`bash -c` 和子 shell 内的这些操作按子会话作用域分析；
+  - 修改 `PATH`、`set -e/-u`、`trap`、`ulimit`、`umask`、别名、函数或 `unset` 关键变量等按修改会话状态处理；默认 confirm/auto 需要确认，显式放行与 yolo 仍按 §6.3。
+- **防止卡住的环境变量**（`PAGER=cat`、`GIT_TERMINAL_PROMPT=0` 等）：临时注入单次 agent 执行，结束后恢复未被命令主动修改的注入值；命令显式修改的值按共享会话语义保留。
 - **用户活动**：最近几条用户命令的命令行、退出码和耗时会写进任务头（见 §5.4），不含输出。
   - 可以开启 `capture_user_output = "last"`（M2）：通过中转 PTY，在内存里保留最近一条非全屏命令输出的末尾部分（不超过 4 KB）。
   - 远程版的服务端本来就在中转 PTY，借助 OSC 133 标记就能切出这段输出。
 - **并发**：同一个会话同一时刻只运行一个任务。agent 运行期间，用户的输入先缓冲；但弹出审批卡片时会清空缓冲，防止提前敲下的按键被当成审批的回答。
 
 ### 4.4 终端与信号
+
+下表描述交互 shell 的常见前台路径，不是所有平台、复合命令或非交互调用的统一保证；已知限制列在表后。
 
 | 状态 | 终端前台进程组 | Ctrl-C | Ctrl-Z |
 |---|---|---|---|
@@ -397,15 +395,19 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 | 等待审批 | nosh | 拒绝本次调用 | 忽略 |
 
 - **识别需要终端的命令**：
-  - agent 命令如果试图读取终端（例如 ssh 询问密码、sudo 要求输入密码），会因为 SIGTTIN 被内核暂停。
-  - nosh 通过 `waitpid(WUNTRACED)` 发现后，会终止该命令并告诉模型；模型改用 `propose_command`，把命令交给用户执行。
-  - 这种做法不需要维护命令名单。
-- **分工**：用户命令的作业控制完全交给 brush；agent 命令通过执行参数指定后台进程组和重定向。如果 brush 不支持这些参数，就向上游贡献。
+  - 后台进程组读取控制终端时通常会因 SIGTTIN 停止；普通 stdin 已接 `/dev/null`，只读 stdin 的程序可能直接读到 EOF。
+  - 当前读取 brush 作业表中本次新增的 `Stopped` 作业及执行结果，设置 `needed_terminal` 并终止可识别的停止作业，不是 nosh 自己用 `waitpid(WUNTRACED)` 精确判定停止原因；详见 [backend.rs](../crates/nosh-shell/src/backend.rs)。
+  - 工具结果会建议模型改用 `propose_command`，不自动转为前台执行。`$(…)`、builtin 后的管道阶段可能仍在 nosh 进程组内直接访问终端，不能保证被 SIGTTIN 识别（[MVP 报告 §6](MVP-REPORT.md#6-已知问题)）。
+- **输出与退出边界**：
+  - stdout/stderr **各自**最多保留 10 MiB 原始字节；超出部分不保存也不展示，管道仍持续排空。这与反馈给模型的 6,000 字符正文预算是两层限制（§5.5）。
+  - 命令返回后按 300 ms 的排空预算继续收集当前输出；采集结束后，后台作业的输出会被读取并丢弃，避免 SIGPIPE。工具结果不是后台作业的完整日志。
+  - agent 命令超时记录退出码 124，中断记录 130；它们先作为工具结果交给 harness，不等于 `nosh -a` 进程最终退出码。
+- **分工**：用户命令的作业控制交给 brush；agent 命令当前通过 `NewProcessGroup` 和 fd 重定向请求后台执行，未统一纳入该进程组的路径靠后续清理兜底。完整取消与进程创建接口仍属于 brush 上游改进项（§14）。
 - **超时和中止时的清理**：
-  - brush 不提供子进程的 pid，所以从系统读取进程树（Linux 读 `/proc`，macOS 用 libproc 的 `proc_listallpids` 和 `proc_pidinfo`）：命令开始后新出现的后代进程都会被清理；命令开始前就已存在的子进程（用户的后台作业）及其后代不受影响。
+  - brush 未直接暴露此次执行的全部 pid，因此比较系统进程树（Linux 读 `/proc`，macOS 用 libproc 的 `proc_listallpids` 和 `proc_pidinfo`），清理本次新出现的后代；开始前已观察到的子进程及其后代排除在外。尚未创建进程的旧后台作业仍可能落入时序窗口，见 MVP 报告 §6 #5。
   - double-fork 或 `setsid` 之后脱离进程树的进程，靠环境变量找回：每次 agent 命令都设置唯一的 `NOSH_AGENT_RUN=<pid>.<序号>`，带有这个值的进程一并清理（Linux 读 `/proc/<pid>/environ`，macOS 用 `sysctl(KERN_PROCARGS2)`）。没有采用 subreaper。
   - 局限：既清空环境、又脱离进程树的进程（如 `env -i setsid …`）找不到；其他用户的进程（例如经 `sudo` 启动、又脱离了进程树的）读不到环境；其他 Unix 平台不做这种清理。
-- **窗口大小和 SIGHUP**：按 bash 的规则处理。远程版中，按键、窗口变化和 Ctrl-C 都通过 `pty` 通道转发；客户端断开不算终端关闭。
+- **窗口与断线**：本地渲染读取终端尺寸，作业与挂断行为以 brush 和平台实现为准，不承诺所有 SIGHUP 场景与 bash 一致。远程按键/窗口/信号转发，以及客户端断开后保留会话，都是 §10 的目标设计。
 
 ### 4.5 CLI 模式与非交互约定
 
@@ -414,32 +416,34 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 | `nosh`、`nosh -l` | 交互 shell / 登录 shell |
 | `nosh -c '…'`、`nosh script.sh` | 纯 bash 兼容执行：不加载模型，不输出任何额外内容（scp、rsync、VS Code Remote 都依赖这一点） |
 | `nosh -a "任务"` | 一次性的 agent 任务，使用临时会话；可以从管道读入附件 |
-| `nosh -s "描述"` | 只输出一条建议的命令，供快捷键集成使用 |
-| `nosh init <shell>` | 输出 bash / zsh / fish / pwsh 的集成脚本 |
-| `nosh connect` / `nosh server` | 远程版的客户端 / 服务端 |
-| `nosh model …`、`nosh doctor` | 模型管理 / 自检 |
+| `nosh -s "描述"` | stdout 仅输出建议的命令文本，可含多行或复合命令；从不自动执行 |
+| `nosh model …`、`nosh doctor` | 模型管理 / 自检，子命令以 `--help` 为准 |
+| `nosh debug gen …` | 推理诊断；含 KV 类型和预重排对比开关 |
 
-- **`nosh -s`**：stdout 只输出命令本身，说明写到 stderr。退出码：0 表示有建议，1 表示没有建议，2 表示出错。
+`nosh init`、`connect/server`、`engine`、`config --defaults` 和 `doctor --rc` **尚未实现**；相关设计见 §9.2、§9.3、§10 和 §11。
+
+- **`nosh -s`**：stdout 只输出命令本身，说明写到 stderr。退出码：0 表示有建议，1 表示没有建议，2 表示出错，130 表示被中止。
 - **`nosh -a`**：退出码为 0 表示完成，1 表示没有完成（达到步数上限，或者命令被拒绝后无法继续），2 表示出错，130 表示被中止。加 `--json` 时，以 JSON Lines 格式输出事件。
-- **没有可见审批终端时**：需要确认的调用一律拒绝，并把命令写到 stderr（隐藏字符以转义显示）。审批要求控制终端可读且 stderr 为 TTY；stdin 可以是管道，但 stderr 重定向时不接受盲确认。只有显式传入 `--auto` 或 `--yolo` 才会放宽，Forbidden 始终拒绝。因此可以放心地用在 CI 里。
+- **状态含义**：`-a` 的 0 表示 harness 正常完成一轮任务，不是已经自动核实用户目标；事实正确性与最终状态由评测或用户验收。`-s` 的 0 表示提取到了建议，不保证命令语法、适用性或安全性。
+- **没有可见审批终端时**：需要确认的调用一律拒绝，并把命令写到 stderr（隐藏字符以转义显示）。审批要求控制终端可读且 stderr 为 TTY；stdin 可以是管道，但 stderr 重定向时不接受盲确认。CLI 或配置选择的 auto/yolo 只改变 §6.3 的策略，不会自动批准仍需确认的调用；Forbidden 始终拒绝。
 
 ### 4.6 平台
 
-| 平台 | 本地版 | 远程版 |
+| 平台 | 当前支持与验证 | 后续设计 |
 |---|---|---|
-| **Linux（核心）** | 完整支持：nosh shell（可以作为登录 shell）、CLI、全部权限能力与沙箱 | 服务端（主要场景），也可作客户端 |
-| macOS | 完整支持（沙箱能力不同） | 客户端，也可作服务端 |
-| Windows | CLI（托管 pwsh），以及在 pwsh 里用 Ctrl+G；nosh shell 为预览版 | 客户端 |
+| **Linux / WSL（核心）** | 本地 shell、CLI、权限 v1；x86_64 / aarch64 CI | 远程服务端与客户端、可选沙箱 |
+| macOS | 本地实现；Apple Silicon CI，进程清理已适配；`doctor` 内存与 debug RSS 仍有观测限制 | 远程客户端 / 服务端；GPU 与平台隔离能力 |
+| Windows | 未实现原生 shell 后端；当前使用 WSL | 托管 pwsh、其他 shell 的 Ctrl+G、远程客户端 |
 
 **验证**：CI 在 Linux x86_64、Linux aarch64（`ubuntu-24.04-arm`）和 macOS（Apple Silicon，`macos-latest`，只在 PR、main 和手动触发时跑）上跑 clippy 和全部测试，并在日志里打印决定 candle 内核路径的 CPU 特性（issue #7）。
 
-**Windows 细节**：
+**Windows 目标约束（未实现）**：
 - 控制台和托管的 pwsh 统一使用 UTF-8；
 - 用 Job Object 管理进程树；
 - engine 通过 Named Pipe 通信；
 - 远程客户端默认使用系统自带的 OpenSSH。
 
-推荐 Windows 用户连接 Linux 核心，或者在 WSL 里使用 nosh。
+Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运行 nosh；这不依赖尚未实现的 `nosh connect`。
 
 ## 5. Harness（两个版本共用）
 
@@ -447,9 +451,11 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 
 | 入口 | 可用工具 | 执行方式 |
 |---|---|---|
-| shell 内（`#`、出错触发、`ai`）、`nosh -a` | 全部 | 按审批模式执行（见 §6.3） |
+| shell 内（`#`、出错触发、`ai`）、无管道附件的 `nosh -a` | 当前四个工具（§5.5） | 按审批模式执行（见 §6.3） |
 | 建议（Ctrl+G、`nosh -s`） | 只有 `propose_command` | 从不执行，命令放进输入行 |
-| 管道附件 | 默认只有只读工具 | stdin 的内容截断后作为附件 |
+| `nosh -a` 的管道附件 | `read_file`、`list_dir` | stdin 的内容截断后作为附件，不注册 `run_command` |
+
+**建议模式边界**：每次仅生成一轮，最多 256 个新 token。优先提取 `propose_command`，没有可用调用时从回答的首个非空代码块或 `$ ` 行提取；保留整个多行文本，发现隐藏字符则拒绝建议，不是删除字符后继续返回。这里不做执行前权限分析或可执行性验证，工具名/格式受限不等于建议内容已获安全批准，见 [suggest.rs](../crates/nosh-core/src/suggest.rs)。
 
 ### 5.2 对话与任务
 
@@ -457,30 +463,35 @@ pub trait Redactor {                     // 扩展接口：本地版为空实现
 会话
  ├─ 对话 #1 ─ 任务 1：# 找出大文件
  │          ├ 任务 2：# 再把它们压缩一下     ← 可以引用任务 1 的结果
- │          └ 任务 3：gti status（not_found）
- └─ 对话 #2（空闲 30 分钟、执行 ai clear、压缩后仍超出预算或者换了模型时新建）
+ │          └ 任务 3：# 这些文件总共多大
+ └─ 对话 #2（空闲 30 分钟、ai clear、切换思考模式或压缩后仍超出预算时新建）
 ```
 
 - **追问**：同一个会话的任务共用一个对话，所以可以追问。prompt 只往后追加，新任务只需要 prefill 新的消息。
 - **不进入主对话的请求**：本地拼写纠错不进入对话；建议模式使用独立的短对话，用完就丢。
-- **持久化**：对话只保存在内存里（KV 在 engine 中）。`history.jsonl` 只记录任务的文本摘要，不用来恢复对话。
+- **持久化**：当前对话与 KV 只保存在进程内存里，不能跨进程恢复。规划中的 `history.jsonl` 仅记录任务文本摘要，不作为对话恢复机制。
 - **一次性任务**：`nosh -a` 每次都新建会话和对话，结束后一起销毁。
 
 ### 5.3 主循环
 
+下面是省略细节的伪代码，实际状态处理见 [agent.rs](../crates/nosh-core/src/agent.rs)：
+
 ```text
+sid = 取得或新建对话（任务前按 §5.7 检查预算）
 append user(任务头 + 输入 [+ 附件])
 for step in 1..=max_steps (默认 10):
-    events = engine.step(sid, pending)            // 只 prefill 新 token
+    events = engine.step(sid, pending)            // 尽量复用公共前缀
+    if ContextFull: 回退本次追加，压缩旧工具结果后重试一次
+    if 生成被取消: 结束任务，不执行本轮工具调用
     流式显示 Text / Think；收集 ToolCall
-    if 没有 ToolCall: break                         // 这是最终回答
+    if 没有 ToolCall 且没有 CallError: 按生成停止原因结束
     for call in calls（按顺序）:
         report = permissions.assess(call, shell)
         match permissions.decide(report, policy):
             Allow → 执行 | Ask → 发起审批，批准后执行 | Deny → 拒绝
         pending.push(结果（截断）+ 状态差异)
         if 被拒绝: 取消本轮剩余的调用并告知模型; break
-    if 上下文占用 > 85%: 压缩                        // §5.7
+    将 CallError 作为 error 工具结果回灌；超出同类错误重试上限则失败
 ```
 
 - **错误回灌**：遇到 XML 解析失败、未知工具、缺少参数或参数类型错误时，以工具结果的形式返回 `error: …`，让模型自己修正。同一种错误最多重试 2 次。
@@ -489,7 +500,7 @@ for step in 1..=max_steps (默认 10):
 
 ### 5.4 Prompt
 
-**system**（在整个会话内保持不变，可以缓存到磁盘）：
+**system**（在同一对话内保持不变；当前复用内存中的前缀，磁盘缓存属于 M2）。下面展示结构，实际内容以 [prompt.rs](../crates/nosh-core/src/prompt.rs) 为准：
 
 ```text
 You are nosh, an AI shell running fully offline on the user's computer.
@@ -516,31 +527,38 @@ Available: {git, docker, python3, ...}
 把 logs 里 7 天前的日志打包后删除
 ```
 
-- **`trigger` 的取值**：`hash`、`parse_error`、`not_found`、`failed`、`ai`、`cli`、`pipe`。`failed` 时会附上 `exit=`，如果有采集到的输出，还会附上 `[output-tail]` 块。
-- **`lang=zh`**：输入或者失败的命令里含有中文时，任务头追加 `lang=zh`，提醒 2B 模型用中文回答（MVP 中模型偶尔会用英文回答中文问题）。这只改动任务消息，system 保持不变。
+- **`trigger` 的取值**：`hash`、`parse_error`、`not_found`、`failed`、`ai`、`cli`、`pipe`。`failed` 时附上 `exit=` 和失败命令；当前不采集用户命令输出，`[output-tail]` 属于 M2 的 PTY 采集设计。
+- **`lang=zh`**：输入或失败命令命中 `contains_cjk` 时追加，提醒模型用中文回答；该范围也包含部分非中文字符（§4.2），不是自动语言检测。这只改变任务消息，system 保持不变。
 - **动态信息不放进 system**：对话会跨任务延续，system 里任何一点变化都会让整段对话的 KV 失效。把动态信息放在任务头里，prompt 就始终只往后追加。
-- **保持简短**：2B 模型和 CPU 上的 prefill 都要求 prompt 精简。指令用英文写，回答用用户使用的语言。不放 few-shot 示例，依靠模型原生的工具调用能力和约束解码。
-- **建议模式**：只带 `propose_command` 一个工具，prompt 约 400 个 token，单独缓存。
-- **项目说明**：如果项目根目录下有 `NOSH.md`，会在进入该项目后的第一个任务消息里截断附上。
+- **保持简短**：2B 模型和 CPU 上的 prefill 都要求 prompt 精简。指令用英文写，回答用用户使用的语言。不放 few-shot 示例，当前依靠模型原生工具调用和错误回灌，约束解码留到 M2。
+- **建议模式**：只带 `propose_command` 一个工具，prompt 约 400 个 token，使用独立短对话；当前并没有独立的 KV 缓存。
+- **项目说明**：从 cwd 向上查找 `NOSH.md`，遇到 git 根目录停止；在当前对话首次遇到该说明文件时，截断到 2,000 字符后附在任务消息里。
 
 ### 5.5 工具
 
-| 工具 | 参数 | 风险 | 说明 |
+当前工具定义以 [tools.rs](../crates/nosh-core/src/tools.rs) 为准：
+
+| 当前工具 | 参数 | 风险 | 说明 |
 |---|---|---|---|
 | `run_command` | `command`、`timeout_sec?`（默认 60，上限 600） | 按命令内容分析 | 在共享会话中执行（见 §4.3、§4.4） |
 | `read_file` | `path`、`start_line?`、`end_line?` | Safe（受保护路径除外） | 带行号，默认最多读 400 行 |
-| `list_dir` | `path?`、`depth?`（≤ 3） | Safe | 树形列表，遵循 .gitignore。同一次列表里的文件大小统一使用最大文件的单位，因为 2B 模型会把 781.2 KB 排在 11.4 MB 前面。递归时每一层都检查受保护路径 |
-| `search` | `pattern`、`path?`、`glob?` | Safe | 使用 ripgrep 的内核（`grep-searcher`） |
-| `write_file` | `path`、`content` | Mutating | 先展示 diff，写入前先备份，可以用 `ai undo` 撤销 |
+| `list_dir` | `path?`、`depth?`（1–3，默认 1） | Safe（受保护起始路径除外） | 遵循 .gitignore，最多展示 300 项；同次列表统一大小单位，避免小模型混排 KB/MB |
 | `propose_command` | `command`、`explanation?` | 不执行 | 把命令放进输入行，由用户执行。用于建议、纠错，以及需要终端或密码的命令 |
-| `ask_user` | `question`、`options?` | — | 需求不明确时向用户澄清 |
 
-- **为什么内置 `read_file`、`list_dir` 和 `search`，而不是走 shell**：各平台行为一致，输出可控，而且能证明它们是只读的，因此可以自动放行。
+**已知限制**：`list_dir` 当前只对起始路径做权限判断，递归列举不会逐层重新审批，可能展示受保护子目录的文件名和大小；逐层检查是设计目标，不是已有保证（[MVP 报告 §6 #13](MVP-REPORT.md#6-已知问题)）。
+
+| 规划工具（尚未注册） | 参数草图 | 设计意图 |
+|---|---|---|
+| `search`（M2） | `pattern`、`path?`、`glob?` | 基于 `grep-searcher` 的只读搜索 |
+| `write_file`（M2） | `path`、`content` | Mutating；先展示 diff、备份，再写入，配套 `ai undo` |
+| `ask_user`（后续扩展） | `question`、`options?` | 需求不明确时向用户澄清 |
+
+- **为什么提供内置只读工具**：行为和输出可控，不需要让模型为简单读取拼装 shell 命令；受保护路径仍按权限策略处理。
 - **截断输出**：
   - 保留开头 60% 和结尾 40%，中间标注省略了多少；
-  - 每次最多反馈 6,000 个字符（约 1.5K token）；
-  - 完整输出保存到 `outputs/<id>.log`，可以用 `read_file` 查看。
-- **结果格式**：纯文本头加原始输出，避免 JSON 转义让内容膨胀。上线前会和 JSON 格式做 A/B 对比。
+  - stdout/stderr 正文合计预算为 6,000 字符；状态头和省略标记另计；
+  - 被截断的命令将采集范围内的原始输出保存到 `state/outputs/<pid>-<id>.log`；超过执行采集上限的字节已经丢弃，不会因落盘恢复。
+- **结果格式**：当前为纯文本头加采集输出，避免 JSON 转义膨胀；与其他结果格式的 A/B 对比尚未完成。
 
 ```text
 [exit_code=0 duration=0.08s truncated=no]
@@ -553,29 +571,26 @@ LISTEN 0 511 *:8080 *:* users:(("node",pid=4312,fd=21))
 
 ### 5.6 工具调用解析
 
-解析由 special token 的 ID 驱动，是一个状态机，不做字符串匹配：
+外层流状态由 special token ID 驱动，CALL 内再解析累积的 XML 风格文本；不是用字符串查找替代控制 token，也不是通用 XML 解析器。实现见 [toolcall.rs](../crates/nosh-llm/src/toolcall.rs)，生成循环见 [local.rs](../crates/nosh-llm/src/local.rs)。
 
 ```text
 TEXT ── id 8 <think> ──▶ THINK ── id 9 </think> ──▶ TEXT
-TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> ──▶ 产出 ToolCall ──▶ TEXT
-任意状态 ── id 130073 <|im_end|> / id 1 </s> / 达到 max_tokens ──▶ DONE
+TEXT 或 THINK ── id 18 <function ──▶ CALL（缓冲）
+CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
+生成结束：EOG / max_new_tokens 或上下文余量耗尽 / 取消 → finish()
 ```
 
-- **CALL 状态内的解析**：解析 `name="…"` 和 `<param name="…">值</param>`（id 20 和 21 是参数的边界），支持 CDATA 和 XML 实体反转义，并按 JSON Schema 转换类型。
+- **初始状态与结束**：开启思考时从 THINK 开始，否则从 TEXT 开始；EOG（1 / 130073）由引擎识别，不是 `StreamParser` 内的 DONE 状态。
+- **CALL 状态内的解析**：解析函数名、参数名与值（id 20/21 为参数边界），支持 CDATA 和 XML 实体反转义；按工具声明的 `properties.type` 尝试转换，并检查 `required`。这不是完整 JSON Schema 验证，不能假定未知参数、枚举、范围或复杂结构约束都已校验。
 - **界面**：TEXT 状态下流式输出；CALL 状态下不显示原始 XML，而是渲染成工具卡片。
-- **截断保护**：CALL 进行到一半遇到 EOG，视为格式错误，把错误反馈给模型。
+- **截断保护**：EOG、长度限制或取消时，`finish()` 对未闭合 CALL 产生 `Truncated` 错误；正常任务按 §5.3 回灌，用户取消则按取消状态终止。
 
 ### 5.7 上下文与思考
 
-- **预算**（默认 8K）：静态前缀约 1.2K，对话和工具结果约 6K，为生成预留 1K。
-- **压缩**：带滞回，以免频繁破坏缓存。上下文占用超过 85% 时，一次性压缩到 50% 以下：
-  1. 先把较早的工具输出换成一行摘要；
-  2. 如果仍然超限，再让模型对最早的几轮做摘要，但保留第一个任务的原文；
-  3. 最后用 `rewind` 重建对话。
-- **思考**：
-  - 默认关闭，在生成前缀里预填空的 think 块，省 token，也降低延迟；
-  - 用 `ai think on` 开启；
-  - 可选 `auto`：同一个任务连续两步失败后，自动开启思考。
+- **当前预算**：默认上下文为 8K，包含静态前缀、对话和生成；静态前缀约 1.0–1.3K，具体占用随工具定义和输入变化。
+- **当前压缩**：新任务开始前，已用上下文超过 85% 时，把旧工具结果缩成短记录；压缩后仍超过 60% 就新建对话。任务内遇到 `ContextFull` 时，回退本次追加、压缩工具结果并重试一次；再次失败会报错，不无限重试。这不是 LLM 摘要，也不保证保留全部历史。
+- **M2 目标**：带滞回地压缩到 50% 以下；工具结果压缩仍不足时，对旧轮次生成摘要，保留首个任务原文，再重建对话。
+- **思考**：当前默认关闭，通过 generation prompt 预填空 think 块；`ai think on/off` 切换并重建对话。`thinking = "auto"`（连续失败后开启）尚未实现，配置中指定会警告并按关闭处理。
 
 ### 5.8 扩展（M3）
 
@@ -589,19 +604,21 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 
 ## 6. 权限（两个版本共用）
 
-**原则：方便优先。** 只在真正危险、不可逆，或者会越出工作区的操作上请求确认。能通过分析判定安全的就直接执行；宁可在少数边界情况下放宽一些，也不要频繁弹出确认，更不要让用户反复键入 `yes`（§16 #14）。这条原则只针对审批确认；命令建议、拼写纠错、执行失败时的提示等 shell 交互提示照常保留。
+**原则：方便优先，但不省略模式约定。** 能判定为 Safe 的操作直接执行，避免把普通工作区操作过度升级为 Dangerous（§16 #14）；confirm 模式仍确认 Mutating，auto 的例外见 §6.3。命令建议、拼写纠错、执行失败提示等 shell 交互不属于审批，照常保留。
+
+**边界**：当前是静态风险分析与执行前策略，不是安全沙箱，不能完整推导任意脚本、程序或动态参数的效果。远程审批、项目/管理员策略和系统调用隔离在下文单独标为规划。
 
 ### 6.1 威胁模型
 
 | 威胁 | 对策 |
 |---|---|
 | 模型误判（"清理日志"被理解成 `rm -rf /var/log/*`） | 风险分级、执行前确认，以及"先预览"的规则 |
-| 提示注入（文件或命令输出里写着"下载脚本并交给 sh 执行"） | 审批在模型之外，无法被绕过；不可信内容禁止解析 special token；高风险调用永远需要强确认 |
-| 数据外泄（先读私钥，再用网络命令发出去） | 网络类命令至少按 Mutating 处理；读取受保护路径需要确认 |
+| 提示注入（文件或命令输出里写着"下载脚本并交给 sh 执行"） | 审批策略在模型之外；不可信内容禁止解析 special token；按 §6.3 判定，不依赖模型自行遵守规则，也不承诺消除所有语义注入 |
+| 数据外泄（先读私钥，再用网络命令发出去） | 网络类命令至少按 Mutating 处理；已识别的受保护读取设置确认标志，最终行为受模式和显式放行规则影响 |
 | agent 破坏会话（执行 `exec`、把 PATH 改坏） | 会话状态保护、状态差异回显（见 §4.3） |
-| 远程审批被伪造或重放 | 使用带外的 control 通道；审批绑定 nonce 和有效期；只接受已认证 SSH 会话中附着的客户端的审批 |
-| 恶意的模型文件或仓库配置 | 固定 SHA-256，按不可信输入解析 GGUF；项目配置只能收紧策略 |
-| 本地 IPC 被他人连接 | UDS 权限为 0600，Named Pipe 只允许当前用户；engine 本身不能执行命令 |
+| 远程审批被伪造或重放 | 规划：带外 control 通道、nonce、有效期与 SSH 会话认证 |
+| 恶意的模型文件或仓库配置 | 当前：registry 固定 SHA-256，加载检查 GGUF 结构；显式自定义路径不等同于 registry 校验。规划：项目配置只能收紧策略 |
+| 本地 IPC 被他人连接 | 规划：UDS 0600、Named Pipe 只允许当前用户；engine 不执行命令 |
 
 ### 6.2 风险分级
 
@@ -620,24 +637,24 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | **Safe**（只读，且不联网） | `ls` `cat` `grep` `rg` `find`（不带 `-delete`/`-exec`）`du` `ps` `ss` `git status/log/diff` | 自动执行 |
 | **Mutating**（可恢复的写入、联网、修改会话状态） | `mkdir` `cp` `mv`、写入重定向、`sed -i`、`git commit`、安装软件包；`curl` `wget` `ssh` `scp` `rsync`；修改 `PATH`、`trap`、`alias`，以及 `read`、`hash`、`fc`、`stty` 等会修改会话或终端状态的用法 | 单键确认 |
 | **Dangerous**（破坏性、不可逆、提权、远程代码执行） | `rm -r/-f`、`find -delete`、`dd` `mkfs`、对系统目录或家目录执行 `chmod/chown -R`、`sudo`、把下载的内容交给 shell 执行、`git push --force`、`git reset --hard`、`shutdown` | 说明影响，要求键入 `yes` |
-| **Forbidden**（任何模式下都拒绝） | `rm -rf /`、`rm -rf ~`、fork bomb、对系统盘执行 `mkfs` 或 `dd`；agent 执行 `exit`/`exec` | 拒绝，并把原因告诉模型 |
+| **Forbidden**（任何模式下都拒绝） | `rm -rf /`、`rm -rf ~`、fork bomb、对系统盘执行 `mkfs` 或 `dd`；agent 在共享父 shell 执行 `exit`/`exec` | 拒绝，并把原因告诉模型 |
 
 补充规则：
 - **子命令和参数级的规则表**：覆盖 git、find、sed、awk、xargs、docker、kubectl、systemctl、npm、pip、apt 等常用命令。
 - **路径**：
   - 在工作区（会话开始时的 cwd，或者它所在的 git 根目录）之外写入时，风险升一级。
-  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`，以及 nosh 自己的配置和状态目录）读取需要确认，写入按 Dangerous 处理。shell 脚本里的读取同样检查。
+  - 受保护路径（`~/.ssh`、`~/.gnupg`、`~/.aws`、`.env`、`/etc`、`/boot`，以及 nosh 自己的配置和状态目录）读取设置 `reads_protected` 标志，confirm/auto 下默认需要确认；写入按 Dangerous 处理。shell 脚本里的读取同样检查，最终决策仍按 §6.3。
   - nosh 的配置和状态目录按实际位置保护：Linux 默认是 `~/.config/nosh` 和 `~/.local/share/nosh/state`，macOS 在 `~/Library/Application Support/nosh`，设置了 `NOSH_HOME` 时就是该目录。
   - macOS 上 `/etc`、`/tmp`、`/var` 是指向 `/private/…` 的符号链接，两种写法（包括解析符号链接之后的真实路径）按同一个位置判断：例如递归删除 `/private/etc`、`/private/var` 与删除 `/etc`、`/var` 一样为 Forbidden。
-  - 读取目标来自变量或参数时（如 `cat "$KEY_PATH"`），用分析时能确定的值解析：会话变量、行内赋值、会话中或行内定义的函数的参数、脚本和 `bash -c` 的参数；子进程只继承导出的变量。解析出受保护路径时，与字面路径一样需要确认。
+  - 读取目标来自变量或参数时（如 `cat "$KEY_PATH"`），用分析时能确定的值解析：会话变量、行内赋值、会话中或行内定义的函数的参数、脚本和 `bash -c` 的参数；子进程只继承导出的变量。解析出受保护路径时，与字面路径一样设置受保护读取标志。
   - 确定不了的值（`$(…)`、glob、未知变量）不改变分级，也不额外确认（方便优先）。
-  - 已知的值只用来增加确认，不用来放宽：分析不考虑执行顺序，经过分支或循环后值可能已经变了。所以用变量拼出的写入目标、删除目标和命令名，仍按原有规则处理（见下方的反混淆和运行时才确定的写入目标）。
+  - 已知的值只用来增加确认，不用来放宽：分析会追踪部分顺序赋值，但不完整模拟分支和循环等控制流，值可能已经失效。所以用变量拼出的写入目标、删除目标和命令名，仍按原有规则处理（见下方的反混淆和运行时才确定的写入目标）。
 - **反混淆**：把 `eval`、`bash -c`、`$(…)` 的内容展开后再分析。以下情况直接判为 Dangerous：
   - 解码后执行（如 `base64 -d | sh`）；
   - 十六进制转义；
   - 用变量拼接出命令名。
 - **sudo**：agent 执行的 sudo 一律改写成 `sudo -n`，并按 Dangerous 处理。需要输入密码时，`sudo -n` 会立即失败，此时模型改用 `propose_command`，让用户自己执行。nosh 不接触用户的密码。
-- **本会话放行**（审批时选 `a`）：只对完全相同的命令前缀生效，而且风险不能高于 Mutating。
+- **本会话放行**（审批时选 `a`）：只对相同的命令前缀生效，风险不能高于 Mutating；新增联网、工作区外写入或修改会话状态能力时重新判定，不覆盖受保护读取。
 - **自定义规则**：`[safety] allow/deny` 按简单命令逐条匹配 glob。
   - 一行里的**每一条**简单命令都匹配 allow，才会放行（可以放行 Dangerous）；只要有一条匹配 deny，就拒绝。这样 `ls; rm -rf x` 就不能借 `ls*` 这条规则被放行。
   - allow 不能覆盖 Forbidden；含隐藏字符的命令不适用 allow。
@@ -652,12 +669,14 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | 模式 \ 风险 | Safe | Mutating | Dangerous | Forbidden |
 |---|---|---|---|---|
 | **confirm（默认）** | 自动 | 确认 | 强确认（键入 yes） | 拒绝 |
-| auto | 自动 | 工作区内自动，工作区外确认 | 强确认 | 拒绝 |
+| auto | 自动 | 工作区内普通操作自动；联网、修改会话状态、受保护读取、工作区外写入需确认 | 强确认 | 拒绝 |
 | yolo | 自动 | 自动 | 确认 | 拒绝 |
+
+矩阵适用于没有显式放行的调用。判定顺序为 Forbidden → deny → 用户 allow / 会话放行 → 模式矩阵；allow 不能覆盖 Forbidden 或含隐藏字符的命令（§6.2）。因此“Dangerous 一律强确认”和“受保护读取在所有模式下都确认”都不是当前契约。
 
 - **只要建议、不想执行**：用 Ctrl+G 或 `nosh -s`。
 - **YOLO**：可以写进配置文件，风险由用户自己承担。启用后启动时会显示警告，提示符上一直显示红色的 `YOLO` 标记；Forbidden 仍然生效。
-- **策略层级**（优先级从低到高）：
+- **策略层级（目标）**：当前实现内置默认值、用户配置和会话放行；项目配置、管理员策略尚未实现。目标优先级从低到高：
   1. 内置默认值；
   2. 用户配置；
   3. 项目配置（`.nosh/`），只能收紧；
@@ -667,6 +686,8 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 - **远程版**：以服务端的策略为准，客户端的配置只影响界面。
 
 ### 6.4 远程审批
+
+**规划（M2/M3）**：当前只支持执行端的终端审批，没有 control 通道。
 
 - **请求与响应**：
   - 服务端经 control 通道把请求 `{session, call_id, command, cwd, risk, nonce, expires_at}` 发给客户端；
@@ -679,21 +700,23 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 
 ### 6.5 隔离、审计与数据
 
-- **执行隔离**：
-  - 基础隔离：超时、输出上限 10 MB、关闭 stdin、放在后台进程组（见 §4.4）；Windows 上托管的 pwsh 使用 Job Object。
+- **执行约束**：
+  - 当前：超时、输出采集上限、关闭 stdin、后台进程组与清理（见 §4.4）；这不是操作系统安全隔离。
+  - Windows Job Object 属于托管 pwsh 后端规划。
   - 可选沙箱（M3，Linux）：agent 命令的外部进程在 exec 之前施加 Landlock（只允许写工作区和临时目录）和 seccomp（可以禁止网络）。这需要 brush 提供进程创建的钩子；沙箱不影响用户自己的命令。
-- **本地数据**：推理在本地完成，数据不会离开用户的机器。
+- **本地推理**：模型不需要上传输入；shell 命令是否访问网络仍由命令本身、审批模式和外部网络环境决定（§8.3）。
 
-| 数据 | 内容 | 默认保留 |
+| 数据 | 当前状态 | 保留策略目标（尚未实现） |
 |---|---|---|
-| `history.jsonl` | agent 任务摘要 | 30 天 / 50 MB |
-| `audit.jsonl` | agent 命令、风险等级、决策与来源、退出码 | 90 天 / 100 MB（管理员可以延长，或锁定为只追加） |
-| `outputs/` | 被截断的命令的完整输出 | 7 天 / 500 MB |
-| `backup/` | `write_file` 覆盖前的原文件 | 7 天 |
-| `cache/prompt/` | 静态前缀的 KV（不含用户数据） | LRU，1 GB |
+| `state/shell_history` | 当前默认 shell 历史，受 brush 历史设置影响；不是 agent 任务摘要 | — |
+| `state/history.jsonl` | 未实现；规划记录 agent 任务摘要 | 30 天 / 50 MB |
+| `state/audit.jsonl` | 未实现；规划记录命令、风险、决策与来源、退出码 | 90 天 / 100 MB，管理员可延长或锁定只追加 |
+| `state/outputs/` | 已实现；截断命令的采集输出，不自动清理 | 7 天 / 500 MB |
+| `state/backup/` | 未实现；用于 `write_file` 覆盖前备份 | 7 天 |
+| `cache/prompt/` | 未实现；静态前缀 KV，不含用户任务数据 | LRU，1 GB |
 
-- **脱敏（扩展接口）**：本地 agent 是受信任的，不做脱敏（§16 #15）。history、audit、outputs 都原样写盘，靠文件权限、保留期限和无痕模式保护。agent 数据的出口（目前只有写盘）都经过 `Redactor` 接口（§3.4），本地版使用空实现；接入远程 agent 时再实现具体规则，覆盖常见平台的令牌、PEM 私钥、口令和令牌类字段（包括带引号、含空格的值）以及 JWT。
-- **权限与无痕模式**：状态文件的权限为 0600，目录为 0700。`ai private on` 进入无痕模式，不写 history 和 outputs；审计是否保留由策略决定。
+- **脱敏（扩展接口）**：本地 agent 受信任，不做脱敏（§16 #15）。当前 `outputs` 落盘经过 `Redactor`，默认 `NoRedact` 原样保留；不能把尚未实现的保留期限或无痕模式视为保护。远程 agent 接入时再实现令牌、PEM 私钥、口令及 JWT 等规则，包括带引号、含空格的字段值。
+- **文件权限**：Unix 上采集输出文件按 0600 创建，状态目录按 0700 设置。**无痕模式是规划**：`ai private on` 将停止写 agent history/outputs，审计是否保留由策略决定，当前不能使用。
 
 ## 7. 推理引擎（nosh-llm）
 
@@ -715,9 +738,9 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 
 | # | 上游现状 | 改造 |
 |---|---|---|
-| 1 | `MAX_SEQ_LEN = 4096` 是写死的 | RoPE 表按 `context_length`（默认 8K，上限 128K）计算，按需扩容 |
+| 1 | `MAX_SEQ_LEN = 4096` 是写死的 | RoPE 表按 `context_length` 计算；默认 8K，当前用户配置接受 1K–32K。模型原生 128K 是架构能力，不是当前 CLI 的配置上限 |
 | 2 | 整张 embedding 表被反量化成 f32（约 1.07 GB） | 保持量化，用 `QTensor::embedding` 按行反量化 |
-| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 使用自有 KV，按 1024 token 分段增长，支持 `truncate` / `snapshot` / `restore`；存为 f16（已实现）。decode 时按 256 个 key 一块、用 F16C 转成 f32 计算；prefill 时把用到的范围一次性转换到一块可复用的 scratch（8K 时 16 MiB） |
+| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 自有 KV 按 1024 token 分段增长，支持截断回退，默认 f16。decode 时按 256 个 key 一块转成 f32 计算；prefill 时把所需范围转换到可复用 scratch（8K 时 16 MiB）。磁盘 snapshot/restore 留到 M2 |
 | 4 | Q/K/V 和 gate/up 各自做一次 matmul | 使用融合 GEMV（M2） |
 | 5 | 注意力按"每个 token × 每个 head"逐行计算，每一行都要重新读一遍 K/V（MVP 在 1.5K 位置实测只有 57 GFLOP/s） | 使用自有的分块 GQA 内核：按"KV head × 一块 query token"划分工作，同组 head 共用一次 K/V 读取；decode 时按 key 区间切分，再合并局部 softmax。MVP 中 2K prompt 的 prefill 从 79 tok/s 提升到 124–140 tok/s |
 | 6 | 重排完成后，原始权重仍然常驻内存 | 加载时按层预重排，最多七个矩阵并行。x86：只释放层内 Q4K，省下 915 MiB，Q6K 和 output 保持不变；ARM + dotprod：释放层内 Q4K/Q6K 和 output 的原始数据。embedding 在所有平台都保留量化原始数据；`--no-prepack` 可关闭提前重排与释放 |
@@ -726,39 +749,41 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
   - 分块 prefill，每块 512 个 token，用来限制峰值内存，块与块之间可以取消；
   - 只计算最后一个位置的 logits；
   - llama 布局的 GGUF 使用交错式 RoPE；
-  - **只保留一个计算线程池**：`CANDLE_NUM_THREADS` 设为物理核心数，`RAYON_NUM_THREADS=1`，而且只作用于 nosh 进程，在 shell 子进程中还原。这两个变量在 `main` 开头、任何线程启动之前设置，以免与其他线程读取环境变量时发生竞争。两个线程池争抢核心时，MVP 的 decode 只有 6.5 tok/s，调整后约 20 tok/s；
+  - **避免线程池争用**：两个线程池仍存在，默认让 candle barrier pool 使用物理核心数、Rayon 使用 1 个线程。有效的正整数 `CANDLE_NUM_THREADS` 可覆盖前者；后者由 `NOSH_RAYON_THREADS` 覆盖，外部的 `RAYON_NUM_THREADS` 本身会被 nosh 重设。设置发生在 `main` 开头、任何线程启动前；注入的两个变量在 shell 中还原原值，不污染用户子进程。MVP 中两个线程池争用时 decode 只有 6.5 tok/s，调整后约 20 tok/s；
   - 权重重排：x86 的 Q4K、ARM + dotprod 的 Q4K/Q6K 在加载时完成（见上表 #6）；x86 的 Q6K prefill 布局仍在第一次 prefill 时懒加载。`LoadOptions::prepack_weights` / `LocalEngineOptions::prepack_weights` 控制提前重排；关闭后仍保留 candle 的懒重排，而非禁用重排内核。常驻 engine 可以避免每次冷启动都重做一遍；
   - 加载时自检架构、层数、量化类型以及词表是否一致。
 
 ### 7.2 分词与模板
 
 - **分词器**：使用 `tokenizer.json` 和 `tokenizers` 0.23（`default-features = false, features = ["fancy-regex"]`，没有 C/C++ 依赖），与模型一起下载。编码模板输出时设置 `add_special_tokens = false`，因为模板里已经有 `<s>`。
-- **分段编码，防止注入**：模板骨架允许解析 special token；用户输入、文件内容、命令输出等不可信的片段开启 `encode_special_tokens`，按普通文本切分，因此无法伪造对话轮次或工具调用。
+- **分段编码，隔离控制标记**：模板骨架允许解析 special token；用户输入、文件内容、命令输出等不可信片段开启 `encode_special_tokens`，按普通文本切分，不把其中的模板标记当作轮次或工具调用边界。这只隔离控制 token，不代表模型不会受文本中的语义指令影响（§6.1）。
 - **增量解码**：流式输出时，遇到不完整的 UTF-8 字节先缓住，不急着输出。
 - **模板**：
   - 内置一个手写的 MiniCPM5 渲染器，复刻官方 `chat_template.jinja` 中用到的分支：system + tools、user、assistant（含空的 think 块）、合并连续的 tool 结果、generation prompt。
-  - 用 HF `apply_chat_template` 生成的样例做逐字节一致的 golden 测试。
+  - 与仓库中的 [固定 golden 样例](../crates/nosh-llm/tests/fixtures/template_cases.json) 逐字节比较；测试本身不实时调用 HF `apply_chat_template`，也不等同于完整的分词一致性验证。
 
 ### 7.3 采样
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | temperature / top_p / min_p | 1.0 / 0.95 / 0 | 官方推荐值；官方指出 llama.cpp 默认的 `min_p=0.05` 容易导致复读 |
-| repetition_penalty | 1.0，检测到复读时升到 1.05 | 复读的判定：最近 256 个 token 内，同一个 16-gram 出现 3 次以上 |
+| repetition_penalty | 配置值 1.05；触发前不应用 | 当前次生成的末尾 16-gram 在最近 256 个已生成 token 中出现至少 3 次后启用，并保持到该次生成结束 |
 | tool_call_temperature | 0.3 | 在 `<function` 到 `</function>` 之间降低温度，减少语法错误 |
-| 建议模式 | temperature 0.7 | 输出更确定 |
+| 建议模式 | temperature 0.7 | 正文采样温度；CALL 区间仍使用 tool_call_temperature，不承诺确定性输出 |
+
+当前每次 `LocalChatEngine::step` 重新创建 sampler，复读窗口只包含该次生成，不含 prompt。固定 `--seed` 会让每次 sampler 从该 seed 开始，但不会固定任务时间、PID、工具耗时、输入 token 或浮点计算；完整任务复现仍按 §13.2 的口径验收。采样实现见 [sampling.rs](../crates/nosh-llm/src/sampling.rs)。
 
 **约束解码**（M2）：在 `<function` 之后，用 token-trie 把函数名限制在已注册的工具里；在 `<param` 之后，把参数名限制在该工具的参数里。
 
 ### 7.4 KV 与前缀复用
 
-在 CPU 上，首 token 延迟主要来自 prefill（身份说明加工具定义约 1.0–1.3K token）。为此做三级复用：
+在 CPU 上，首 token 延迟主要来自 prefill（身份说明加工具定义约 1.0–1.3K token）。三级复用中，前两项已实现，第三项属于 M2：
 
-1. **对话内增量**：求新请求与已缓存 token 的最长公共前缀，调用 `truncate_kv` 之后，只对新的 token 做前向计算。
-2. **token 级日志**：assistant 轮保存模型原始生成的 token id，下一轮直接拼接，而不是"解码 → 重新渲染 → 重新编码"。重新序列化或者 BPE 的差异，都会让缓存从差异处开始失效。
-3. **磁盘前缀缓存**：把静态前缀的 KV 落盘。
+1. **对话内增量**：求新请求与缓存 token 的最长公共前缀，将 KV 截断到该位置后计算未缓存部分；若输入被完全覆盖，仍退回一个 token 重算末位置 logits，不是所有命中都能省去前向计算。
+2. **token 级日志**：assistant 正文保留生成的 token id，下一轮直接拼接，不走“解码 → 重新渲染 → 重新编码”；轮尾会按模板移除 `</s>` 并补齐 `<|im_end|>` 和换行，不是整个生成流逐字节原封不动。重新序列化或 BPE 差异会使缓存从差异处失效。
+3. **磁盘前缀缓存（未实现）**：把静态前缀的 KV 落盘。
    - key = `sha256(模型哈希 ‖ 前缀 token ‖ KV 类型 ‖ 引擎版本)`；
-   - 约 50 MB，加载不到 100 ms；
+   - 估算约 50 MB，目标加载不到 100 ms，需实测；
    - 采用 LRU 淘汰，上限 1 GB。
 
 ### 7.5 性能目标与实测
@@ -767,21 +792,23 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 |---|---|---|
 | decode | CPU ≥ 12 tok/s；Metal ≥ 40 tok/s；CUDA ≥ 60 tok/s | 短上下文 23.6–25.6 tok/s；2.1K 为 19.5–19.9；4.4K 为 17.0–17.7；7.9K 为 13.1–13.8（内存优化后，KV 读取量减半，长上下文更快） |
 | prefill | CPU ≥ 100 tok/s | 2.1K 冷 prompt 136–156 tok/s；2.2K→4.3K 为 95–104；7.9K 冷 prompt 89–92 |
-| engine 常驻内存（8K） | ≤ 3.0 GB | x86_64：2.69 GiB（约 2.88 GB）；Linux ARM + dotprod：2.05 GiB（约 2.21 GB）✔，均为注明样本的 RSS 峰值；x86 MVP 为 3.2–3.8 GB（见 §2.3） |
+| nosh 进程峰值 RSS（8K） | ≤ 3.0 GB | x86_64：2.69 GiB（约 2.88 GB）；Linux ARM + dotprod：2.05 GiB（约 2.21 GB），均为注明样本；x86 MVP 为 3.2–3.8 GB（见 §2.3） |
 | 模型加载 | — | 1.8–2.1 s（页缓存已热，含 Q4K 的提前重排 0.5–0.9 s）；短 prompt 的首个 token 0.72–0.86 s |
 
 **加速手段**：
-- **M1（已实现）**：量化；运行时 SIMD 分派和重排内核；分块 GQA 注意力；单一计算线程池；加载时重排 Q4K 并释放其原始权重；KV 使用 f16。
+- **M1（已实现）**：量化；运行时 SIMD 分派和重排内核；分块 GQA 注意力；默认抑制线程池争用；加载时重排 Q4K 并释放其原始权重；KV 使用 f16。
 - **M2**：
   - 共享 engine 和磁盘前缀缓存：消除模型加载、重排和静态前缀的 prefill；
   - 融合 GEMV；
-  - Prompt Lookup Decoding：从上下文中的 n-gram 猜测后续 token，再批量验证。shell 场景里经常复制路径和命令输出，收益明显。
+  - Prompt Lookup Decoding：从上下文中的 n-gram 猜测后续 token，再批量验证；shell 中复制路径和命令输出可能受益，收益待实测。
 
 交互延迟的指标见 §13.1。
 
 ### 7.6 资源自适应与调度
 
-**加载前自适应**（用户显式配置的值优先）：阈值不写死，而是按 §2.3 的公式估算所需内存，再与可用内存比较。估算时要考虑三点：是否保留重排副本、KV 的类型、上下文长度。下表是内存优化后（M1 已实现，x86_64）2B 模型的结果：
+**规划（M2）**：当前加载使用显式上下文配置，不根据可用内存自动切换模型或上下文；`doctor` 只做告警。共享调度、空闲退出、电池模式和 KV 预算也尚未实现。
+
+**加载前自适应目标**（用户显式配置优先）：按 §2.3 的内存组成估算需求，再与可用内存比较；考虑原始/重排权重是否并存、KV 类型和上下文长度。下表是基于 x86_64 内存优化结果的候选策略，不是当前运行时阈值：
 
 | 可用内存 | 选择 |
 |---|---|
@@ -790,7 +817,7 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 | 2.5–4 GB | 提示用户换成 1B Q4_K_M（不会自动下载），4K |
 | < 2.5 GB | 不加载，并说明原因；shell 照常可用 |
 
-不释放原始权重的平台（如 aarch64，约多 0.9 GB），同一个公式会自动把阈值上调。
+没有满足释放条件的平台（例如无 dotprod 的 aarch64）需按实际布局重新估算；已有 dotprod 的 ARM 释放路径不能归入“所有 aarch64 均不释放”，也不能套用 x86 的内存增量。
 
 - **电池与空闲**：使用电池时可以减半线程数（`engine.battery_saver`）；engine 空闲超时后退出，释放内存，重新加载时依靠磁盘前缀缓存。
 - **多会话调度**：
@@ -806,22 +833,28 @@ TEXT ── id 18 <function ──▶ CALL（缓冲）── id 19 </function> �
 
 1. `--model-path` 或 `NOSH_MODEL_PATH`；
 2. 配置中的 `model.path`；
-3. 便携模式：`<可执行文件所在目录>/models/<id>/`；
-4. 用户模型库：`<data_dir>/nosh/models/<id>/`；
-5. 系统模型库：`/usr/share/nosh/models/<id>/`（多用户主机共用）；
-6. 都找不到时，自动下载。
+3. 便携模式：`<可执行文件所在目录>/models/<模型目录名>/`；
+4. 用户模型库：`<data_dir>/nosh/models/<模型目录名>/`；
+5. 系统模型库：`/usr/share/nosh/models/<模型目录名>/`（Unix，多用户主机共用）；
+6. 都找不到时，在允许下载且未开启离线模式的情况下提议下载。
+
+模型目录名将 id 中的 `:` 替换为 `-`，例如 `minicpm5-2b-q4_k_m`；`NOSH_HOME` 会覆盖用户模型库根目录（§8.4）。
 
 显式指定的路径（第 1、2 项）解析失败时直接报错，不再往后查找，也不会下载。如果指定的是目录、里面有多个 GGUF，就按所请求模型（未指定时为默认模型）在 registry 中的文件名选择；没有匹配的文件时报错，并列出候选文件。GGUF 不在 registry 中、又显式给了无效的 `--model` 时，同样报错，不换成默认模型。
 
-registry 随 nosh 版本一起发布，固定了 revision 和 SHA-256。nosh 不会自动更新模型；`nosh model update` 会显式检查更新，旧文件要确认后才删除。
+registry 随 nosh 版本一起发布，以 SHA-256 固定文件内容；HF 使用提交 revision，ModelScope 的 `master` 仍需通过相同哈希校验。
+
+显式 `--model-path` 不要求 tokenizer 与 GGUF 同目录。[`ModelHub::resolve_path`](../crates/nosh-hub/src/lib.rs) 先使用同目录的 `tokenizer.json`；缺失时，尝试从已解析的 registry 模型的已校验安装中取得 tokenizer（便携 → 用户 → 系统模型库）；仍未找到时，回退到该模型用户模型目录中的 tokenizer 文件，不存在才报错。显式 GGUF、同目录 tokenizer，以及最后的用户目录文件回退不执行 registry 哈希校验，只应使用可信文件。
+
+当前不自动更新模型，也没有 `model use/update/export` 子命令。切换模型用 `--model`、`NOSH_MODEL` 或 `[model] id`；显式检查更新、确认删除旧文件和打包导出属于后续模型管理设计。
 
 ### 8.2 下载
 
 - **确认（默认同意）**：
-  - **nosh shell 首次启动**：提示 `首次使用需要下载 MiniCPM5-2B（1.56 GB），是否继续？[Y/n]`，直接按回车即同意。
-    - 下载在后台进行，shell 马上就能用，提示符会显示下载进度。
-    - 下载完成之前触发 AI，会显示进度而不是报错。
-  - **一次性调用**：`nosh -a`、`nosh -s` 和 `nosh model pull` 在前台下载，示例见下方。
+  - **nosh shell 首次启动**：提示模型名称、含 tokenizer 的总下载量（约 1.57 GB）与 `[Y/n]`，直接按回车即同意。
+    - **当前在前台下载**，完成或取消后进入 shell；模型在首次 AI 请求时加载。
+    - 后台下载、提示符进度和下载期间的 AI 等待体验属于 M2。
+  - **一次性调用**：`nosh -a`、`nosh -s` 缺少模型时按相同规则前台下载；`nosh model pull` 是显式下载请求，不再做首次确认。
   - **非交互环境**：默认下载，并在 stderr 给出提示。
   - **关闭自动下载**：使用 `--no-download`，或者设置 `download.auto = "never"`。
   - **`nosh -c`**：永远不会触发下载。
@@ -831,12 +864,11 @@ registry 随 nosh 版本一起发布，固定了 revision 和 SHA-256。nosh 不
   - ModelScope：`/models/{Org}/{repo}/resolve/master/{file}`。
 
   已实测：HF 和 ModelScope 都会 302 跳转到 CDN，支持 `Range`，并在 `X-Linked-Etag` 中给出 SHA-256。
-- **选源**：
-  - 地区只用本地信息推断，包括安装包的地区标记、locale 和时区，不调用外部的 IP 定位服务；
-  - 并行发送 HEAD 请求，并下载 2 MB 测速（总共不超过 3 s），按吞吐选择；吞吐从收到第一个字节开始计时，排除 TLS 握手和重定向的影响；
-  - 各个源的内容相同，所以分段下载时可以同时从多个源拉取；
-  - 某个源的吞吐连续 10 s 低于最佳探测值的 30% 时，把它剩下的区间改派给其他源；
-  - 记住上次的最佳源。
+- **当前选源**：
+  - 根据 locale 和时区推断地区，`NOSH_REGION=cn|global` 可覆盖，不调用外部 IP 定位服务；
+  - 并行 HEAD 和最多 2 MiB 下载测速，使用约 3 s 探测预算；吞吐尽量从首个响应字节开始计时，减少 TLS/重定向的影响；
+  - 按吞吐排序后顺序使用候选源，失败时从已下载偏移切换；**并行测速不等于多源并行下载**。
+- **后续选源目标**：多源分段并行、记住最佳源；某源连续 10 s 低于最佳探测吞吐的 30% 时，将剩余区间改派。阈值需实际链路验证。
 - **可靠性**：
   - 先写入 `*.partial`，按 64 MiB 分块发送 Range 请求，每块单独设置超时，便于及时发现卡顿，并从断点处换源；
   - 边下载边计算 SHA-256，校验通过后再原子地 rename；
@@ -845,41 +877,48 @@ registry 随 nosh 版本一起发布，固定了 revision 和 SHA-256。nosh 不
   - 下载前检查磁盘空间；
   - 失败时按指数退避重试。
 
-```text
-$ nosh -a "看看哪个进程占用了 8080 端口"
-首次使用需要下载模型 MiniCPM5-2B（Q4_K_M，1.56 GB，Apache-2.0），是否继续？[Y/n]
-测速：modelscope.cn 21.4 MB/s · hf-mirror.com 6.8 MB/s · huggingface.co 3.1 MB/s → 并行使用前两个源
-[██████████████████▌          ] 1.02 / 1.56 GB  27.9 MB/s  剩余 19s
-✔ SHA-256 校验通过。之后可以完全断网使用。
+```bash
+nosh model pull                                   # 自动选源
+nosh model pull minicpm5-2b:q4_k_m --source hf-mirror
 ```
 
 ### 8.3 离线与气隙
 
-- **运行期间不联网**：模型就绪后，没有遥测，也不自动检查更新（`nosh update` 需要显式调用）。CI 会在无网络的 namespace 中跑 E2E 测试来验证这一点。
-- **离线开关**：`--offline`、`NOSH_OFFLINE=1`，也兼容 `HF_HUB_OFFLINE=1`。
-- **气隙部署**：
-  1. 在联网的机器上执行 `nosh model pull` 和 `nosh model export`；
-  2. 把导出的文件拷贝到目标机器；
-  3. 在目标机器上执行 `nosh model import`，校验通过后入库。
+- **当前离线边界**：模型就绪后推理不需要网络，没有遥测或自动更新。`--offline`、`NOSH_OFFLINE=1`、`HF_HUB_OFFLINE=1` 在 [nosh-hub 网络出口](../crates/nosh-hub/src/net.rs) 阻止下载与探测；它们**不限制用户或 agent 执行的 `curl`、`ssh` 等命令**。禁止这些进程联网需要外部隔离或后续沙箱。
+- **当前气隙部署**：在联网机器下载后，将 GGUF 和 tokenizer 一起复制到目标机器，再导入。导入只接受 registry 中可由 SHA-256 识别的模型；缺少 tokenizer 会报错，不会用错误文件代替。
 
-  也可以直接使用包含模型的离线发行包。
-- **远程版**：`nosh connect host --push-model` 通过 SSH 把模型推送到主机（支持续传），服务端的二进制也由客户端推送，所以内网主机不需要联网。
+```bash
+# 联网机器
+nosh model pull
+nosh model path                       # 查看目录，复制其中的 GGUF 和 tokenizer.json
+
+# 离线机器；假定两个文件已复制到当前目录，且 nosh 已构建/安装
+nosh --offline model import ./MiniCPM5-2B-Q4_K_M.gguf --tokenizer ./tokenizer.json
+nosh --offline --no-download
+```
+
+**规划**：`model export` 打包导出、包含模型的离线发行包、`nosh connect host --push-model` 续传及服务端部署。无网络 namespace 的完整 E2E 也是验收目标，不是现有 CI 已覆盖的测试。
 
 ### 8.4 目录布局
 
 ```text
-<data_dir>/nosh/          Linux ~/.local/share · macOS ~/Library/Application Support · Windows %LOCALAPPDATA%
-├─ bin/                   远程版：客户端推送的服务端二进制
-├─ models/<id>/           GGUF、tokenizer.json、manifest.json（文件名、大小、SHA-256、来源、revision）
-├─ cache/prompt/          前缀 KV 快照
-└─ state/                 history.jsonl、audit.jsonl、outputs/、backup/、sessions/、download.json
+<data_dir>/nosh/            Linux ~/.local/share · macOS ~/Library/Application Support
+├─ models/<模型目录名>/      GGUF、tokenizer.json、manifest.json
+└─ state/
+   ├─ shell_history         默认 shell 历史
+   ├─ download-declined     记录用户拒绝首次下载
+   └─ outputs/              被截断命令的采集输出
 ```
+
+`NOSH_HOME` 非空时，同时替代 `<data_dir>/nosh` 和 `<config_dir>/nosh`，即模型在 `$NOSH_HOME/models`，配置在 `$NOSH_HOME/config.toml`。默认平台路径由 [paths.rs](../crates/nosh-hub/src/paths.rs) 解析。
+
+`bin/`、`cache/prompt/`、agent history/audit、备份和远程会话目录属于后续设计，不是当前默认布局。
 
 ## 9. 交互
 
 ### 9.1 nosh shell 界面
 
-- **提示符**：沿用用户的 `PS1` 或 starship，右侧附加审批模式、模型状态和 YOLO 标记。reedline 提供历史、建议、高亮和补全。
+- **提示符**：沿用用户的 `PS1` 或默认 cwd 提示符，右侧显示状态与审批模式/YOLO 标记。当前接入 reedline 的历史、建议、补全和续行校验；不把依赖库提供的语法高亮能力视为 nosh 已启用的功能。
 - **AI 输出块**：AI 的输出以带左侧竖线的块插入回滚区。
   - agent 命令的输出显示在一个高度有限的实时区域里（默认 8 行）；
   - 结束后折叠成首尾预览加一个编号，可以用 `ai out <编号>` 查看全文；
@@ -889,6 +928,8 @@ $ nosh -a "看看哪个进程占用了 8080 端口"
   - 命令捕获在非法 UTF-8 字节之后仍保留未完成的字符；stdout/stderr 的解码器和预览行缓冲互不混用。终端预览使用有界的流式 ANSI 解析，支持跨块的 CSI、OSC 超链接及其他控制序列；JSON/保存结果保留捕获文本。
   - 预览按实际 stderr 终端的列宽裁剪，不拆开字素簇；Tab 按八列制表位展开，窄窗口与缩放不沿用固定最小宽度。短输入框以完整字素簇退格并重画有界单行；长提示单独显示，避免回绕擦除错误。
   - 思考与回答切换时在各自的输出流结束行，回答中的 CRLF 支持跨块归一化。普通文本允许 ZWJ/ZWNJ，命令审批仍使用严格的隐藏字符显示；双向控制符始终可见。
+
+界面示意（文字与耗时不作为实测数据）：
 
 ```text
 ~/proj (main*) ❯ npm start
@@ -908,24 +949,23 @@ Error: listen EADDRINUSE: address already in use :::8080
 ~/proj (main*) ❯
 ```
 
-- **内建命令 `ai`**（名称可以配置）：
-  - `ai "任务"`：执行任务；
-  - `ai mode confirm|auto|yolo`：切换审批模式；
-  - `ai think on|off`：开关思考模式；
-  - `ai auto off`：暂停出错时自动触发 AI；
-  - `ai fix`：修复上一条失败的命令；
-  - `ai undo`：撤销文件写入；
-  - `ai out <编号>`：查看 agent 命令的完整输出；
-  - `ai clear`：新建对话；
-  - `ai ctx`：查看上下文占用；
-  - `ai history`：查看历史；
-  - `ai private on|off`：开关无痕模式；
-  - `ai model`：管理模型；
-  - `ai status`：查看运行状态。
+**当前内建命令**（名称可用 `shell.builtin_name` 配置；存在同名别名、函数或 PATH 命令时不遮蔽它）：
+
+| 命令 | 行为 |
+|---|---|
+| `ai help`、`ai "任务"` | 显示帮助 / 执行任务 |
+| `ai mode confirm\|auto\|yolo` | 切换审批模式 |
+| `ai think on\|off` | 开关思考并新建对话 |
+| `ai auto on\|off` | 恢复 / 暂停部分自动路由；不是全局禁用，例外见 §4.2 |
+| `ai fix` | 分析最近记录的可求助失败；单独输入前缀或在空行按 Ctrl+G 也走此入口 |
+| `ai out <编号>` | 查看本会话记录的 agent 输出 |
+| `ai clear`、`ai ctx`、`ai status` | 新建对话 / 查看上下文占用 / 查看模型与模式 |
+
+**规划命令**：`ai undo`（文件写入回滚）、`ai history`（agent 历史）、`ai private on|off`（无痕模式）、`ai model`（模型管理）尚不可用。shell 的 `history` 不等于规划中的 agent 历史。
 
 ### 9.2 嵌入其他 shell
 
-执行 `nosh init <shell>` 会输出集成脚本。之后在 bash、zsh、fish 或 pwsh 里按 Ctrl+G，就能把输入行中的自然语言换成命令（内部调用 `nosh -s`），再由用户自己按回车执行。以 zsh 为例：
+**规划（M2）**：`nosh init <shell>` 输出集成脚本，在 bash、zsh、fish 或 pwsh 里绑定 Ctrl+G，内部调用 `nosh -s`，仍由用户检查并回车执行。当前 `-s` 按 bash 生成建议，`init` 和 `--shell` 参数尚未实现；下面是目标集成草图，不能直接当作当前配置使用。
 
 ```zsh
 _nosh_suggest() {
@@ -945,6 +985,8 @@ zle -N _nosh_suggest && bindkey '^G' _nosh_suggest
 
 ### 9.3 远程客户端
 
+**规划（M2/M3）**：下面的 `connect` 命令、自动部署与附着能力尚未实现；当前可用普通 SSH 登录主机后运行 nosh。
+
 ```text
 nosh connect user@host                 连接并附着到新会话（首次会自动部署服务端）
 nosh connect user@host --list          列出主机上的会话
@@ -957,6 +999,8 @@ nosh connect user@host --push-model    把本地模型推送到主机
 - **客户端能力**：审批卡片由客户端在带外绘制，并配合系统通知；支持本地剪贴板和文件收发。
 
 ## 10. 进程与协议
+
+**本章全部为目标设计**：当前没有 `nosh engine/server/connect` 子命令或本地 IPC。M2 实现每用户共享 engine 与远程基础，M3 扩展会话保持、多端附着和系统级共享；当前进程模型见 §3.2。
 
 ### 10.1 本地 engine
 
@@ -973,7 +1017,7 @@ nosh connect user@host --push-model    把本地模型推送到主机
   **不监听 TCP。**
 - **协议**：JSON Lines，发送请求后以流的形式返回事件；调度规则见 §7.6。
 
-```json
+```text
 → {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[task trigger=hash …]\n哪个进程占用了 8080？"}]}
 ← {"id":2,"ev":"text","text":"我先看看端口占用情况。"}
 ← {"id":2,"ev":"tool_call","name":"run_command","args":{"command":"ss -ltnp 'sport = :8080'"}}
@@ -999,7 +1043,7 @@ nosh connect user@host --push-model    把本地模型推送到主机
 
 ### 10.3 多用户主机
 
-- **默认**：每个用户一个 engine，用户之间完全隔离，但每人约占 2.9 GB 内存。
+- **默认目标**：每个用户一个 engine，用户之间隔离；约 2.9 GB 是 §2.3 的 x86 配置量级，实际需求随平台、模型、上下文与活跃会话数变化。
 - **系统级共享 engine**（M3）：用户多、内存紧张时，管理员可以部署。
   - 用专用的系统用户运行 `nosh-engine.service`，监听 `/run/nosh/engine.sock`（属组 `nosh`，权限 0660）。
   - 模型只加载一份，按用户分配配额并公平调度。
@@ -1008,11 +1052,12 @@ nosh connect user@host --push-model    把本地模型推送到主机
 
 ## 11. 配置
 
-- **位置**：`<config_dir>/nosh/config.toml`。
-- **优先级**：命令行 > 环境变量 > 用户配置 > 默认值。项目配置和管理员策略见 §6.3。
-- **读取失败**：配置文件不存在时使用默认值；文件存在但读不了（权限或 I/O 错误）时也使用默认值，但会给出警告，因为其中的 deny 规则和受保护路径此时不生效。
+- **位置**：Linux 默认 `~/.config/nosh/config.toml`，macOS 默认 `~/Library/Application Support/nosh/config.toml`；设置 `NOSH_HOME` 时为 `$NOSH_HOME/config.toml`。
+- **优先级**：对有对应覆盖项的配置，命令行 > 环境变量 > 用户配置 > 默认值。当前没有项目配置或管理员策略（§6.3）。
+- **错误处理**：文件不存在时使用默认值；不可读或 TOML 无效时警告并使用默认值；未知键、非法字段值给出警告，相关字段按默认值处理。不要忽略告警：读取失败时，用户的 deny 规则和附加受保护路径没有生效。
+- **实现入口**：[config.rs](../crates/nosh-cli/src/config.rs) 定义键、默认值和范围，[main.rs](../crates/nosh-cli/src/main.rs) 装配 CLI/环境覆盖。下例仅包含当前支持的字段。
 
-常用配置项：
+### 11.1 当前配置示例
 
 ```toml
 [shell]
@@ -1021,80 +1066,107 @@ trigger_on_error = true       # 解析失败、命令不存在时自动交给 AI
 on_failure = "hint"           # 执行失败时：hint | auto | off
 nl_guard = "destructive"      # 破坏性命令安全网：destructive | off
 builtin_name = "ai"
-suggest_key = "ctrl-g"
+suggest_key = "ctrl-g"        # 当前固定支持 Ctrl+G，不支持自定义按键
 
 [agent]
 approval = "confirm"          # confirm | auto | yolo（风险由用户自担）
-max_steps = 10
-command_timeout_sec = 60
+max_steps = 10                # 1–50；达到上限后另有一次总结请求
+command_timeout_sec = 60      # 1–600
 restore_cwd = false
-conversation_idle_minutes = 30
+conversation_idle_minutes = 30 # 1–1440
 
 [model]
-id = "minicpm5-2b:q4_k_m"     # 也可以用 path = "/opt/models/xxx.gguf" 指定文件
-context_length = 8192
-device = "auto"               # auto | cpu | metal | cuda
-thinking = "off"              # off | on | auto
+id = "minicpm5-2b:q4_k_m"
+# path = "/opt/models/MiniCPM5-2B-Q4_K_M.gguf"  # 可选；tokenizer 查找与校验见 §8.1
+context_length = 8192         # 1024–32768，不等于模型原生 128K 上限
+device = "auto"               # auto | cpu；当前都使用 CPU
+thinking = "off"              # off | on
 
 [download]
 auto = "yes"                  # yes（交互时询问，默认同意）| never
-source_selection = "auto"     # auto（地区 + 测速）| 指定源
-
-[engine]
-shared = true
-idle_exit_minutes = 15
-kv_budget = "25%"
+source_selection = "auto"     # auto | hf | hf-mirror | modelscope
 
 [safety]
-allow = ["git status*"]
-deny  = ["docker system prune*"]
-protected_paths = ["~/.ssh", "~/.gnupg", "~/.aws", "/etc"]
+allow = []
+deny = []                     # 例如 ["docker system prune*"]
+protected_paths = []          # 附加路径，不替代内置的受保护路径
 fallback_shell = "/bin/bash"
 ```
 
-- **完整配置项**（采样、隐私、扩展、远程等）：用 `nosh config --defaults` 查看。
-- **环境变量**：`NOSH_HOME`、`NOSH_MODEL`、`NOSH_MODEL_PATH`、`NOSH_OFFLINE`、`NOSH_DISABLE_AI`、`NOSH_ENDPOINT`（兼容 `HF_ENDPOINT`）、`HTTPS_PROXY`、`NO_COLOR`。
+`nosh model` 管理子命令独立按位置参数和自身选项工作，不继承交互模式的模型/下载配置。例如 `model pull/verify/path` 省略 id 时使用 registry 默认模型；拉取其他模型应写 `nosh model pull minicpm5-1b:q4_k_m`。
+
+### 11.2 保留字段与未实现能力
+
+| 字段或入口 | 当前行为 | 目标 |
+|---|---|---|
+| `[engine] shared / idle_exit_minutes / kv_budget` | 键被识别，但值被忽略；始终进程内推理 | M2：默认共享，空闲 15 分钟退出，KV 预算为可用内存的 25% |
+| `model.device = "metal"` / `"cuda"` | 告警，仍使用 CPU | 后续 GPU 构建 |
+| `model.thinking = "auto"` | 告警，按 off 处理 | 连续失败后自动开启 |
+| `shell.suggest_key` 的其他值 | 告警，仍使用 Ctrl+G | 后续按键扩展 |
+| `nosh config --defaults` | 子命令不存在 | 后续完整配置输出 |
+| 隐私、扩展、远程及其他规划字段 | 不属于当前支持清单；不能依靠写入配置启用 | 随对应能力交付 |
+
+### 11.3 环境变量
+
+| 用途 | 变量 |
+|---|---|
+| 路径与模型 | `NOSH_HOME`、`NOSH_MODEL`、`NOSH_MODEL_PATH` |
+| 推理线程 | `CANDLE_NUM_THREADS`、`NOSH_RAYON_THREADS`；默认值、覆盖和子进程还原见 §7.1 |
+| 离线与禁用 AI | `NOSH_OFFLINE`、`HF_HUB_OFFLINE`、`NOSH_DISABLE_AI`；离线范围见 §8.3 |
+| 下载源 | `NOSH_ENDPOINT`（优先于 `HF_ENDPOINT`）、`NOSH_REGION=cn\|global`、`HTTPS_PROXY` |
+| 终端表现 | `NO_COLOR`、`CLICOLOR`、`TERM`、locale；详见 §9.1 与 README |
+
+`NOSH_EVAL_TRACE` 是显式启用的开发观测入口，记录内容与权限约束见 [评测文档](../eval/README.md#指标与观测协议)，不是默认 agent history/audit。
 
 ## 12. 工程
 
+### 12.1 当前目录与依赖
+
 ```text
 nosh/
+├─ Cargo.toml · Cargo.lock  workspace、统一依赖和锁定版本
 ├─ crates/
-│  ├─ nosh-cli/          bin：按调用方式分派（shell / -c / -a / -s / connect / server / engine）
-│  ├─ nosh-core/         Session：harness（agent 循环、prompt、上下文）+ tools；本地版与服务端共用
-│  ├─ nosh-shell/        ShellBackend（brush-core / 托管 pwsh）、AI 触发、行编辑
-│  ├─ nosh-permissions/  风险分级、策略、审批协议、审计
-│  ├─ nosh-llm/          candle 模型、分词、模板、采样、KV 缓存、ChatEngine 与 engine 进程
-│  ├─ nosh-hub/          registry、下载、导入导出
-│  └─ nosh-remote/       远程协议、服务端会话宿主、客户端
-├─ assets/               registry.toml、shell 集成脚本
-└─ tests/ · evals/ · xtask/（gen-registry、bench、dist）
+│  ├─ nosh-cli/            参数、配置、shell / agent / suggest / model / doctor / debug
+│  ├─ nosh-core/           agent 循环、prompt、工具、审批 UI、REPL AI handler
+│  ├─ nosh-shell/          EmbeddedShell、AI 触发、行编辑、历史、终端与进程
+│  ├─ nosh-permissions/    AST 风险分析、路径分类、策略与会话放行
+│  ├─ nosh-llm/            CPU 模型、分词、模板、采样、KV、Local/MockChatEngine
+│  └─ nosh-hub/            registry、下载、校验、导入、路径与终端能力
+├─ assets/registry.toml    内置模型清单
+├─ third_party/candle-core/  锁定上游版本与本地补丁
+├─ tests/                  跨 crate 集成测试
+├─ eval/                   Python 评测运行器、场景、版本化基线
+└─ docs/                   设计、MVP 计划与报告
 ```
 
-| 用途 | 依赖 |
+| 用途 | 当前直接依赖 |
 |---|---|
-| Shell | `brush-core`、`brush-parser`、`brush-builtins`、`brush-interactive`（reedline） |
+| Shell | `brush-core`、`brush-parser`、`brush-builtins`、`reedline` |
 | 推理 | `candle-core`、`candle-nn`；`tokenizers`（fancy-regex） |
-| 网络与远程 | `ureq` + `rustls`、`sha2`；系统 `ssh`，或内置的 `russh` |
-| 终端与进程 | `crossterm`、`portable-pty`、`interprocess` |
-| 工具 | `ignore`、`grep-searcher`、`similar` |
-| 运行时 | `tokio`（brush-core 的 API 是异步的；推理跑在专用线程上） |
-| 沙箱（可选） | `landlock`、`seccompiler` |
+| 下载 | `ureq` + `rustls`、`sha2`、`fs4`、`indicatif` |
+| 终端与进程 | `crossterm`、`libc`、`unicode-segmentation`、`unicode-width`、`vte` |
+| 工具 | `ignore` |
+| 运行时 | `tokio`（驱动 brush 的异步 API）；推理在进程内调用 |
 
-- **"纯 Rust"的边界**：代码 100% 是 Rust；TLS 使用 `rustls` + `ring`（ring 含有少量汇编和 C，已确认可以接受）；CUDA 版依赖 NVIDIA 的运行时；Metal 是系统框架。
-- **发布产物**：
+- **“纯 Rust”的边界**：nosh 运行时以 Rust 实现，不自研推理框架；允许 TLS 依赖中的 ring 使用少量汇编和 C。`eval/` 使用 Python 3.11+，只用于开发评测，运行 nosh 不需要 Python。
+- **构建**：Rust ≥ 1.89；release 为 `lto = "fat"`、`codegen-units = 1`、`panic = "unwind"`、`strip = true`。构建入口见 README，补丁维护按 [NOSH_PATCH.md](../third_party/candle-core/NOSH_PATCH.md) 执行。
 
-| 产物 | 平台 | 说明 |
+### 12.2 后续工程与分发
+
+以下为规划，不表示仓库已提供相应 crate、工具或发行包：
+
+- `nosh-remote`：远程协议、会话宿主和客户端；系统 SSH 优先，`russh` 作为备用方案。
+- `xtask`：registry 生成、基准、分发；shell 集成脚本随 §9.2 交付。
+- 需要时引入 `portable-pty/interprocess`、`grep-searcher/similar`、`landlock/seccompiler`，不视为当前依赖。
+- CUDA 使用 NVIDIA 运行时，Metal 使用系统框架，均不属于当前 CPU 构建。
+
+| 目标产物 | 平台 | 说明 |
 |---|---|---|
-| 标准版 `nosh-<ver>-<target>` | Linux x86_64/aarch64（gnu、musl）、macOS、Windows | 只用 CPU；macOS arm64 版内含 Metal |
+| 标准版 `nosh-<ver>-<target>` | Linux x86_64/aarch64（gnu、musl）、macOS、Windows | 默认 CPU；规划 macOS arm64 版同时提供 Metal |
 | CUDA 版 `nosh-cuda-<ver>-<target>` | Linux x86_64、Windows x86_64 | 需要 NVIDIA 驱动 |
 | 离线包 | 同上 | 包含二进制、模型和分词器 |
 
-- **构建**：release profile 为 `lto = "fat"`、`codegen-units = 1`、`panic = "unwind"`（用来隔离 AI 子系统的 panic）、`strip`；二进制约 20–35 MB。
-- **安装与分发**：
-  - deb/rpm 安装时把 nosh 写入 `/etc/shells`，之后可以用 `chsh` 设为登录 shell；
-  - 分发渠道：GitHub Releases、cargo binstall、Homebrew、Scoop/winget；
-  - 供应链：cargo-deny、cargo auditable、发布签名、SBOM。
+目标渠道为 GitHub Releases、cargo binstall、Homebrew、Scoop/winget；deb/rpm 计划注册 `/etc/shells`。当前应按 README 从源码构建，不把这些渠道名当作可用安装命令。供应链门禁、签名与 SBOM 随分发流程建设。
 
 ## 13. 测试与评估
 
@@ -1115,48 +1187,58 @@ nosh/
 
 ### 13.2 测试矩阵
 
+下表区分现有覆盖与后续验收要求；“全部通过”等通过线只对对应测试集合成立，不代表规划功能已完成。
+
 | 类别 | 内容 | 通过标准 |
 |---|---|---|
-| 单元与模糊测试 | 采样、增量解码、工具调用与 CDATA 解析、截断、AI 触发判定、状态差异；对解析器和协议帧做 fuzz | 全部通过，不出现 panic |
-| 推理正确性 | 模板对比 HF `apply_chat_template`；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
+| 单元（当前）与 fuzz（规划） | 当前覆盖采样、增量解码、工具调用与 CDATA、截断、AI 触发、状态差异；解析器/协议帧 fuzz 留待建设 | 对应集合全部通过，不出现 panic |
+| 推理正确性 | 当前模板对照固定 golden 样例，测试时不调用 HF `apply_chat_template`（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
 | ARM 权重释放（issue #9） | 每个 PR 在 Linux ARM64/macOS 用 Q4K/Q6K 合成矩阵覆盖 m=1..64、prefill 边界及原始数据访问；独立手动工作流 `arm64-memory.yml` 下载并缓存固定模型，比较预重排开/关 | 支持 dotprod 的合格矩阵必须实际释放，其他条件保持原始数据；8K 峰值 RSS ≤ 2.5 GiB；相同 f16 KV 下的 3,329/8,065 token prompt 各加 48 步 teacher forcing，应用上一行的全部通过线。Linux ARM 实测：KL 和 NLL 差均为 0，余弦中位数 1，top-5 均 49/49，高置信 top-1 分别 30/30、48/48 |
-| Shell 兼容 | brush 兼容测试的子集；scp、rsync、git over ssh、VS Code Remote；常见 rc（oh-my-bash、starship、conda、nvm） | 全部通过；`nosh -c` 不输出任何额外内容 |
+| Shell 兼容 | 当前有本地 shell/CLI 集成测试；完整 scp、rsync、git over ssh、VS Code Remote 和常见 rc 矩阵属于目标覆盖 | 已有用例全部通过；`nosh -c` 保持纯命令输出，不将上游兼容性等同于完整生态验证 |
 | 共享会话与信号 | agent 和用户交替执行时状态连续；Ctrl-C 只中断前台；agent 不能 exit/exec；SIGTTIN 检测 | 全部通过 |
 | AI 触发 | 415 条标注语料：合法命令 200、中文自然语言 60、英文自然语言 55、拼写错误 50、安全网输入 50 | 所有样本逐条匹配期望动作，纠错需匹配完整命令；安全网误拦截 < 0.5%；中文自然语言 100% 交给 AI；破坏性命令误执行次数为 0；纠错命中率 ≥ 90% |
-| 权限 | 至少 500 条命令（含混淆样本、别名和函数展开，以及 100 条在工作区内执行的日常开发命令：查询、构建和测试、常规写操作），在本地版和远程版装配下各跑一遍 | Dangerous 召回率 100%；Safe 误报率 < 5%；日常开发命令中的查询在 confirm 模式下也不需要确认，auto 模式下整组都不需要确认，并输出 confirm 模式下需要确认的比例，作为调整规则的参照（目前 54%，加入 `--version`/`--help` 规则之前为 64%）；两个版本结果一致 |
-| 远程与离线 | 断线重连、输出回放、nonce 防重放、多端附着、自动部署、模型推送；在无网络的 namespace 中跑完整的 E2E | 全部通过；没有任何网络调用 |
-| Agent 评测 | [MVP 10 场景](../eval/README.md)，每场景默认 5 个固定 seed，每轮 50 次独立进程试验；main `4f602ab` 已串行双跑 100 次（含 10 次不加载模型的本地纠错），夹具逐次重建 | 自动判定回答事实与最终状态，记录通过率、步数、确认次数、首 token 延迟、总耗时及 RSS，输出 JSON/Markdown 并按场景/seed 比较。原始 70/100 通过，保持全部观测的判定修复后 73/100，错误/缺失均为 0；判定加状态复现 45/50，尚未通过一致性验收。回答、输入及工具轨迹差异另报；不进入每 PR 的真实模型 CI |
-| 性能 | prefill 与 decode 速度、TTFT、RSS（`xtask bench`） | 达到 §7.5 和 §13.1 的目标 |
+| 权限 | 当前本地 555 条表驱动用例，含混淆、别名/函数展开和 100 条日常开发命令；远程装配复用测试属于规划 | Dangerous 召回率 100%；Safe 误报率 < 5%；日常查询在 confirm 下不确认，auto 下整组不确认；confirm 确认比例目前 54%（此前 64%）。未来两种装配需结果一致 |
+| 远程与离线（规划验收） | 断线重连、输出回放、nonce、多端附着、部署与模型推送；无网络 namespace 完整 E2E。当前 CI 不包含这些完整场景 | 远程流程全部通过；离线样本无模型下载/探测，不混同于限制 shell 命令联网 |
+| Agent 评测（当前） | [10 场景运行器](../eval/README.md)，每场景默认 5 个固定 seed，每轮 50 次；main `4f602ab` 已串行双跑 100 次，夹具逐次重建 | 按场景/seed 比较回答判定和最终状态；输入、回答、工具轨迹差异单列。当前复现验收未满足，详见下文；每 PR 仅运行评测工具的无模型自测 |
+| 性能 | 当前通过 `nosh debug gen`、`NOSH_STATS=1`、`-a --json` 与评测运行器观测；`xtask bench` 未实现 | 目标见 §7.5、§13.1；比较时必须固定构建、模型、硬件和冷热口径 |
 
-上述原生基线的被测源码固定为 `4f602ab8d95d046162adb7d4b202ddf6d3e20bea`（合并 #13），不是报告提交时的构建；[构建来源](../eval/baselines/main-4f602ab/build-info.json)记录干净源码归档和二进制哈希。73/100 包含真实模型 63/90 和本地纠错 10/10，通过率分母不能混用。[复现分析](../eval/baselines/main-4f602ab/analysis.md)记录全部 5 个剩余判定差异：50/50 对最终状态一致，但动态任务时刻/命令耗时等输入未固定，不能认定是推理数值不确定性，#3 保持未关闭。90 次模型试验 TTFT 中位数 4.90 s（不含加载），全部 100 次进程总耗时中位数 16.93 s、最大峰值 RSS 2423.92 MiB；独立进程只保证冷会话/KV，不保证冷 OS 页缓存。RSS 是逐个 nosh 的 Linux wait4 峰值（含内核对已等待后代的统计），不是进程树求和。历史 `main-7c57a88` 的 36/50 legacy 有限观测记录原样保留。
+**基线结论与来源**：被测源码固定为 `4f602ab8d95d046162adb7d4b202ddf6d3e20bea`（合并 #13），不是本文核对实现状态的提交。[构建来源](../eval/baselines/main-4f602ab/build-info.json)保存干净源码与二进制哈希；[报告](../eval/baselines/main-4f602ab/report.md)原始为 70/100 通过，保持原始观测的判定修复后为 73/100（模型 63/90、本地纠错 10/10），错误和缺失均为 0。[复现分析](../eval/baselines/main-4f602ab/analysis.md)记录最终状态 50/50 对一致、判定加状态仅 45/50，#3 的验收尚未满足。
+
+动态任务时刻、工具耗时等输入未固定，不能直接把差异归为推理数值不确定性；独立进程只保证冷会话/KV，不保证冷 OS 页缓存。TTFT 不含加载，RSS 为单个 nosh 的 Linux wait4 峰值（含内核对已等待后代的统计），不是进程树求和。性能样本、原始判定和 legacy 基线统一保留在 [评测文档](../eval/README.md#基线生命周期) 与 [MVP 报告 §3.1](MVP-REPORT.md#31-固定-seed-的原生-main-基线2026-09-25)，不在设计文档重复维护逐次数据。
 
 ## 14. 里程碑
 
-| 阶段 | 周期（估算） | 交付内容 |
+周期沿用初始设计估算，不是当前排期承诺。MVP 完成表示精简范围通过验收，不表示本设计的全部目标已经完成。
+
+| 阶段 | 原周期估算 | 状态与范围 |
 |---|---|---|
-| **M0 验证** | 1–2 周 | 用 30–50 个任务评测 2B 模型处理 shell 任务的能力；实测 candle 的速度，并与 llama.cpp 对比；做一个 brush-core 嵌入的 PoC（在共享会话中执行 agent 命令，放在后台进程组并 tee 输出，验证它能与用户的前台作业共存） |
-| **M1 本地版 MVP**（✔ 已完成，见 PR #1 与 `docs/MVP-REPORT.md`） | 6 周 | **nosh shell**：AI 触发、安全网、本地纠错、登录 shell 兼容；终端与信号模型；故障隔离。**harness**：任务头。**权限** v1。**工具**：`run_command`、`read_file`、`list_dir`、`propose_command`。**推理**：fork 改造 #1–#3 和 #5、模板、采样、对话内前缀复用、资源自适应。**下载与离线导入**。**CLI**：`-a`、`-s`、管道。**平台**：Linux（之后 CI 增加了 Linux aarch64 和 macOS Apple Silicon，见 issue #7）。**内存优化**（追加）：加载时重排 Q4K 并释放其原始权重，KV 改为 f16，x86_64 上 8K 上下文实测 2.69 GiB |
-| **M2 完善 + 远程基础** | 5 周 | **推理**：共享 engine 与多会话 KV（修复 Ctrl+G 冲掉主对话缓存的问题）、磁盘前缀缓存、约束解码、PLD、融合 GEMV。**可靠性**：固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式的 temperature（0.6–0.7 与 1.0 对比）；为小模型优化工具输出。**交互**：Ctrl+G（nosh 内，以及嵌入其他 shell）、AI 输出块、上下文压缩、输出采集（中转 PTY）、后台下载、缓存 WSL 下 `/mnt/*` 的 PATH。**工具**：`search`、`write_file`、`ai undo`。**Windows**：托管 pwsh。**安全**：数据保留、管理员策略、运行时写入目标的预览。**brush 上游**：异步作业的 pid、可取消的执行接口、子进程放入独立进程组、SIGINT 中止循环、`read` 响应中断、进程创建钩子。**远程**：`nosh server` + `nosh connect`（SSH、pty/control 通道、带外审批、自动部署）；实现 `Redactor` 的脱敏规则（§6.5） |
+| **M0 验证** | 1–2 周 | 验证工作并入 MVP 计划与报告：模型任务能力、CPU 性能、brush 嵌入及共享会话。原设想的更大任务集和参考实现对比不因 MVP 完成而自动视为已覆盖 |
+| **M1 本地版 MVP（已完成）** | 6 周 | 按 [MVP 计划](MVP-PLAN.md) 交付 Linux shell、AI 触发/纠错、共享会话、权限 v1、四个工具、CPU 进程内推理、下载/导入与 CLI；没有共享进程、资源自适应或沙箱。后续完成 f16 KV、x86/ARM 权重释放及多平台 CI，结果见 [MVP 报告](MVP-REPORT.md) |
+| **M2 完善 + 远程基础（未完成）** | 5 周 | **推理**：共享 engine、多会话 KV、磁盘前缀缓存、资源自适应、约束解码、PLD、融合 GEMV。**可靠性**：补齐固定 seed 判定复现验收、比较 temperature、优化工具输出。**交互**：其他 shell 的 Ctrl+G、LLM 摘要、PTY 输出采集、后台下载、WSL PATH 缓存。**工具/安全**：`search/write_file/ai undo`、数据保留、项目/管理员策略、运行时写入预览。**平台/远程**：托管 pwsh、SSH pty/control、带外审批、自动部署、远程 Redactor；推动 brush 的 pid、取消、进程组、信号及进程创建钩子 |
 | **M3 远程完善与生态** | 4 周以上 | 断线保持与重连、多端附着、文件与模型推送；系统级共享 engine；CUDA 版；Landlock/seccomp 沙箱；自定义工具、钩子、MCP |
+
+原列在 M2 的 nosh 内 Ctrl+G、AI 输出块、基础工具结果压缩和固定 seed 评测运行器已提前落地；不要重复列为未开始任务。评测工具已存在与模型可靠性/复现验收已通过是不同状态。
 
 ## 15. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| 2B 模型处理多步任务的可靠性有限 | M0 先做验证；工具少而精；约束解码；错误回灌；默认需要确认；用评测驱动迭代 |
-| brush 的兼容性缺口 | 锁定版本、自检 rc、向上游贡献；实在不兼容时，用自己的 bash 加 `nosh init bash` |
-| 自然语言被当作命令执行 | 合法命令照常执行，只在 `#` 前缀或出错时交给 AI；中文本身就会落入"命令不存在"；破坏性命令安全网；用触发语料做回归测试 |
+| 2B 模型处理多步任务的可靠性有限 | 以 MVP 和固定 seed 基线为依据，保持工具精简、错误回灌与执行前审批；约束解码是后续措施 |
+| brush 的兼容性缺口 | 当前锁定版本、提供 `--norc/--safe`；也可从自己的 shell 调用 `-a/-s`。rc 自检与 `init` 集成待实现 |
+| 自然语言被当作命令执行 | 按解析与命令存在性判定，不仅按语言判断；保留破坏性命令安全网与触发语料回归 |
 | agent 弄乱共享会话 | 会话状态保护、状态差异回显、禁止 exit/exec |
-| CPU 上 prefill 慢 | 共享 engine、磁盘前缀缓存、任务头只往后追加、分块 prefill |
-| 作为登录 shell 时出故障，导致无法登录 | AI 子系统隔离、核心 panic 时回退到 bash、配置出错时用默认值、`nosh --safe` |
-| candle 的关键优化还没发版 | 锁定 git rev；CI 设置性能回归门禁 |
-| 下载源不可达，或文件被替换 | 测速选源、多源并行、固定 SHA-256、离线导入与推送 |
-| Windows 的原生 shell 支持不成熟 | Windows 以 CLI（托管 pwsh）和远程客户端为主 |
+| CPU 上 prefill 慢 | 当前增量任务头、公共前缀复用和分块 prefill；M2 增加共享 engine 与磁盘缓存 |
+| 作为登录 shell 时出故障，导致无法登录 | 当前有 AI 调用 panic 捕获、登录 REPL 回退和 `--safe`；同进程 OOM 尚不能隔离，边界见 §3.6 |
+| candle 的关键优化还没发版 | 当前锁定 git rev、维护补丁和正确性测试；性能回归门禁是后续目标 |
+| 下载源不可达，或文件被替换 | 当前测速选源、失败换源、固定 SHA-256 和离线导入；多源并行及模型推送尚未实现 |
+| Windows 的原生 shell 支持不成熟 | 当前使用 WSL 或普通 SSH；托管 pwsh 和 nosh 远程客户端属于规划 |
 | candle 的重排布局与原始权重同时常驻（x86 Q4K 重排约 1.33 倍、Q6K 约 1.52 倍；ARM Q4K/Q6K 等大） | vendored 补丁释放 x86 层内 Q4K，以及 ARM + dotprod 的层内 Q4K/Q6K 和 output（§7.1）。残留风险：无 dotprod/其他架构未做本次优化或实测；macOS RSS、AMX 尚未实测；candle 升级时必须按 `NOSH_PATCH.md` 重打补丁并运行跨平台正确性与手动内存验收；向上游提议增加开关 |
 | brush 的作业控制与中断存在缺口（后台作业没有 pid、部分 Ctrl-C 场景无法中断） | 向上游贡献相关修复（见 §14 M2）；agent 命令用超时加信号兜底 |
-| 2B 模型的结果波动大（temperature 1.0 下，三个构建各跑 3 轮，每轮 10 个场景，完全正确的次数为 27、20、25） | 建立固定 seed 的评测集，每个场景至少跑 10 次；评估 agent 模式采用更低的 temperature |
+| 2B 模型的结果波动大 | 已建立固定 seed 基线，但判定复现尚未通过；继续固定动态输入、保留失败样本并比较 temperature，不靠重试到成功替换观测 |
 
 ## 16. 决策记录（2026-09-23）
+
+编号沿用原始讨论记录，允许不连续或合并编号，以保持已有引用有效。后续修订补充在同一决策下；“决定采用”不表示当前已实现，交付状态见 §0.3 和 §14。
 
 | # | 议题 | 决定 |
 |---|---|---|
@@ -1169,12 +1251,13 @@ nosh/
 | 7 | 命令上下文 | 保持连续，agent 和用户共用一个会话（§4.3） |
 | 8 | 下载 | 需要确认，但默认 Yes；按地区和链路质量自动选源（§8.2） |
 | 11 | AI 触发 | `#` 前缀或命令出错都会触发；执行失败时默认只给提示；保留破坏性命令安全网（§4.2） |
-| 4、9、10 | 其他 | 按建议执行：M1 不带联网工具；sudo 需要强确认；使用 Apache-2.0 许可；界面中英双语 |
+| 4、9、10 | 其他 | M1 不另设专用联网工具，`run_command` 的联网命令仍按权限处理；sudo 默认强确认，模式与显式规则见 §6.3；使用 Apache-2.0 许可；界面中英双语 |
 | B | 验证范围 | 不考虑 DSpark；不做分词一致性验证 |
-| 12 | 内存目标 | 优先保证速度：只做"重排后释放 Q4K 原始权重"，配合 KV f16，8K 上下文约 2.9 GB（目标 ≤ 3.0 GB）；不做不重排的低内存档，也暂不自研紧凑重排格式（§2.3） |
-| 13 | 数值验收标准 | 接受分布类指标（高置信 top-1、KL、NLL、余弦中位数 > 0.995、top-5 重合度），保留 KV f16。不再使用"余弦 > 0.999"：任何改动 KV 数值的做法都达不到，只改动 1 个最低位的 f32 对照同样只有 0.9982（§13.2） |
+| 12 | 内存目标 | 初始 x86 决策：优先保证速度，释放层内 Q4K 原始权重并使用 f16 KV，8K 目标 ≤ 3.0 GB；不做不重排的低内存档或自研紧凑布局。后续 ARM + dotprod 扩展到 Q6K 和 output，按平台适用条件执行（§2.3、§7.1） |
+| 13 | 数值验收标准 | 接受分布类指标（高置信 top-1、KL、NLL、余弦中位数 > 0.995、top-5 重合度），保留 KV f16。不再要求样本 logits 的“余弦 > 0.999”：该样本中，只改动 1 个最低位的 f32 对照也为 0.9982，因此按 §13.2 的组合通过线判定 |
 | 14 | 审批确认策略 | 方便优先，避免过度的确认，也不要过严。效果未知的命令按 Mutating 处理，auto 模式下照常自动执行，shell 脚本通过分析内容把关，不额外要求确认；运行时才确定、但在工作区内的写入目标按 Mutating 处理；Dangerous 仍然需要确认，Forbidden 仍然拒绝。命令建议、拼写纠错、失败提示等 shell 交互提示不受影响（§6） |
 | 15 | 脱敏 | 本地 agent 是受信任的，不做脱敏，日志原样写盘。脱敏保留为扩展接口 `Redactor`（本地为空实现），接入远程 agent 时再实现具体规则（§3.4、§6.5） |
+
 ## 17. 待定事项
 
 | # | 事项 | 当前默认 | 何时决定 |
@@ -1182,7 +1265,7 @@ nosh/
 | 1 | 正式名称 | nosh | M1 发布前 |
 | 2 | 执行失败时是否默认自动交给 AI | hint | M1 评测后 |
 | 3 | 本地版是否默认开启输出采集（中转 PTY 的兼容性还需要验证） | 关闭 | M2 |
-| 4 | Windows 上 nosh shell 的定位 | 预览版 | M2 复评 |
+| 4 | Windows 上 nosh shell 的定位 | 尚未实现；目标为预览版 | M2 复评 |
 | 5 | 是否针对 shell 任务微调模型（LoRA） | 不做 | 看 M0 的结果 |
 | 6 | 是否支持第三方模型（需要通用的 Jinja 模板渲染，以及从 GGUF 内嵌词表构建分词器） | 不支持 | M3 之后 |
 | 7 | 客户端侧推理（用于服务器资源不足的场景） | 不做 | M3 之后 |
@@ -1192,6 +1275,8 @@ nosh/
 | 11 | aarch64 与其他非 x86 平台的内存优化 | aarch64 + dotprod 已实现 Q4K/Q6K（含 output）释放；Linux ARM 8K 实测 2.05 GiB，macOS 合成正确性通过（issue #9） | 无 dotprod、其他架构或 macOS RSS 有明确需求时另行实测，不套用 Linux ARM 的数字 |
 
 ## 附录 A：prompt 示例（token 视角）
+
+以下是格式示意，不是逐字节 golden fixture；实际渲染与测试以 [template.rs](../crates/nosh-llm/src/template.rs) 为准。
 
 ```text
 <s><|im_start|>system
@@ -1236,47 +1321,27 @@ LISTEN 0 511 *:8080 *:* users:(("node",pid=4312,fd=21))
 8080 端口已被另一个 **node 进程（PID 4312）** 占用，所以 `npm start` 失败了。可以先结束它：`kill 4312`，或者换一个端口启动。<|im_end|>
 ```
 
-- 整个 system 消息（从 `<s>` 到第一个 `<|im_end|>`）都是静态前缀，可以缓存到磁盘；动态信息都放在任务头里。
+- 整个 system 消息（从 `<s>` 到第一个 `<|im_end|>`）都是静态前缀；当前在内存中复用，M2 再缓存到磁盘。动态信息都放在任务头里。
 - `<function`、`</function>`、`<param`、`</param>`、`<tool_response>` 各自是单个 special token。工具说明里作为示例出现的这些文本，也会被编码成 special token，这与 HF 官方的行为一致。
 
 ## 附录 B：registry 片段
 
-```toml
-[[model]]
-id = "minicpm5-2b:q4_k_m"
-default = true
-arch = "llama"
-chat_format = "minicpm5"
-context_max = 131072
-min_memory_mb = 2600
-eog_ids = [1, 130073]
-license = "Apache-2.0"
-sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+完整、可加载的数据只维护在 [`assets/registry.toml`](../assets/registry.toml)，解析与约束见 [registry.rs](../crates/nosh-hub/src/registry.rs)。下面只说明层次，不复制容易过时的哈希和 revision：
 
-  [[model.files]]
-  role = "weights"
-  name = "MiniCPM5-2B-Q4_K_M.gguf"
-  size = 1561318368
-  sha256 = "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
-  sources = [
-    { hub = "hf", repo = "openbmb/MiniCPM5-2B-GGUF", revision = "2079a22f3beaa4e306449978533478fe0522f4b3" },
-    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B-GGUF", revision = "master" },
-  ]
-
-  [[model.files]]
-  role = "tokenizer"
-  name = "tokenizer.json"
-  size = 9894271
-  sha256 = "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
-  sources = [
-    { hub = "hf", repo = "openbmb/MiniCPM5-2B" },
-    { hub = "modelscope", repo = "OpenBMB/MiniCPM5-2B" },
-  ]
-
-# 其它条目（字段同上）：
-# minicpm5-2b:q8_0    MiniCPM5-2B-Q8_0.gguf    2679710688  c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078
-# minicpm5-1b:q4_k_m  MiniCPM5-1B-Q4_K_M.gguf   688065920  81b64d05a23b17b34c475f42b3e72fbde62d4b92cc34541f7a8031d0752deafa
+```text
+schema = 1
+model[]
+├─ id / default / display
+├─ arch / chat_format / context_max / min_memory_mb
+├─ eog_ids / license / sampling
+└─ files[]
+   ├─ role = weights 或 tokenizer
+   ├─ name / size / sha256
+   └─ sources[]
+      └─ hub / repo / revision
 ```
+
+权重与 tokenizer 都必须记录精确字节数和 SHA-256；不要只更新文件名而沿用旧哈希。模型 id 与磁盘目录名的转换见 §8.1。
 
 ## 附录 C：GGUF 元数据实测（MiniCPM5-2B-Q4_K_M.gguf）
 
@@ -1319,3 +1384,5 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.11 | CI 增加 Linux aarch64 和 macOS（issue #7）：§4.4 macOS 上的进程跟踪（libproc、`sysctl(KERN_PROCARGS2)`），以及清理的局限；§4.6 写明 CI 验证的平台；§6.2 按实际位置保护 nosh 的配置和状态目录（macOS、`NOSH_HOME`），macOS 的 `/private` 别名按同一位置判断；§14 M1 的平台 |
 | v0.12 | 固定 seed 的真实模型评测（issue #3）：§13.2 的 Agent 评测改为已入库的 10 个场景，每场景默认 5 个 seed、每轮 50 次试验（含本地纠错），逐次重建夹具；自动判定回答事实和最终状态，记录通过率、步数、确认次数、首 token 延迟、总耗时与 RSS，输出 JSON/Markdown 并比较版本。双跑检查判定和最终状态一致，输入、回答和工具轨迹差异另报；CI 仅跑无模型的评测工具自测。原始 main 的 legacy 实测已入库，完整正式基线在观测支持合入 main 后双跑补齐 |
 | v0.13 | 记录 main `4f602ab`（合并 #13）的精确干净 release 构建、原生观测 10 场景 × 5 seeds × 2 轮，共 100 次：原始 70/30/0，修复明确作用域误拒并透明重评后 73/27/0（通过/失败/错误），保留原始判定和未变观测摘要。§13.2 按实际规模和数据更新：最终状态 50/50 一致、判定加状态 45/50，#3 的复现验收仍未满足；记录动态输入、真实 `-s` TTFT、冷会话/页缓存及 wait4 RSS 口径。历史 legacy 基线不覆盖，不将后续报告或判定器提交误记为被测 main |
+| v0.14 | 整理文档职责和章节导航，按 `826a825` 区分当前实现、规划与实测口径；补充实现状态矩阵和真实代码入口，移除不可用的上手命令；校正进程内推理、故障隔离、工具、审批、上下文、下载/离线、配置及工程布局；保留章节与决策编号，把 registry 和评测明细链接到唯一维护入口；MVP 计划标为历史记录，不改变产品决策或运行时代码 |
+| v0.15 | 继续核对实现细节：明确 AI 开关、有限名称预检、失败求助与 CJK 判定边界；修正终端需求识别、每流输出上限和后台输出范围；补充建议模式提取/长度限制与退出码语义，修正工具调用状态机和 Schema 验证范围；对齐线程变量、逐次采样、KV 复用与模板样例来源。仅更新文档，不改变运行时行为或历史实测 |
