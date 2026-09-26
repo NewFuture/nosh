@@ -617,8 +617,8 @@ def audit_case(directory, row, require_arm=True):
         raise ValueError("Reported comparison differs from its samples")
 
 
-def report(root):
-    expected = {model["id"] for model in assets.manifest()["models"]}
+def report(root, cases="all"):
+    expected = {model["id"] for model in assets.select_models(cases)}
     rows = []
     seen = set()
     for path in sorted(root.rglob("summary.json")):
@@ -633,6 +633,7 @@ def report(root):
             print("AUDIT FAILED", row["case"], str(error), flush=True)
         rows.append(row)
     result = {"complete": seen == expected and all(r["complete"] for r in rows),
+              "expected_cases": sorted(expected),
               "missing": sorted(expected - seen), "cases": rows}
     assets.save(root / "report.json", result)
     lines = [
@@ -675,21 +676,30 @@ def interrupted(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("prepare", "run", "report"))
-    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("action", choices=("matrix", "prepare", "run", "report"))
+    parser.add_argument("--root", type=Path)
     parser.add_argument("--case", choices=[m["id"] for m in assets.manifest()["models"]])
+    parser.add_argument("--cases", default="all")
+    parser.add_argument("--quantizer", type=Path)
     parser.add_argument("--require-arm", action="store_true")
     args = parser.parse_args()
+    if args.action == "matrix":
+        print(json.dumps([{"case": model["id"], "hf": model["kind"] == "convert_hf",
+                           "quantize": model["kind"] != "gguf"}
+                          for model in assets.select_models(args.cases)]))
+        return 0
+    if args.root is None:
+        parser.error("--root is required for prepare, run and report")
     root = args.root.resolve()
     if args.action == "report":
-        return 0 if report(root) else 1
+        return 0 if report(root, args.cases) else 1
     if not args.case:
         parser.error("--case is required for prepare and run")
     model = next(m for m in assets.manifest()["models"] if m["id"] == args.case)
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, interrupted)
     if args.action == "prepare":
-        assets.prepare(model, root)
+        assets.prepare(model, root, args.quantizer.resolve() if args.quantizer else None)
         return 0
     return 0 if run(model, root, args.require_arm) else 1
 

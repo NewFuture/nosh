@@ -27,6 +27,14 @@ class KVCacheTests(unittest.TestCase):
         self.assertEqual(sum(m["quant"] == "Q4_0_PURE" for m in models), 4)
         self.assertTrue(all(m["bytes"] > 0 for m in models))
 
+    def test_followup_scope_is_explicit_and_validated(self):
+        self.assertEqual(len(assets.select_models()), 10)
+        self.assertEqual([m["id"] for m in assets.select_models("gemma270-pure,shellcue-q4km")],
+                         ["shellcue-q4km", "gemma270-pure"])
+        for cases in ("", "unknown", "gemma270-pure,gemma270-pure", "all,gemma270-pure"):
+            with self.assertRaises(ValueError):
+                assets.select_models(cases)
+
     def test_five_percent_is_strict_and_both_metrics_are_required(self):
         for prefill, decode, expected in ((95, 100, False), (100, 95, False),
                                           (95.00001, 96, True), (94, 120, False)):
@@ -153,6 +161,37 @@ class KVCacheTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     assets.source_path(Path(temporary), bad)
 
+    def test_separate_quantizer_preserves_strict_output_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.gguf"
+            quantizer = root / "quantizer"
+            source.write_bytes(b"source")
+            quantizer.write_bytes(b"executable")
+            model = {
+                "id": "test-pure", "model_id": "test", "revision": "a" * 40,
+                "kind": "quantize_gguf", "quant": "Q4_0_PURE", "source": {},
+                "bytes": 4, "sha256": hashlib.sha256(b"data").hexdigest(),
+            }
+            commands = []
+
+            def execute(command, log):
+                commands.append(command)
+                Path(command[-3]).write_bytes(b"data")
+
+            with (patch.object(assets, "download", return_value={"path": str(source)}),
+                  patch.object(assets, "execute", side_effect=execute)):
+                receipt = assets.prepare(model, root, quantizer)
+                self.assertTrue(receipt["verified"])
+                self.assertEqual(commands[0][0], quantizer)
+                self.assertEqual(commands[0][1], "--pure")
+                self.assertEqual(receipt["sha256"], model["sha256"])
+                with self.assertRaises(ValueError):
+                    assets.prepare({**model, "sha256": "0" * 64}, root, quantizer)
+            recorded = json.loads((root / "results" / "model-output.json").read_text())
+            self.assertEqual(recorded["actual_sha256"], model["sha256"])
+            self.assertEqual(recorded["expected_sha256"], "0" * 64)
+
     def test_stream_persists_the_actual_request_and_final_event(self):
         final = sample(count=1)["final"]
         final["stop"] = True
@@ -194,6 +233,18 @@ class KVCacheTests(unittest.TestCase):
             row = json.loads((root / "report.json").read_text())["cases"][0]
             self.assertFalse(row["complete"])
             self.assertIn("audit_error", row)
+
+    def test_selected_report_does_not_claim_all_ten_cases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model = assets.manifest()["models"][0]
+            assets.save(root / model["id"] / "summary.json", kv.summary(model, self.rows()))
+            with (patch.dict("os.environ", {}, clear=True),
+                  patch.object(kv, "audit_case"),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertTrue(kv.report(root, model["id"]))
+            report = json.loads((root / "report.json").read_text())
+            self.assertEqual(report["expected_cases"], [model["id"]])
 
 
 if __name__ == "__main__":

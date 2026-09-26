@@ -8,6 +8,10 @@ on:
         type: choice
         options: [memory, kv-cache]
         default: memory
+      kv_cases:
+        description: "KV manifest IDs, comma-separated; 'all' runs all ten"
+        type: string
+        default: all
 
 run-name: ARM64 ${{ inputs.experiment || 'memory' }} @ ${{ github.ref_name }}
 
@@ -94,25 +98,32 @@ jobs:
           path: target/arm64-memory
           if-no-files-found: error
 
-  kv-cache:
+  kv-matrix:
     if: inputs.experiment == 'kv-cache'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cases: ${{ steps.matrix.outputs.cases }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: matrix
+        env:
+          KV_CASES: ${{ inputs.kv_cases || 'all' }}
+        run: |
+          cases=$(python3 -m eval.kv_cache matrix --cases "$KV_CASES")
+          echo "cases=$cases" >> "$GITHUB_OUTPUT"
+
+  kv-cache:
+    needs: kv-matrix
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        include:
-          - {case: granite-h350-q4km, hf: false}
-          - {case: gemma270-q4km, hf: false}
-          - {case: functiongemma-q4km, hf: false}
-          - {case: shellcue-q4km, hf: true}
-          - {case: shellper-gemma-q4km, hf: true}
-          - {case: shellminator-q4km, hf: true}
-          - {case: gemma270-pure, hf: false}
-          - {case: functiongemma-pure, hf: false}
-          - {case: shellper-gemma-pure, hf: true}
-          - {case: shellminator-pure, hf: true}
+        include: ${{ fromJSON(needs.kv-matrix.outputs.cases) }}
     env:
       KV_ROOT: ${{ github.workspace }}/target/kv-cache
       KV_CASE: ${{ matrix.case }}
@@ -153,6 +164,20 @@ jobs:
             --target llama-server llama-quantize 2>&1 | tee -a "$KV_ROOT/results/build.log"
           cp "$KV_ROOT/build/CMakeCache.txt" "$KV_ROOT/results/CMakeCache.txt"
           "$KV_ROOT/build/bin/llama-server" --version >> "$KV_ROOT/results/build-environment.txt" 2>&1
+      - name: build separate reproducible model quantizer
+        if: matrix.quantize
+        timeout-minutes: 10
+        run: |
+          cmake -S "$KV_ROOT/llama.cpp" -B "$KV_ROOT/quantize-build" \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON \
+            -DCMAKE_C_FLAGS=-ffp-contract=off -DCMAKE_CXX_FLAGS=-ffp-contract=off \
+            -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_VULKAN=OFF \
+            -DGGML_BLAS=OFF -DGGML_CPU_KLEIDIAI=OFF -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            2>&1 | tee "$KV_ROOT/results/quantizer-build.log"
+          cmake --build "$KV_ROOT/quantize-build" --parallel 2 --target llama-quantize \
+            2>&1 | tee -a "$KV_ROOT/results/quantizer-build.log"
+          cp "$KV_ROOT/quantize-build/CMakeCache.txt" "$KV_ROOT/results/quantizer-CMakeCache.txt"
       - name: install pinned HF conversion dependencies
         if: matrix.hf
         timeout-minutes: 10
@@ -161,7 +186,14 @@ jobs:
           python3 -m pip freeze > "$KV_ROOT/results/conversion-packages.txt"
       - name: prepare and verify the exact x86 reference weight
         timeout-minutes: 15
-        run: python3 -u -m eval.kv_cache prepare --root "$KV_ROOT" --case "$KV_CASE"
+        env:
+          QUANTIZE: ${{ matrix.quantize }}
+        run: |
+          args=()
+          if [[ "$QUANTIZE" == "true" ]]; then
+            args+=(--quantizer "$KV_ROOT/quantize-build/bin/llama-quantize")
+          fi
+          python3 -u -m eval.kv_cache prepare --root "$KV_ROOT" --case "$KV_CASE" "${args[@]}"
       - name: two-core reversed-order f16 and q8 KV requests
         timeout-minutes: 40
         run: |
@@ -177,7 +209,7 @@ jobs:
 
   kv-summary:
     if: always() && inputs.experiment == 'kv-cache'
-    needs: kv-cache
+    needs: [kv-matrix, kv-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -189,7 +221,9 @@ jobs:
           pattern: arm-kv-*-${{ github.run_id }}
           path: target/arm-kv-artifacts
       - name: report complete and incomplete comparisons
-        run: python3 -m eval.kv_cache report --root target/arm-kv-artifacts
+        env:
+          KV_CASES: ${{ inputs.kv_cases || 'all' }}
+        run: python3 -m eval.kv_cache report --root target/arm-kv-artifacts --cases "$KV_CASES"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

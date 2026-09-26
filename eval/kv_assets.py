@@ -38,6 +38,17 @@ def manifest():
     return data
 
 
+def select_models(cases="all"):
+    models = manifest()["models"]
+    if cases == "all":
+        return models
+    requested = cases.split(",")
+    known = {model["id"] for model in models}
+    if len(set(requested)) != len(requested) or not set(requested) <= known:
+        raise ValueError("Cases must be unique manifest IDs separated by commas, or 'all'")
+    return [model for model in models if model["id"] in requested]
+
+
 def save(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -124,7 +135,7 @@ def hf_files(model):
     return selected
 
 
-def prepare(model, root):
+def prepare(model, root, quantizer=None):
     result_dir = root / "results"
     save(result_dir / "case.json", model)
     source = root / "sources" / model["model_id"] / model["revision"]
@@ -148,12 +159,21 @@ def prepare(model, root):
         else:
             high_precision = Path(receipts[0]["path"])
         output = folder / f"{model['model_id']}-{model['quant']}.gguf"
-        command = [root / "build" / "bin" / "llama-quantize"]
+        if quantizer is None:
+            quantizer = root / "build" / "bin" / "llama-quantize"
+        command = [quantizer]
         if model["quant"] == "Q4_0_PURE":
             command.append("--pure")
         command += [high_precision, output,
                     "Q4_0" if model["quant"] == "Q4_0_PURE" else model["quant"], "2"]
         execute(command, result_dir / "prepare.log")
+    assets_output = {
+        "expected_sha256": model["sha256"], "actual_sha256": digest(output),
+        "expected_bytes": model["bytes"], "actual_bytes": output.stat().st_size,
+    }
+    if quantizer is not None:
+        assets_output["quantizer_sha256"] = digest(quantizer)
+    save(result_dir / "model-output.json", assets_output)
     verify(output, model)
     receipt = {**model, "path": str(output), "verified": True}
     save(result_dir / "asset.json", receipt)
