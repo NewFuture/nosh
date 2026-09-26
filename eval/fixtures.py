@@ -103,6 +103,25 @@ class MathTests(unittest.TestCase):
 }
 
 
+RUST_ARTIFACT = re.compile(
+    r"target/(?:CACHEDIR\.TAG|\.rustc_info\.json|(?:debug|release)/(?:\.cargo(?:-artifact|-build)?-lock|eval_math(?:\.d)?"
+    r"|deps/eval_math-[0-9a-f]+(?:\.d|\.rmeta)?"
+    r"|\.fingerprint/eval_math-[0-9a-f]+/(?:invoked\.timestamp|(?:dep-|output-)?(?:test-)?bin-eval_math(?:\.json)?)))"
+)
+
+
+def artifact(name: str, item: dict, kind: str) -> bool:
+    if "symlink" in item:
+        return False
+    if kind.startswith("rust") or kind == "build-failure":
+        return bool(RUST_ARTIFACT.fullmatch(name))
+    return kind == "node-build" and name in ("dist/math.js", "dist/main.js")
+
+
+def protected_files(files: dict, kind: str) -> dict:
+    return {name: item for name, item in files.items() if not artifact(name, item, kind)}
+
+
 def project_environment(home: Path, tools: dict | None = None) -> dict[str, str]:
     path = "/usr/bin:/bin"
     if tools:

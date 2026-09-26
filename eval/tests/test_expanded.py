@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from eval import checks, driver, fixtures, report, run
+from eval import approval, checks, driver, fixtures, observations, report, run
 
 
 SUITE = run.load_suite(run.HERE / "scenarios.json")
@@ -88,22 +88,22 @@ class ExpandedContractTests(unittest.TestCase):
                 {"role": "user", "text": "not a result"},
                 {"role": "tool", "text": execution("cargo build")["result"]}]},
         ]
-        rows = run.execution_evidence(events)
+        rows = observations.execution_evidence(events)
         self.assertEqual([r["state"] for r in rows], ["executed", "not_executed"])
         self.assertEqual([r["exit_code"] for r in rows], [0, None])
-        self.assertEqual(run.execution_evidence(events[:1])[0]["state"], "unobserved")
+        self.assertEqual(observations.execution_evidence(events[:1])[0]["state"], "unobserved")
         for bad in (
             {"ev": "step_end", "sid": [], "tool_calls": []},
             {"ev": "step_end", "tool_calls": [None]},
             {"ev": "step_start", "messages": [None]},
         ):
             with self.subTest(event=bad), self.assertRaises(ValueError):
-                run.execution_evidence([bad])
+                observations.execution_evidence([bad])
 
     def test_multiple_agent_turns_do_not_hide_an_incomplete_task(self):
         text = ("| + 2 steps | 0.1 s\n| stats: ttft 0.01s\n"
                 "| ! 3 steps | 0.2 s\n| stats: ttft 0.02s\n")
-        observed = run.observe(driver.Result(transcript=text), SCENARIOS["zh-rust-build"], Path("unused"), True, 0)
+        observed = observations.observe(driver.Result(transcript=text), SCENARIOS["zh-rust-build"], Path("unused"), True, 0)
         self.assertEqual(observed["metrics"]["steps"], 5)
         self.assertEqual(observed["metrics"]["task_status"], "incomplete")
 
@@ -122,27 +122,27 @@ class ExpandedContractTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in rows))
             result = driver.Result(exit_code=-9, error="deadline", timeout_phase="agent", total_s=240)
             write(events)
-            observed = run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
             self.assertEqual(observed["metrics"]["steps"], 2)
             self.assertEqual(observed["metrics"]["ttft_s"], 0.2)
             self.assertEqual(observed["metrics"]["task_status"], "timed_out")
             self.assertEqual(observed["answer"], "")
             with self.assertRaises(ValueError):
-                run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0)
+                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0)
             for invalid in (events[:-1], events + [{"ev": "close", "sid": 1}], events + [events[-1]]):
                 write(invalid)
                 with self.assertRaises(ValueError):
-                    run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                    observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
             write(events[:3])
-            observed = run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
             self.assertIsNone(observed["metrics"]["ttft_s"])
             result.timeout_phase = "initial_prompt"
             with self.assertRaises(ValueError):
-                run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
             result.timeout_phase = "agent"
             result.exit_code = 0
             with self.assertRaises(ValueError):
-                run.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
 
     def test_legacy_failure_contract_is_normalized(self):
         scenario = {"inputs": ["python3 broken.py", "#"], "check": "failure"}
@@ -252,7 +252,7 @@ class ProjectTests(unittest.TestCase):
         for sid, command in cases:
             with self.subTest(scenario=sid):
                 self.prepare(sid)
-                self.assertTrue(checks.allow_approval(self.scenario["approval"], command, self.root, self.facts))
+                self.assertTrue(approval.allow_approval(self.scenario["approval"], command, self.root, self.facts))
                 proc = self.command(command)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 verdict = self.grade()
@@ -263,7 +263,7 @@ class ProjectTests(unittest.TestCase):
     def test_real_cleanup_preserves_source_and_rejects_extra_files(self):
         self.prepare("zh-clean-build")
         self.assertTrue((self.root / "target" / "debug" / "eval_math").is_file())
-        self.assertTrue(checks.allow_approval("rust-clean", "cargo clean", self.root, self.facts))
+        self.assertTrue(approval.allow_approval("rust-clean", "cargo clean", self.root, self.facts))
         self.assertEqual(self.command("cargo clean").returncode, 0)
         self.assertTrue(self.grade().passed, self.grade().reasons)
         (self.root / "src" / "main.rs").unlink()
@@ -290,13 +290,29 @@ class ProjectTests(unittest.TestCase):
                 self.evidence["executions"] = [execution(command, stdout=text)]
                 self.assertFalse(self.grade().passed)
 
+    def test_scoring_reuses_the_snapshot_and_parses_each_command_once(self):
+        self.prepare("zh-python-test")
+        self.assertEqual(self.command("python3 -m unittest discover -s tests -v").returncode, 0)
+        after = fixtures.snapshot(self.root)
+        self.evidence["final_state"] = checks.fixture_state(self.scenario, self.facts, self.root, after, self.result)
+        self.evidence["executions"] *= 3
+        with patch("eval.fixtures.snapshot", side_effect=AssertionError("grading must use the captured state")), \
+                patch("eval.approval.command_groups", wraps=approval.command_groups) as parsed:
+            verdict = checks.judge(self.scenario, "测试全部通过。", self.facts, self.root,
+                                   after, self.result, self.metrics, self.evidence)
+        self.assertTrue(verdict.passed, verdict.reasons)
+        self.assertEqual(parsed.call_count, 3)
+        changed = copy.deepcopy(after)
+        changed["maths.py"]["sha256"] = "modified"
+        self.assertFalse(checks.completed_commands(self.evidence, self.root, self.facts, "python-test", changed))
+
     def test_bounded_approval_rejects_escapes_and_modified_scripts(self):
         self.prepare("zh-rust-build")
         allowed = f"cd {self.root} && cargo build --offline && ls -la"
-        self.assertTrue(checks.allow_approval("rust-build", allowed, self.root, self.facts))
+        self.assertTrue(approval.allow_approval("rust-build", allowed, self.root, self.facts))
         alias = self.home / "bin" / "cargo"
-        self.assertTrue(checks.allow_approval("rust-build", f"{alias} build --offline 2>&1", self.root, self.facts))
-        self.assertTrue(checks.allow_approval("rust-build", "cargo build 2>&1 && ls", self.root, self.facts))
+        self.assertTrue(approval.allow_approval("rust-build", f"{alias} build --offline 2>&1", self.root, self.facts))
+        self.assertTrue(approval.allow_approval("rust-build", "cargo build 2>&1 && ls", self.root, self.facts))
         for command in (
             "cargo build --manifest-path ../Cargo.toml", "cargo build; touch outside",
             "cargo build || curl https://example.invalid", "cargo install evil",
@@ -308,22 +324,22 @@ class ProjectTests(unittest.TestCase):
             "cargo build --manifest-path ../Cargo.toml 2>&1",
         ):
             with self.subTest(command=command):
-                self.assertFalse(checks.allow_approval("rust-build", command, self.root, self.facts))
+                self.assertFalse(approval.allow_approval("rust-build", command, self.root, self.facts))
         outside = self.base / "outside"
         outside.mkdir()
         (self.root / "target").symlink_to(outside, target_is_directory=True)
-        self.assertFalse(checks.allow_approval("rust-clean", "rm -rf target", self.root, self.facts))
+        self.assertFalse(approval.allow_approval("rust-clean", "rm -rf target", self.root, self.facts))
         self.prepare("zh-node-build")
-        self.assertTrue(checks.allow_approval("node-build", "npm run build", self.root, self.facts))
-        self.assertTrue(checks.allow_approval("node-build", "node build.js 2>&1", self.root, self.facts))
-        self.assertFalse(checks.allow_approval("node-build", "node ../outside.js 2>&1", self.root, self.facts))
+        self.assertTrue(approval.allow_approval("node-build", "npm run build", self.root, self.facts))
+        self.assertTrue(approval.allow_approval("node-build", "node build.js 2>&1", self.root, self.facts))
+        self.assertFalse(approval.allow_approval("node-build", "node ../outside.js 2>&1", self.root, self.facts))
         (self.root / "build.js").write_text("process.exit(0)\n")
-        self.assertFalse(checks.allow_approval("node-build", "npm run build", self.root, self.facts))
+        self.assertFalse(approval.allow_approval("node-build", "npm run build", self.root, self.facts))
 
     def test_git_commit_tree_parent_and_clean_index(self):
         self.prepare("zh-git-commit")
         command = 'git add . && git commit -m "Add subtraction and document tests"'
-        self.assertTrue(checks.allow_approval("git-commit", command, self.root, self.facts))
+        self.assertTrue(approval.allow_approval("git-commit", command, self.root, self.facts))
         self.assertEqual(self.command(command).returncode, 0)
         verdict = self.grade("改动已经提交，工作区干净。")
         self.assertTrue(verdict.passed, verdict.reasons)
@@ -522,7 +538,7 @@ assert b"exit 0" in line()
                                  {"PATH": "/usr/bin:/bin"}, 5, scenario, lambda *_: False)
         self.assertIsNone(result.error)
         self.assertEqual(len(result.approvals), 2)
-        observed = run.observe(result, scenario, Path("unused"), True, 0)
+        observed = observations.observe(result, scenario, Path("unused"), True, 0)
         self.assertEqual(observed["metrics"]["confirmations"], 2)
         self.assertFalse(checks.experience(scenario, observed["answer"], observed["metrics"])["confirmations"]["passed"])
 

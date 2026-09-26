@@ -5,19 +5,10 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      evaluation:
-        description: Run the real-model evaluation instead of regular CI
-        type: boolean
-        default: false
-      source_revision:
-        description: Exact main commit to evaluate (empty pins current main)
-        type: string
-        default: ''
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.evaluation && 'evaluation' || 'checks' }}
-  cancel-in-progress: ${{ !inputs.evaluation }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -31,7 +22,6 @@ env:
 # tests found on them, also when an earlier step failed.
 jobs:
   check:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.evaluation) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -60,7 +50,6 @@ jobs:
 
   # Linux arm64 (2 vCPU, 8 GB for private repositories), on every run.
   linux-arm64:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.evaluation) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -80,7 +69,7 @@ jobs:
   # Apple Silicon (M1, 3 vCPU, 7 GB). About 10x the per-minute price of Linux
   # x64, so only for pull requests, main and manual runs.
   macos:
-    if: ${{ !inputs.evaluation && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -96,235 +85,3 @@ jobs:
       - name: cpu features and kernel paths
         if: success() || failure()
         run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1
-
-  evaluation:
-    if: github.event_name == 'workflow_dispatch' && inputs.evaluation
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    env:
-      CARGO_BUILD_JOBS: 2
-      CANDLE_NUM_THREADS: 2
-      RAYON_NUM_THREADS: 1
-      PYTHONDONTWRITEBYTECODE: '1'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: freeze main source and record the environment
-        env:
-          REQUESTED_SOURCE: ${{ inputs.source_revision }}
-        run: |
-          git fetch --no-tags origin main
-          source="${REQUESTED_SOURCE:-$(git rev-parse origin/main)}"
-          if [[ ! "$source" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::source_revision must be a full lowercase commit SHA"
-            exit 2
-          fi
-          if ! git merge-base --is-ancestor "$source" origin/main; then
-            echo "::error::source_revision must be on main"
-            exit 2
-          fi
-          EVAL_SOURCE="$RUNNER_TEMP/nosh-evaluation-source"
-          EVAL_ARTIFACTS="$GITHUB_WORKSPACE/target/evaluation-artifacts"
-          {
-            echo "EVAL_SOURCE_REVISION=$source"
-            echo "EVAL_SOURCE=$EVAL_SOURCE"
-            echo "EVAL_ARTIFACTS=$EVAL_ARTIFACTS"
-            echo "EVAL_BINARY=$GITHUB_WORKSPACE/target/evaluation-main/release/nosh"
-            echo "NOSH_HOME=$RUNNER_TEMP/nosh-evaluation-model"
-          } >> "$GITHUB_ENV"
-          mkdir -p "$EVAL_SOURCE" "$EVAL_ARTIFACTS"
-          git archive --format=tar --output="$RUNNER_TEMP/evaluation-source.tar" "$source"
-          tar -xf "$RUNNER_TEMP/evaluation-source.tar" -C "$EVAL_SOURCE"
-          {
-            printf 'Main source: %s\nHarness source: %s\n' "$source" "$GITHUB_SHA"
-            rustc -Vv
-            cargo --version
-            node --version
-            npm --version
-            python3 --version
-            lscpu
-            free -m
-          } > "$EVAL_ARTIFACTS/environment.txt"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ runner.temp }}/nosh-evaluation-source -> ${{ github.workspace }}/target/evaluation-main
-          key: evaluation-clean-main-release
-      - name: evaluation harness tests (no model)
-        run: python3 -m unittest discover -s eval -v
-      - name: build the pinned clean main
-        working-directory: ${{ runner.temp }}/nosh-evaluation-source
-        run: |
-          echo "EVAL_BUILD_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-          env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_TARGET \
-            cargo build --release --locked -p nosh-cli --bin nosh \
-            --target-dir "$GITHUB_WORKSPACE/target/evaluation-main"
-      - name: write verified build provenance
-        run: |
-          python3 - <<'PY'
-          from datetime import datetime, timezone
-          import json, os, subprocess
-          from pathlib import Path
-          from eval import fixtures
-          data = {
-              "schema_version": 1,
-              "source_revision": os.environ["EVAL_SOURCE_REVISION"],
-              "source_ref": "main",
-              "source_clean": True,
-              "source_archive_sha256": fixtures.file_hash(Path(os.environ["RUNNER_TEMP"]) / "evaluation-source.tar"),
-              "binary_sha256": fixtures.file_hash(Path(os.environ["EVAL_BINARY"])),
-              "build_cwd": os.environ["EVAL_SOURCE"],
-              "command": ["env", "-u", "RUSTFLAGS", "-u", "CARGO_ENCODED_RUSTFLAGS", "-u", "CARGO_BUILD_TARGET",
-                          "cargo", "build", "--release", "--locked", "-p", "nosh-cli", "--bin", "nosh",
-                          "--target-dir", str(Path(os.environ["GITHUB_WORKSPACE"]) / "target" / "evaluation-main")],
-              "cargo_build_jobs": 2,
-              "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
-              "cargo": subprocess.check_output(["cargo", "--version"], text=True).strip(),
-              "build_started_at": os.environ["EVAL_BUILD_STARTED"],
-              "build_finished_at": datetime.now(timezone.utc).isoformat(),
-              "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-          }
-          path = Path(os.environ["EVAL_ARTIFACTS"]) / "build-info.json"
-          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-          PY
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/nosh-evaluation-model/models
-          key: evaluation-model-${{ env.EVAL_SOURCE_REVISION }}
-      - name: explicitly prepare and verify the pinned model
-        run: |
-          "$EVAL_BINARY" model pull minicpm5-2b:q4_k_m --source hf
-          "$EVAL_BINARY" model verify minicpm5-2b:q4_k_m
-      - name: prepare the pinned checkpoint artifact client
-        run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@2.3.2
-      - name: collect the serial 250-trial campaign
-        id: campaign
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('node:fs');
-            const path = require('node:path');
-            const {spawn, execFile} = require('node:child_process');
-            const {promisify} = require('node:util');
-            const execute = promisify(execFile);
-            const {DefaultArtifactClient} = require(path.join(
-              process.env.RUNNER_TEMP, 'evaluation-artifact-client/node_modules/@actions/artifact'));
-            const artifacts = new DefaultArtifactClient();
-            const root = process.env.EVAL_ARTIFACTS;
-            const log = fs.createWriteStream(path.join(root, 'campaign.log'));
-            const args = ['-n', '10', 'python3', '-u', '-m', 'eval.run',
-              '--binary', process.env.EVAL_BINARY,
-              '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
-              '--build-info', path.join(root, 'build-info.json'),
-              '--threads', '2', '--repeat', '2',
-              '--label', `main-${process.env.EVAL_SOURCE_REVISION.slice(0, 7)}-expanded-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
-              '--output', path.join(root, 'campaign')];
-            const child = spawn('nice', args, {stdio: ['ignore', 'pipe', 'pipe']});
-            child.stdout.on('data', data => { process.stdout.write(data); log.write(data); });
-            child.stderr.on('data', data => { process.stderr.write(data); log.write(data); });
-            let exited = false;
-            const finished = new Promise((resolve, reject) => {
-              child.once('error', error => { exited = true; reject(error); });
-              child.once('close', (code, signal) => { exited = true; resolve({code, signal}); });
-            });
-            function files(directory) {
-              return fs.readdirSync(directory, {withFileTypes: true}).flatMap(entry => {
-                const file = path.join(directory, entry.name);
-                if (entry.isSymbolicLink()) throw new Error('checkpoint contains a symlink');
-                return entry.isDirectory() ? files(file) : [file];
-              });
-            }
-            let outcome;
-            try {
-              // At most eight immutable checkpoints plus the final artifact.
-              for (let index = 1; index <= 8; index++) {
-                let timer;
-                outcome = await Promise.race([finished, new Promise(resolve => {
-                  timer = setTimeout(() => resolve(null), (index === 1 ? 5 : 45) * 60_000);
-                })]);
-                clearTimeout(timer);
-                if (outcome) break;
-                const snapshot = path.join(process.env.RUNNER_TEMP, `evaluation-checkpoint-${index}`);
-                const saved = await execute('python3', ['-m', 'eval.checkpoint', root, snapshot]);
-                core.info(saved.stdout.trim());
-                const uploaded = await artifacts.uploadArtifact(
-                  `evaluation-${process.env.GITHUB_RUN_ID}-checkpoint-${index}`,
-                  files(snapshot), snapshot, {retentionDays: 1, compressionLevel: 6});
-                core.info(`Durable checkpoint artifact ${uploaded.id}`);
-              }
-              outcome ??= await finished;
-              const code = outcome.code ?? 130;
-              fs.writeFileSync(path.join(root, 'exit-code.txt'), `${code}\n`);
-              if (code > 1) core.setFailed(`Evaluation infrastructure failed: exit ${code}, signal ${outcome.signal}`);
-            } finally {
-              if (!exited) {
-                child.kill('SIGINT');
-                await finished;
-              }
-              await new Promise(resolve => log.end(resolve));
-            }
-      - name: verify completeness and attribute the harness
-        if: always() && steps.campaign.outcome != 'skipped'
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, subprocess
-          from pathlib import Path
-          from eval import fixtures, report, run
-          root = Path(os.environ["EVAL_ARTIFACTS"])
-          path = root / "campaign" / "report.json"
-          data = json.loads(path.read_text(encoding="utf-8"))
-          report.validate(data)
-          raw_hashes = {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")}
-          revision = os.environ["GITHUB_SHA"]
-          committed = {}
-          for file in sorted(run.HERE.glob("*.py")):
-              text = subprocess.check_output(["git", "show", f"{revision}:eval/{file.name}"]).decode("utf-8")
-              committed[file.name] = hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode()).hexdigest()
-          if fixtures.digest(committed) != data["metadata"]["harness_content_sha256"]:
-              raise SystemExit("harness source does not match its recorded commit")
-          data["metadata"]["harness_revision"] = revision
-          report.save(data, path.parent)
-          complete = (len(data["metadata"]["scenarios"]) == 25
-                      and data["metadata"]["seeds"] == [0, 1, 2, 3, 4]
-                      and data["metadata"]["repeat"] == 2
-                      and len(data["trials"]) == 250
-                      and not any(t["status"] == "error" for t in data["trials"])
-                      and not data.get("error"))
-          provenance = {
-              "schema_version": 1, "complete": complete,
-              "source_revision": os.environ["EVAL_SOURCE_REVISION"], "harness_revision": revision,
-              "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-              "workflow_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-              "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
-              "process_niceness": 10,
-              "original_report_hashes": raw_hashes,
-              "attributed_report_hashes": {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")},
-              "note": "One serial campaign. No selective retries or resampling. Source attribution does not change trials or judgments.",
-          }
-          (root / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
-              stream.write(f"## Expanded evaluation: {'complete' if complete else 'incomplete'}\n\n")
-              stream.write(f"Main `{provenance['source_revision']}`; harness `{revision}`.\n\n")
-              stream.write("Model failures are retained; workflow success does not mean a 100% task pass rate.\n\n")
-              for group in data["groups"]:
-                  stream.write(f"- {group['group']}: {group['pass']}/{group['planned']} pass; "
-                               f"steps {report.fmt(group['steps'])}; confirmations {report.fmt(group['confirmations'])}\n")
-          if not complete:
-              raise SystemExit("incomplete campaign; inspect the preserved artifacts")
-          PY
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: evaluation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            target/evaluation-artifacts/build-info.json
-            target/evaluation-artifacts/environment.txt
-            target/evaluation-artifacts/exit-code.txt
-            target/evaluation-artifacts/provenance.json
-            target/evaluation-artifacts/campaign.log
-            target/evaluation-artifacts/campaign
-          if-no-files-found: error

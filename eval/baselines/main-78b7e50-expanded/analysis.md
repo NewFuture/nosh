@@ -84,12 +84,12 @@ The scenario set, grading, thread count, hardware, nice level, and checkpoint ac
 
 ## Reproduce without inference
 
-With the normalization code at revision `a26d1b2ddf1d06dfcb1bdda2bdae8ddb6922cf12` unchanged:
+The replay command loads the normalization code from revision `a26d1b2ddf1d06dfcb1bdda2bdae8ddb6922cf12`, independently of the current evaluator:
 
 ```bash
 python3 eval/baselines/main-78b7e50-expanded/reproduce.py --check
 ```
 
-This verifies raw hashes and all planned identities, derives the corrections from preserved observations, and checks all final files byte-for-byte. It never starts nosh or a model. The normalization commit must be available in the Git object database; shallow clones need its history first. `GIT` can select a native Git executable when WSL is reading a Windows-managed worktree. The script refuses mismatched normalization sources rather than reinterpreting the historical record with a different grader.
+This verifies raw hashes and all planned identities, derives the corrections from preserved observations, and checks all final files byte-for-byte. It never starts nosh or a model. The normalization commit must be available in the Git object database; shallow clones need its history first. `GIT` can select a native Git executable when WSL is reading a Windows-managed worktree. The script verifies an isolated temporary copy before loading the pinned modules, so refactoring the current evaluator does not reinterpret or invalidate this historical record.
 
 Model weights, build products, and the complete raw-log bundles are not committed. Reports are self-contained; the single timeout's raw evidence is retained because its observation recovery depends on it. Its terminal transcript is marked binary in Git to preserve carriage returns/control bytes and the recorded hash.

@@ -13,33 +13,25 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
-
-from eval import checks, driver, fixtures, report, run
-
 HERE = Path(__file__).resolve().parent
 REVISION = "a26d1b2ddf1d06dfcb1bdda2bdae8ddb6922cf12"
 TIMEOUT = ("zh-clean-build", 1, 1)
 DENIAL = "The declared approval policy denied at least one command; see approval evidence."
+SOURCE_FILES = ("__init__.py", "checks.py", "driver.py", "fixtures.py", "report.py", "run.py")
 
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def verify_source() -> dict:
-    sources = {}
-    for name in ("checks.py", "driver.py", "fixtures.py", "report.py", "run.py"):
-        text = subprocess.check_output([os.environ.get("GIT", "git"), "show", f"{REVISION}:eval/{name}"],
-                                       cwd=ROOT).decode("utf-8")
-        sources[name] = sha(text.replace("\r\n", "\n").replace("\r", "\n"))
-        if sources[name] != fixtures.source_hash(ROOT / "eval" / name):
-            raise ValueError(f"{name} differs from normalization revision {REVISION}")
-    return sources
+def frozen_sources() -> dict[str, bytes]:
+    return {
+        name: subprocess.check_output([os.environ.get("GIT", "git"), "show", f"{REVISION}:eval/{name}"], cwd=ROOT)
+        for name in SOURCE_FILES
+    }
 
 
-def normalized() -> tuple[dict, dict]:
-    sources = verify_source()
+def normalized(sources: dict) -> tuple[dict, dict]:
     workflow = json.loads((HERE / "workflow-provenance.json").read_text(encoding="utf-8"))
     raw = json.loads((HERE / "raw-report.json").read_text(encoding="utf-8"))
     report.validate(raw)
@@ -147,10 +139,32 @@ def normalized() -> tuple[dict, dict]:
 
 
 def main() -> int:
+    global checks, driver, fixtures, report, run
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify committed outputs without overwriting them")
+    parser.add_argument("--source-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    data, evidence = normalized()
+    sources = frozen_sources()
+    if args.source_root is None:
+        with tempfile.TemporaryDirectory(prefix="nosh-baseline-source-") as temporary:
+            package = Path(temporary) / "eval"
+            package.mkdir()
+            for name, content in sources.items():
+                (package / name).write_bytes(content)
+            return subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--source-root", temporary],
+                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+            ).returncode
+    for name, content in sources.items():
+        if (args.source_root / "eval" / name).read_bytes() != content:
+            raise ValueError(f"frozen normalization source changed: {name}")
+    sys.path.insert(0, str(args.source_root))
+    from eval import checks, driver, fixtures, report, run
+
+    hashes = {name: sha(content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"))
+              for name, content in sources.items() if name != "__init__.py"}
+    data, evidence = normalized(hashes)
     with tempfile.TemporaryDirectory() as temporary:
         destination = Path(temporary) if args.check else HERE
         report.save(data, destination)

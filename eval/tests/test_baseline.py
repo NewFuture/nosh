@@ -2,7 +2,7 @@ import copy
 import json
 import unittest
 
-from eval import driver, fixtures, report, run
+from eval import driver, fixtures, observations, report, run
 
 
 class ExpandedBaselineTests(unittest.TestCase):
@@ -74,7 +74,7 @@ class ExpandedBaselineTests(unittest.TestCase):
             error=original["reasons"][0], timeout_phase="agent",
             transcript=(self.root / "timeout-transcript.txt").read_text(encoding="utf-8"),
         )
-        recovered = run.observe(result, scenario, self.root / "timeout-engine.jsonl",
+        recovered = observations.observe(result, scenario, self.root / "timeout-engine.jsonl",
                                 False, row["seed"], inflight_timeout=True)
         self.assertEqual(recovered["metrics"], row["metrics"])
         self.assertEqual(recovered["inputs"], row["inputs"])
