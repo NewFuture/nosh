@@ -116,7 +116,9 @@ native 观测由 `NOSH_EVAL_TRACE` 的私有版本化 JSONL 提供；缺失/损�
 
 新基线的全部 250 个身份保留。原始 120/129/1/0（通过/失败/错误/缺失），仅确定性恢复一条真实模型超时的指标并改为失败，另去掉一条不影响通过数的收尾误判，归一化为 120/130/0/0；没有重抽 seed。失联和过窄审批规则的前次运行也保留说明及可得证据。
 
-判定加状态仅 **107/125** 对一致，最终状态 **119/125** 对一致，#3 的复现要求仍未满足。历史数据不改写；[复核脚本](baselines/main-78b7e50-expanded/reproduce.py) 从 Git 提取固定处理版本，在隔离临时目录中重建报告，不依赖当前评测实现，也不运行模型。
+判定加状态仅 **107/125** 对一致，最终状态 **119/125** 对一致，#3 的复现要求仍未满足。完整报告、原始/诊断记录及一次性材料已迁到 [#4 的归档索引](https://github.com/NewFuture/nosh/issues/4#issuecomment-5844795358)，实际托管在同仓库的非最新版证据 Release 附件；[archive.json](baselines/main-78b7e50-expanded/archive.json) 固定下载地址与 SHA-256。Git 只保留精简指标和来源，原文件在附件中逐字节保留，已有历史不重写。
+
+[复核脚本](baselines/main-78b7e50-expanded/reproduce.py) 只接受显式下载的 ZIP，先核验整体及每个文件，再用归档内固定处理源码重建报告，无需 Git 历史、联网或模型。常规 CI 不下载附件。`summary.json` 不是完整报告；需要 `--compare` 时，使用验证后的归档内 `baseline/report.json`。
 
 ## 开发与无模型自测
 
@@ -131,7 +133,9 @@ native 观测由 `NOSH_EVAL_TRACE` 的私有版本化 JSONL 提供；缺失/损�
 
 ```bash
 python3 -m unittest discover -s eval -v
-python3 eval/baselines/main-78b7e50-expanded/reproduce.py --check
+
+# 从 archive.json 的地址下载 ZIP 后，可选地完整复核证据
+python3 eval/baselines/main-78b7e50-expanded/reproduce.py --archive PATH_TO_ZIP --check
 ```
 
 测试使用真正的无依赖小项目构建/测试、脚本化 PTY、协议正反例和已保存的基线，不加载模型。CLI 观测的 Rust 回归可运行 `cargo test -p nosh-cli --locked`。无模型测试不能替代真实模型基线。
