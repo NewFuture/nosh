@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from eval import checks, driver, fixtures, report, run
+from eval import approval, checks, driver, fixtures, observations, report, run
 
 
 class ContractTests(unittest.TestCase):
@@ -25,7 +25,9 @@ class ContractTests(unittest.TestCase):
 
     def test_default_suite_and_seeds(self):
         suite = run.load_suite(run.HERE / "scenarios.json")
-        self.assertEqual(len(suite["scenarios"]), 10)
+        self.assertEqual(len(suite["scenarios"]), 25)
+        self.assertEqual(sum(s["group"] == "mvp" for s in suite["scenarios"]), 10)
+        self.assertEqual(sum(s["group"] == "expanded" for s in suite["scenarios"]), 15)
         self.assertEqual(suite["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(run.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
         for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):
@@ -58,22 +60,22 @@ class ContractTests(unittest.TestCase):
             trace.write_text("\n".join(json.dumps(dict(e, schema_version=1)) for e in events))
             result = driver.Result(stdout="tar -czf logs.tar.gz logs\n", exit_code=0, total_s=9)
             scenario = {"mode": "suggest", "check": "archive"}
-            observed = run.observe(result, scenario, trace, False, 4)
+            observed = observations.observe(result, scenario, trace, False, 4)
             self.assertEqual(observed["metrics"]["ttft_s"], 0.125)
             self.assertEqual(observed["metrics"]["total_s"], 9)
             self.assertEqual(observed["metrics"]["load_s"], 1.5)
             self.assertEqual(observed["answer"], result.stdout.strip())
-            legacy = run.observe(result, scenario, trace, True, 4)
+            legacy = observations.observe(result, scenario, trace, True, 4)
             self.assertIsNone(legacy["metrics"]["ttft_s"])
             self.assertIsNone(legacy["inputs"])
             with self.assertRaises(ValueError):
-                run.observe(result, scenario, trace, False, 5)
+                observations.observe(result, scenario, trace, False, 5)
             trace.write_text(json.dumps({"schema_version": 1, "ev": "step_error", "error": "context full"}) + "\n")
             with self.assertRaisesRegex(RuntimeError, "context full"):
-                run.observe(result, scenario, trace, False, 4)
+                observations.observe(result, scenario, trace, False, 4)
             trace.unlink()
             with self.assertRaises(ValueError):
-                run.observe(result, scenario, trace, False, 4)
+                observations.observe(result, scenario, trace, False, 4)
 
     def test_isolated_config_uses_the_existing_string_contract(self):
         import tomllib
@@ -86,7 +88,7 @@ class ContractTests(unittest.TestCase):
             result = driver.Result(stdout="tar -czf logs.tar.gz logs", exit_code=0,
                                    stderr="nosh: /tmp/config.toml: model.thinking: expected a string\n")
             with self.assertRaises(ValueError):
-                run.observe(result, {"mode": "suggest", "check": "archive"}, home / "trace", True, 0)
+                observations.observe(result, {"mode": "suggest", "check": "archive"}, home / "trace", True, 0)
 
     def test_legacy_answer_excludes_echo_tools_and_intermediate_answers(self):
         text = (
@@ -94,11 +96,11 @@ class ContractTests(unittest.TestCase):
             "┃ Let me inspect.\n┃ ⚙ list_dir SAFE\n┃   expected.py\n┃   exit 0\n"
             "┃ Actual final answer.\n┃ ✔ 2 steps · 1.0 s\n┃ stats: ttft 0.12s\n"
         )
-        self.assertEqual(run.legacy_answer(text), "Actual final answer.")
+        self.assertEqual(observations.legacy_answer(text), "Actual final answer.")
         denied = ("┃ I will change it.\n┃ ╭─ run_command · MUTATING\n┃ │ $ mv a b\n"
                   "┃ ╰─ [y] run [n] deny › n\n┃ reason (optional, Enter to skip):\n"
                   "┃ I did not change it.\n┃ ⚠ 2 steps · 1.0 s\n")
-        self.assertEqual(run.legacy_answer(denied), "I did not change it.")
+        self.assertEqual(observations.legacy_answer(denied), "I did not change it.")
 
     def test_ascii_terminal_answers_and_metrics(self):
         text = (
@@ -106,27 +108,27 @@ class ContractTests(unittest.TestCase):
             "| Actual final answer.\n| * a Markdown bullet\n| + another bullet\n| > a quote\n"
             "| + 2 steps | 1.0 s\n| stats: ttft 0.12s\n"
         )
-        self.assertEqual(run.legacy_answer(text), "Actual final answer.\n* a Markdown bullet\n+ another bullet\n> a quote")
+        self.assertEqual(observations.legacy_answer(text), "Actual final answer.\n* a Markdown bullet\n+ another bullet\n> a quote")
         result = driver.Result(transcript=text)
-        observed = run.observe(result, {"mode": "repl", "check": "largest"}, Path("unused"), True, 0)
+        observed = observations.observe(result, {"mode": "repl", "check": "largest"}, Path("unused"), True, 0)
         self.assertEqual(observed["metrics"]["steps"], 2)
         self.assertEqual(observed["metrics"]["ttft_s"], 0.12)
         self.assertEqual(observed["metrics"]["task_status"], "completed")
         denied = ("| I will change it.\n| +- run_command - MUTATING\n| | $ mv a b\n"
                   "| +- [y] run [n] deny > n\n| reason (optional, Enter to skip):\n"
                   "| I did not change it.\n| ! 2 steps | 1.0 s\n")
-        self.assertEqual(run.legacy_answer(denied), "I did not change it.")
+        self.assertEqual(observations.legacy_answer(denied), "I did not change it.")
 
     def test_ascii_tool_headers_require_a_complete_risk_label(self):
         for bullet in ("* item  with details", "* item  SAFETY first", "* item  safe"):
             with self.subTest(bullet=bullet):
                 text = f"| Previous answer.\n| {bullet}\n| Final answer.\n"
-                self.assertEqual(run.legacy_answer(text), f"Previous answer.\n{bullet}\nFinal answer.")
+                self.assertEqual(observations.legacy_answer(text), f"Previous answer.\n{bullet}\nFinal answer.")
         for risk in ("SAFE", "MUTATING", "DANGEROUS", "FORBIDDEN"):
             for separator in (" · ", " | "):
                 with self.subTest(risk=risk, separator=separator):
                     text = f"| Inspecting.\n| * run_command  {risk}{separator}auto\n|   details\n| Final answer.\n"
-                    self.assertEqual(run.legacy_answer(text), "Final answer.")
+                    self.assertEqual(observations.legacy_answer(text), "Final answer.")
 
     def test_legacy_answer_excludes_multiline_proposal_explanations(self):
         for bar, arrow in (("┃", "↳"), ("|", "->")):
@@ -136,7 +138,7 @@ class ContractTests(unittest.TestCase):
                     f"{bar}   Suggested explanation.\n{bar}   More detail.\n"
                     f"{bar} Final answer.\n"
                 )
-                self.assertEqual(run.legacy_answer(text), "Final answer.")
+                self.assertEqual(observations.legacy_answer(text), "Final answer.")
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux fixtures and process interfaces")
@@ -454,7 +456,8 @@ class CheckTests(unittest.TestCase):
                 scenario = scenarios[trial["scenario_id"]]
                 root = self.base / f"{trial['scenario_id']}-{trial['seed']}"
                 facts = fixtures.create(root, scenario["fixture"])
-                self.assertEqual(facts, trial["facts"])
+                historical_facts = {key: value for key, value in facts.items() if key != "file_lines"}
+                self.assertEqual(historical_facts, trial["facts"])
                 result = driver.Result(exit_code=trial["exit_code"], turns=trial["turns"])
                 verdict = checks.judge(
                     scenario, trial["answer"], facts, root,
@@ -486,13 +489,13 @@ class CheckTests(unittest.TestCase):
         (root / "readme.md").write_text("changed")
         self.assertFalse(checks.judge(scenario, "done", facts, root, fixtures.snapshot(root), self.result, self.metrics).passed)
         loop = 'for f in *.txt; do mv "$f" "${f%.txt}.md"; done'
-        self.assertTrue(checks.allow_approval("rename", loop, root, facts))
-        self.assertTrue(checks.allow_approval("rename", f"cd {root} && {loop}", root, facts))
-        self.assertTrue(checks.allow_approval("rename", f"cd {root} && mv alpha.txt alpha.md && ls -la", root, facts))
-        self.assertTrue(checks.allow_approval("rename", loop.replace("*.txt", "./*.txt").replace("%.txt", "%.*"), root, facts))
-        self.assertFalse(checks.allow_approval("rename", f"cd /tmp && {loop}", root, facts))
-        self.assertFalse(checks.allow_approval("rename", loop + "; touch /tmp/other", root, facts))
-        self.assertFalse(checks.allow_approval("rename", "mv alpha.txt /tmp/a.md", root, facts))
+        self.assertTrue(approval.allow_approval("rename", loop, root, facts))
+        self.assertTrue(approval.allow_approval("rename", f"cd {root} && {loop}", root, facts))
+        self.assertTrue(approval.allow_approval("rename", f"cd {root} && mv alpha.txt alpha.md && ls -la", root, facts))
+        self.assertTrue(approval.allow_approval("rename", loop.replace("*.txt", "./*.txt").replace("%.txt", "%.*"), root, facts))
+        self.assertFalse(approval.allow_approval("rename", f"cd /tmp && {loop}", root, facts))
+        self.assertFalse(approval.allow_approval("rename", loop + "; touch /tmp/other", root, facts))
+        self.assertFalse(approval.allow_approval("rename", "mv alpha.txt /tmp/a.md", root, facts))
 
     def test_cwd_requires_physical_probe(self):
         root = self.base / "big"
@@ -502,8 +505,8 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(checks.judge(*args).passed)
         self.result.pwd = str(root / "data")
         self.assertTrue(checks.judge(*args).passed)
-        self.assertTrue(checks.allow_approval("cwd", "cd data && ls -la", root, facts))
-        self.assertFalse(checks.allow_approval("cwd", "cd / && ls -la", root, facts))
+        self.assertTrue(approval.allow_approval("cwd", "cd data && ls -la", root, facts))
+        self.assertFalse(approval.allow_approval("cwd", "cd / && ls -la", root, facts))
 
     def test_archive_verifies_contents_without_running_arbitrary_shell(self):
         root = self.base / "logs"

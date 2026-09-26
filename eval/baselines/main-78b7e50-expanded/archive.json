@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "storage": "github-release-asset",
+  "issue_url": "https://github.com/NewFuture/nosh/issues/4",
+  "issue_comment_url": "https://github.com/NewFuture/nosh/issues/4#issuecomment-5844795358",
+  "release_url": "https://github.com/NewFuture/nosh/releases/tag/eval-main-78b7e50-evidence",
+  "url": "https://github.com/NewFuture/nosh/releases/download/eval-main-78b7e50-evidence/nosh-eval-main-78b7e50-evidence.zip",
+  "name": "nosh-eval-main-78b7e50-evidence.zip",
+  "bytes": 1159368,
+  "sha256": "c417c0dba5a6ec96e5d256771a6e54188f3baae4053cd602abc8ed25a96f6764",
+  "file_count": 22,
+  "uncompressed_bytes": 15872769,
+  "manifest_sha256": "7a74a40f54674dd7f4770084ca4501448ffe467375c64016c24a11807117cde0",
+  "snapshot_revision": "584d8c8808335e2c0ec8d6b7e67ebc0de31eae67",
+  "note": "ZIP uploads are unsupported by the token-authenticated issue attachment endpoint. This non-latest evidence-only prerelease is linked from issue #4. Every pre-migration baseline file is archived byte-for-byte; the ZIP was downloaded and verified before removing full reports from the Git tree."
+}

@@ -17,7 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-# fmt runs once, on x86_64; every job runs clippy and the tests. The last step
+# Regular CI runs fmt once, on x86_64; every regular job runs clippy and tests. The last step
 # prints the CPU features that pick candle's kernels, with what the prepack
 # tests found on them, also when an earlier step failed.
 jobs:
@@ -39,6 +39,9 @@ jobs:
         run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: evaluation runner tests (no model)
         run: python3 -m unittest discover -s eval -v
       - name: cpu features and kernel paths

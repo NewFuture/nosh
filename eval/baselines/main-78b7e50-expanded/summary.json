@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "kind": "evaluation-baseline-summary",
+  "run_id": "main-78b7e50-expanded-36203738656-1",
+  "source_revision": "78b7e509ad0d6d71ce50397cfa9e9f2187b0db75",
+  "harness_revision": "581c75a8e0032a5bf9b55eaf5f63b0c0996d2751",
+  "normalization_revision": "a26d1b2ddf1d06dfcb1bdda2bdae8ddb6922cf12",
+  "suite_sha256": "36db301420739d00c526171a1e967a8e63f5d73687adc4eba266398265634d3d",
+  "model": {
+    "weights": "MiniCPM5-2B-Q4_K_M.gguf",
+    "weights_sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd",
+    "tokenizer_sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+  },
+  "settings": {
+    "threads": 2,
+    "rayon_threads": 1,
+    "context_length": 8192,
+    "max_steps": 10,
+    "timeout_s": 240,
+    "approval": "confirm",
+    "process_niceness": 10
+  },
+  "machine": {
+    "os_release": "PRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
+    "kernel": "6.17.0-1022-azure",
+    "arch": "x86_64",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpus": 4
+  },
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "repeat": 2,
+  "raw_counts": {
+    "pass": 120,
+    "fail": 129,
+    "error": 1
+  },
+  "diagnostic": {
+    "planned": 250,
+    "pass": 107,
+    "fail": 143,
+    "error": 0,
+    "missing": 0,
+    "steps": 5.3,
+    "confirmations": 1.232
+  },
+  "reproducibility": {
+    "pairs": 125,
+    "verdict_and_state_consistent": 107,
+    "state_consistent": 119,
+    "answers_changed": 109,
+    "tools_changed": 62,
+    "inputs_changed": 120
+  },
+  "groups": [
+    {"group": "all", "planned": 250, "pass": 120, "fail": 130, "error": 0, "missing": 0, "steps": 4.88, "steps_samples": 250, "confirmations": 1.028, "confirmations_samples": 250, "ttft_s": 16.165417677500002, "ttft_s_samples": 240, "total_s": 52.0483019090002, "total_s_samples": 250, "peak_rss_mib": 2523.6484375, "peak_rss_mib_samples": 250, "facts_pass": 171, "facts_samples": 250, "experience_pass": 140, "experience_samples": 249},
+    {"group": "mvp", "planned": 100, "pass": 80, "fail": 20, "error": 0, "missing": 0, "steps": 2.1, "steps_samples": 100, "confirmations": 0.1, "confirmations_samples": 100, "ttft_s": 16.1506540735, "ttft_s_samples": 90, "total_s": 37.07939795249993, "total_s_samples": 100, "peak_rss_mib": 2445.91796875, "peak_rss_mib_samples": 100, "facts_pass": 80, "facts_samples": 100, "experience_pass": 99, "experience_samples": 100},
+    {"group": "expanded", "planned": 150, "pass": 40, "fail": 110, "error": 0, "missing": 0, "steps": 6.733333333333333, "steps_samples": 150, "confirmations": 1.6466666666666667, "confirmations_samples": 150, "ttft_s": 16.169108405, "ttft_s_samples": 150, "total_s": 74.47784346200024, "total_s_samples": 150, "peak_rss_mib": 2523.6484375, "peak_rss_mib_samples": 150, "facts_pass": 91, "facts_samples": 150, "experience_pass": 41, "experience_samples": 149},
+    {"group": "model", "planned": 240, "pass": 110, "fail": 130, "error": 0, "missing": 0, "steps": 5.083333333333333, "steps_samples": 240, "confirmations": 1.0708333333333333, "confirmations_samples": 240, "ttft_s": 16.165417677500002, "ttft_s_samples": 240, "total_s": 53.90608217749923, "total_s_samples": 240, "peak_rss_mib": 2523.6484375, "peak_rss_mib_samples": 240, "facts_pass": 161, "facts_samples": 240, "experience_pass": 130, "experience_samples": 239},
+    {"group": "local", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 0, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10, "ttft_s": null, "ttft_s_samples": 0, "total_s": 0.009266969499549305, "total_s_samples": 10, "peak_rss_mib": 26.37890625, "peak_rss_mib_samples": 10, "facts_pass": 10, "facts_samples": 10, "experience_pass": 10, "experience_samples": 10}
+  ],
+  "scenarios": [
+    {"scenario_id": "largest-files", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 2.1, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "listening-port", "planned": 10, "pass": 9, "fail": 1, "error": 0, "missing": 0, "steps": 2.4, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "language-lines", "planned": 10, "pass": 1, "fail": 9, "error": 0, "missing": 0, "steps": 3.5, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "rename-files", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 3.2, "steps_samples": 10, "confirmations": 1, "confirmations_samples": 10},
+    {"scenario_id": "chinese-python", "planned": 10, "pass": 9, "fail": 1, "error": 0, "missing": 0, "steps": 3, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "typo-correction", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 0, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "explain-failure", "planned": 10, "pass": 9, "fail": 1, "error": 0, "missing": 0, "steps": 2.8, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "summarize-git-log", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 1, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "suggest-archive", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 1, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "persistent-cwd", "planned": 10, "pass": 2, "fail": 8, "error": 0, "missing": 0, "steps": 2, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "zh-rust-build", "planned": 10, "pass": 3, "fail": 7, "error": 0, "missing": 0, "steps": 8.1, "steps_samples": 10, "confirmations": 3.1, "confirmations_samples": 10},
+    {"scenario_id": "zh-node-build", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 10.7, "steps_samples": 10, "confirmations": 2.1, "confirmations_samples": 10},
+    {"scenario_id": "zh-rust-test", "planned": 10, "pass": 2, "fail": 8, "error": 0, "missing": 0, "steps": 7.5, "steps_samples": 10, "confirmations": 1, "confirmations_samples": 10},
+    {"scenario_id": "zh-node-test", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 8.7, "steps_samples": 10, "confirmations": 1.2, "confirmations_samples": 10},
+    {"scenario_id": "zh-python-test", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 7.4, "steps_samples": 10, "confirmations": 1.8, "confirmations_samples": 10},
+    {"scenario_id": "zh-git-diff", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 6.6, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "zh-git-commit", "planned": 10, "pass": 4, "fail": 6, "error": 0, "missing": 0, "steps": 7.4, "steps_samples": 10, "confirmations": 1.9, "confirmations_samples": 10},
+    {"scenario_id": "zh-git-log", "planned": 10, "pass": 4, "fail": 6, "error": 0, "missing": 0, "steps": 2.1, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "zh-listening-port", "planned": 10, "pass": 10, "fail": 0, "error": 0, "missing": 0, "steps": 2, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "zh-clean-build", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 7, "steps_samples": 10, "confirmations": 0.2, "confirmations_samples": 10},
+    {"scenario_id": "zh-tool-versions", "planned": 10, "pass": 9, "fail": 1, "error": 0, "missing": 0, "steps": 2, "steps_samples": 10, "confirmations": 0, "confirmations_samples": 10},
+    {"scenario_id": "zh-clarify-task", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 8, "steps_samples": 10, "confirmations": 2.7, "confirmations_samples": 10},
+    {"scenario_id": "zh-build-failure", "planned": 10, "pass": 2, "fail": 8, "error": 0, "missing": 0, "steps": 7.1, "steps_samples": 10, "confirmations": 0.9, "confirmations_samples": 10},
+    {"scenario_id": "zh-test-failure", "planned": 10, "pass": 6, "fail": 4, "error": 0, "missing": 0, "steps": 5.9, "steps_samples": 10, "confirmations": 1.1, "confirmations_samples": 10},
+    {"scenario_id": "zh-port-failure", "planned": 10, "pass": 0, "fail": 10, "error": 0, "missing": 0, "steps": 10.5, "steps_samples": 10, "confirmations": 8.7, "confirmations_samples": 10}
+  ]
+}

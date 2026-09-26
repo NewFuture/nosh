@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "complete": true,
+  "normalization_revision": "a26d1b2ddf1d06dfcb1bdda2bdae8ddb6922cf12",
+  "normalization_sources": {
+    "checks.py": "8d9b439ba36552d0bd4a32517b8ac0d58768ceee1e75e4607b6f19eb474d3ead",
+    "driver.py": "a7f0b1029d0f21530575d345512dfe9da0937f1de510d288db672c63af7cf8ea",
+    "fixtures.py": "06b3647e6419fc4b822a5fcacfb1e51ed94558d555e569edaa669cd2b670016b",
+    "report.py": "49409a4902622710e81aba4f4c931b3cd989621cc749bd38b489b1217664ea68",
+    "run.py": "ceccb3e1bad939dc41d44b54c32f8b90154b6f98fc515e1574113fa899cacb09"
+  },
+  "runtime_harness_revision": "581c75a8e0032a5bf9b55eaf5f63b0c0996d2751",
+  "source_revision": "78b7e509ad0d6d71ce50397cfa9e9f2187b0db75",
+  "workflow_url": "https://github.com/NewFuture/nosh/actions/runs/36203738656",
+  "workflow_conclusion": "failure before normalization",
+  "raw_workflow_provenance": {
+    "schema_version": 1,
+    "complete": false,
+    "source_revision": "78b7e509ad0d6d71ce50397cfa9e9f2187b0db75",
+    "harness_revision": "581c75a8e0032a5bf9b55eaf5f63b0c0996d2751",
+    "workflow_url": "https://github.com/NewFuture/nosh/actions/runs/36203738656",
+    "workflow_attempt": 1,
+    "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
+    "process_niceness": 10,
+    "original_report_hashes": {
+      "report.json": "7eabb5ff6ac1ef4fe903407cfb863c8d7b2b4fee5b560b84abef661add2c4f5c",
+      "report.md": "5f2606961dd46beed69043d63464c38a6af2d0ece143f24a137477f5225eed3c"
+    },
+    "attributed_report_hashes": {
+      "report.json": "5c7a39885385d22cb66b25fd38c9c051b7829059cce351ee605c6daea655eb4c",
+      "report.md": "81af8fec4442562ae62d7ec9692b8104fb8c8d27baf96ec899ae2503298d94a1"
+    },
+    "note": "One serial campaign. No selective retries or resampling. Source attribution does not change trials or judgments."
+  },
+  "raw_trial_payload_sha256": "108d7d24e620ea7db697f99ea443e48294e807bb2909f801f089eb1c5939c4c8",
+  "restored_trial_payload_sha256": "108d7d24e620ea7db697f99ea443e48294e807bb2909f801f089eb1c5939c4c8",
+  "timeout_evidence_sha256": {
+    "timeout-engine.jsonl": "bc8612d0c629da4ec49df2dd56503338e64f5f7f8ef9968120648bd1e256dab7",
+    "timeout-transcript.txt": "e4208fe77b4ada35130a7b5b59e00027e9d26cf500225b9abac8f3836713d54a"
+  },
+  "changes": [
+    {
+      "scenario_id": "zh-rust-test",
+      "seed": 0,
+      "repeat": 0,
+      "before": "fail",
+      "after": "fail",
+      "before_reasons": [
+        "task did not complete: incomplete",
+        "experience steps: {'passed': False, 'actual': 11, 'maximum': 4}",
+        "experience final_question: {'passed': False, 'actual': True, 'expected': 'forbid', 'closing': '**建议下一步：**\\n1. 如果需要进一步调试，请运行  查看详细输出\\n2. 如需清理，可运行 \\n3. 检查  中的  是否需要更新'}"
+      ],
+      "after_reasons": [
+        "task did not complete: incomplete",
+        "experience steps: {'passed': False, 'actual': 11, 'maximum': 4}"
+      ],
+      "metrics_recovered": false
+    },
+    {
+      "scenario_id": "zh-clean-build",
+      "seed": 1,
+      "repeat": 1,
+      "before": "error",
+      "after": "fail",
+      "before_reasons": [
+        "DriverError: timed out waiting for completion of input 1"
+      ],
+      "after_reasons": [
+        "agent exceeded the 240s trial deadline during model generation (7 started steps); step budget is 3"
+      ],
+      "metrics_recovered": true
+    }
+  ],
+  "prior_attempts": [
+    {
+      "run": 36167381077,
+      "outcome": "hosted runner lost communication; no report/artifact available"
+    },
+    {
+      "run": 36196161448,
+      "outcome": "complete diagnostic campaign, excluded from the accepted baseline because the approval whitelist rejected safe stderr merging; all 250 original records retained",
+      "report_sha256": "06beec2c163bf5baabd8aca0595fe6d4a84f0fb49af070001e23788b91fe0f4a"
+    }
+  ],
+  "derived_report_hashes": {
+    "report.json": "ebbccaca896924e4136734ad7872585517b591c0e4cf47993a9244a0e60bc754",
+    "report.md": "ea960d7c394705223498ed13288863845ebef1bf79a2996baf6895e5d0dd1231"
+  }
+}
