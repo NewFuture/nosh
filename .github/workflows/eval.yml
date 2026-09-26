@@ -28,10 +28,24 @@ jobs:
       CANDLE_NUM_THREADS: 2
       RAYON_NUM_THREADS: 1
       PYTHONDONTWRITEBYTECODE: '1'
+      EVAL_TRIAL_TIMEOUT_S: '60'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: validate the hosted campaign budget
+        run: |
+          python3 - <<'PY'
+          import os
+          from eval import run
+          suite = run.load_suite(run.HERE / "scenarios.json")
+          # Reserve at least 90 minutes of the six-hour job for setup, fixtures and uploads.
+          available_s = (360 - 90) * 60
+          timeout_s = int(os.environ["EVAL_TRIAL_TIMEOUT_S"])
+          worst_case = run.validate_campaign_budget(suite, 2, timeout_s, available_s)
+          print(f"Hosted trial timeout: {timeout_s}s; worst-case trial time: {worst_case / 60:g} minutes; "
+                "at least 90 minutes reserved for non-trial work.")
+          PY
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -77,8 +91,10 @@ jobs:
           workspaces: ${{ runner.temp }}/nosh-evaluation-source -> ${{ github.workspace }}/target/evaluation-main
           key: evaluation-clean-main-release
       - name: evaluation harness tests (no model)
+        timeout-minutes: 10
         run: python3 -m unittest discover -s eval -v
       - name: build the pinned clean main
+        timeout-minutes: 30
         working-directory: ${{ runner.temp }}/nosh-evaluation-source
         run: |
           echo "EVAL_BUILD_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
@@ -118,10 +134,12 @@ jobs:
           path: ${{ runner.temp }}/nosh-evaluation-model/models
           key: evaluation-model-${{ env.EVAL_SOURCE_REVISION }}
       - name: explicitly prepare and verify the pinned model
+        timeout-minutes: 20
         run: |
           "$EVAL_BINARY" model pull minicpm5-2b:q4_k_m --source hf
           "$EVAL_BINARY" model verify minicpm5-2b:q4_k_m
       - name: prepare the pinned checkpoint artifact client
+        timeout-minutes: 5
         run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@2.3.2
       - name: collect the serial 250-trial campaign
         id: campaign
@@ -143,6 +161,7 @@ jobs:
               '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
               '--build-info', path.join(root, 'build-info.json'),
               '--threads', '2', '--repeat', '2',
+              '--timeout', process.env.EVAL_TRIAL_TIMEOUT_S,
               '--label', `main-${process.env.EVAL_SOURCE_REVISION.slice(0, 7)}-expanded-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
               '--output', path.join(root, 'campaign')];
             const child = spawn('nice', args, {stdio: ['ignore', 'pipe', 'pipe']});
@@ -224,6 +243,7 @@ jobs:
               "workflow_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
               "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
               "process_niceness": 10,
+              "trial_timeout_s": data["metadata"]["settings"]["timeout_s"],
               "original_report_hashes": raw_hashes,
               "attributed_report_hashes": {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")},
               "note": "One serial campaign. No selective retries or resampling. Source attribution does not change trials or judgments.",
@@ -233,6 +253,8 @@ jobs:
               stream.write(f"## Expanded evaluation: {'complete' if complete else 'incomplete'}\n\n")
               stream.write(f"Dataset revision {provenance['dataset_revision']}; "
                            f"main `{provenance['source_revision']}`; harness `{revision}`.\n\n")
+              stream.write(f"Hosted trial deadline: {provenance['trial_timeout_s']} seconds; "
+                           "not timing-equivalent to local runs with a different deadline.\n\n")
               stream.write("Model failures are retained; workflow success does not mean a 100% task pass rate.\n\n")
               for group in data["groups"]:
                   stream.write(f"- {group['group']}: {group['pass']}/{group['planned']} pass; "

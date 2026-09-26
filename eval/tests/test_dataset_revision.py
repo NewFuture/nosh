@@ -69,6 +69,35 @@ class DatasetRevisionTests(unittest.TestCase):
                 measured = run.metadata(args, configured, path, path, path, {})
                 self.assertEqual(measured["dataset_revision"], revision or 1)
                 self.assertEqual(configured, suite if revision is None else dict(suite, dataset_revision=2))
+            args.timeout = 60
+            configured = dict(suite, timeout_s=240)
+            measured = run.metadata(args, configured, path, path, path, {})
+            self.assertEqual(measured["settings"]["timeout_s"], 60)
+            self.assertEqual(configured["timeout_s"], 240)
+
+    def test_hosted_campaign_budget_covers_every_seed_and_repeat(self):
+        suite = run.load_suite(run.HERE / "scenarios.json")
+        available_s = (360 - 90) * 60
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, available_s), 250 * 60)
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 64, available_s), 250 * 64)
+        for timeout in (65, suite["timeout_s"]):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "250 trial deadlines"):
+                run.validate_campaign_budget(suite, 2, timeout, available_s)
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, 250 * 60), 250 * 60)
+        self.assertEqual(suite["timeout_s"], 240, "hosted limits must not change the local suite")
+        subset = dict(suite, scenarios=suite["scenarios"][:1], seeds=[0])
+        self.assertEqual(run.validate_campaign_budget(subset, 2, 240, available_s), 480)
+
+    def test_invalid_campaign_budgets_are_rejected(self):
+        suite = run.load_suite(run.HERE / "scenarios.json")
+        for value in (0, -1, True, None, float("nan"), float("inf")):
+            with self.subTest(timeout=value), self.assertRaises(ValueError):
+                run.validate_campaign_budget(suite, 2, value, 1000)
+            with self.subTest(budget=value), self.assertRaises(ValueError):
+                run.validate_campaign_budget(suite, 2, 60, value)
+        for repeat in (0, -1, True, 1.5):
+            with self.subTest(repeat=repeat), self.assertRaises(ValueError):
+                run.validate_campaign_budget(suite, repeat, 60, 1000)
 
 
 @unittest.skipUnless(sys.platform == "linux", "fixture command paths use Linux shell semantics")

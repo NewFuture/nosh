@@ -24,6 +24,24 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 
+def validate_campaign_budget(suite: dict, repeat: int, timeout_s: float, available_s: float) -> float:
+    if type(repeat) is not int or repeat < 1:
+        raise ValueError("repeat must be a positive integer")
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+           for value in (timeout_s, available_s)):
+        raise ValueError("trial timeout and campaign budget must be finite and positive")
+    trials = len(suite["scenarios"]) * len(seeds(suite["seeds"])) * repeat
+    if not trials:
+        raise ValueError("campaign must contain trials")
+    worst_case = trials * timeout_s
+    if worst_case > available_s:
+        raise ValueError(
+            f"{trials} trial deadlines require {worst_case:g}s, exceeding the {available_s:g}s "
+            "campaign budget; use a shorter explicit timeout or run locally"
+        )
+    return worst_case
+
+
 def required_tools(scenarios: list[dict]) -> set[str]:
     required = {"git", "bash", "python3", "tar", "ss"}
     if any(s["fixture"].startswith("rust") for s in scenarios):
