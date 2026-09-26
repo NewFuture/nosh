@@ -120,6 +120,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         inner: MockChatEngine,
         steps: usize,
         fail_compaction: bool,
+        force_context_reset: bool,
     }
 
     impl ChatEngine for Engine {
@@ -168,7 +169,11 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         }
 
         fn context_usage(&self, sid: SessionId) -> (usize, usize) {
-            self.inner.context_usage(sid)
+            if self.force_context_reset && self.steps == 2 {
+                (7500, 8192)
+            } else {
+                self.inner.context_usage(sid)
+            }
         }
 
         fn cancel_handle(&self) -> CancelHandle {
@@ -181,69 +186,87 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
     }
 
     let _g = setup();
-    let mut sh = shell();
-    let engine = MockChatEngine::with_responder(|history| {
-        if history.iter().any(
-            |message| matches!(message, Message::Tool(result) if result.contains("printed-once")),
-        ) {
-            vec![text("The command printed printed-once.")]
-        } else {
-            vec![call(
-                "run_command",
-                json!({"command": "printf printed-once"}),
-            )]
+    let default_idle = AgentConfig::default().idle_reset;
+    for (idle_reset, force_context_reset, expected_sessions) in [
+        (default_idle, false, 1),
+        (std::time::Duration::ZERO, false, 2),
+        (default_idle, true, 2),
+    ] {
+        let mut sh = shell();
+        let engine = MockChatEngine::with_responder(|history| {
+            let has_result = history.iter().any(|message| match message {
+                Message::Tool(result) => result.contains("printed-once"),
+                _ => false,
+            });
+            if has_result {
+                vec![text("The command printed printed-once.")]
+            } else {
+                vec![call(
+                    "run_command",
+                    json!({"command": "printf printed-once"}),
+                )]
+            }
+        });
+        let received = engine.received();
+        let specs = engine.specs();
+        let mut agent = Agent::new(
+            Box::new(Engine {
+                inner: engine,
+                steps: 0,
+                fail_compaction: true,
+                force_context_reset,
+            }),
+            AgentConfig {
+                idle_reset,
+                ..AgentConfig::default()
+            },
+            env(),
+            ToolSet::Full,
+        );
+        let first = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "print the result"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(first.status, TaskStatus::Failed);
+        assert_eq!(first.commands_run, 1);
+        assert!(
+            first
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("one-time compaction failure")
+        );
+        assert_eq!(agent.last_output_id(), Some(1));
+
+        if idle_reset.is_zero() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    });
-    let received = engine.received();
-    let mut agent = Agent::new(
-        Box::new(Engine {
-            inner: engine,
-            steps: 0,
-            fail_compaction: true,
-        }),
-        AgentConfig::default(),
-        env(),
-        ToolSet::Full,
-    );
-    let first = agent.run_task(
-        &mut sh,
-        TaskInput::new(Trigger::Hash, "print the result"),
-        &mut Scripted::new([]),
-        &mut RecordUi::default(),
-    );
-    assert_eq!(first.status, TaskStatus::Failed);
-    assert_eq!(first.commands_run, 1);
-    assert!(
-        first
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("one-time compaction failure")
-    );
-    assert_eq!(agent.last_output_id(), Some(1));
+        let second = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "what did the command print?"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(second.status, TaskStatus::Completed);
+        assert_eq!(second.commands_run, 0, "the command must not be run again");
+        assert_eq!(second.steps, 1);
+        assert_eq!(second.answer, "The command printed printed-once.");
+        assert_eq!(agent.last_output_id(), Some(1));
+        assert_eq!(specs.lock().unwrap().len(), expected_sessions);
 
-    let second = agent.run_task(
-        &mut sh,
-        TaskInput::new(Trigger::Hash, "what did the command print?"),
-        &mut Scripted::new([]),
-        &mut RecordUi::default(),
-    );
-    assert_eq!(second.status, TaskStatus::Completed);
-    assert_eq!(second.commands_run, 0, "the command must not be run again");
-    assert_eq!(second.steps, 1);
-    assert_eq!(second.answer, "The command printed printed-once.");
-    assert_eq!(agent.last_output_id(), Some(1));
-
-    let received = received.lock().unwrap();
-    assert_eq!(received.len(), 3);
-    let [Message::Tool(original)] = &received[1][..] else {
-        panic!("the failed append must contain the command result");
-    };
-    let [Message::Tool(restored), Message::User(followup)] = &received[2][..] else {
-        panic!("the next task must receive the result before its own input");
-    };
-    assert_eq!(restored, original);
-    assert!(followup.ends_with("\nwhat did the command print?"));
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 3);
+        let [Message::Tool(original)] = &received[1][..] else {
+            panic!("the failed append must contain the command result");
+        };
+        let [Message::Tool(restored), Message::User(followup)] = &received[2][..] else {
+            panic!("the next task must receive the result before its own input");
+        };
+        assert_eq!(restored, original);
+        assert!(followup.ends_with("\nwhat did the command print?"));
+    }
 }
 
 #[test]

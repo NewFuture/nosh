@@ -311,9 +311,12 @@ impl Agent {
             self.hooked = true;
         }
         let mut out = TaskOutcome::default();
+        // Keep executed results outside the history that automatic resets discard.
+        let mut pending = std::mem::take(&mut self.carry);
         let sid = match self.ensure_session() {
             Ok(s) => s,
             Err(e) => {
+                self.carry = pending;
                 ui.error(&e.to_string());
                 out.status = TaskStatus::Failed;
                 out.error = Some(e.to_string());
@@ -324,7 +327,6 @@ impl Agent {
         let notes = prompt::project_notes(&cwd0)
             .filter(|(p, _)| self.notes_seen.insert(p.clone()))
             .map(|(_, t)| t);
-        let mut pending = std::mem::take(&mut self.carry);
         pending.push(Message::User(prompt::task_message(
             shell,
             &input,
@@ -932,6 +934,47 @@ mod tests {
         );
         assert_eq!(agent.sid, Some(1));
         assert_eq!(*calls.lock().unwrap(), ["compact"]);
+    }
+
+    #[test]
+    fn session_setup_errors_preserve_carried_results() {
+        for (failure, expected_calls) in [
+            ("open", vec!["close", "open"]),
+            ("compact", vec!["compact"]),
+        ] {
+            let (mut agent, calls) = recovery_agent(Some(failure));
+            agent.sid = Some(1);
+            if failure == "open" {
+                agent.cfg.idle_reset = Duration::ZERO;
+                agent.last_task = Some(Instant::now() - Duration::from_secs(1));
+            }
+            let result = Message::Tool("already executed".into());
+            agent.carry.push(result.clone());
+            let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+            let outcome = agent.run_task(
+                &mut shell,
+                TaskInput::new(nosh_shell::Trigger::Hash, "continue"),
+                &mut crate::Scripted::new([]),
+                &mut crate::RecordUi::default(),
+            );
+            assert_eq!(outcome.status, TaskStatus::Failed);
+            assert_eq!(outcome.error, Some(format!("{failure} failed")));
+            assert_eq!(agent.carry, [result]);
+            assert_eq!(*calls.lock().unwrap(), expected_calls);
+        }
+    }
+
+    #[test]
+    fn explicit_conversation_reset_discards_carried_results() {
+        let (mut agent, calls) = recovery_agent(None);
+        agent.sid = Some(1);
+        agent.carry.push(Message::Tool("already executed".into()));
+        agent.notes_seen.insert(PathBuf::from("NOSH.md"));
+        agent.reset_conversation();
+        assert!(agent.carry.is_empty());
+        assert!(agent.notes_seen.is_empty());
+        assert_eq!(agent.sid, None);
+        assert_eq!(*calls.lock().unwrap(), ["close"]);
     }
 
     #[test]
