@@ -13,6 +13,8 @@ use std::time::Instant;
 use candle_core::Device;
 
 use crate::LlmError;
+use crate::conversation::Conversation;
+pub use crate::conversation::shorten_tool_result;
 use crate::engine::{
     CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId, SessionSpec, StepOutcome,
     StopReason, Usage,
@@ -64,51 +66,12 @@ pub struct EngineInfo {
     pub prepack: PrepackStats,
 }
 
-#[derive(Debug, Clone)]
-enum Entry {
-    User(String),
-    Tools(Vec<String>),
-    /// Generation prompt + generated ids + `<|im_end|>\n`.
-    Assistant {
-        raw: Vec<u32>,
-    },
-}
-
-impl Entry {
-    fn message_count(&self) -> usize {
-        match self {
-            Entry::Tools(t) => t.len(),
-            _ => 1,
-        }
-    }
-}
-
-struct Session {
-    spec: SessionSpec,
-    prefix: Vec<u32>,
-    entries: Vec<(Entry, Vec<u32>)>,
-}
-
-impl Session {
-    fn tokens(&self) -> Vec<u32> {
-        let mut t = self.prefix.clone();
-        for (_, toks) in &self.entries {
-            t.extend_from_slice(toks);
-        }
-        t
-    }
-
-    fn len(&self) -> usize {
-        self.prefix.len() + self.entries.iter().map(|(_, t)| t.len()).sum::<usize>()
-    }
-}
-
 pub struct LocalChatEngine {
     model: Llama,
     tok: Tok,
     eog: Vec<u32>,
     newline: Vec<u32>,
-    sessions: HashMap<SessionId, Session>,
+    sessions: HashMap<SessionId, Conversation>,
     next_id: SessionId,
     kv_tokens: Vec<u32>,
     cancel: CancelHandle,
@@ -198,52 +161,6 @@ impl LocalChatEngine {
         &mut self.tok
     }
 
-    fn encode_entry(&mut self, e: &Entry) -> Result<Vec<u32>, LlmError> {
-        match e {
-            Entry::User(u) => self.tok.encode_segments(&template::render_user(u)),
-            Entry::Tools(t) => {
-                let refs: Vec<&str> = t.iter().map(String::as_str).collect();
-                self.tok
-                    .encode_segments(&template::render_tool_results(&refs))
-            }
-            Entry::Assistant { raw, .. } => Ok(raw.clone()),
-        }
-    }
-
-    fn push_messages(&mut self, sid: SessionId, append: Vec<Message>) -> Result<(), LlmError> {
-        let mut new_entries: Vec<Entry> = Vec::new();
-        for m in append {
-            match m {
-                Message::System(_) => {
-                    return Err(LlmError::Config("system messages are set at open()".into()));
-                }
-                Message::User(u) => new_entries.push(Entry::User(u)),
-                Message::Tool(t) => match new_entries.last_mut() {
-                    Some(Entry::Tools(v)) => v.push(t),
-                    _ => new_entries.push(Entry::Tools(vec![t])),
-                },
-                Message::Assistant {
-                    content,
-                    tool_calls,
-                } => {
-                    let raw = self
-                        .tok
-                        .encode_segments(&template::render_assistant(&content, &tool_calls))?;
-                    new_entries.push(Entry::Assistant { raw });
-                }
-            }
-        }
-        for e in new_entries {
-            let toks = self.encode_entry(&e)?;
-            self.sessions
-                .get_mut(&sid)
-                .ok_or(LlmError::UnknownSession(sid))?
-                .entries
-                .push((e, toks));
-        }
-        Ok(())
-    }
-
     /// Feeds `tokens` after the longest prefix already cached; returns last logits.
     fn prefill(
         &mut self,
@@ -289,18 +206,10 @@ impl LocalChatEngine {
 
 impl ChatEngine for LocalChatEngine {
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
-        let segs = template::render_system(Some(&spec.system), &spec.tools);
-        let prefix = self.tok.encode_segments(&segs)?;
+        let conversation = Conversation::new(spec, &mut self.tok)?;
         let id = self.next_id;
         self.next_id += 1;
-        self.sessions.insert(
-            id,
-            Session {
-                spec,
-                prefix,
-                entries: Vec::new(),
-            },
-        );
+        self.sessions.insert(id, conversation);
         Ok(id)
     }
 
@@ -311,18 +220,19 @@ impl ChatEngine for LocalChatEngine {
         sink: &mut dyn FnMut(Event),
     ) -> Result<StepOutcome, LlmError> {
         let t_start = Instant::now();
-        self.push_messages(sid, append)?;
-        let (spec, mut full) = {
-            let s = self
-                .sessions
-                .get(&sid)
-                .ok_or(LlmError::UnknownSession(sid))?;
-            (s.spec.clone(), s.tokens())
-        };
+        let conversation = self
+            .sessions
+            .get_mut(&sid)
+            .ok_or(LlmError::UnknownSession(sid))?;
+        conversation.append(append, &mut self.tok)?;
+        let sampling = conversation.spec.sampling;
+        let thinking = conversation.spec.thinking;
+        let max_new_tokens = conversation.spec.max_new_tokens;
+        let tools = conversation.spec.tools.clone();
         let gen_prompt = self
             .tok
-            .encode_segments(&[template::generation_prompt(Some(spec.thinking))])?;
-        full.extend_from_slice(&gen_prompt);
+            .encode_segments(&[template::generation_prompt(Some(thinking))])?;
+        let full = conversation.tokens(&gen_prompt);
         let max_ctx = self.model.max_context();
         let mut usage = Usage {
             context_max: max_ctx,
@@ -349,8 +259,8 @@ impl ChatEngine for LocalChatEngine {
             return Ok(outcome);
         };
 
-        let mut sampler = Sampler::new(spec.sampling);
-        let mut parser = StreamParser::new(spec.tools.clone(), spec.thinking);
+        let mut sampler = Sampler::new(sampling);
+        let mut parser = StreamParser::new(tools, thinking);
         let mut generated: Vec<u32> = Vec::new();
         let t_decode = Instant::now();
         let trace = std::env::var_os("NOSH_TRACE_DECODE").is_some();
@@ -373,7 +283,7 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::EndOfTurn;
             }
             dispatch(parser.push(id, &self.tok), &mut outcome, sink);
-            if generated.len() >= spec.max_new_tokens || self.kv_tokens.len() + 2 >= max_ctx {
+            if generated.len() >= max_new_tokens || self.kv_tokens.len() + 2 >= max_ctx {
                 break StopReason::MaxTokens;
             }
             let tf = Instant::now();
@@ -407,83 +317,48 @@ impl ChatEngine for LocalChatEngine {
         let mut raw = gen_prompt;
         raw.extend_from_slice(&generated);
         raw.extend_from_slice(&self.newline);
-        let entry = Entry::Assistant { raw: raw.clone() };
-        if let Some(s) = self.sessions.get_mut(&sid) {
-            s.entries.push((entry, raw));
-            usage.context_used = s.len();
-        }
+        let conversation = self
+            .sessions
+            .get_mut(&sid)
+            .ok_or(LlmError::UnknownSession(sid))?;
+        conversation.push_assistant(raw);
+        usage.context_used = conversation.token_count();
         outcome.stop = stop;
         outcome.usage = usage;
         Ok(outcome)
     }
 
     fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
-        let s = self
-            .sessions
+        self.sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
-        let mut count = 0;
-        let mut cut = s.entries.len();
-        let mut split: Option<(usize, usize)> = None;
-        for (i, (e, _)) in s.entries.iter().enumerate() {
-            let n = e.message_count();
-            if count + n > keep {
-                cut = i;
-                if count < keep {
-                    split = Some((i, keep - count));
-                }
-                break;
-            }
-            count += n;
-        }
-        let tail = s.entries.split_off(cut);
-        if let Some((_, n)) = split
-            && let Some((Entry::Tools(t), _)) = tail.into_iter().next()
-        {
-            let e = Entry::Tools(t.into_iter().take(n).collect());
-            let toks = self.encode_entry(&e)?;
-            self.sessions.get_mut(&sid).unwrap().entries.push((e, toks));
-        }
-        Ok(())
+            .ok_or(LlmError::UnknownSession(sid))?
+            .rewind(keep, &mut self.tok)
     }
 
     fn message_count(&self, sid: SessionId) -> usize {
         self.sessions
             .get(&sid)
-            .map(|s| s.entries.iter().map(|(e, _)| e.message_count()).sum())
+            .map(Conversation::message_count)
             .unwrap_or(0)
     }
 
-    fn compact_tool_results(&mut self, sid: SessionId, keep_recent: usize) -> usize {
-        let Some(s) = self.sessions.get(&sid) else {
-            return 0;
-        };
-        let total: usize = s.entries.iter().map(|(e, _)| e.message_count()).sum();
-        let mut seen = 0;
-        let mut changes = Vec::new();
-        for (i, (e, _)) in s.entries.iter().enumerate() {
-            let n = e.message_count();
-            if seen + n + keep_recent <= total
-                && let Entry::Tools(t) = e
-            {
-                let shortened: Vec<String> = t.iter().map(|c| shorten_tool_result(c)).collect();
-                if &shortened != t {
-                    changes.push((i, Entry::Tools(shortened)));
-                }
-            }
-            seen += n;
-        }
-        let count = changes.len();
-        for (i, e) in changes {
-            if let Ok(toks) = self.encode_entry(&e) {
-                self.sessions.get_mut(&sid).unwrap().entries[i] = (e, toks);
-            }
-        }
-        count
+    fn compact_tool_results(
+        &mut self,
+        sid: SessionId,
+        keep_recent: usize,
+    ) -> Result<usize, LlmError> {
+        self.sessions
+            .get_mut(&sid)
+            .ok_or(LlmError::UnknownSession(sid))?
+            .compact_tool_results(keep_recent, &mut self.tok)
     }
 
     fn context_usage(&self, sid: SessionId) -> (usize, usize) {
-        let used = self.sessions.get(&sid).map(Session::len).unwrap_or(0);
+        let used = self
+            .sessions
+            .get(&sid)
+            .map(Conversation::token_count)
+            .unwrap_or(0);
         (used, self.model.max_context())
     }
 
@@ -583,19 +458,6 @@ pub(crate) fn dispatch(
             }
         }
     }
-}
-
-/// One-line stand-in for an old tool result (keeps the status header).
-pub fn shorten_tool_result(content: &str) -> String {
-    const KEEP: usize = 200;
-    if content.chars().count() <= KEEP + 40 {
-        return content.to_string();
-    }
-    let head: String = content.chars().take(KEEP).collect();
-    format!(
-        "{head}\n[… older output omitted to save context ({} chars)]",
-        content.chars().count()
-    )
 }
 
 /// Resident set size of this process in MB (Linux), current and peak.

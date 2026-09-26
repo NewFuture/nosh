@@ -3,7 +3,7 @@
 //! it answers, the step limit is hit, or the user cancels.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use nosh_shell::{AgentExecOpts, EmbeddedShell};
 
 use crate::approval::{ApprovalChannel, ApprovalRequest, ApprovalResponse};
 use crate::prompt::{self, Environment, TaskInput};
-use crate::tools::{self, NoRedact, Redactor, ToolSet};
+use crate::tools::{self, BuiltinTool, NoRedact, Redactor, ToolSet};
 use crate::ui::{AgentUi, TaskSummary, UiSink};
 
 #[derive(Debug, Clone)]
@@ -110,6 +110,7 @@ pub struct OutputRecord {
 
 enum Exec {
     Result(String),
+    CommandResult(String),
     Denied(String),
     Handoff(String, String),
     Aborted(String),
@@ -220,7 +221,7 @@ impl Agent {
         if let Some(sid) = self.sid {
             let (used, max) = self.engine.context_usage(sid);
             if used * 100 > max * 85 {
-                self.engine.compact_tool_results(sid, 0);
+                self.engine.compact_tool_results(sid, 0)?;
                 let (used, _) = self.engine.context_usage(sid);
                 if used * 100 > max * 60 {
                     self.reset_conversation();
@@ -278,8 +279,15 @@ impl Agent {
         match self.engine.step(sid, msgs.clone(), &mut sink) {
             Err(LlmError::ContextFull { .. }) => {
                 // Drop the failed append, shorten old tool output and retry once.
-                let _ = self.engine.rewind(sid, keep);
-                self.engine.compact_tool_results(sid, 0);
+                self.engine.rewind(sid, keep)?;
+                if let Err(error) = self.engine.compact_tool_results(sid, 0) {
+                    // Rewind removed these results, but their tools have already run.
+                    self.carry = msgs
+                        .into_iter()
+                        .filter(|message| matches!(message, Message::Tool(_)))
+                        .collect();
+                    return Err(error);
+                }
                 self.engine.step(sid, msgs, &mut sink)
             }
             r => r,
@@ -303,9 +311,12 @@ impl Agent {
             self.hooked = true;
         }
         let mut out = TaskOutcome::default();
+        // Keep executed results outside the history that automatic resets discard.
+        let mut pending = std::mem::take(&mut self.carry);
         let sid = match self.ensure_session() {
             Ok(s) => s,
             Err(e) => {
+                self.carry = pending;
                 ui.error(&e.to_string());
                 out.status = TaskStatus::Failed;
                 out.error = Some(e.to_string());
@@ -316,7 +327,6 @@ impl Agent {
         let notes = prompt::project_notes(&cwd0)
             .filter(|(p, _)| self.notes_seen.insert(p.clone()))
             .map(|(_, t)| t);
-        let mut pending = std::mem::take(&mut self.carry);
         pending.push(Message::User(prompt::task_message(
             shell,
             &input,
@@ -381,9 +391,10 @@ impl Agent {
                 }
                 match self.exec_call(shell, call, approval, ui) {
                     Exec::Result(t) => {
-                        if call.name == "run_command" {
-                            out.commands_run += 1;
-                        }
+                        pending.push(Message::Tool(t));
+                    }
+                    Exec::CommandResult(t) => {
+                        out.commands_run += 1;
                         pending.push(Message::Tool(t));
                     }
                     Exec::Denied(t) => {
@@ -399,6 +410,7 @@ impl Agent {
                     }
                     Exec::Aborted(t) => {
                         aborted = true;
+                        out.commands_run += 1;
                         pending.push(Message::Tool(t));
                     }
                 }
@@ -492,21 +504,18 @@ impl Agent {
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> Exec {
-        let allowed: Vec<String> = tools::specs(self.tools)
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        if !allowed.contains(&call.name) {
+        let Some(tool) = self.tools.resolve(&call.name) else {
+            let allowed: Vec<_> = self.tools.tools().iter().map(|t| t.name()).collect();
             return Exec::Result(format!(
                 "error: unknown tool '{}'; available tools: {}",
                 call.name,
                 allowed.join(", ")
             ));
-        }
-        match call.name.as_str() {
-            "run_command" => self.run_command(shell, call, approval, ui),
-            "read_file" | "list_dir" => self.read_tool(shell, call, approval, ui),
-            _ => Exec::Result(format!("error: unknown tool '{}'", call.name)),
+        };
+        match tool {
+            BuiltinTool::RunCommand => self.run_command(shell, call, approval, ui),
+            BuiltinTool::ReadFile => self.read_tool(shell, call, approval, ui, tools::read_file),
+            BuiltinTool::ListDir => self.read_tool(shell, call, approval, ui, tools::list_dir),
         }
     }
 
@@ -680,7 +689,7 @@ impl Agent {
             )));
             return Exec::Handoff(command.to_string(), text);
         }
-        Exec::Result(text)
+        Exec::CommandResult(text)
     }
 
     fn read_tool(
@@ -689,6 +698,7 @@ impl Agent {
         call: &ToolCall,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
+        read: fn(&ToolCall, &Path) -> Result<String, String>,
     ) -> Exec {
         let cwd = shell.cwd();
         let path = tools::tool_path(call, &cwd);
@@ -737,11 +747,7 @@ impl Agent {
             }
         }
         ui.tool_start(&call.name, &detail, Some(risk), &label);
-        let r = if call.name == "read_file" {
-            tools::read_file(call, &cwd)
-        } else {
-            tools::list_dir(call, &cwd)
-        };
+        let r = read(call, &cwd);
         match r {
             Ok(t) => {
                 ui.tool_end(&format!("{} lines", t.lines().count().saturating_sub(1)));
@@ -781,6 +787,195 @@ fn add_usage(total: &mut Usage, u: &Usage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nosh_llm::{CancelHandle, Event};
+    use std::sync::Mutex;
+
+    struct RecoveryEngine {
+        fail: Option<&'static str>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl RecoveryEngine {
+        fn record(&self, operation: &'static str) -> Result<(), LlmError> {
+            self.calls.lock().unwrap().push(operation);
+            if self.fail == Some(operation) {
+                Err(LlmError::Config(format!("{operation} failed")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl ChatEngine for RecoveryEngine {
+        fn open(&mut self, _spec: SessionSpec) -> Result<SessionId, LlmError> {
+            self.record("open")?;
+            Ok(1)
+        }
+
+        fn step(
+            &mut self,
+            _sid: SessionId,
+            _append: Vec<Message>,
+            _sink: &mut dyn FnMut(Event),
+        ) -> Result<StepOutcome, LlmError> {
+            self.record("step")?;
+            Err(LlmError::ContextFull {
+                used: 100,
+                max: 100,
+            })
+        }
+
+        fn rewind(&mut self, _sid: SessionId, _keep: usize) -> Result<(), LlmError> {
+            self.record("rewind")
+        }
+
+        fn compact_tool_results(
+            &mut self,
+            _sid: SessionId,
+            _keep_recent: usize,
+        ) -> Result<usize, LlmError> {
+            self.record("compact")?;
+            Ok(0)
+        }
+
+        fn message_count(&self, _sid: SessionId) -> usize {
+            1
+        }
+
+        fn context_usage(&self, _sid: SessionId) -> (usize, usize) {
+            (90, 100)
+        }
+
+        fn cancel_handle(&self) -> CancelHandle {
+            CancelHandle::default()
+        }
+
+        fn close(&mut self, _sid: SessionId) {
+            self.calls.lock().unwrap().push("close");
+        }
+    }
+
+    fn recovery_agent(fail: Option<&'static str>) -> (Agent, Arc<Mutex<Vec<&'static str>>>) {
+        let calls = Arc::default();
+        let agent = Agent::new(
+            Box::new(RecoveryEngine {
+                fail,
+                calls: Arc::clone(&calls),
+            }),
+            AgentConfig::default(),
+            Environment {
+                os: "Linux".into(),
+                arch: "x86_64".into(),
+                user: "test".into(),
+                available: vec![],
+            },
+            ToolSet::Full,
+        );
+        (agent, calls)
+    }
+
+    #[test]
+    fn context_recovery_stops_at_the_first_error() {
+        for (failure, expected) in [
+            ("rewind", vec!["step", "rewind"]),
+            ("compact", vec!["step", "rewind", "compact"]),
+        ] {
+            let (mut agent, calls) = recovery_agent(Some(failure));
+            let error = agent
+                .step(1, vec![], &mut crate::RecordUi::default())
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("{failure} failed"));
+            assert_eq!(*calls.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn compaction_failure_carries_results_without_replaying_user_messages() {
+        let (mut agent, calls) = recovery_agent(Some("compact"));
+        let first = Message::Tool("first executed result".into());
+        let second = Message::Tool("second executed result".into());
+        let error = agent
+            .step(
+                1,
+                vec![
+                    first.clone(),
+                    Message::User("failed task".into()),
+                    second.clone(),
+                    Message::User(SUMMARIZE.into()),
+                ],
+                &mut crate::RecordUi::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "compact failed");
+        assert_eq!(agent.carry, [first, second]);
+        assert_eq!(*calls.lock().unwrap(), ["step", "rewind", "compact"]);
+    }
+
+    #[test]
+    fn context_recovery_only_retries_once() {
+        let (mut agent, calls) = recovery_agent(None);
+        assert!(matches!(
+            agent.step(1, vec![], &mut crate::RecordUi::default()),
+            Err(LlmError::ContextFull { .. })
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["step", "rewind", "compact", "step"]
+        );
+    }
+
+    #[test]
+    fn pre_task_compaction_failure_does_not_reset_the_conversation() {
+        let (mut agent, calls) = recovery_agent(Some("compact"));
+        agent.sid = Some(1);
+        assert_eq!(
+            agent.ensure_session().unwrap_err().to_string(),
+            "compact failed"
+        );
+        assert_eq!(agent.sid, Some(1));
+        assert_eq!(*calls.lock().unwrap(), ["compact"]);
+    }
+
+    #[test]
+    fn session_setup_errors_preserve_carried_results() {
+        for (failure, expected_calls) in [
+            ("open", vec!["close", "open"]),
+            ("compact", vec!["compact"]),
+        ] {
+            let (mut agent, calls) = recovery_agent(Some(failure));
+            agent.sid = Some(1);
+            if failure == "open" {
+                agent.cfg.idle_reset = Duration::ZERO;
+                agent.last_task = Some(Instant::now() - Duration::from_secs(1));
+            }
+            let result = Message::Tool("already executed".into());
+            agent.carry.push(result.clone());
+            let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+            let outcome = agent.run_task(
+                &mut shell,
+                TaskInput::new(nosh_shell::Trigger::Hash, "continue"),
+                &mut crate::Scripted::new([]),
+                &mut crate::RecordUi::default(),
+            );
+            assert_eq!(outcome.status, TaskStatus::Failed);
+            assert_eq!(outcome.error, Some(format!("{failure} failed")));
+            assert_eq!(agent.carry, [result]);
+            assert_eq!(*calls.lock().unwrap(), expected_calls);
+        }
+    }
+
+    #[test]
+    fn explicit_conversation_reset_discards_carried_results() {
+        let (mut agent, calls) = recovery_agent(None);
+        agent.sid = Some(1);
+        agent.carry.push(Message::Tool("already executed".into()));
+        agent.notes_seen.insert(PathBuf::from("NOSH.md"));
+        agent.reset_conversation();
+        assert!(agent.carry.is_empty());
+        assert!(agent.notes_seen.is_empty());
+        assert_eq!(agent.sid, None);
+        assert_eq!(*calls.lock().unwrap(), ["close"]);
+    }
 
     #[test]
     fn password_handoff_requires_a_rewritten_sudo_and_explicit_diagnostic() {
