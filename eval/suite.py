@@ -114,6 +114,9 @@ def load_suite(path: Path) -> dict:
                         raise ValueError(f"correction completion does not match inputs: {sid}")
                 if corrections is None and completions[-1]["kind"] != "agent":
                     raise ValueError(f"the final REPL input must ask the agent: {sid}")
+                if (scenario["check"] in ("build-failure", "test-failure", "port-failure")
+                        and completions[0]["kind"] != "shell"):
+                    raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):
             if any(key in scenario for key in ("inputs", "corrections", "completions")):
                 raise ValueError(f"REPL fields in a CLI scenario: {sid}")

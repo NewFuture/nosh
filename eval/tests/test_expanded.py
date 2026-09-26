@@ -78,6 +78,22 @@ class ExpandedContractTests(unittest.TestCase):
         with patch("eval.run.shutil.which", return_value=None), self.assertRaisesRegex(ValueError, "missing required executable"):
             run.discover_tools(old)
 
+    def test_failure_diagnosis_requires_the_initial_shell_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "suite.json"
+            for sid in ("zh-build-failure", "zh-test-failure", "zh-port-failure"):
+                scenario = copy.deepcopy(SCENARIOS[sid])
+                for inputs, completions in (
+                    (scenario["inputs"], [{"kind": "agent"}, {"kind": "agent"}]),
+                    ([scenario["inputs"][-1]], [{"kind": "agent"}]),
+                ):
+                    scenario.update(inputs=inputs, completions=completions)
+                    path.write_text(json.dumps(dict(SUITE, scenarios=[scenario])), encoding="utf-8")
+                    with self.subTest(scenario=sid, inputs=inputs), self.assertRaisesRegex(
+                        ValueError, "initial failed shell command",
+                    ):
+                        run.load_suite(path)
+
     def test_execution_results_are_correlated_by_engine_and_session(self):
         events = [
             {"ev": "step_end", "engine": 1, "sid": 1, "tool_calls": [execution("cargo build")["call"]]},
@@ -289,6 +305,26 @@ class ProjectTests(unittest.TestCase):
             with self.subTest(command=command, text=text):
                 self.evidence["executions"] = [execution(command, stdout=text)]
                 self.assertFalse(self.grade().passed)
+
+    def test_semicolon_cannot_mask_a_failed_project_command(self):
+        self.prepare("zh-test-failure")
+        command = "python3 -m unittest discover -s tests -v; ls"
+        proc = self.command(command)
+        self.assertEqual(proc.returncode, 0, "the shell exposes only the final command's status")
+        self.assertIn("FAILED", proc.stderr)
+        self.assertFalse(approval.allow_approval("python-test", command, self.root, self.facts))
+        after = fixtures.snapshot(self.root)
+        self.assertEqual(checks.completed_commands(self.evidence, self.root, self.facts, "python-test", after), [])
+        for accepted in (
+            "python3 -m unittest discover -s tests -v && ls",
+            "python3 -m unittest discover -s tests -v;",
+        ):
+            self.assertTrue(approval.allow_approval("python-test", accepted, self.root, self.facts), accepted)
+        for rejected in (
+            "python3 -m unittest discover -s tests -v 2>&1; ls",
+            "python3 -m unittest discover -s tests -v; cat README.md",
+        ):
+            self.assertFalse(approval.allow_approval("python-test", rejected, self.root, self.facts), rejected)
 
     def test_scoring_reuses_the_snapshot_and_parses_each_command_once(self):
         self.prepare("zh-python-test")

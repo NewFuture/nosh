@@ -47,6 +47,8 @@ gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
 
 [`scenarios.json`](scenarios.json) 是唯一的场景配置。v2 声明输入、夹具、审批、判定器、`completions` 和 `expect`；仍支持 v1 场景及旧报告。REPL 输入原样发送，失败求助先观察真实退出码和诊断，不插入会覆盖“上次失败命令”的探针。
 
+失败诊断场景必须先声明一个带退出码和诊断特征的 `shell` 输入，再进入 agent 求助；缺少这一前置步骤会在预检时报错，而不是开始运行后才崩溃。
+
 | 覆盖 | 场景 | 主要证据 |
 |---|---|---|
 | 原 10 个任务 | 大文件、监听端口、语言行数、改名、中文 Python 文件、本地纠错、失败解释、git 摘要、归档建议、cwd 连续性 | 最终回答中的事实、文件状态、审批记录、物理 cwd；纠错/建议不自动执行 |
@@ -79,6 +81,7 @@ gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
 - 改名与 cwd 保留固定、可验证的命令形式。
 - 项目操作只允许对应 Cargo 命令、已知 npm/Node 脚本、完整 unittest、有限 git add/commit；源码与脚本内容必须仍匹配夹具。
 - 可组合受限的 `cd`、pwd、ls、cat。允许本夹具 Cargo.toml 和解析后仍指向已记录工具的链接。
+- 项目操作的多命令组合必须用 `&&`，不允许 `cargo test; ls` 这类以末尾命令掩盖失败的写法；单条命令末尾的 `;` 和只读版本查询不受影响。
 - 唯一重定向例外是未加引号的命令末尾 `2>&1`；外部路径、替换脚本、任意解释器代码、文件重定向、管道、`|| true`、push 等不放行。
 - `-s` 只验证严格解析的 tar 子集，不把任意模型建议交给 shell 执行。
 

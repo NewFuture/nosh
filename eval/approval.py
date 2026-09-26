@@ -27,7 +27,8 @@ def shell_parts(command: str) -> list[str]:
     return list(lex)
 
 
-def command_groups(command: str, root: Path, tools: dict | None = None) -> list[list[str]]:
+def command_groups(command: str, root: Path, tools: dict | None = None,
+                   *, require_success: bool = False) -> list[list[str]]:
     cleaned = []
     quote = None
     i = 0
@@ -55,8 +56,10 @@ def command_groups(command: str, root: Path, tools: dict | None = None) -> list[
             raise ValueError("only an initial cd to the fixture root is supported")
         parts = parts[separator + 1:]
     groups, group = [], []
-    for word in parts:
+    for i, word in enumerate(parts):
         if word in ("&&", ";"):
+            if require_success and word == ";" and i + 1 < len(parts):
+                raise ValueError("project commands must use && so failures remain observable")
             if not group:
                 raise ValueError("empty command")
             groups.append(group)
@@ -153,7 +156,7 @@ def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[s
         return set()
     before = protected_files(facts["before"], policy)
     try:
-        groups = command_groups(command, root, facts.get("tools"))
+        groups = command_groups(command, root, facts.get("tools"), require_success=True)
     except ValueError:
         return set()
     actions = set()
