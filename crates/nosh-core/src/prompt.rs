@@ -94,7 +94,7 @@ If a command needs a terminal or a password, the harness hands control back to t
    Evidence belongs only to its recorded command, not to new input that has not executed.\n\
    Distinguish evidence from hypotheses; do not invent an exit-code meaning or application purpose.\n\
    Empty output is valid. If evidence is missing, partial or mixed, say so; do not invent diagnostics.\n\
-6. Each user turn starts with a [task ...] header describing the trigger and current state.\n\
+6. Each user turn starts with a [task ...] header describing the current session state.\n\
 7. End with a brief answer in the user's language, including the key command(s).",
         env.os,
         env.arch,
@@ -250,7 +250,7 @@ pub fn project_notes(cwd: &Path) -> Option<(PathBuf, String)> {
 /// Builds the user message for a task.
 pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str>) -> String {
     let st = shell.snapshot();
-    let mut header = format!("[task trigger={}", input.trigger.name());
+    let mut header = String::from("[task");
     if let Trigger::Failed { exit } = input.trigger {
         header.push_str(&format!(" exit={exit}"));
     }
@@ -327,7 +327,7 @@ pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nosh_shell::OutputState;
+    use nosh_shell::{OutputState, ShellOptions};
 
     #[test]
     fn system_prompt_is_static_and_has_tool_slot() {
@@ -340,8 +340,69 @@ mod tests {
         let p = system_prompt(&env);
         assert!(p.contains("<tool_def_sep>"));
         assert!(p.contains("Available: git, python3"));
+        assert!(p.contains("header describing the current session state"));
         assert_eq!(p, system_prompt(&env));
         assert!(suggest_system_prompt(&env).contains("ONLY one complete bash program"));
+    }
+
+    #[test]
+    fn task_headers_keep_context_without_routing_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = EmbeddedShell::new(ShellOptions {
+            working_dir: Some(dir.path().to_path_buf()),
+            ..ShellOptions::default()
+        })
+        .unwrap();
+        let request = "编译，并解释 trigger=not_found";
+        for trigger in [
+            Trigger::Hash,
+            Trigger::ParseError,
+            Trigger::NotFound,
+            Trigger::Builtin,
+            Trigger::Cli,
+            Trigger::Pipe,
+        ] {
+            let mut input = TaskInput::new(trigger, request);
+            input.attachment = Some(Attachment::from_bytes("stdin", b"input"));
+            let message = task_message(&shell, &input, Some("Keep existing files."));
+            let header = message.lines().next().unwrap();
+            assert!(
+                header.starts_with(&format!("[task cwd={} ", shell.cwd().display())),
+                "{header}"
+            );
+            assert!(!header.contains("trigger="), "{header}");
+            assert!(!header.contains(" exit="), "{header}");
+            assert!(header.contains(" time="), "{header}");
+            assert!(header.ends_with(" lang=zh]"), "{header}");
+            assert!(message.contains("\n[NOSH.md]\nKeep existing files.\n"));
+            assert!(message.contains("\n[attachment stdin (5 bytes)]\ninput\n[/attachment]"));
+            assert!(message.ends_with(&format!("\n{request}")));
+        }
+    }
+
+    #[test]
+    fn failed_task_keeps_exit_and_command_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = EmbeddedShell::new(ShellOptions {
+            working_dir: Some(dir.path().to_path_buf()),
+            ..ShellOptions::default()
+        })
+        .unwrap();
+        let mut input = TaskInput::new(Trigger::Failed { exit: 101 }, "解释错误，不要修改文件");
+        input.failed = Some(UserCommand {
+            line: "cargo build --offline".into(),
+            exit: 101,
+            duration: Duration::from_secs(1),
+        });
+        let message = task_message(&shell, &input, None);
+        let header = message.lines().next().unwrap();
+        assert!(header.starts_with("[task exit=101 cwd="), "{header}");
+        assert!(!header.contains("trigger="), "{header}");
+        assert!(header.ends_with(" lang=zh]"), "{header}");
+        assert!(message.contains(
+            "The command `cargo build --offline` failed with exit code 101. Explain the likely cause and how to fix it."
+        ));
+        assert!(message.ends_with("\n解释错误，不要修改文件"));
     }
 
     #[test]

@@ -94,7 +94,7 @@ fn multi_step_task_uses_tool_results() {
     let Message::User(task) = &rec[0][0] else {
         panic!("first message must be the task");
     };
-    assert!(task.starts_with("[task trigger=hash cwd="), "{task}");
+    assert!(task.starts_with("[task cwd="), "{task}");
     assert!(task.ends_with("\nsay hello"));
     let results = tool_results(&rec);
     assert!(results[0].starts_with("[exit_code=0 "), "{}", results[0]);
@@ -937,7 +937,6 @@ fn repl_pipeline_with_mock_engine() {
             vec![call("run_command", json!({"command": "cd /tmp"}))]
         }
         Some(Message::Tool(t)) if t.contains("[state] cwd:") => vec![text("Now in /tmp.")],
-        Some(Message::User(u)) if u.contains("trigger=not_found") => vec![text("Not a command.")],
         _ => vec![text("ok")],
     });
     let received = engine.received();
@@ -982,15 +981,24 @@ fn repl_pipeline_with_mock_engine() {
     }
     assert_eq!(received.lock().unwrap().len(), steps_before);
 
-    // Unknown command words (e.g. Chinese) trigger the AI with not_found.
-    p.process(&mut sh, &mut ai, &mut Ui, "帮我看看磁盘空间");
-    let rec = received.lock().unwrap();
-    let Some(Message::User(u)) = rec.last().and_then(|m| m.last()) else {
-        panic!("expected a task message");
-    };
-    assert!(u.contains("trigger=not_found"), "{u}");
-    assert!(u.contains(" lang=zh]"), "{u}");
-    assert!(u.contains("[recent] pwd >"), "{u}");
-    drop(rec);
+    for (line, chinese) in [
+        ("帮我看看磁盘空间", true),
+        ("编译", true),
+        ("# 编译", true),
+        ("xqzvw_nosuch --help", false),
+    ] {
+        p.process(&mut sh, &mut ai, &mut Ui, line);
+        let rec = received.lock().unwrap();
+        let Some(Message::User(u)) = rec.last().and_then(|m| m.last()) else {
+            panic!("expected a task message");
+        };
+        let header = u.lines().next().unwrap();
+        assert!(header.starts_with("[task cwd="), "{u}");
+        assert!(!header.contains("trigger="), "{u}");
+        assert!(!header.contains(" exit="), "{u}");
+        assert_eq!(header.contains(" lang=zh]"), chinese, "{u}");
+        assert!(u.contains("[recent] pwd >"), "{u}");
+        assert!(u.ends_with(&format!("\n{}", line.trim_start_matches("# "))));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

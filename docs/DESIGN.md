@@ -529,19 +529,19 @@ Available: {git, docker, python3, ...}
    Evidence belongs to its recorded command, not to new input that has not executed.
    Distinguish evidence from hypotheses; do not invent an exit-code meaning or application purpose.
    Empty output is valid; missing or incomplete evidence is not an invented error.
-6. Each user turn starts with a [task ...] header describing the trigger and current state.
+6. Each user turn starts with a [task ...] header describing the current session state.
 7. End with a brief answer in the user's language, including the key command(s).
 ```
 
 **任务消息**（所有动态信息都放在这里）：
 
 ```text
-[task trigger=hash cwd=/home/u/proj venv=.venv git=main* time=2026-09-23T20:05]
+[task cwd=/home/u/proj venv=.venv git=main* time=2026-09-23T20:05]
 [recent] npm start → exit 1 (0.8s) · git pull → exit 0 (1.2s)
 把 logs 里 7 天前的日志打包后删除
 ```
 
-- **`trigger` 的取值**：`hash`、`parse_error`、`not_found`、`failed`、`ai`、`cli`、`pipe`。`failed` 时附上 `exit=` 和失败命令。
+- **内部触发类型**：`hash`、`parse_error`、`not_found`、`failed`、`ai`、`cli`、`pipe` 仍用于内部路由，但不再通过 `trigger=` 传给模型。真实失败保留退出码、失败命令与解释请求。
 - **用户输出证据**：`[user_output {...}]` 是动态 user message 中的不可信证据；注入矩阵见[输出采集设计 §2](OUTPUT-CAPTURE.md#2-用户行为)，状态、正文预算和 special token 处理见[§6](OUTPUT-CAPTURE.md#6-任务消息与信任边界)。
 - **`lang=zh`**：输入或失败命令命中 `contains_cjk` 时追加，提醒模型用中文回答；该范围也包含部分非中文字符（§4.2），不是自动语言检测。这只改变任务消息，system 保持不变。
 - **动态信息不放进 system**：对话会跨任务延续，system 里任何一点变化都会让整段对话的 KV 失效。把动态信息放在任务头里，prompt 就始终只往后追加。
@@ -1071,7 +1071,7 @@ nosh connect user@host --push-model    把本地模型推送到主机
 - **协议**：JSON Lines，发送请求后以流的形式返回事件；调度规则见 §7.6。
 
 ```text
-→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[task trigger=hash …]\n哪个进程占用了 8080？"}]}
+→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[task cwd=…]\n哪个进程占用了 8080？"}]}
 ← {"id":2,"ev":"text","text":"我先看看端口占用情况。"}
 ← {"id":2,"ev":"tool_call","name":"run_command","args":{"command":"ss -ltnp 'sport = :8080'"}}
 ← {"id":2,"ev":"done","reason":"stop","usage":{"prompt":1236,"cached":1180,"completion":41,"tok_s":14.1}}
@@ -1375,7 +1375,7 @@ Available: git, docker, node, python3
 # Rules
 ...<|im_end|>
 <|im_start|>user
-[task trigger=hash cwd=/home/u/proj git=main* time=2026-09-23T20:05]
+[task cwd=/home/u/proj git=main* time=2026-09-23T20:05]
 [recent] npm start → exit 1 (0.8s)
 刚才为什么启动失败？<|im_end|>
 <|im_start|>assistant

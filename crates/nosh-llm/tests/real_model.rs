@@ -174,7 +174,7 @@ fn produces_parseable_tool_call() {
         .step(
             sid,
             vec![Message::User(
-                "[task trigger=hash cwd=/tmp]\nList the files in the current directory.".into(),
+                "[task cwd=/tmp]\nList the files in the current directory.".into(),
             )],
             &mut |ev| {
                 if let Event::ToolCall(c) = ev {
