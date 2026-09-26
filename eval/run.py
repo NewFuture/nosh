@@ -280,7 +280,11 @@ def execution_evidence(events: list[dict]) -> list[dict]:
     return executions
 
 
-def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, seed: int) -> dict:
+def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, seed: int,
+            inflight_timeout: bool = False) -> dict:
+    if inflight_timeout and (legacy or result.timeout_phase not in ("agent", "cli")
+                            or result.exit_code not in (-9, -15)):
+        raise ValueError("task timeout recovery requires native in-flight agent observations")
     if re.search(r"(?m)^nosh: [^\n]*config\.toml:", driver.plain(result.stderr + result.transcript)):
         raise ValueError("nosh rejected part of the isolated configuration; see stderr/transcript")
     metrics = {
@@ -339,8 +343,27 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         starts = [e for e in events if e["ev"] == "step_start"]
         ends = [e for e in events if e["ev"] == "step_end"]
         opens = [e for e in events if e["ev"] == "open"]
-        if not starts or len(starts) != len(ends) or not opens:
+        if not starts or len(starts) != len(ends) + int(inflight_timeout) or not opens:
             raise ValueError("incomplete engine observations; no successful fallback")
+        if inflight_timeout:
+            pending = set()
+            for event in events:
+                key = (event.get("engine"), event.get("sid"))
+                if any(value is not None and type(value) is not int for value in key):
+                    raise ValueError("invalid engine/session identity in trace")
+                if event["ev"] == "step_start":
+                    if key in pending:
+                        raise ValueError("overlapping observed engine steps")
+                    pending.add(key)
+                elif event["ev"] == "step_end":
+                    if key not in pending:
+                        raise ValueError("engine result has no matching started step")
+                    pending.remove(key)
+                elif event["ev"] == "close" and key in pending:
+                    raise ValueError("closed engine is missing its step result")
+            completed_tasks = sum(turn.get("kind") == "agent" for turn in result.turns)
+            if len(pending) != 1 or len(summaries) > completed_tasks:
+                raise ValueError("timeout was not an unfinished model generation")
         if any(not isinstance(e.get("sampling"), dict) or type(e["sampling"].get("seed")) is not int
                or e["sampling"]["seed"] != seed for e in opens):
             raise ValueError("observed sampling seed differs from the requested seed")
@@ -358,7 +381,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
                     raise ValueError("invalid engine load observation")
         executions = execution_evidence(events)
         metrics["steps"] = len(starts)
-        metrics["ttft_s"] = ends[0]["usage"]["ttft_s"]
+        metrics["ttft_s"] = ends[0]["usage"]["ttft_s"] if ends else None
         metrics["load_s"] = sum(e["info"]["load_s"] for e in events if e["ev"] == "engine")
         inputs = [e for e in events if e["ev"] in ("open", "step_start", "rewind", "compact")]
         # Engine IDs are process-local bookkeeping, not model input.
@@ -366,7 +389,13 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         tools = [call for e in ends for call in e["tool_calls"]]
         sampling = [e["sampling"] for e in opens]
         generated = [e["text"] for e in ends]
-        if scenario["mode"] != "suggest":
+        if inflight_timeout:
+            metrics["task_status"] = "timed_out"
+            answer = ""
+            notes.append("The declared trial deadline expired during model generation. "
+                         "Steps include the observed in-flight call; there is no final answer. "
+                         "TTFT is available only if the first step completed.")
+        elif scenario["mode"] != "suggest":
             answer = ends[-1]["text"].strip()
     elif not legacy and trace.exists():
         raise ValueError("local correction unexpectedly loaded the inference engine")
@@ -484,6 +513,16 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         row.update(fixture_sha256=fixtures.digest({k: v for k, v in facts.items() if k != "listener"}),
                    file_snapshot=after, final_state=checks.fixture_state(scenario, facts, root, after, result))
         if result.error:
+            if not args.legacy and result.timeout_phase in ("agent", "cli") and trace.is_file():
+                observed = observe(result, scenario, trace, False, seed, inflight_timeout=True)
+                row.update(observed)
+                reason = (f"agent exceeded the {timeout:g}s trial deadline during model generation "
+                          f"({row['metrics']['steps']} started steps)")
+                if scenario.get("expect") and row["metrics"]["steps"] > scenario["expect"]["max_steps"]:
+                    reason += f"; step budget is {scenario['expect']['max_steps']}"
+                row.update(status="fail", reasons=[reason], timeout_phase=result.timeout_phase,
+                           grading={"facts": {"passed": False, "reasons": [reason]}, "experience": None})
+                return row
             raise driver.DriverError(result.error)
         if result.failure:
             if not args.legacy and trace.is_file():

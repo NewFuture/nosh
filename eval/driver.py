@@ -152,6 +152,7 @@ class Result:
     pwd: str | None = None
     error: str | None = None
     failure: str | None = None
+    timeout_phase: str | None = None
 
 
 def input_contracts(scenario: dict) -> list[dict]:
@@ -348,6 +349,8 @@ def run_cli(argv: list[str], cwd: Path, env: dict, timeout: float, stdin: bytes 
             child.pump()
     except (TimeoutError, DriverError, OSError) as exc:
         child.result.error = str(exc)
+        if isinstance(exc, TimeoutError):
+            child.result.timeout_phase = "cli"
     finally:
         child.close()
     return child.result
@@ -359,6 +362,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     deadline = child.start + timeout
     approval_offset = 0
     denial_pending = False
+    phase = "initial_prompt"
 
     def prompt():
         return child.screen.line().startswith(PROMPT.rstrip())
@@ -405,6 +409,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
         contracts = input_contracts(scenario)
         for i, line in enumerate(scenario["inputs"]):
             contract = contracts[i]
+            phase = contract["kind"]
             start = len(result.transcript)
             child.send(b"\x15" + line.encode() + b"\r")
             correction = (scenario.get("corrections") or [])[i] if scenario.get("corrections") else None
@@ -433,12 +438,14 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             if result.failure:
                 break
         if scenario["check"] == "cwd" and not result.failure:
+            phase = "cwd_probe"
             start = len(result.transcript)
             child.send(b"\x15printf '\\n__NOSH_EVAL_PWD_BEGIN__\\n'; pwd -P; printf '__NOSH_EVAL_PWD_END__\\n'\r")
             pattern = r"(?m)^__NOSH_EVAL_PWD_BEGIN__\n([^\n]+)\n__NOSH_EVAL_PWD_END__"
             child.until(lambda: bool(re.search(pattern, plain(result.transcript[start:]))) and prompt(),
                         deadline, "physical working directory")
             result.pwd = re.search(pattern, plain(result.transcript[start:])).group(1)
+        phase = "exit"
         child.send(b"\x15exit 0\r")
         while child.result.exit_code is None or child.selector.get_map():
             if time.monotonic() >= deadline:
@@ -446,6 +453,8 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             child.pump()
     except (TimeoutError, DriverError, OSError) as exc:
         result.error = str(exc)
+        if isinstance(exc, TimeoutError):
+            result.timeout_phase = phase
     finally:
         child.close()
     return result
