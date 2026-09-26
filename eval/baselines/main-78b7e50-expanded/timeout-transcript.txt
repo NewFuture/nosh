@@ -1,0 +1,14 @@
+[6n[0m[?25l[1;2H[J[1;1H__NOSH_EVAL_PROMPT__ 7[1;154Hconfirm878[?25h[0m[?25l[1;2H[J[1;1H__NOSH_EVAL_PROMPT__ 7[1;154Hconfirm8清理构建产物78[?25h[J
+… loading MiniCPM5-2B Q4_K_M[K[K┃ … 66%[K┃ ⚙ list_dir  SAFE · auto
+┃   /tmp/nosh-eval-1001/zh-clean-build/files
+┃   6 lines
+┃ ⚙ list_dir  SAFE · auto
+┃   /tmp/nosh-eval-1001/zh-clean-build/files/src
+┃   1 lines
+┃ ⚙ list_dir  SAFE · auto
+┃   /tmp/nosh-eval-1001/zh-clean-build/files/target
+┃   3 lines
+┃ ⚙ list_dir  SAFE · auto
+┃   /tmp/nosh-eval-1001/zh-clean-build/files/target/debug
+┃   10 lines
+┃ 清理构建产物。常见的构建产物包括编译中间产物。用户提到了"清理构建产物"，我将移除 `target/` 目录以及一些常见的构建中间文件，但保留源码文件和 `.gitignore`。

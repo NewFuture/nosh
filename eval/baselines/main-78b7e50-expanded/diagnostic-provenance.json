@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "complete": true,
+  "source_revision": "78b7e509ad0d6d71ce50397cfa9e9f2187b0db75",
+  "harness_revision": "70c4c3cf311074925da0654f59fe56ddcd605e7b",
+  "workflow_url": "https://github.com/NewFuture/nosh/actions/runs/36196161448",
+  "workflow_attempt": 1,
+  "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
+  "process_niceness": 10,
+  "original_report_hashes": {
+    "report.json": "165709002d75e20770db3f4556d4264a0553ebe3a314308d166a804035e00ac2",
+    "report.md": "a42706451baa018cc44c4bf1dd188672cde673b209fb94bb68ae9d8257fa7331"
+  },
+  "attributed_report_hashes": {
+    "report.json": "06beec2c163bf5baabd8aca0595fe6d4a84f0fb49af070001e23788b91fe0f4a",
+    "report.md": "7fe940e02725a567784afe55ec6ff31896d4e56797b23c1f29de8e16be8b5f3f"
+  },
+  "note": "One serial campaign. No selective retries or resampling. Source attribution does not change trials or judgments."
+}
