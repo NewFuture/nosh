@@ -19,7 +19,7 @@ CHECK_FIXTURES = {
     "archive": "logs", "cwd": "big",
     "rust-build": "rust", "rust-test": "rust", "rust-clean": "rust-built",
     "node-build": "node", "node-test": "node", "python-test": "python",
-    "git-diff": "dirty-git", "git-commit": "dirty-git", "recent-history": "history",
+    "git-diff": "dirty-git", "git-commit": "staged-git", "recent-history": "history",
     "versions": "python", "clarification": "python",
     "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
 }
@@ -43,8 +43,11 @@ def load_suite(path: Path) -> dict:
     suite = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(suite, dict) or type(suite.get("schema_version")) is not int or suite["schema_version"] not in (1, 2):
         raise ValueError("unsupported scenario schema")
-    if set(suite) - {"schema_version", "seeds", "timeout_s", "scenarios"}:
+    if set(suite) - {"schema_version", "dataset_revision", "seeds", "timeout_s", "scenarios"}:
         raise ValueError("unknown suite fields")
+    revision = suite.get("dataset_revision", 1)
+    if type(revision) is not int or revision < 1:
+        raise ValueError("dataset_revision must be a positive integer")
     seeds(suite.get("seeds"))
     timeout = suite.get("timeout_s")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
@@ -71,7 +74,10 @@ def load_suite(path: Path) -> dict:
             raise ValueError(f"unknown fixture or check: {sid}")
         if suite["schema_version"] == 1 and scenario["check"] not in LEGACY_CHECKS:
             raise ValueError(f"new checks require scenario schema v2: {sid}")
-        if scenario["fixture"] != CHECK_FIXTURES[scenario["check"]]:
+        legacy_commit_fixture = (
+            revision == 1 and scenario["check"] == "git-commit" and scenario["fixture"] == "dirty-git"
+        )
+        if scenario["fixture"] != CHECK_FIXTURES[scenario["check"]] and not legacy_commit_fixture:
             raise ValueError(f"fixture does not supply the check's required facts: {sid}")
         if not isinstance(scenario.get("title"), str) or not scenario["title"].strip():
             raise ValueError(f"missing scenario title: {sid}")

@@ -21,6 +21,9 @@ def validate(report: dict) -> None:
         raise ValueError("unsupported report schema")
     if not isinstance(report.get("metadata"), dict) or not isinstance(report.get("trials"), list):
         raise ValueError("report must contain metadata and trials")
+    revision = report["metadata"].get("dataset_revision", 1)
+    if type(revision) is not int or revision < 1:
+        raise ValueError("dataset_revision must be a positive integer")
     seen = set()
     identities = None
     if report["schema_version"] == 2:
@@ -120,6 +123,8 @@ def compare(current: dict, previous: dict) -> dict:
     warnings = []
     if current["schema_version"] != previous["schema_version"]:
         warnings.append("report/scoring schemas differ; old trials have no measured experience verdict")
+    if a.get("dataset_revision", 1) != b.get("dataset_revision", 1):
+        warnings.append("dataset_revision differs; paired deltas are descriptive, not a controlled regression")
     for key in ("suite_sha256", "suite_schema_version", "grading_content_sha256", "model",
                 "settings", "machine", "tools", "toolchain", "observation"):
         if a.get(key) != b.get(key):
@@ -252,7 +257,8 @@ def markdown(report: dict) -> str:
         f"Harness source: `{meta.get('harness_revision') or meta.get('harness_content_sha256') or meta.get('harness_sha256', 'unverified')}`.",
         "",
         f"Seeds: `{meta['seeds']}`; repeats: {meta['repeat']}. "
-        "Each scenario/seed starts a new process. The typo scenario does not load a model.",
+        + (f"Dataset revision: {meta['dataset_revision']}. " if "dataset_revision" in meta else "")
+        + "Each scenario/seed starts a new process. The typo scenario does not load a model.",
         "",
         "| Scenario | Passed/planned | Failed / error / missing | Steps (mean) | Confirmations (mean) | TTFT (median s) | Process time (median s) | Peak RSS (max MiB) |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",

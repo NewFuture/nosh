@@ -218,6 +218,7 @@ jobs:
                       and not data.get("error"))
           provenance = {
               "schema_version": 1, "complete": complete,
+              "dataset_revision": data["metadata"].get("dataset_revision", 1),
               "source_revision": os.environ["EVAL_SOURCE_REVISION"], "harness_revision": revision,
               "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "workflow_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
@@ -230,7 +231,8 @@ jobs:
           (root / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
               stream.write(f"## Expanded evaluation: {'complete' if complete else 'incomplete'}\n\n")
-              stream.write(f"Main `{provenance['source_revision']}`; harness `{revision}`.\n\n")
+              stream.write(f"Dataset revision {provenance['dataset_revision']}; "
+                           f"main `{provenance['source_revision']}`; harness `{revision}`.\n\n")
               stream.write("Model failures are retained; workflow success does not mean a 100% task pass rate.\n\n")
               for group in data["groups"]:
                   stream.write(f"- {group['group']}: {group['pass']}/{group['planned']} pass; "

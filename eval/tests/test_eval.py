@@ -456,7 +456,8 @@ class CheckTests(unittest.TestCase):
                 scenario = scenarios[trial["scenario_id"]]
                 root = self.base / f"{trial['scenario_id']}-{trial['seed']}"
                 facts = fixtures.create(root, scenario["fixture"])
-                self.assertEqual(facts, trial["facts"])
+                historical_facts = {key: value for key, value in facts.items() if key != "file_lines"}
+                self.assertEqual(historical_facts, trial["facts"])
                 result = driver.Result(exit_code=trial["exit_code"], turns=trial["turns"])
                 verdict = checks.judge(
                     scenario, trial["answer"], facts, root,

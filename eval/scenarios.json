@@ -1,5 +1,6 @@
 {
   "schema_version": 2,
+  "dataset_revision": 2,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 240,
   "scenarios": [
@@ -199,7 +200,7 @@
       "id": "zh-git-commit",
       "title": "Commit only the local project changes",
       "mode": "repl",
-      "fixture": "dirty-git",
+      "fixture": "staged-git",
       "inputs": ["提交改动"],
       "completions": [{"kind": "agent"}],
       "group": "expanded",
@@ -299,9 +300,9 @@
       "inputs": ["python3 -m http.server 8080 --bind 127.0.0.1", "为什么启动失败？请说明原因和解决方法，不要修改文件或终止进程"],
       "completions": [{"kind": "shell", "exit_code": 1, "contains": ["Address already in use"]}, {"kind": "agent"}],
       "group": "expanded",
-      "approval": "deny",
+      "approval": "port-failure",
       "check": "port-failure",
-      "expect": {"max_steps": 6, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
+      "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "zh", "final_question": "forbid"}
     }
   ]
 }

@@ -19,7 +19,9 @@ from . import driver
 
 EPOCH = 1_700_000_000
 OWNER = "nosh-eval-workspace-v1\n"
-PROJECT_FIXTURES = {"rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git"}
+PROJECT_FIXTURES = {
+    "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
+}
 FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "history", "logs"} | PROJECT_FIXTURES
 PROJECT = {
     "main.py": "from lib.maths import add\nvalues = [1, 2, 3]\nresult = add(values[0], values[1])\nprint(result)\nprint(len(values))\n",
@@ -115,7 +117,7 @@ def artifact(name: str, item: dict, kind: str) -> bool:
         return False
     if kind.startswith("rust") or kind == "build-failure":
         return bool(RUST_ARTIFACT.fullmatch(name))
-    return kind == "node-build" and name in ("dist/math.js", "dist/main.js")
+    return kind in ("node-build", "node-test") and name in ("dist/math.js", "dist/main.js")
 
 
 def protected_files(files: dict, kind: str) -> dict:
@@ -258,6 +260,7 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
             languages=counts, total=sum(counts.values()), file_count=len(PROJECT),
             language_files={lang: sum(Path(name).suffix == ext for name in PROJECT)
                             for ext, lang in languages.items()},
+            file_lines={name: len(text.splitlines()) for name, text in PROJECT.items()},
             python=sorted(name for name in PROJECT if name.endswith(".py")),
         )
     elif kind == "rename":
@@ -291,7 +294,7 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
             write(root, "src/main.rs", text)
         elif kind == "python-broken":
             write(root, "maths.py", "def add(a, b):\n    return a - b\n")
-        elif kind == "dirty-git":
+        elif kind in {"dirty-git", "staged-git"}:
             git(root, "init", "--quiet", "--initial-branch=fixture", "--template=")
             git(root, "config", "user.name", "Eval Fixture")
             git(root, "config", "user.email", "fixture@example.invalid")
@@ -301,6 +304,8 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
             write(root, "maths.py", PYTHON_PROJECT["maths.py"] + "\n\ndef subtract(a, b):\n    return a - b\n")
             git(root, "add", "maths.py")
             write(root, "README.md", PYTHON_PROJECT["README.md"] + "\nThe unittest suite covers positive and negative integers.\n")
+            if kind == "staged-git":
+                git(root, "add", "README.md")
             facts["git_before"] = git_state(root)
             facts["changed_files"] = ["README.md", "maths.py"]
         elif kind == "rust-built":

@@ -58,7 +58,7 @@ agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交
 | [设计文档](docs/DESIGN.md) | 架构、当前实现边界、配置与后续方案；先读 [实现状态](docs/DESIGN.md#03-实现状态) |
 | [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
-| [固定 seed 的真实模型评测](eval/README.md) | 25 场景、真实项目夹具与体验门槛；main 双跑 250 次基线已记录，综合通过率 48.0% |
+| [固定 seed 的真实模型评测](eval/README.md) | 25 场景及 revision 2 任务语义；历史 main 双跑基线通过率 48.0%，新语义未重新采样 |
 
 ## 许可
 

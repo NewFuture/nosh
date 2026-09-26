@@ -124,6 +124,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
                   "tokenizer_sha256": fixtures.file_hash(tokenizer)},
         "suite_sha256": fixtures.digest(suite),
         "suite_schema_version": suite["schema_version"],
+        "dataset_revision": suite.get("dataset_revision", 1),
         "harness_sha256": fixtures.digest({p.name: fixtures.file_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),

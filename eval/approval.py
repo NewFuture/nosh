@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import shlex
@@ -14,9 +15,26 @@ APPROVAL_CHECKS = {
     "rust-build": {"rust-build", "build-failure"}, "rust-test": {"rust-test"},
     "rust-clean": {"rust-clean"}, "node-build": {"node-build"}, "node-test": {"node-test"},
     "python-test": {"python-test", "test-failure"}, "git-commit": {"git-commit"},
+    "port-failure": {"port-failure"},
 }
 
-PROJECT_POLICIES = APPROVAL_CHECKS.keys() - {"rename", "cwd"}
+PROJECT_POLICIES = APPROVAL_CHECKS.keys() - {"rename", "cwd", "port-failure"}
+PROJECT_ACTIONS = {
+    "rust-build": {"rust-build", "rust-test"},
+    "rust-test": {"rust-build", "rust-test"},
+    "node-build": {"node-build", "node-test"},
+    "node-test": {"node-build", "node-test"},
+    "git-commit": {"git-add", "git-commit"},
+}
+PROJECT_POLICY_FIXTURES = {
+    "rust-build": {"rust", "rust-broken"},
+    "rust-test": {"rust"},
+    "rust-clean": {"rust-built"},
+    "node-build": {"node"},
+    "node-test": {"node"},
+    "python-test": {"python", "python-broken"},
+    "git-commit": {"dirty-git", "staged-git"},
+}
 
 def shell_parts(command: str) -> list[str]:
     if any(ch in command for ch in "$`<>\\\0"):
@@ -152,7 +170,7 @@ def project_action(parts: list[str], root: Path) -> str | None:
 
 
 def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[str]:
-    if facts.get("project") not in fixtures.PROJECT_FIXTURES:
+    if facts.get("project") not in PROJECT_POLICY_FIXTURES.get(policy, set()):
         return set()
     before = protected_files(facts["before"], policy)
     try:
@@ -179,7 +197,7 @@ def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[s
             continue
         else:
             return set()
-    allowed = {"git-add", "git-commit"} if policy == "git-commit" else {policy}
+    allowed = PROJECT_ACTIONS.get(policy, {policy})
     return actions if actions <= allowed else set()
 
 
@@ -189,9 +207,59 @@ def allow_project_approval(policy: str, command: str, root: Path, facts: dict) -
     )
 
 
+def allow_port_failure(command: str, root: Path, facts: dict) -> bool:
+    listener = facts.get("listener")
+    if not isinstance(listener, dict):
+        return False
+    pid, port = listener.get("pid"), listener.get("port")
+    if (type(pid) is not int or pid <= 0 or type(port) is not int or not 1 <= port <= 65535
+            or listener.get("process") != "python3" or not root.is_dir() or root.is_symlink()):
+        return False
+    try:
+        os.kill(pid, 0)
+        argv = [arg for arg in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if arg]
+    except (OSError, ValueError):
+        return False
+    expected = [
+        b"-u", b"-m", b"http.server", str(port).encode(), b"--bind", b"127.0.0.1",
+        b"--directory", os.fsencode(root),
+    ]
+    if argv[1:] != expected:
+        return False
+    if not isinstance(facts.get("before"), dict) or fixtures.snapshot(root) != facts["before"]:
+        return False
+
+    cleaned = command.strip()
+    if cleaned.endswith("2>&1"):
+        cleaned = cleaned[:-4]
+        if not cleaned or not cleaned[-1].isspace():
+            return False
+        cleaned = cleaned.rstrip()
+    try:
+        parts = shell_parts(cleaned)
+    except ValueError:
+        return False
+    if parts[:1] == ["cd"]:
+        try:
+            separator = parts.index("&&")
+        except ValueError:
+            return False
+        directory = parts[1:separator]
+        if directory[:1] == ["--"]:
+            directory = directory[1:]
+        if len(directory) != 1 or (root / directory[0]).resolve() != root.resolve():
+            return False
+        parts = parts[separator + 1:]
+    return parts == [
+        "python3", "-m", "http.server", str(port), "--bind", "127.0.0.1",
+    ]
+
+
 def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
     if policy in PROJECT_POLICIES:
         return allow_project_approval(policy, command, root, facts)
+    if policy == "port-failure":
+        return allow_port_failure(command, root, facts)
     if policy == "rename":
         command = command.strip()
         if command.startswith("cd "):
