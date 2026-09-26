@@ -1,8 +1,8 @@
 # nosh：纯 Rust 原生离线 AI Shell 设计文档
 
-> **代号**：nosh（Native Offline SHell）　**版本**：v0.16　**日期**：2026-09-25　**默认模型**：MiniCPM5-2B（Apache-2.0）
+> **代号**：nosh（Native Offline SHell）　**版本**：v0.17　**日期**：2026-09-26　**默认模型**：MiniCPM5-2B（Apache-2.0）
 >
-> **范围**：说明当前本地 MVP 的架构、行为与约束，并保留 M2/M3 的目标设计。在 `826a825` 的实现核对基础上，同步直接命令建议、静态校验与自动终端交接的改动；设计决策不等于功能已经交付。
+> **范围**：说明当前本地 MVP 的架构、行为与约束，并保留 M2/M3 的目标设计。在 `20ae1d6`（含 revision 2 评测语义）的实现基础上，同步工具分发、对话日志、错误恢复和辅助热路径的重构；设计决策不等于功能已经交付。
 >
 > **口径**：**当前**表示已有实现；**规划**表示尚未实现；**目标 / 估算**不是实测结论。模型事实来自模型配置、GGUF 元数据和上游源码；历史性能数据以 [MVP 报告](MVP-REPORT.md) 的平台、构建和测量条件为准，不外推到其他平台。
 
@@ -257,10 +257,11 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 | Shell | `EmbeddedShell` 持有 brush 会话；`run_user_line` 直连终端，`run_agent_command` 采集输出；`snapshot/resolve/parse` 提供状态和解析信息 | [backend.rs](../crates/nosh-shell/src/backend.rs) |
 | 风险与策略 | `assess_command` 接收命令和 `Context`，生成 `RiskReport`；`decide` 综合模式、用户规则和会话放行，返回 Allow / Ask / Deny | [analyze.rs](../crates/nosh-permissions/src/analyze.rs)、[policy.rs](../crates/nosh-permissions/src/policy.rs) |
 | 审批 | `ApprovalChannel::request` 接收请求，返回批准、拒绝、编辑或同类放行；当前实现为终端、无终端拒绝和测试脚本 | [approval.rs](../crates/nosh-core/src/approval.rs) |
-| 推理 | `ChatEngine` 提供 open / step / rewind / close、上下文查询、工具结果压缩与取消；事件为 Text / Think / ToolCall / CallError / Prefill | [engine.rs](../crates/nosh-llm/src/engine.rs) |
+| 推理 | `ChatEngine` 提供 open / step / rewind / close、上下文查询、工具结果压缩与取消；事件为 Text / Think / ToolCall / CallError / Prefill；回退和压缩均显式返回错误 | [engine.rs](../crates/nosh-llm/src/engine.rs) |
+| 对话日志 | 内部 `Conversation` 管理已编码消息、连续工具结果分组、原始 assistant token、回退与压缩；不持有模型或 KV | [conversation.rs](../crates/nosh-llm/src/conversation.rs) |
 | 输出出口 | `Redactor` 在完整采集输出落盘前处理文本；当前使用不复制、不修改文本的 `NoRedact` | [tools.rs](../crates/nosh-core/src/tools.rs) |
 
-早期草图中的 `ShellBackend`、`PermissionEngine` 不是当前代码里的 trait；Windows 后端和 IPC 实现应在实际需要时沿上述边界扩展，不把草图当作现有 API。
+当前已有 [`ShellBackend`](../crates/nosh-shell/src/lib.rs) trait，但 harness 仍使用具体的 `EmbeddedShell`，不能据此认为后端已可直接替换；`PermissionEngine` 仍只是早期草图。Windows 后端和 IPC 实现应在实际需要时沿上述边界扩展，不把草图当作现有 API。
 
 ### 3.5 典型流程：自然语言任务
 
@@ -482,7 +483,7 @@ sid = 取得或新建对话（任务前按 §5.7 检查预算）
 append user(任务头 + 输入 [+ 附件])
 for step in 1..=max_steps (默认 10):
     events = engine.step(sid, pending)            // 尽量复用公共前缀
-    if ContextFull: 回退本次追加，压缩旧工具结果后重试一次
+    if ContextFull: 回退本次追加，压缩旧工具结果后重试一次；回退或压缩失败则结束任务并报错
     if 生成被取消: 结束任务，不执行本轮工具调用
     流式显示 Text / Think；收集 ToolCall
     if 没有 ToolCall 且没有 CallError: 按生成停止原因结束
@@ -549,6 +550,8 @@ Available: {git, docker, python3, ...}
 
 当前内置工具仅上述三个，其他工具仍属未来扩展。普通 agent 的纯建议在最终文本中展示，不执行、不预填。终端/密码交接由 harness 根据执行结果决定，不作为模型工具暴露。
 
+工具名称和集合成员由 `BuiltinTool` / `ToolSet` 统一维护，声明和执行准入共用同一目录；分发先解析为枚举，再进入穷尽匹配，不为每次调用重新构造 JSON Schema。未知工具或当前集合禁用的工具仍回灌原有错误，不进入审批或执行；`commands_run` 根据真实执行结果计数，而不是根据模型请求的工具名计数。
+
 **已知限制**：`list_dir` 当前只对起始路径做权限判断，递归列举不会逐层重新审批，可能展示受保护子目录的文件名和大小；逐层检查是设计目标，不是已有保证（[MVP 报告 §6 #13](MVP-REPORT.md#6-已知问题)）。
 
 | 规划工具（尚未注册） | 参数草图 | 设计意图 |
@@ -561,6 +564,7 @@ Available: {git, docker, python3, ...}
 - **截断输出**：
   - 保留开头 60% 和结尾 40%，中间标注省略了多少；
   - stdout/stderr 正文合计预算为 6,000 字符；状态头和省略标记另计；
+  - 按 UTF-8 字符边界定位首尾，只分配保留片段和标记，不将整份输出展开为 `Vec<char>`；格式化时复用字符计数，并借用无需截断的文本；
   - 被截断的命令将采集范围内的原始输出保存到 `state/outputs/<pid>-<id>.log`；超过执行采集上限的字节已经丢弃，不会因落盘恢复。
 - **结果格式**：当前为纯文本头加采集输出，避免 JSON 转义膨胀；与其他结果格式的 A/B 对比尚未完成。
 
@@ -592,7 +596,9 @@ CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
 ### 5.7 上下文与思考
 
 - **当前预算**：默认上下文为 8K，包含静态前缀、对话和生成；静态前缀约 1.0–1.3K，具体占用随工具定义和输入变化。
-- **当前压缩**：新任务开始前，已用上下文超过 85% 时，把旧工具结果缩成短记录；压缩后仍超过 60% 就新建对话。任务内遇到 `ContextFull` 时，回退本次追加、压缩工具结果并重试一次；再次失败会报错，不无限重试。这不是 LLM 摘要，也不保证保留全部历史。
+- **当前压缩**：新任务开始前，已用上下文超过 85% 时，把旧工具结果缩成短记录；压缩后仍超过 60% 就新建对话。任务内遇到 `ContextFull` 时，回退本次追加、压缩工具结果并重试一次；回退、压缩或再次生成失败都会报错，不忽略错误继续，也不无限重试。这不是 LLM 摘要，也不保证保留全部历史。
+- **日志一致性**：追加、拆分工具组回退、压缩均先完成所需编码，再更新日志；编码失败保留原日志。`compact_tool_results` 返回 `Result<usize, LlmError>`，成功数是实际缩短的工具结果条数，而非分组数；Local、Mock 和评测包装器遵循同一错误返回契约。保留最近消息时，Local 会完整保留与边界相交的工具组。
+- **失败后的结果回灌**：回退成功但压缩失败时，已执行工具的结果保留到下次任务，并在新任务输入之前回灌；不自动重跑工具，也不重放失败的用户请求或步数上限总结指令。
 - **M2 目标**：带滞回地压缩到 50% 以下；工具结果压缩仍不足时，对旧轮次生成摘要，保留首个任务原文，再重建对话。
 - **思考**：当前默认关闭，通过 generation prompt 预填空 think 块；`ai think on/off` 切换并重建对话。`thinking = "auto"`（连续失败后开启）尚未实现，配置中指定会警告并按关闭处理。
 
@@ -777,6 +783,8 @@ CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
 
 当前每次 `LocalChatEngine::step` 重新创建 sampler，复读窗口只包含该次生成，不含 prompt。固定 `--seed` 会让每次 sampler 从该 seed 开始，但不会固定任务时间、PID、工具耗时、输入 token 或浮点计算；完整任务复现仍按 §13.2 的口径验收。采样实现见 [sampling.rs](../crates/nosh-llm/src/sampling.rs)。
 
+候选 token 和复读惩罚去重集合的缓冲区在同次生成内复用；容量按需要增长，生成结束后随 sampler 释放，不是全局缓存。概率计算、排序和随机数消费顺序保持不变；优化减少重复堆分配，不替代模型前向计算，也不据此宣称整体 tok/s 或 RSS 提升。
+
 **约束解码**（M2）：在 `<function` 之后，用 token-trie 把函数名限制在已注册的工具里；在 `<param` 之后，把参数名限制在该工具的参数里。
 
 ### 7.4 KV 与前缀复用
@@ -784,7 +792,7 @@ CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
 在 CPU 上，首 token 延迟主要来自 prefill（身份说明加工具定义约 1.0–1.3K token）。三级复用中，前两项已实现，第三项属于 M2：
 
 1. **对话内增量**：求新请求与缓存 token 的最长公共前缀，将 KV 截断到该位置后计算未缓存部分；若输入被完全覆盖，仍退回一个 token 重算末位置 logits，不是所有命中都能省去前向计算。
-2. **token 级日志**：assistant 正文保留生成的 token id，下一轮直接拼接，不走“解码 → 重新渲染 → 重新编码”；轮尾会按模板移除 `</s>` 并补齐 `<|im_end|>` 和换行，不是整个生成流逐字节原封不动。重新序列化或 BPE 差异会使缓存从差异处失效。
+2. **token 级日志**：assistant 正文保留生成的 token id，下一轮直接拼接，不走“解码 → 重新渲染 → 重新编码”；轮尾会按模板移除 `</s>` 并补齐 `<|im_end|>` 和换行，不是整个生成流逐字节原封不动。已编码消息只保留一份 token 数组，普通用户原文不再重复常驻，工具原文保留供压缩使用；拼接时一次预留静态前缀、历史和 generation prompt 的容量。重新序列化或 BPE 差异会使缓存从差异处失效。
 3. **磁盘前缀缓存（未实现）**：把静态前缀的 KV 落盘。
    - key = `sha256(模型哈希 ‖ 前缀 token ‖ KV 类型 ‖ 引擎版本)`；
    - 估算约 50 MB，目标加载不到 100 ms，需实测；
@@ -1172,6 +1180,25 @@ nosh/
 
 目标渠道为 GitHub Releases、cargo binstall、Homebrew、Scoop/winget；deb/rpm 计划注册 `/etc/shells`。当前应按 README 从源码构建，不把这些渠道名当作可用安装命令。供应链门禁、签名与 SBOM 随分发流程建设。
 
+### 12.3 维护与扩展约定
+
+当前六个 crate 的职责分层继续保留，优先沿已有边界改进，不为尚未交付的远程、GPU 或插件方案提前增加空 crate、配置项或通用框架。
+
+| 改动方向 | 维护入口与约束 |
+|---|---|
+| 新增内置工具 | 在 `tools.rs` 中维护 `BuiltinTool`、参数声明和 `ToolSet` 成员，并补齐 `Agent` 的穷尽分发；工具声明顺序影响 prompt，不随意调整；只读/建议入口不能绕过集合限制 |
+| 对话与上下文 | 在 `conversation.rs` 中处理 token 日志、分组和原子更新，在 `local.rs` 中处理模型、KV 与生成；不将模型格式细节移到 harness；修改 `ChatEngine` 契约时同步 Local、Mock、CLI 观测包装器和调用方 |
+| 输出与采样性能 | 输出内存按保留预算分配，采样 scratch 按单次生成复用；先证明字符预算、模板 token、固定 seed 序列和错误行为未漂移，再比较分配与耗时 |
+| 文档与评测 | README 说明可用功能，本设计说明现状与扩展边界，MVP 报告和版本化基线保留历史事实；不重写历史通过率，不把辅助路径优化等同于真实模型基线改善 |
+
+相关改动的无模型入口如下；完整 CI 及平台矩阵以 [ci.yml](../.github/workflows/ci.yml) 为准。模型吞吐、首 token 延迟与内存结论仍需按 §13.2 固定构建、硬件、模型和冷热条件单独测量。
+
+```bash
+cargo test -p nosh-core -p nosh-llm -p nosh-cli -p nosh-tests --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
 ## 13. 测试与评估
 
 ### 13.1 体验指标
@@ -1195,7 +1222,7 @@ nosh/
 
 | 类别 | 内容 | 通过标准 |
 |---|---|---|
-| 单元（当前）与 fuzz（规划） | 当前覆盖采样、增量解码、工具调用与 CDATA、截断、AI 触发、状态差异；解析器/协议帧 fuzz 留待建设 | 对应集合全部通过，不出现 panic |
+| 单元（当前）与 fuzz（规划） | 当前覆盖固定 seed 采样序列与 scratch 复用、增量解码、工具调用与 CDATA、Unicode 截断预算、工具集合准入、对话日志与恢复错误、AI 触发、状态差异；解析器/协议帧 fuzz 留待建设 | 对应集合全部通过，不出现 panic |
 | 推理正确性 | 当前模板对照固定 golden 样例，测试时不调用 HF `apply_chat_template`（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
 | ARM 权重释放（issue #9） | 每个 PR 在 Linux ARM64/macOS 用 Q4K/Q6K 合成矩阵覆盖 m=1..64、prefill 边界及原始数据访问；独立手动工作流 `arm64-memory.yml` 下载并缓存固定模型，比较预重排开/关 | 支持 dotprod 的合格矩阵必须实际释放，其他条件保持原始数据；8K 峰值 RSS ≤ 2.5 GiB；相同 f16 KV 下的 3,329/8,065 token prompt 各加 48 步 teacher forcing，应用上一行的全部通过线。Linux ARM 实测：KL 和 NLL 差均为 0，余弦中位数 1，top-5 均 49/49，高置信 top-1 分别 30/30、48/48 |
 | Shell 兼容 | 当前有本地 shell/CLI 集成测试；完整 scp、rsync、git over ssh、VS Code Remote 和常见 rc 矩阵属于目标覆盖 | 已有用例全部通过；`nosh -c` 保持纯命令输出，不将上游兼容性等同于完整生态验证 |
@@ -1393,3 +1420,4 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.14 | 整理文档职责和章节导航，按 `826a825` 区分当前实现、规划与实测口径；补充实现状态矩阵和真实代码入口，移除不可用的上手命令；校正进程内推理、故障隔离、工具、审批、上下文、下载/离线、配置及工程布局；保留章节与决策编号，把 registry 和评测明细链接到唯一维护入口；MVP 计划标为历史记录，不改变产品决策或运行时代码 |
 | v0.15 | 继续核对实现细节：明确 AI 开关、有限名称预检、失败求助与 CJK 判定边界；修正终端需求识别、每流输出上限和后台输出范围；补充建议模式提取/长度限制与退出码语义，修正工具调用状态机和 Schema 验证范围；对齐线程变量、逐次采样、KV 复用与模板样例来源。仅更新文档，不改变运行时行为或历史实测 |
 | v0.16 | 移除 propose_command 模型工具，Full 仅 run_command/read_file/list_dir，ReadOnly 仅 read_file/list_dir，Suggest 无工具并直接返回经 brush 校验的完整 program；Ctrl+G/-s 不执行，普通建议不预填。SIGTTIN/明确 sudo 密码诊断由 harness 直接交回整条原命令并结束任务，披露可能部分执行，不自动重试。建议校验递归覆盖替换，按函数顺序与作用域处理确定行为，动态不确定性仅写文档。Full prompt 与固定命令探测列表沿用 main，仅改正终端/密码交接说明；建议采样默认统一为 1.0。 |
+| v0.17 | 保留六 crate 分层，提取可独立测试的 token 对话日志，消除 assistant token 副本和逐步 SessionSpec 深拷贝；追加/回退/压缩先编码后更新，恢复错误显式传递。工具声明和准入使用统一枚举目录，命令计数来自执行结果；截断按字符边界保留首尾，采样复用候选与去重缓冲，不改变采样数学或随机数顺序。补充维护/扩展入口，校正已有 ShellBackend trait 的实际接入边界；不修改模型内核、权限策略、prompt、评测语义或历史性能数字。 |

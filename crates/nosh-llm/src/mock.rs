@@ -172,7 +172,7 @@ impl ChatEngine for MockChatEngine {
             .sessions
             .get_mut(&sid)
             .ok_or(LlmError::UnknownSession(sid))?;
-        h.truncate(keep + 1);
+        h.truncate(keep.saturating_add(1));
         Ok(())
     }
 
@@ -180,22 +180,27 @@ impl ChatEngine for MockChatEngine {
         self.sessions.get(&sid).map(|h| h.len() - 1).unwrap_or(0)
     }
 
-    fn compact_tool_results(&mut self, sid: SessionId, keep_recent: usize) -> usize {
-        let Some(h) = self.sessions.get_mut(&sid) else {
-            return 0;
-        };
+    fn compact_tool_results(
+        &mut self,
+        sid: SessionId,
+        keep_recent: usize,
+    ) -> Result<usize, LlmError> {
+        let h = self
+            .sessions
+            .get_mut(&sid)
+            .ok_or(LlmError::UnknownSession(sid))?;
         let n = h.len();
         let mut changed = 0;
         for m in h.iter_mut().take(n.saturating_sub(keep_recent)) {
             if let Message::Tool(c) = m {
-                let s = crate::local::shorten_tool_result(c);
+                let s = crate::conversation::shorten_tool_result(c);
                 if &s != c {
                     *c = s;
                     changed += 1;
                 }
             }
         }
-        changed
+        Ok(changed)
     }
 
     fn context_usage(&self, sid: SessionId) -> (usize, usize) {
@@ -259,5 +264,34 @@ mod tests {
         assert_eq!(m.message_count(sid), 4);
         m.rewind(sid, 1).unwrap();
         assert_eq!(m.message_count(sid), 1);
+    }
+
+    #[test]
+    fn compaction_reports_changed_results_and_rejects_unknown_sessions() {
+        let mut engine = MockChatEngine::new(vec![]);
+        assert!(matches!(
+            engine.compact_tool_results(99, 0),
+            Err(LlmError::UnknownSession(99))
+        ));
+        let sid = engine.open(spec()).unwrap();
+        engine
+            .step(
+                sid,
+                vec![
+                    Message::Tool("a".repeat(300)),
+                    Message::Tool("b".repeat(300)),
+                ],
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(engine.compact_tool_results(sid, usize::MAX).unwrap(), 0);
+        assert_eq!(engine.compact_tool_results(sid, 1).unwrap(), 2);
+        engine.rewind(sid, usize::MAX).unwrap();
+        assert_eq!(engine.message_count(sid), 3);
+        engine.close(sid);
+        assert!(matches!(
+            engine.compact_tool_results(sid, 0),
+            Err(LlmError::UnknownSession(_))
+        ));
     }
 }

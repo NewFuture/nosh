@@ -60,6 +60,8 @@ agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
 | [固定 seed 的真实模型评测](eval/README.md) | 25 场景及 revision 2 任务语义；历史 main 双跑基线通过率 48.0%，新语义未重新采样 |
 
+开发入口见 [维护与扩展约定](docs/DESIGN.md#123-维护与扩展约定)：工具目录、对话日志、推理执行各自维护边界；错误显式传递，性能结论区分辅助路径优化与真实模型实测。
+
 ## 许可
 
 Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。

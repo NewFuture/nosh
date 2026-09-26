@@ -219,8 +219,14 @@ pub trait ChatEngine {
     fn message_count(&self, sid: SessionId) -> usize;
 
     /// Replaces the content of tool results older than the last `keep_recent`
-    /// messages with a one-line note; returns how many were shortened.
-    fn compact_tool_results(&mut self, sid: SessionId, keep_recent: usize) -> usize;
+    /// messages with a one-line note; returns the number of shortened results.
+    /// A grouped tool turn overlapping recent messages may be kept intact.
+    /// Tokenization failures leave the conversation unchanged.
+    fn compact_tool_results(
+        &mut self,
+        sid: SessionId,
+        keep_recent: usize,
+    ) -> Result<usize, LlmError>;
 
     /// `(used, max)` context tokens.
     fn context_usage(&self, sid: SessionId) -> (usize, usize);

@@ -2,7 +2,7 @@
 //! calls, and a repetition penalty that switches on only once a loop is detected
 //! (the same 16-gram ≥ 3 times within the last 256 tokens).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::engine::SamplingParams;
 
@@ -54,6 +54,8 @@ pub struct Sampler {
     rng: Rng,
     recent: VecDeque<u32>,
     penalty_on: bool,
+    candidates: Vec<(u32, f32)>,
+    penalized: HashSet<u32>,
 }
 
 impl Sampler {
@@ -69,6 +71,8 @@ impl Sampler {
             rng: Rng::new(seed),
             recent: VecDeque::with_capacity(REP_WINDOW + 1),
             penalty_on: false,
+            candidates: Vec::new(),
+            penalized: HashSet::new(),
         }
     }
 
@@ -91,9 +95,9 @@ impl Sampler {
     pub fn sample(&mut self, logits: &mut [f32], in_tool_call: bool) -> u32 {
         if self.penalty_on && self.params.repetition_penalty > 1.0 {
             let p = self.params.repetition_penalty;
-            let mut seen = std::collections::HashSet::new();
+            self.penalized.clear();
             for &id in &self.recent {
-                if seen.insert(id)
+                if self.penalized.insert(id)
                     && let Some(l) = logits.get_mut(id as usize)
                 {
                     *l = if *l > 0.0 { *l / p } else { *l * p };
@@ -114,6 +118,7 @@ impl Sampler {
             self.params.top_p,
             self.params.min_p,
             &mut self.rng,
+            &mut self.candidates,
         )
     }
 }
@@ -130,21 +135,30 @@ pub fn argmax(logits: &[f32]) -> u32 {
     best as u32
 }
 
-fn sample_top(logits: &[f32], temp: f32, top_p: f32, min_p: f32, rng: &mut Rng) -> u32 {
+fn sample_top(
+    logits: &[f32],
+    temp: f32,
+    top_p: f32,
+    min_p: f32,
+    rng: &mut Rng,
+    cand: &mut Vec<(u32, f32)>,
+) -> u32 {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if !max.is_finite() {
         return argmax(logits);
     }
     // Probabilities below ~1e-9 of the max cannot matter for top-p ≤ 0.9999; skip them.
     let cutoff = max - 20.7 * temp;
-    let mut cand: Vec<(u32, f32)> = logits
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| **l >= cutoff)
-        .map(|(i, l)| (i as u32, ((l - max) / temp).exp()))
-        .collect();
+    cand.clear();
+    cand.extend(
+        logits
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| **l >= cutoff)
+            .map(|(i, l)| (i as u32, ((l - max) / temp).exp())),
+    );
     let sum: f32 = cand.iter().map(|c| c.1).sum();
-    for c in &mut cand {
+    for c in cand.iter_mut() {
         c.1 /= sum;
     }
     cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
@@ -187,7 +201,11 @@ pub fn detect_repetition(window: &[u32]) -> bool {
         return false;
     }
     let tail = &window[window.len() - REP_NGRAM..];
-    let count = window.windows(REP_NGRAM).filter(|w| *w == tail).count();
+    let count = window
+        .windows(REP_NGRAM)
+        .filter(|w| *w == tail)
+        .take(REP_COUNT)
+        .count();
     count >= REP_COUNT
 }
 
@@ -217,6 +235,93 @@ mod tests {
     }
 
     #[test]
+    fn seeded_sampling_matches_pre_refactor_sequences() {
+        let cases = [
+            (
+                1.0,
+                0.95,
+                0.0,
+                [
+                    23, 5, 53, 35, 18, 19, 72, 55, 73, 38, 71, 40, 58, 19, 90, 54, 5, 90, 38, 38,
+                    21, 3, 3, 5,
+                ],
+            ),
+            (
+                0.3,
+                0.8,
+                0.0,
+                [
+                    39, 55, 73, 71, 71, 90, 89, 72, 21, 72, 4, 39, 88, 90, 21, 5, 55, 4, 72, 72,
+                    72, 22, 22, 38,
+                ],
+            ),
+            (
+                1.0,
+                1.0,
+                0.1,
+                [
+                    23, 5, 53, 35, 18, 19, 72, 55, 73, 38, 71, 40, 58, 19, 90, 54, 5, 90, 38, 38,
+                    21, 3, 3, 5,
+                ],
+            ),
+            (1.0, 0.0, 0.0, [89; 24]),
+        ];
+        let logits: Vec<f32> = (0..100).map(|i| (i as f32 * 0.37).sin() * 3.0).collect();
+        for (temperature, top_p, min_p, expected) in cases {
+            let mut sampler = Sampler::new(SamplingParams {
+                temperature,
+                top_p,
+                min_p,
+                seed: Some(7),
+                ..SamplingParams::default()
+            });
+            let actual: Vec<_> = (0..expected.len())
+                .map(|_| sampler.sample(&mut logits.clone(), false))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn sampling_scratch_is_reused_without_stale_candidates() {
+        let mut sampler = Sampler::new(params(1.0, 7));
+        sampler.sample(&mut vec![0.0; 256], false);
+        let capacity = sampler.candidates.capacity();
+        let ptr = sampler.candidates.as_ptr();
+        for len in [16, 128, 1, 256] {
+            let mut logits = vec![f32::NEG_INFINITY; len];
+            logits[len - 1] = 1.0;
+            assert_eq!(sampler.sample(&mut logits, false), (len - 1) as u32);
+            assert_eq!(sampler.candidates.len(), 1);
+            assert_eq!(sampler.candidates.capacity(), capacity);
+            assert_eq!(sampler.candidates.as_ptr(), ptr);
+        }
+    }
+
+    #[test]
+    fn repeated_tokens_are_penalized_once_per_sample() {
+        let mut sampler = Sampler::new(SamplingParams {
+            temperature: 0.0,
+            repetition_penalty: 2.0,
+            ..params(0.0, 7)
+        });
+        for _ in 0..REP_NGRAM * REP_COUNT {
+            sampler.observe(1);
+        }
+        sampler.observe(2);
+        sampler.observe(999);
+        assert!(sampler.penalty_active());
+        let mut logits = [1.0, 4.0, -3.0];
+        sampler.sample(&mut logits, false);
+        assert_eq!(logits, [1.0, 2.0, -6.0]);
+        let capacity = sampler.penalized.capacity();
+        let mut logits = [1.0, 4.0, -3.0];
+        sampler.sample(&mut logits, false);
+        assert_eq!(logits, [1.0, 2.0, -6.0]);
+        assert_eq!(sampler.penalized.capacity(), capacity);
+    }
+
+    #[test]
     fn zero_temperature_is_greedy() {
         let mut s = Sampler::new(params(0.0, 1));
         let mut l = vec![0.1, 5.0, 4.9, -1.0];
@@ -236,9 +341,10 @@ mod tests {
     #[test]
     fn min_p_filters_tail() {
         let mut rng = Rng::new(1);
+        let mut candidates = Vec::new();
         for _ in 0..200 {
             let l = [2.0f32, 1.9, -3.0, -3.0];
-            let id = sample_top(&l, 1.0, 1.0, 0.1, &mut rng);
+            let id = sample_top(&l, 1.0, 1.0, 0.1, &mut rng, &mut candidates);
             assert!(id < 2);
         }
     }

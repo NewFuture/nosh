@@ -80,7 +80,7 @@ impl<W: Write> TracedEngine<W> {
         result
     }
 
-    // These trait methods cannot return an I/O error. Report it now and make
+    // Infallible trait operations cannot return an I/O error. Report it now and make
     // subsequent fallible operations fail instead of silently losing evidence.
     fn record_infallible(&mut self, value: Value) {
         if let Err(error) = self.record(value) {
@@ -167,12 +167,16 @@ impl<W: Write> ChatEngine for TracedEngine<W> {
         self.inner.message_count(sid)
     }
 
-    fn compact_tool_results(&mut self, sid: SessionId, keep_recent: usize) -> usize {
-        let changed = self.inner.compact_tool_results(sid, keep_recent);
-        self.record_infallible(json!({
+    fn compact_tool_results(
+        &mut self,
+        sid: SessionId,
+        keep_recent: usize,
+    ) -> Result<usize, LlmError> {
+        let changed = self.inner.compact_tool_results(sid, keep_recent)?;
+        self.record(json!({
             "ev": "compact", "sid": sid, "keep_recent": keep_recent, "changed": changed,
-        }));
-        changed
+        }))?;
+        Ok(changed)
     }
 
     fn context_usage(&self, sid: SessionId) -> (usize, usize) {
@@ -237,7 +241,7 @@ mod tests {
         );
         assert_eq!(engine.message_count(sid), 2);
         assert_eq!(engine.context_usage(sid).0, out.usage.context_used);
-        assert_eq!(engine.compact_tool_results(sid, 1), 0);
+        assert_eq!(engine.compact_tool_results(sid, 1).unwrap(), 0);
         engine.rewind(sid, 0).unwrap();
         assert_eq!(engine.message_count(sid), 0);
         engine.cancel(sid);
@@ -302,6 +306,53 @@ mod tests {
         ));
         let data = String::from_utf8(engine.writer.into_inner()).unwrap();
         assert!(data.contains("step_error"));
+    }
+
+    #[test]
+    fn compaction_errors_do_not_emit_success_records() {
+        let mut engine = TracedEngine::new(
+            Box::new(MockChatEngine::new(vec![])),
+            Cursor::new(Vec::new()),
+        );
+        assert!(matches!(
+            engine.compact_tool_results(999, 0),
+            Err(LlmError::UnknownSession(999))
+        ));
+        assert!(engine.writer.get_ref().is_empty());
+    }
+
+    #[test]
+    fn compaction_trace_failure_is_returned_immediately() {
+        struct Writer {
+            fail: bool,
+        }
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.fail {
+                    Err(io::Error::other("trace disk full"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut engine = TracedEngine::new(
+            Box::new(MockChatEngine::new(vec![])),
+            Writer { fail: false },
+        );
+        let sid = engine.open(spec()).unwrap();
+        engine.writer.fail = true;
+        assert!(
+            engine
+                .compact_tool_results(sid, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("trace disk full")
+        );
+        assert!(engine.failed.is_some());
     }
 
     #[cfg(unix)]

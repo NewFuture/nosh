@@ -111,6 +111,142 @@ fn multi_step_task_uses_tool_results() {
 }
 
 #[test]
+fn compaction_failure_preserves_executed_results_for_the_next_task() {
+    use nosh_llm::{
+        CancelHandle, ChatEngine, Event, LlmError, SessionId, SessionSpec, StepOutcome,
+    };
+
+    struct Engine {
+        inner: MockChatEngine,
+        steps: usize,
+        fail_compaction: bool,
+    }
+
+    impl ChatEngine for Engine {
+        fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+            self.inner.open(spec)
+        }
+
+        fn step(
+            &mut self,
+            sid: SessionId,
+            append: Vec<Message>,
+            sink: &mut dyn FnMut(Event),
+        ) -> Result<StepOutcome, LlmError> {
+            self.steps += 1;
+            if self.steps == 2 {
+                // Fail after the append, without a completed assistant turn.
+                let after_append = self.inner.message_count(sid) + append.len();
+                self.inner.step(sid, append, &mut |_| {})?;
+                self.inner.rewind(sid, after_append)?;
+                return Err(LlmError::ContextFull {
+                    used: 8193,
+                    max: 8192,
+                });
+            }
+            self.inner.step(sid, append, sink)
+        }
+
+        fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+            self.inner.rewind(sid, keep)
+        }
+
+        fn message_count(&self, sid: SessionId) -> usize {
+            self.inner.message_count(sid)
+        }
+
+        fn compact_tool_results(
+            &mut self,
+            sid: SessionId,
+            keep_recent: usize,
+        ) -> Result<usize, LlmError> {
+            if std::mem::take(&mut self.fail_compaction) {
+                Err(LlmError::Tokenizer("one-time compaction failure".into()))
+            } else {
+                self.inner.compact_tool_results(sid, keep_recent)
+            }
+        }
+
+        fn context_usage(&self, sid: SessionId) -> (usize, usize) {
+            self.inner.context_usage(sid)
+        }
+
+        fn cancel_handle(&self) -> CancelHandle {
+            self.inner.cancel_handle()
+        }
+
+        fn close(&mut self, sid: SessionId) {
+            self.inner.close(sid);
+        }
+    }
+
+    let _g = setup();
+    let mut sh = shell();
+    let engine = MockChatEngine::with_responder(|history| {
+        if history.iter().any(
+            |message| matches!(message, Message::Tool(result) if result.contains("printed-once")),
+        ) {
+            vec![text("The command printed printed-once.")]
+        } else {
+            vec![call(
+                "run_command",
+                json!({"command": "printf printed-once"}),
+            )]
+        }
+    });
+    let received = engine.received();
+    let mut agent = Agent::new(
+        Box::new(Engine {
+            inner: engine,
+            steps: 0,
+            fail_compaction: true,
+        }),
+        AgentConfig::default(),
+        env(),
+        ToolSet::Full,
+    );
+    let first = agent.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "print the result"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(first.status, TaskStatus::Failed);
+    assert_eq!(first.commands_run, 1);
+    assert!(
+        first
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("one-time compaction failure")
+    );
+    assert_eq!(agent.last_output_id(), Some(1));
+
+    let second = agent.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "what did the command print?"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(second.status, TaskStatus::Completed);
+    assert_eq!(second.commands_run, 0, "the command must not be run again");
+    assert_eq!(second.steps, 1);
+    assert_eq!(second.answer, "The command printed printed-once.");
+    assert_eq!(agent.last_output_id(), Some(1));
+
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 3);
+    let [Message::Tool(original)] = &received[1][..] else {
+        panic!("the failed append must contain the command result");
+    };
+    let [Message::Tool(restored), Message::User(followup)] = &received[2][..] else {
+        panic!("the next task must receive the result before its own input");
+    };
+    assert_eq!(restored, original);
+    assert!(followup.ends_with("\nwhat did the command print?"));
+}
+
+#[test]
 fn mutating_needs_approval_and_denial_reason_reaches_model() {
     let _g = setup();
     let dir = tmpdir("deny");
@@ -601,6 +737,48 @@ fn read_only_tools_and_protected_paths() {
     assert_eq!(approval.seen.len(), 1, "protected read asks");
     assert!(results[2].contains("[denied by user]"));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn unavailable_tools_are_rejected_before_approval_or_execution() {
+    let _g = setup();
+    let dir = tmpdir("tool-catalog");
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    for (set, names) in [
+        (ToolSet::Full, "run_command, read_file, list_dir"),
+        (ToolSet::ReadOnly, "read_file, list_dir"),
+        (ToolSet::Suggest, ""),
+    ] {
+        let name = if set == ToolSet::Full {
+            "unknown_tool"
+        } else {
+            "run_command"
+        };
+        let engine = MockChatEngine::new(vec![
+            vec![call(name, json!({"command": "touch should-not-exist"}))],
+            vec![text("No command was run.")],
+        ]);
+        let received = engine.received();
+        let mut agent = Agent::new(Box::new(engine), AgentConfig::default(), env(), set);
+        let mut approval = Scripted::new([]);
+        let out = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Pipe, "inspect only"),
+            &mut approval,
+            &mut RecordUi::default(),
+        );
+        assert_eq!(out.commands_run, 0);
+        assert!(approval.seen.is_empty());
+        assert!(!dir.join("should-not-exist").exists());
+        assert_eq!(
+            tool_results(&received.lock().unwrap()),
+            [format!(
+                "error: unknown tool '{name}'; available tools: {names}"
+            )]
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

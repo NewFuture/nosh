@@ -24,9 +24,52 @@ pub enum ToolSet {
     Suggest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinTool {
+    RunCommand,
+    ReadFile,
+    ListDir,
+}
+
+impl BuiltinTool {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::RunCommand => "run_command",
+            Self::ReadFile => "read_file",
+            Self::ListDir => "list_dir",
+        }
+    }
+
+    fn spec(self) -> ToolSpec {
+        match self {
+            Self::RunCommand => run_command_spec(),
+            Self::ReadFile => read_file_spec(),
+            Self::ListDir => list_dir_spec(),
+        }
+    }
+}
+
+impl ToolSet {
+    pub(crate) fn tools(self) -> &'static [BuiltinTool] {
+        match self {
+            Self::Full => &[
+                BuiltinTool::RunCommand,
+                BuiltinTool::ReadFile,
+                BuiltinTool::ListDir,
+            ],
+            Self::ReadOnly => &[BuiltinTool::ReadFile, BuiltinTool::ListDir],
+            Self::Suggest => &[],
+        }
+    }
+
+    pub(crate) fn resolve(self, name: &str) -> Option<BuiltinTool> {
+        self.tools().iter().copied().find(|t| t.name() == name)
+    }
+}
+
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
-        name: "run_command".into(),
+        name: BuiltinTool::RunCommand.name().into(),
         description: "Run a bash command in the user's shell session and return its output.".into(),
         parameters: json!({
             "type": "object",
@@ -41,7 +84,7 @@ pub fn run_command_spec() -> ToolSpec {
 
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
-        name: "read_file".into(),
+        name: BuiltinTool::ReadFile.name().into(),
         description: "Read a text file (not a directory) with line numbers, at most 400 lines."
             .into(),
         parameters: json!({
@@ -58,7 +101,7 @@ pub fn read_file_spec() -> ToolSpec {
 
 pub fn list_dir_spec() -> ToolSpec {
     ToolSpec {
-        name: "list_dir".into(),
+        name: BuiltinTool::ListDir.name().into(),
         description: "List file names and sizes in a directory (respects .gitignore). For counting lines or searching, use run_command.".into(),
         parameters: json!({
             "type": "object",
@@ -72,27 +115,34 @@ pub fn list_dir_spec() -> ToolSpec {
 }
 
 pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
-    match set {
-        ToolSet::Full => vec![run_command_spec(), read_file_spec(), list_dir_spec()],
-        ToolSet::ReadOnly => vec![read_file_spec(), list_dir_spec()],
-        ToolSet::Suggest => vec![],
-    }
+    set.tools().iter().map(|t| t.spec()).collect()
 }
 
 /// Keeps the first 60% and last 40% of `s` within `max` characters.
 pub fn truncate_middle(s: &str, max: usize) -> (String, bool) {
-    let n = s.chars().count();
+    let (text, truncated) = truncate_counted(s, max, s.chars().count());
+    (text.into_owned(), truncated)
+}
+
+fn truncate_counted(s: &str, max: usize, n: usize) -> (Cow<'_, str>, bool) {
     if n <= max {
-        return (s.to_string(), false);
+        return (Cow::Borrowed(s), false);
     }
     let head = max * 6 / 10;
     let tail = max - head;
-    let chars: Vec<char> = s.chars().collect();
-    let omitted = n - head - tail;
-    let mut out: String = chars[..head].iter().collect();
+    let head_end = s.char_indices().nth(head).map_or(s.len(), |(i, _)| i);
+    let tail_start = s
+        .char_indices()
+        .rev()
+        .take(tail)
+        .last()
+        .map_or(s.len(), |(i, _)| i);
+    let omitted = n - max;
+    let mut out = String::with_capacity(head_end + s.len() - tail_start + 64);
+    out.push_str(&s[..head_end]);
     let _ = write!(out, "\n[… {omitted} characters omitted …]\n");
-    out.extend(&chars[n - tail..]);
-    (out, true)
+    out.push_str(&s[tail_start..]);
+    (Cow::Owned(out), true)
 }
 
 fn secs(d: std::time::Duration) -> String {
@@ -105,13 +155,17 @@ pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> Stri
     let out_len = r.stdout.chars().count();
     let err_len = r.stderr.chars().count();
     let (out, err, truncated) = if out_len + err_len <= body_budget {
-        (r.stdout.clone(), r.stderr.clone(), r.truncated)
+        (
+            Cow::Borrowed(r.stdout.as_str()),
+            Cow::Borrowed(r.stderr.as_str()),
+            r.truncated,
+        )
     } else {
         // Give stderr up to a third of the budget, stdout the rest.
         let err_budget = err_len.min(body_budget / 3);
         let out_budget = body_budget - err_budget;
-        let (o, _) = truncate_middle(&r.stdout, out_budget);
-        let (e, _) = truncate_middle(&r.stderr, err_budget.max(1));
+        let (o, _) = truncate_counted(&r.stdout, out_budget, out_len);
+        let (e, _) = truncate_counted(&r.stderr, err_budget.max(1), err_len);
         (o, e, true)
     };
     let mut s = format!(
@@ -483,6 +537,38 @@ mod tests {
     }
 
     #[test]
+    fn tool_catalog_matches_the_advertised_schema_and_order() {
+        for (set, names) in [
+            (ToolSet::Full, vec!["run_command", "read_file", "list_dir"]),
+            (ToolSet::ReadOnly, vec!["read_file", "list_dir"]),
+            (ToolSet::Suggest, vec![]),
+        ] {
+            let advertised = specs(set);
+            assert_eq!(
+                advertised
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>(),
+                names
+            );
+            for spec in advertised {
+                let tool = set.resolve(&spec.name).unwrap();
+                assert_eq!(tool.spec(), spec);
+            }
+            for name in [
+                "run_command",
+                "read_file",
+                "list_dir",
+                "propose_command",
+                "READ_FILE",
+                "",
+            ] {
+                assert_eq!(set.resolve(name).is_some(), names.contains(&name));
+            }
+        }
+    }
+
+    #[test]
     fn middle_truncation_keeps_head_and_tail() {
         let s: String = (0..10_000)
             .map(|i| char::from(b'a' + (i % 26) as u8))
@@ -493,6 +579,58 @@ mod tests {
         assert!(t.ends_with(&s[s.len() - 400..]));
         assert!(t.contains("9000 characters omitted"));
         assert_eq!(truncate_middle("short", 10), ("short".into(), false));
+    }
+
+    #[test]
+    fn middle_truncation_preserves_character_budgets_and_utf8() {
+        for unit in ["", "a", "abcdef", "中文🙂e\u{301}\r\n尾部"] {
+            for repeats in [1, 3, 17] {
+                let text = unit.repeat(repeats);
+                let chars: Vec<_> = text.chars().collect();
+                for max in 0..=chars.len() + 2 {
+                    let (actual, truncated) = truncate_middle(&text, max);
+                    if chars.len() <= max {
+                        assert_eq!(actual, text);
+                        assert!(!truncated);
+                    } else {
+                        let head = max * 6 / 10;
+                        let tail = max - head;
+                        let expected = format!(
+                            "{}\n[… {} characters omitted …]\n{}",
+                            chars[..head].iter().collect::<String>(),
+                            chars.len() - max,
+                            chars[chars.len() - tail..].iter().collect::<String>()
+                        );
+                        assert_eq!(actual, expected, "{text:?}, max={max}");
+                        assert!(truncated);
+                    }
+                }
+            }
+        }
+        assert!(matches!(
+            truncate_counted("short", 10, 5).0,
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn command_result_budgets_count_characters_not_bytes() {
+        let mut result = CommandResult {
+            stdout: "中".repeat(4500),
+            stderr: "错".repeat(1500),
+            ..CommandResult::default()
+        };
+        let output = format_command_result(&result, None);
+        assert!(output.contains("truncated=no"));
+        assert_eq!(output.matches('中').count(), 4500);
+        assert_eq!(output.matches('错').count(), 1500);
+
+        result.stdout.push('中');
+        let output = format_command_result(&result, None);
+        assert!(output.contains("truncated=yes"));
+        assert!(output.contains("1 characters omitted"));
+        assert_eq!(output.matches('中').count(), 4500);
+        assert_eq!(output.matches('错').count(), 1500);
     }
 
     #[test]
