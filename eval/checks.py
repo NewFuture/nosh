@@ -54,7 +54,24 @@ def shell_parts(command: str) -> list[str]:
 
 
 def command_groups(command: str, root: Path, tools: dict | None = None) -> list[list[str]]:
-    parts = shell_parts(command)
+    cleaned = []
+    quote = None
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif (command.startswith("2>&1", i) and i > 0 and command[i - 1] in " \t\n"
+              and re.match(r"[ \t\n]*(?:&&|;|$)", command[i + 4:])):
+            cleaned.append(" ")
+            i += 4
+            continue
+        cleaned.append(char)
+        i += 1
+    parts = shell_parts("".join(cleaned))
     if parts[:1] == ["cd"]:
         separator = parts.index("&&") if "&&" in parts else -1
         directory = parts[1:separator]
@@ -86,7 +103,8 @@ def command_groups(command: str, root: Path, tools: dict | None = None) -> list[
         if not group:
             raise ValueError("missing command")
         if "/" in group[0]:
-            matches = [name for name, info in (tools or {}).items() if group[0] == info["path"]]
+            executable = (root / group[0]).resolve()
+            matches = [name for name, info in (tools or {}).items() if executable == Path(info["path"])]
             if len(matches) != 1:
                 raise ValueError("executable is not a recorded tool")
             group[0] = matches[0]
@@ -96,6 +114,11 @@ def command_groups(command: str, root: Path, tools: dict | None = None) -> list[
 def project_action(parts: list[str], root: Path) -> str | None:
     if parts[:1] == ["cargo"] and len(parts) >= 2:
         verb, args = parts[1], parts[2:]
+        if "--manifest-path" in args:
+            index = args.index("--manifest-path")
+            if index + 1 >= len(args) or (root / args[index + 1]).resolve() != root / "Cargo.toml":
+                return None
+            args = args[:index] + args[index + 2:]
         common = {"--offline", "--locked", "--frozen", "--quiet", "-q", "--verbose", "-v"}
         if verb in ("build", "test") and "--" in args:
             split = args.index("--")
@@ -114,6 +137,8 @@ def project_action(parts: list[str], root: Path) -> str | None:
     if parts[:2] == ["node", "--test"]:
         if all(p in ("--test-reporter=tap", "test/math.test.js") for p in parts[2:]):
             return "node-test"
+    if len(parts) == 2 and parts[0] == "node" and (root / parts[1]).resolve() == root / "build.js":
+        return "node-build"
     if parts[:1] == ["python3"]:
         args = [p for p in parts[1:] if p != "-B"]
         if args[:2] == ["-m", "unittest"]:
@@ -316,7 +341,7 @@ def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
     prose = response_prose(answer)
     closing = re.split(r"\n\s*\n", prose)[-1]
     question = bool(re.search(r"[?？][\s\"'”’)\]】。.!！]*$", closing) or re.search(
-        r"你(?:想|希望|需要)(?:我|让)|要不要|是否(?:需要|要|希望)|需不需要"
+        r"[你您](?:想|希望|需要)(?:我|让)|要不要|是否(?:需要|要|希望)|需不需要"
         r"|\b(?:would you like|do you want|shall I|should I|let me know (?:if|whether))\b", closing, re.I,
     ))
     rule = expect["final_question"]

@@ -130,7 +130,9 @@ class ExperienceTests(unittest.TestCase):
     def test_questions_and_chinese_prose_not_code_or_filenames(self):
         metrics = {"steps": 3, "confirmations": 0}
         scenario = SCENARIOS["zh-rust-build"]
-        for answer in ("编译完成，你想让我继续运行测试吗？", "编译完成。要不要继续", "Build completed. Would you like me to test it"):
+        for answer in ("编译完成，你想让我继续运行测试吗？", "编译完成。要不要继续",
+                       "Build completed. Would you like me to test it",
+                       "您希望我继续吗？如果是，我可以：\n1. 编译项目\n2. 运行测试"):
             with self.subTest(answer=answer):
                 self.assertFalse(checks.experience(scenario, answer, metrics)["final_question"]["passed"])
         for answer in (
@@ -151,6 +153,8 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(checks.experience(SCENARIOS["zh-clarify-task"], answer, metrics)["final_question"]["passed"])
         self.assertFalse(checks.experience(SCENARIOS["zh-rust-build"], answer, metrics)["final_question"]["passed"])
         self.assertFalse(checks.experience(SCENARIOS["zh-clarify-task"], "已经处理完成。", metrics)["final_question"]["passed"])
+        polite = "您希望我处理什么具体任务？我可以：\n1. 编译\n2. 测试"
+        self.assertTrue(checks.experience(SCENARIOS["zh-clarify-task"], polite, metrics)["final_question"]["passed"])
         result = checks.experience(SCENARIOS["suggest-archive"], "tar -czf logs.tar.gz logs", {"steps": 1, "confirmations": 0})
         self.assertIsNone(result["response_language"]["passed"])
         self.assertIsNone(result["final_question"]["passed"])
@@ -200,11 +204,11 @@ class ProjectTests(unittest.TestCase):
 
     def test_real_build_and_test_commands(self):
         cases = [
-            ("zh-rust-build", "cat Cargo.toml && cargo build --offline --locked"),
-            ("zh-node-build", "npm run build"),
-            ("zh-rust-test", "cargo test --offline --locked"),
-            ("zh-node-test", "npm test"),
-            ("zh-python-test", "python3 -m unittest discover -s tests -v"),
+            ("zh-rust-build", "cat Cargo.toml && cargo build --offline --locked 2>&1"),
+            ("zh-node-build", "node build.js 2>&1"),
+            ("zh-rust-test", "cargo test --manifest-path Cargo.toml --offline --locked 2>&1"),
+            ("zh-node-test", "npm test 2>&1"),
+            ("zh-python-test", "python3 -m unittest discover -s tests -v 2>&1"),
         ]
         for sid, command in cases:
             with self.subTest(scenario=sid):
@@ -251,12 +255,18 @@ class ProjectTests(unittest.TestCase):
         self.prepare("zh-rust-build")
         allowed = f"cd {self.root} && cargo build --offline && ls -la"
         self.assertTrue(checks.allow_approval("rust-build", allowed, self.root, self.facts))
+        alias = self.home / "bin" / "cargo"
+        self.assertTrue(checks.allow_approval("rust-build", f"{alias} build --offline 2>&1", self.root, self.facts))
+        self.assertTrue(checks.allow_approval("rust-build", "cargo build 2>&1 && ls", self.root, self.facts))
         for command in (
             "cargo build --manifest-path ../Cargo.toml", "cargo build; touch outside",
             "cargo build || curl https://example.invalid", "cargo install evil",
             "cat ../home/nosh/config.toml && cargo build",
             "./cargo build", "cargo build &&", "env -i cargo build",
             "cargo build; git push", "rm -rf .",
+            "cargo build > output.txt", "cargo build 2> error.txt", "cargo build 2>&10",
+            "cargo build 2>&1 || true", "cargo build '2>&1'", "cargo build 2>&1; touch outside",
+            "cargo build --manifest-path ../Cargo.toml 2>&1",
         ):
             with self.subTest(command=command):
                 self.assertFalse(checks.allow_approval("rust-build", command, self.root, self.facts))
@@ -266,6 +276,8 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse(checks.allow_approval("rust-clean", "rm -rf target", self.root, self.facts))
         self.prepare("zh-node-build")
         self.assertTrue(checks.allow_approval("node-build", "npm run build", self.root, self.facts))
+        self.assertTrue(checks.allow_approval("node-build", "node build.js 2>&1", self.root, self.facts))
+        self.assertFalse(checks.allow_approval("node-build", "node ../outside.js 2>&1", self.root, self.facts))
         (self.root / "build.js").write_text("process.exit(0)\n")
         self.assertFalse(checks.allow_approval("node-build", "npm run build", self.root, self.facts))
 
