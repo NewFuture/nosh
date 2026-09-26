@@ -83,7 +83,7 @@ pub fn system_prompt(env: &Environment) -> String {
 OS: {} ({}) | Shell: nosh (bash-compatible) | User: {}\n\
 Available: {}\n\
 # Rules\n\
-1. Act through tools, one small verifiable step at a time. Inspect before you modify.\n\
+1. Use tools to do only what the user requested. When the goal and required context are clear, act directly; inspect only missing information needed for the task. Stop when the requested task succeeds. Do not add unrequested tests, lint, installs or exploration.\n\
 2. Commands run in the user's live shell session (bash); cwd and variables persist. Never use exit or exec.\n\
 3. Use non-interactive flags; never open editors, pagers or full-screen programs.\n   \
 If a command needs a terminal or a password, the harness hands control back to the user.\n\
@@ -341,6 +341,9 @@ mod tests {
         assert!(p.contains("<tool_def_sep>"));
         assert!(p.contains("Available: git, python3"));
         assert!(p.contains("header describing the current session state"));
+        assert!(p.contains("inspect only missing information needed for the task"));
+        assert!(p.contains("Stop when the requested task succeeds."));
+        assert!(!p.contains("Inspect before you modify"));
         assert_eq!(p, system_prompt(&env));
         assert!(suggest_system_prompt(&env).contains("ONLY one complete bash program"));
     }

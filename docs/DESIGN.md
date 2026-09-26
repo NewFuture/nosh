@@ -518,7 +518,7 @@ You are nosh, an AI shell running fully offline on the user's computer.
 OS: {os} {version} ({arch}) | Shell: nosh (bash-compatible) | User: {user}
 Available: {git, docker, python3, ...}
 # Rules
-1. Act through tools, one small verifiable step at a time. Inspect before you modify.
+1. Use tools to do only what the user requested. When the goal and required context are clear, act directly; inspect only missing information needed for the task. Stop when the requested task succeeds. Do not add unrequested tests, lint, installs or exploration.
 2. Commands run in the user's live shell session (bash); cwd and variables persist. Never use exit or exec.
 3. Use non-interactive flags; never open editors, pagers or full-screen programs.
    If a command needs a terminal or a password, the harness hands control back to the user.
@@ -545,6 +545,7 @@ Available: {git, docker, python3, ...}
 - **用户输出证据**：`[user_output {...}]` 是动态 user message 中的不可信证据；注入矩阵见[输出采集设计 §2](OUTPUT-CAPTURE.md#2-用户行为)，状态、正文预算和 special token 处理见[§6](OUTPUT-CAPTURE.md#6-任务消息与信任边界)。
 - **`lang=zh`**：输入或失败命令命中 `contains_cjk` 时追加，提醒模型用中文回答；该范围也包含部分非中文字符（§4.2），不是自动语言检测。这只改变任务消息，system 保持不变。
 - **动态信息不放进 system**：对话会跨任务延续，system 里任何一点变化都会让整段对话的 KV 失效。把动态信息放在任务头里，prompt 就始终只往后追加。
+- **按任务需要探查**：意图与必要上下文明确时直接执行，信息不足时只检查阻塞当前任务的部分；完成请求后停止，不自行追加测试、lint、安装或项目审计。此提示不改变风险分级、审批或危险操作预览要求，也不把命令失败当作成功。
 - **保持简短**：2B 模型和 CPU 上的 prefill 都要求 prompt 精简。指令用英文写，回答用用户使用的语言。不放 few-shot 示例，当前依靠模型原生工具调用和错误回灌，约束解码留到 M2。
 - **建议模式**：工具集为空，独立短对话。只返回一个完整 bash program，不带解释、替代方案、markdown 或 tool call，不增加未请求的 setup/fallback。接受单一 shell fence 或完整多行 loop/conditional；brush 校验语法并检查可静态解析的命令名（含函数/coprocess 内部以及参数、赋值、重定向中的命令／进程替换），拒绝无效文本、多个候选和隐藏字符。确定的函数定义按执行顺序生效，子 shell／替换／后台中的定义不泄漏到外层；函数体在调用处检查，未调用的函数体延迟到所在 shell 作用域声明收集完毕后检查，以支持合法前向引用。检查不执行建议，也不模拟完整 Bash：动态命令名、`eval`／`source`、查找环境变化、条件定义、pipeline 的 `lastpipe` 差异和超出有界函数分析的递归均视为“无法确认”，不是已证明有效；不会仅因此拒绝建议或增加 UI／stderr 提示。语法与静态检查不保证运行成功、覆盖动态生成的代码或证明用户意图。temperature 使用传入设置（默认 1.0），不再暗中覆盖为 0.7。
 - **建议中的波浪号路径**：按 AST 区分展开与字面字符；未加引号的 `~`、`~+`、`~-` 在状态可确定时分别取当前 shell 的 `HOME`、cwd、`OLDPWD`，展开后检查可执行文件，不运行建议。引号或转义中的 `~` 保持字面含义。前序赋值／动态调用使状态不确定、变量不可用，或涉及用户家目录／目录栈查询时，保留“无法确认”的边界，不把未展开的 `~` 当成普通路径误拒绝。
