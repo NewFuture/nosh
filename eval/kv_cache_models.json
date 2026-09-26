@@ -1,0 +1,150 @@
+{
+  "runtime_revision": "fc343a84bbd925b37dde3219de35ea0bed50d630",
+  "models": [
+    {
+      "id": "granite-h350-q4km",
+      "model_id": "granite4-h350m",
+      "quant": "Q4_K_M",
+      "kind": "gguf",
+      "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+      "revision": "a864f823cce6e6048b5752e2816fe7a23987d790",
+      "bytes": 222662560,
+      "sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb",
+      "source": {
+        "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+        "bytes": 222662560,
+        "sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb"
+      },
+      "request_sha256": "1a44e95b61bc848f1fd45d66b94240a2c7b6254579c97bcc6981044c65e19eff"
+    },
+    {
+      "id": "gemma270-q4km",
+      "model_id": "gemma3-270m",
+      "quant": "Q4_K_M",
+      "kind": "gguf",
+      "repo": "unsloth/gemma-3-270m-it-GGUF",
+      "revision": "c90975dbd40c0c7b275fefaae758c3415c906238",
+      "bytes": 253115424,
+      "sha256": "b1baabd6b729e4041822220d3e648e00d99cac5df86b10dffb77bcccf0688e39",
+      "source": {
+        "file": "gemma-3-270m-it-Q4_K_M.gguf",
+        "bytes": 253115424,
+        "sha256": "b1baabd6b729e4041822220d3e648e00d99cac5df86b10dffb77bcccf0688e39"
+      },
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "functiongemma-q4km",
+      "model_id": "functiongemma-270m",
+      "quant": "Q4_K_M",
+      "kind": "gguf",
+      "repo": "unsloth/functiongemma-270m-it-GGUF",
+      "revision": "1de0f7fc7cae0062012c2e91ef02e642c161aa57",
+      "bytes": 253127904,
+      "sha256": "7474135cf63b5de86bd29d2feb92c644d48e9df5e1ac31550662af373c67d0fc",
+      "source": {
+        "file": "functiongemma-270m-it-Q4_K_M.gguf",
+        "bytes": 253127904,
+        "sha256": "7474135cf63b5de86bd29d2feb92c644d48e9df5e1ac31550662af373c67d0fc"
+      },
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "shellcue-q4km",
+      "model_id": "shellcue-230m",
+      "quant": "Q4_K_M",
+      "kind": "convert_hf",
+      "repo": "kroffske/shellcue-lfm2.5-230m-alpha",
+      "revision": "ae5b48546645926a6839df554a46596a8a19498e",
+      "bytes": 153401440,
+      "sha256": "44f0ba0709169446afdd7c0de042e33585a946828244524078a0c20fffdb86d3",
+      "hf_weights": {"model.safetensors": "c4f7973c48eb04fa2e8013f0d03171fcfb4ee27c157dea31e96020b12b84fb53"},
+      "precision_source_sha256": "ffa68307c45d756cb2ec694c5d0831acfef41a90ebb516217d32558298af1cf3",
+      "request_sha256": "b66f94a093113eee81016e5df35b18f9d41a39d21755a716ce3c5abe806eb024"
+    },
+    {
+      "id": "shellper-gemma-q4km",
+      "model_id": "shellper-gemma270",
+      "quant": "Q4_K_M",
+      "kind": "convert_hf",
+      "repo": "distil-labs/distil-gemma3-270m-SHELLper",
+      "revision": "d5a3e439693a6dc12b34c52c574897f801145559",
+      "bytes": 253128768,
+      "sha256": "482116026d028c83bb6493254b3656532639fb0e1386069333c6ab129957049c",
+      "hf_weights": {"model.safetensors": "41708244f07c6f0529ec66cb75bd58d17795f50e99228c700744d2bea68de848"},
+      "precision_source_sha256": "d48faf09d9f13cae7aa9836515c2597f2abba17373ac861e74e7d18b05726856",
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "shellminator-q4km",
+      "model_id": "shellminator-270m",
+      "quant": "Q4_K_M",
+      "kind": "convert_hf",
+      "repo": "ISB369/shellminator-270m-bash-distilled",
+      "revision": "9717e95e1ab4b7ae748ac1afc8d5ccba0def45bb",
+      "bytes": 261318464,
+      "sha256": "283f884dad71ae97607f63195b95a01dbe3c3bf905980f4b950aed79efe29751",
+      "hf_weights": {"model.safetensors": "2b04b2b5ce6495912d2c14c606311ce5df4cfeac758896a814c48f3fe329322d"},
+      "precision_source_sha256": "9249f1952e5a6809a6e95672b75b8d5583cbf860a8e86d6c15c286873c210520",
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "gemma270-pure",
+      "model_id": "gemma3-270m",
+      "quant": "Q4_0_PURE",
+      "kind": "quantize_gguf",
+      "repo": "unsloth/gemma-3-270m-it-GGUF",
+      "revision": "c90975dbd40c0c7b275fefaae758c3415c906238",
+      "bytes": 157524768,
+      "sha256": "9e82d386f0d99281a1afbb755f243c5b818f0d20576f76b5704948880e63e150",
+      "source": {
+        "file": "gemma-3-270m-it-F16.gguf",
+        "bytes": 542835488,
+        "sha256": "140cb395a3a3dcdb3de66e44c60d7265286c9d49f951c1899ec0d8c1f16b2feb"
+      },
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "functiongemma-pure",
+      "model_id": "functiongemma-270m",
+      "quant": "Q4_0_PURE",
+      "kind": "quantize_gguf",
+      "repo": "unsloth/functiongemma-270m-it-GGUF",
+      "revision": "1de0f7fc7cae0062012c2e91ef02e642c161aa57",
+      "bytes": 157537216,
+      "sha256": "361f4ab06943dc3a2f6d103e76fb3c793bea1e41196244bc6d706a6433faa01e",
+      "source": {
+        "file": "functiongemma-270m-it-BF16.gguf",
+        "bytes": 542847936,
+        "sha256": "2d9469b8ea30c0aaa73f4119ca52426acc2edbf34cda4847f11644f4d0cd0193"
+      },
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "shellper-gemma-pure",
+      "model_id": "shellper-gemma270",
+      "quant": "Q4_0_PURE",
+      "kind": "convert_hf",
+      "repo": "distil-labs/distil-gemma3-270m-SHELLper",
+      "revision": "d5a3e439693a6dc12b34c52c574897f801145559",
+      "bytes": 157537728,
+      "sha256": "7e5bf42e2096a811b504f3e6625e2fd63ec33a67363c72f9658375e88846f82b",
+      "hf_weights": {"model.safetensors": "41708244f07c6f0529ec66cb75bd58d17795f50e99228c700744d2bea68de848"},
+      "precision_source_sha256": "d48faf09d9f13cae7aa9836515c2597f2abba17373ac861e74e7d18b05726856",
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    },
+    {
+      "id": "shellminator-pure",
+      "model_id": "shellminator-270m",
+      "quant": "Q4_0_PURE",
+      "kind": "convert_hf",
+      "repo": "ISB369/shellminator-270m-bash-distilled",
+      "revision": "9717e95e1ab4b7ae748ac1afc8d5ccba0def45bb",
+      "bytes": 165727744,
+      "sha256": "ee5ad3b3143d1fd7e130cd7581bc4279757f9cca5240b70022a65b63f7adef21",
+      "hf_weights": {"model.safetensors": "2b04b2b5ce6495912d2c14c606311ce5df4cfeac758896a814c48f3fe329322d"},
+      "precision_source_sha256": "9249f1952e5a6809a6e95672b75b8d5583cbf860a8e86d6c15c286873c210520",
+      "request_sha256": "868d4cebdc3bdbe32ca61020e98dd93c98953d6bbb295fff757ff4982b4f3741"
+    }
+  ]
+}

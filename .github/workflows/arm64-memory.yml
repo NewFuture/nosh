@@ -2,6 +2,14 @@ name: ARM64 memory
 
 on:
   workflow_dispatch:
+    inputs:
+      experiment:
+        description: ARM experiment to run
+        type: choice
+        options: [memory, kv-cache]
+        default: memory
+
+run-name: ARM64 ${{ inputs.experiment || 'memory' }} @ ${{ github.ref_name }}
 
 concurrency:
   group: arm64-memory-${{ github.ref }}
@@ -19,6 +27,7 @@ env:
 
 jobs:
   memory:
+    if: inputs.experiment != 'kv-cache'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
@@ -83,4 +92,110 @@ jobs:
         with:
           name: arm64-memory-${{ github.sha }}
           path: target/arm64-memory
+          if-no-files-found: error
+
+  kv-cache:
+    if: inputs.experiment == 'kv-cache'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {case: granite-h350-q4km, hf: false}
+          - {case: gemma270-q4km, hf: false}
+          - {case: functiongemma-q4km, hf: false}
+          - {case: shellcue-q4km, hf: true}
+          - {case: shellper-gemma-q4km, hf: true}
+          - {case: shellminator-q4km, hf: true}
+          - {case: gemma270-pure, hf: false}
+          - {case: functiongemma-pure, hf: false}
+          - {case: shellper-gemma-pure, hf: true}
+          - {case: shellminator-pure, hf: true}
+    env:
+      KV_ROOT: ${{ github.workspace }}/target/kv-cache
+      KV_CASE: ${{ matrix.case }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: record runner and check benchmark
+        run: |
+          mkdir -p "$KV_ROOT/results"
+          {
+            git rev-parse HEAD
+            uname -a
+            lscpu
+            c++ --version
+            python3 --version
+          } > "$KV_ROOT/results/build-environment.txt"
+          python3 -m unittest eval.tests.test_kv_cache -q
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: fc343a84bbd925b37dde3219de35ea0bed50d630
+          path: target/kv-cache/llama.cpp
+          persist-credentials: false
+      - name: build pinned native CPU reference
+        timeout-minutes: 15
+        run: |
+          cmake -S "$KV_ROOT/llama.cpp" -B "$KV_ROOT/build" \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON \
+            -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_VULKAN=OFF \
+            -DGGML_BLAS=OFF -DGGML_CPU_KLEIDIAI=OFF -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            2>&1 | tee "$KV_ROOT/results/build.log"
+          cmake --build "$KV_ROOT/build" --parallel 2 \
+            --target llama-server llama-quantize 2>&1 | tee -a "$KV_ROOT/results/build.log"
+          cp "$KV_ROOT/build/CMakeCache.txt" "$KV_ROOT/results/CMakeCache.txt"
+          "$KV_ROOT/build/bin/llama-server" --version >> "$KV_ROOT/results/build-environment.txt" 2>&1
+      - name: install pinned HF conversion dependencies
+        if: matrix.hf
+        timeout-minutes: 10
+        run: |
+          python3 -m pip install --disable-pip-version-check -q -r eval/kv_cache_requirements.txt
+          python3 -m pip freeze > "$KV_ROOT/results/conversion-packages.txt"
+      - name: prepare and verify the exact x86 reference weight
+        timeout-minutes: 15
+        run: python3 -u -m eval.kv_cache prepare --root "$KV_ROOT" --case "$KV_CASE"
+      - name: two-core reversed-order f16 and q8 KV requests
+        timeout-minutes: 40
+        run: |
+          python3 -u -m eval.kv_cache run --root "$KV_ROOT" --case "$KV_CASE" --require-arm \
+            2>&1 | tee "$KV_ROOT/results/controller.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm-kv-${{ matrix.case }}-${{ github.run_id }}
+          path: target/kv-cache/results
+          retention-days: 7
+          if-no-files-found: error
+
+  kv-summary:
+    if: always() && inputs.experiment == 'kv-cache'
+    needs: kv-cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: arm-kv-*-${{ github.run_id }}
+          path: target/arm-kv-artifacts
+      - name: report complete and incomplete comparisons
+        run: python3 -m eval.kv_cache report --root target/arm-kv-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm-kv-summary-${{ github.run_id }}
+          path: |
+            target/arm-kv-artifacts/report.json
+            target/arm-kv-artifacts/report.md
+          retention-days: 7
           if-no-files-found: error

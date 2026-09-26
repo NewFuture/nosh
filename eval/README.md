@@ -110,3 +110,21 @@ cargo test -p nosh-cli --locked
 ```
 
 Python 自测用固定夹具、正反例和脚本化 PTY/CLI 子进程覆盖驱动、审批、超时、清理、判定和报告；Rust 回归覆盖观测转发及错误。它们可以进入现有 CI，但不能替代真实模型基线。`eval/results`、大日志和 Python 缓存忽略入库。
+
+## 可选 ARM64 KV 缓存实验
+
+`ARM64 memory` 工作流的手动输入 `experiment=kv-cache` 使用 `ubuntu-24.04-arm`，不运行上面的终端任务质量评测，也不更改 nosh 的默认模型或 KV 设置。默认 `experiment=memory` 保留原有 MiniCPM 内存验收。
+
+```bash
+gh workflow run arm64-memory.yml --ref YOUR_BRANCH -f experiment=kv-cache
+```
+
+`kv_cache_models.json` 固定此前 x86 补测的 10 个权重、HF 来源提交、最终 GGUF SHA-256 和输入请求指纹；运行时固定为 llama.cpp `fc343a84bbd925b37dde3219de35ea0bed50d630`。需要转换的模型只读取 safetensors 和 tokenizer 数据，不执行模型仓库的 Python；从高精度源转换后仍须匹配原权重 hash，跨架构转换不一致时明确失败，不能混用不同权重。
+
+每权重独立 CI job，最多并行 3 个 **不同 runner**；每个 job 内串行运行 f16→q8、q8→f16 两轮，每配置 3 次近 8K 输入＋128 token 输出。固定重排、batch 512／micro-batch 128、各 2 个推理线程，并把全部模型线程限制在两个拓扑不同的核心上；客户端避开它们及 SMT 兄弟线程。至少需要两个模型核心和另一个客户端 CPU。CPU 外部竞争门槛为 15%，逐次验证 affinity、token 数、完整流和进程全生命周期 RSS／swap；内存准入最低 2 GiB，仅用于这些小模型，不代表 2 GiB 整机部署承诺。
+
+每个 job 上限 90 分钟，其中构建 15、依赖 10、准备 15、测量 40 分钟分别限时，预留报告上传时间。竞争超标最多重试一次，原尝试保留；失败、超时或缺失配置不会算作完成，也不会用成功样本凑满分母。`kv-summary` 重新核对原始流、资源轨迹、实际参数和样本计算，汇总所有已产生的记录；是否完成实验与 q8 是否满足速度门槛是两回事，q8 变慢本身不导致 CI 失败。
+
+Artifacts 保留 7 天，包含 runner／编译信息、实际核心拓扑、来源 hash、命令、原始流、资源轨迹及总体／分轮比较；不上传模型权重。总体吞吐取每种 KV 的六次样本中位数，内存取两次进程峰值的较大值；两个速度比值都严格大于 0.95 才符合“损耗小于 5%”，另检查两轮是否一致。首个进程生成 tokenizer 提示缓存发生在吞吐测量前，不将其冷启动耗时与已有 x86 冷 TTFT 混比。
+
+这是固定参考引擎的 CPU 实测，不是 nosh 原生后端、GPU、质量评测或“大多数 ARM 芯片”的结论。新增运行器的轻量自测为 `python3 -m unittest eval.tests.test_kv_cache -v`。
