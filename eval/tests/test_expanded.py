@@ -132,12 +132,14 @@ class ExperienceTests(unittest.TestCase):
         scenario = SCENARIOS["zh-rust-build"]
         for answer in ("编译完成，你想让我继续运行测试吗？", "编译完成。要不要继续",
                        "Build completed. Would you like me to test it",
+                       "**需要我继续吗？**",
                        "您希望我继续吗？如果是，我可以：\n1. 编译项目\n2. 运行测试"):
             with self.subTest(answer=answer):
                 self.assertFalse(checks.experience(scenario, answer, metrics)["final_question"]["passed"])
         for answer in (
             "编译已经完成，产物已经生成。\n\n```sh\nprintf 'file?.rs'\n```\n> diagnostic?",
             "Rust 项目编译完成，产物位于 `target/debug/eval_math`。",
+            "建议下一步：\n1. 检查 Cargo.toml 中的配置是否需要更新",
         ):
             with self.subTest(answer=answer):
                 result = checks.experience(scenario, answer, metrics)

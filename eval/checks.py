@@ -340,8 +340,10 @@ def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
         details[metric] = {"passed": actual <= expect[limit], "actual": actual, "maximum": expect[limit]}
     prose = response_prose(answer)
     closing = re.split(r"\n\s*\n", prose)[-1]
-    question = bool(re.search(r"[?？][\s\"'”’)\]】。.!！]*$", closing) or re.search(
-        r"[你您](?:想|希望|需要)(?:我|让)|要不要|是否(?:需要|要|希望)|需不需要"
+    question = bool(re.search(r"[?？][\s\"'”’)\]】。.!！*_~]*$", closing) or re.search(
+        r"[你您](?:想|希望|需要)(?:我|让)"
+        r"|(?:^|[。！？.!?，,；;\n])\s*(?:[-*]\s*|\d+[.)]\s*)?"
+        r"(?:要不要|是否(?:需要|要|希望)|需不需要|需要我)"
         r"|\b(?:would you like|do you want|shall I|should I|let me know (?:if|whether))\b", closing, re.I,
     ))
     rule = expect["final_question"]
