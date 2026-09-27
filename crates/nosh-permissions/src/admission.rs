@@ -75,10 +75,15 @@ fn development(op: &Operation) -> bool {
     match base(op) {
         "cargo" => {
             known(1)
-                && matches!(
-                    sub,
-                    Some("build" | "check" | "test" | "bench" | "fmt" | "clippy")
-                )
+                && !args.iter().any(|arg| arg == "--fix")
+                && match sub {
+                    Some("fmt") => {
+                        op.known.iter().all(|known| *known)
+                            && args.iter().any(|arg| arg == "--check")
+                    }
+                    Some("build" | "check" | "test" | "bench" | "clippy") => true,
+                    _ => false,
+                }
         }
         "go" => known(1) && matches!(sub, Some("build" | "test" | "vet")),
         "npm" | "pnpm" | "yarn" => {

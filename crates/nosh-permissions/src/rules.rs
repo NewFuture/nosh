@@ -257,7 +257,9 @@ fn option_targets(args: &[Arg], short: Option<char>, long: &[&str]) -> Vec<Targe
             let (name, value) = rest
                 .split_once('=')
                 .map_or((rest, None), |(name, value)| (name, Some(value)));
-            if !long.contains(&name) {
+            // GNU tools accept unambiguous prefixes. Treat even an ambiguous
+            // nonempty prefix as a potential path effect, never as read-only.
+            if name.is_empty() || !long.iter().any(|option| option.starts_with(name)) {
                 continue;
             }
             value.map(|value| arg.value.len() - value.len())

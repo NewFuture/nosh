@@ -91,6 +91,8 @@ fn common_builds_are_an_explicit_convenience_exception() {
         "cargo test --workspace",
         "cargo check",
         "cargo clippy",
+        "cargo fmt --check",
+        "cargo fmt -- --check",
         "go build ./...",
         "go test ./...",
         "npm run build",
@@ -130,6 +132,9 @@ fn common_builds_are_an_explicit_convenience_exception() {
     for command in [
         "cargo run",
         "cargo publish",
+        "cargo fmt",
+        "cargo clippy --fix",
+        "cargo clippy --fix --allow-dirty",
         "npm run deploy",
         "make install",
         "python3 unknown.py",
@@ -1159,4 +1164,141 @@ fn touch_reference_is_an_independent_read_effect() {
         }
     }
     assert!(!dir.path().join("dest").exists());
+}
+
+#[test]
+fn abbreviated_path_options_are_not_treated_as_read_only() {
+    let (_dir, context) = fixture();
+    for (full, abbreviated) in [
+        (
+            "sort --output=/etc/file input",
+            "sort --out=/etc/file input",
+        ),
+        (
+            "sort --output /etc/file input",
+            "sort --out /etc/file input",
+        ),
+        (
+            "cp --target-directory=/etc input",
+            "cp --target-dir=/etc input",
+        ),
+        (
+            "curl --output=/etc/file https://example.invalid",
+            "curl --out=/etc/file https://example.invalid",
+        ),
+    ] {
+        let report = assess_command(abbreviated, &context);
+        let expected = assess_command(full, &context);
+        let paths = |report: &nosh_permissions::RiskReport| {
+            report
+                .operations
+                .iter()
+                .flat_map(|op| &op.paths)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(&report), paths(&expected), "{abbreviated}");
+        assert!(
+            matches!(
+                policy(abbreviated, Auto, &context, &UserRules::default()).decision,
+                Decision::Ask { .. }
+            ),
+            "{abbreviated}"
+        );
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("run_command".into()),
+                write_paths: vec!["/etc/**".into()],
+                ..RuleSpec::default()
+            },
+            "system writes",
+        )
+        .unwrap();
+        assert!(matches!(
+            policy(
+                abbreviated,
+                Yolo,
+                &context,
+                &UserRules {
+                    allow: vec![],
+                    deny: vec![rule]
+                }
+            )
+            .source,
+            DecisionSource::UserDeny(_)
+        ));
+    }
+}
+
+#[test]
+fn absolute_path_scopes_follow_root_aliases_but_not_escaping_children() {
+    let (dir, context) = fixture();
+    let actual = context.cwd.join("real");
+    std::fs::create_dir(&actual).unwrap();
+    std::fs::write(actual.join("file"), "fixture").unwrap();
+    let alias = context.cwd.join("alias");
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("file"), "outside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), actual.join("escape")).unwrap();
+    for pattern in [
+        format!("{}/**", alias.display()),
+        alias.join("file").to_string_lossy().into_owned(),
+    ] {
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("read_file".into()),
+                path: Some(pattern),
+                ..RuleSpec::default()
+            },
+            "aliased scope",
+        )
+        .unwrap();
+        for path in [actual.join("file"), alias.join("file")] {
+            let report = assess_read("read_file", &path, None, &context);
+            let allow = evaluate(
+                &report,
+                Confirm,
+                &UserRules {
+                    allow: vec![rule.clone()],
+                    deny: vec![],
+                },
+                &SessionAllowList::default(),
+            );
+            assert!(
+                matches!(allow.source, DecisionSource::UserAllow(_)),
+                "{allow:?}"
+            );
+            for mode in [Confirm, Auto, Yolo] {
+                let deny = evaluate(
+                    &report,
+                    mode,
+                    &UserRules {
+                        allow: vec![rule.clone()],
+                        deny: vec![rule.clone()],
+                    },
+                    &SessionAllowList::default(),
+                );
+                assert!(
+                    matches!(deny.source, DecisionSource::UserDeny(_)),
+                    "{deny:?}"
+                );
+            }
+        }
+        let report = assess_read("read_file", &alias.join("escape/file"), None, &context);
+        let result = evaluate(
+            &report,
+            Confirm,
+            &UserRules {
+                allow: vec![rule],
+                deny: vec![],
+            },
+            &SessionAllowList::default(),
+        );
+        assert!(
+            !matches!(result.source, DecisionSource::UserAllow(_)),
+            "{result:?}"
+        );
+    }
+    assert!(dir.path().exists());
 }

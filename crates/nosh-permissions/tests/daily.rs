@@ -184,6 +184,7 @@ fn convenience_first_on_daily_commands() {
             && !matches!(
                 *cmd,
                 "cargo run"
+                    | "cargo fmt"
                     | "cargo run -- --help"
                     | "RUST_LOG=debug cargo run"
                     | "./target/debug/app --help"

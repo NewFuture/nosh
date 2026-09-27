@@ -38,6 +38,7 @@ struct PathPattern {
     text: String,
     glob: GlobMatcher,
     home: Option<std::path::PathBuf>,
+    absolute_root: Option<std::path::PathBuf>,
 }
 
 impl PathPattern {
@@ -56,6 +57,18 @@ impl PathPattern {
         {
             return Err("path patterns cannot traverse '..'; use an absolute or ~/ pattern".into());
         }
+        let (absolute_root, pattern) = if Path::new(pattern).is_absolute() {
+            let cut = pattern.find(['*', '?', '[', '{']);
+            let root_end = cut.map_or(pattern.len(), |cut| {
+                pattern[..cut].rfind('/').unwrap_or(0) + 1
+            });
+            (
+                Some(std::path::PathBuf::from(&pattern[..root_end])),
+                &pattern[root_end..],
+            )
+        } else {
+            (None, pattern)
+        };
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
             .backslash_escape(true)
@@ -70,14 +83,15 @@ impl PathPattern {
             text: text.into(),
             glob,
             home,
+            absolute_root,
         })
     }
 
     fn matches(&self, path: &Path, ctx: &Context) -> bool {
         let base = if self.text.starts_with("~/") {
             self.home.as_deref()
-        } else if Path::new(&self.text).is_absolute() {
-            return self.glob.is_match(path);
+        } else if let Some(root) = &self.absolute_root {
+            Some(root.as_path())
         } else {
             Some(ctx.workspace.as_path())
         };
