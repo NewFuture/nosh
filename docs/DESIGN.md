@@ -512,7 +512,7 @@ for step in 1..=max_steps (默认 10):
 
 ### 5.4 Prompt
 
-初始 system 在同一对话内保持稳定，Available 分组、Rules 保留通用约束；动态背景用独立 System，原始请求用 User。动态 System 正文按普通文本编码，不允许注入特殊 token。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
+初始 system 在同一对话内保持稳定，Available 分组、Rules 保留通用约束；动态背景用独立 System，原始请求用 User。动态 System 正文按普通文本编码，README／AGENTS 正文另以 `untrusted_text` 标为外部输入。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
 
 上下文格式、项目发现、AGENTS/README 加载、缓存与保护边界统一见 [Project context 设计](PROJECT-CONTEXT.md)。实际 system 文本以 [prompt.rs](../crates/nosh-core/src/prompt.rs) 为准，不在多处复制规则全文。
 
