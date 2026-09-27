@@ -21,7 +21,7 @@ pub use backend::{
 };
 pub use repl::{AiHandler, AiOutcome, AiRequest, Badge, OnFailure, ReplConfig};
 pub use trigger::{Trigger, TriggerConfig};
-pub use user_output::{CaptureUserOutput, OutputState, OutputUnavailable, UserOutput};
+pub use user_output::{CaptureOutput, OutputState, OutputUnavailable, UserOutput};
 
 /// The shell operations the harness relies on (design §3.4).
 pub trait ShellBackend {

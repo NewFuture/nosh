@@ -1929,6 +1929,7 @@ dependencies = [
  "brush-core",
  "brush-parser",
  "crossterm",
+ "filedescriptor",
  "libc",
  "nosh-hub",
  "nu-ansi-term",

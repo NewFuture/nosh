@@ -63,16 +63,16 @@ def load_suite(path: Path) -> dict:
         fields = {"id", "title", "mode", "fixture", "inputs", "input",
                   "corrections", "stdin_command", "approval", "check"}
         if suite["schema_version"] == 2:
-            fields |= {"group", "expect", "completions", "capture_user_output"}
+            fields |= {"group", "expect", "completions", "capture_output"}
         if set(scenario) - fields:
             raise ValueError("unknown scenario fields")
-        capture = scenario.get("capture_user_output", "off")
-        if capture not in ("off", "last"):
-            raise ValueError("capture_user_output must be off or last")
+        capture = scenario.get("capture_output")
+        if "capture_output" in scenario and capture not in ("off", "last"):
+            raise ValueError("capture_output must be off or last")
         if capture == "last" and scenario.get("mode") != "repl":
             raise ValueError("user output capture requires REPL mode")
         if scenario.get("check") == "captured-failure" and capture != "last":
-            raise ValueError("captured failure diagnosis requires capture_user_output=last")
+            raise ValueError("captured failure diagnosis requires capture_output=last")
         sid = scenario.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid) or sid in ids:
             raise ValueError(f"invalid/duplicate scenario id: {sid}")

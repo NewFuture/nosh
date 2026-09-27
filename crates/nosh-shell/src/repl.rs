@@ -362,7 +362,7 @@ fn ask(
             Trigger::Failed { .. } => failed
                 .as_ref()
                 .is_some_and(|command| command.id == output.command_id),
-            Trigger::Hash | Trigger::Builtin => true,
+            Trigger::Hash | Trigger::Builtin | Trigger::ParseError | Trigger::NotFound => true,
             _ => false,
         })
         .cloned();

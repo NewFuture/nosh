@@ -109,7 +109,7 @@ fn capture_configuration_preserves_noninteractive_and_unavailable_paths() {
     let home = empty_home("capture");
     std::fs::write(
         home.join("config.toml"),
-        "[shell]\ncapture_user_output = \"last\"\n",
+        "[shell]\ncapture_output = \"last\"\n",
     )
     .unwrap();
     let out = nosh()
@@ -130,7 +130,7 @@ fn capture_configuration_preserves_noninteractive_and_unavailable_paths() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("continuing without capture"));
     std::fs::write(
         home.join("config.toml"),
-        "[shell]\ncapture_user_output = \"off\"\n",
+        "[shell]\ncapture_output = \"off\"\n",
     )
     .unwrap();
     let direct = nosh()

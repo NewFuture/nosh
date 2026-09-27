@@ -10,13 +10,13 @@ pub const OUTPUT_BYTES: usize = 4096;
 pub const METADATA_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CaptureUserOutput {
-    #[default]
+pub enum CaptureOutput {
     Off,
+    #[default]
     Last,
 }
 
-impl CaptureUserOutput {
+impl CaptureOutput {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "off" => Some(Self::Off),

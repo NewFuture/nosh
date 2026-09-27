@@ -12,7 +12,7 @@ use brush_core::{ExecutionControlFlow, ShellVariable, SourceInfo};
 
 use crate::procs;
 use crate::user_output::Utf8Decoder;
-use crate::{CaptureUserOutput, OutputState, OutputUnavailable, UserOutput, pty};
+use crate::{CaptureOutput, OutputState, OutputUnavailable, UserOutput, pty};
 
 pub type BrushShell = brush_core::Shell;
 
@@ -319,7 +319,7 @@ pub struct EmbeddedShell {
     interrupts: Arc<Interrupts>,
     recent: Vec<UserCommand>,
     next_command_id: u64,
-    capture_mode: CaptureUserOutput,
+    capture_mode: CaptureOutput,
     capture_control: Option<pty::Control>,
     last_output: Option<UserOutput>,
     path_cache: Option<(String, Arc<Vec<String>>)>,
@@ -376,7 +376,7 @@ impl EmbeddedShell {
             interrupts: Arc::new(Interrupts::default()),
             recent: Vec::new(),
             next_command_id: 1,
-            capture_mode: CaptureUserOutput::Off,
+            capture_mode: CaptureOutput::Off,
             capture_control: None,
             last_output: None,
             path_cache: None,
@@ -435,11 +435,7 @@ impl EmbeddedShell {
         &self.recent
     }
 
-    pub fn configure_output_capture(
-        &mut self,
-        mode: CaptureUserOutput,
-        control: Option<pty::Control>,
-    ) {
+    pub fn configure_output_capture(&mut self, mode: CaptureOutput, control: Option<pty::Control>) {
         self.capture_mode = mode;
         self.capture_control = control;
         self.last_output = None;
@@ -620,7 +616,7 @@ impl EmbeddedShell {
         let ints = self.interrupts.clone();
         let ints_at_start = ints.count();
         let interactive = self.interactive;
-        let control = (self.capture_mode == CaptureUserOutput::Last)
+        let control = (self.capture_mode == CaptureOutput::Last)
             .then(|| self.capture_control.clone())
             .flatten();
         let mut capture_started = false;
@@ -724,7 +720,7 @@ impl EmbeddedShell {
             exit: code,
             duration,
         };
-        let mut output = if self.capture_mode == CaptureUserOutput::Off {
+        let mut output = if self.capture_mode == CaptureOutput::Off {
             UserOutput::unavailable(&command, OutputState::NotCaptured)
         } else if let Some(control) = control {
             if capture_started {

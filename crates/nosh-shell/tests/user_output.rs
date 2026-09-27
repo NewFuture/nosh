@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use nosh_shell::pty::{Control, SessionPty, Snapshot};
 use nosh_shell::repl::{GuardChoice, Pipeline, ReplUi};
 use nosh_shell::{
-    AgentExecOpts, AiHandler, AiOutcome, AiRequest, Badge, CaptureUserOutput, EmbeddedShell,
-    NullSink, OutputState, OutputUnavailable, ReplConfig, ShellOptions,
+    AgentExecOpts, AiHandler, AiOutcome, AiRequest, Badge, CaptureOutput, EmbeddedShell, NullSink,
+    OutputState, OutputUnavailable, ReplConfig, ShellOptions,
 };
 
 const ROLE: &str = "NOSH_PTY_TEST_ROLE";
@@ -58,6 +58,13 @@ fn pty_probe() {
     let Ok(role) = std::env::var(ROLE) else {
         return;
     };
+    if role == "no-tty" {
+        assert!(
+            nosh_shell::term::flush_input().is_err(),
+            "missing controlling tty must fail closed"
+        );
+        return;
+    }
     if role == "relay" {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", "pty_probe", "--nocapture", "--test-threads=1"]);
@@ -173,7 +180,7 @@ fn pty_probe() {
             assert!(out.truncated);
         }
         "evidence" => {
-            shell.configure_output_capture(CaptureUserOutput::Last, Some(control.clone()));
+            shell.configure_output_capture(CaptureOutput::Last, Some(control.clone()));
             std::fs::write("calls", "0").unwrap();
             std::fs::write(
                 "once.sh",
@@ -192,19 +199,24 @@ fn pty_probe() {
             assert_eq!(output.text, "ONCE_ERROR: missing REGION\n");
             assert_eq!(std::fs::read_to_string("calls").unwrap(), "1");
             let first_id = output.command_id;
+            pipeline.process(&mut shell, &mut ai, &mut QuietUi, "帮我解释刚才的输出");
+            let prose = ai.0.last().unwrap().user_output.as_ref().unwrap();
+            assert_eq!(prose.command_id, first_id);
+            assert!(prose.text.contains("ONCE_ERROR"));
 
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "sh -c 'exit 17'");
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "#");
-            let empty = ai.0[1].user_output.as_ref().unwrap();
+            let empty = ai.0.last().unwrap().user_output.as_ref().unwrap();
             assert_eq!(empty.state, OutputState::Captured);
             assert_eq!(empty.observed_bytes, Some(0));
             assert!(empty.text.is_empty());
             assert_eq!(empty.command_id, first_id + 1);
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "echo )");
-            assert!(
-                ai.0.last().unwrap().user_output.is_none(),
-                "parse errors did not execute a new command"
-            );
+            let parse_error = ai.0.last().unwrap();
+            assert!(parse_error.failed.is_none());
+            let previous = parse_error.user_output.as_ref().unwrap();
+            assert_eq!(previous.command_id, first_id + 1);
+            assert_eq!(previous.command, "sh -c 'exit 17'");
             for command in ["printf '' | grep -q absent", "sh -c 'exit 130'"] {
                 pipeline.process(&mut shell, &mut ai, &mut QuietUi, command);
                 assert!(pipeline.last_failure().is_none());
@@ -227,13 +239,13 @@ fn pty_probe() {
             shell.run_user_line("mkdir next; cd next");
             assert_eq!(shell.last_user_output().unwrap().cwd, cwd.to_string_lossy());
 
-            shell.configure_output_capture(CaptureUserOutput::Off, None);
+            shell.configure_output_capture(CaptureOutput::Off, None);
             shell.run_user_line("printf ''");
             assert_eq!(
                 shell.last_user_output().unwrap().state,
                 OutputState::NotCaptured
             );
-            shell.configure_output_capture(CaptureUserOutput::Last, None);
+            shell.configure_output_capture(CaptureOutput::Last, None);
             shell.run_user_line("printf ''");
             assert_eq!(
                 shell.last_user_output().unwrap().state,
@@ -429,4 +441,24 @@ fn captured_failures_are_not_rerun_or_assigned_to_new_commands() {
 #[test]
 fn approval_flush_discards_relay_typeahead() {
     run_probe("flush");
+}
+
+#[test]
+fn approval_flush_rejects_a_missing_controlling_terminal() {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "pty_probe", "--nocapture", "--test-threads=1"])
+        .env(ROLE, "no-tty")
+        .stdin(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and gives this probe no controlling tty.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
 }

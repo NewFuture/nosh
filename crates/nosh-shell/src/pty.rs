@@ -243,6 +243,17 @@ impl SessionPty {
         if &hello != HELLO {
             return Err(protocol("invalid PTY host handshake"));
         }
+        // Validate readiness support before releasing the host to run rc files.
+        let mut descriptors = [
+            pollfd(
+                session.terminal.file.as_raw_fd(),
+                libc::POLLIN | libc::POLLOUT,
+            ),
+            pollfd(session.master.as_raw_fd(), libc::POLLIN | libc::POLLOUT),
+            pollfd(session.socket.as_raw_fd(), libc::POLLIN),
+            pollfd(session.signals.reader.as_raw_fd(), libc::POLLIN),
+        ];
+        wait_io(&mut descriptors, Some(Duration::ZERO))?;
         session.terminal.raw()?;
         nonblocking(session.master.as_raw_fd())?;
         session.socket.set_nonblocking(true)?;
@@ -388,27 +399,16 @@ impl SessionPty {
                 ),
                 pollfd(self.signals.reader.as_raw_fd(), libc::POLLIN),
             ];
-            // SAFETY: poll only mutates the live descriptor array.
             let timeout = if boundary.is_some() {
-                DRAIN_TIMEOUT
-                    .saturating_sub(boundary_started.elapsed())
-                    .as_millis()
-                    .min(i32::MAX as u128) as i32
+                Some(DRAIN_TIMEOUT.saturating_sub(boundary_started.elapsed()))
             } else {
-                -1
+                None
             };
-            let result = unsafe {
-                libc::poll(
-                    descriptors.as_mut_ptr(),
-                    descriptors.len() as libc::nfds_t,
-                    timeout,
-                )
-            };
-            if result < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            if let Err(error) = wait_io(&mut descriptors, timeout) {
+                if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(io::Error::last_os_error());
+                return Err(error);
             }
             if descriptors[3].revents != 0 {
                 for signal in self.signals.pending()? {
@@ -723,6 +723,36 @@ fn pollfd(fd: RawFd, events: i16) -> libc::pollfd {
     }
 }
 
+fn wait_io(descriptors: &mut [libc::pollfd; 4], timeout: Option<Duration>) -> io::Result<()> {
+    // Like crossterm's use-dev-tty backend, use select on macOS: Darwin poll
+    // reports POLLNVAL for /dev/tty. Its select adapter rejects negative fds.
+    let mut active = std::array::from_fn::<_, 4, _>(|_| pollfd(-1, 0));
+    let mut indices = [0; 4];
+    let mut count = 0;
+    for (index, descriptor) in descriptors.iter_mut().enumerate() {
+        descriptor.revents = 0;
+        if descriptor.fd >= 0 && descriptor.events != 0 {
+            active[count] = *descriptor;
+            indices[count] = index;
+            count += 1;
+        }
+    }
+    filedescriptor::poll(&mut active[..count], timeout).map_err(|error| match error {
+        filedescriptor::Error::Io(error) | filedescriptor::Error::Poll(error) => error,
+        error => io::Error::other(error),
+    })?;
+    for index in 0..count {
+        if active[index].revents & libc::POLLNVAL != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid relay descriptor",
+            ));
+        }
+        descriptors[indices[index]].revents = active[index].revents;
+    }
+    Ok(())
+}
+
 fn protocol(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -743,6 +773,21 @@ mod tests {
     fn inactive_descriptors_cannot_spin_on_hangup() {
         assert_eq!(pollfd(4, 0).fd, -1);
         assert_eq!(pollfd(4, libc::POLLIN).fd, 4);
+    }
+
+    #[test]
+    fn readiness_handles_sockets_and_disabled_entries() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"x").unwrap();
+        let mut descriptors = [
+            pollfd(-1, 0),
+            pollfd(reader.as_raw_fd(), libc::POLLIN),
+            pollfd(-1, 0),
+            pollfd(-1, 0),
+        ];
+        wait_io(&mut descriptors, Some(Duration::from_secs(1))).unwrap();
+        assert_ne!(descriptors[1].revents & libc::POLLIN, 0);
+        assert_eq!(descriptors[0].revents, 0);
     }
 
     #[test]

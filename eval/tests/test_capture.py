@@ -19,22 +19,22 @@ class CaptureEvaluationTests(unittest.TestCase):
         self.data = suite.load_suite(run.HERE / "scenarios.json")
         self.scenario = next(s for s in self.data["scenarios"] if s["check"] == "captured-failure")
 
-    def test_only_the_new_capture_scenario_enables_capture(self):
+    def test_binary_defaults_and_explicit_capture_overrides_are_distinct(self):
         for scenario in self.data["scenarios"]:
-            expected = "last" if scenario["check"] == "captured-failure" else "off"
-            self.assertEqual(scenario.get("capture_user_output", "off"), expected)
-        for mode in ("off", "last"):
-            home = self.base / mode
+            expected = "last" if scenario["check"] == "captured-failure" else None
+            self.assertEqual(scenario.get("capture_output"), expected)
+        for mode in ("off", "last", None):
+            home = self.base / (mode or "default")
             home.mkdir()
-            env = run.environment(home, 1, None, capture_user_output=mode)
+            env = run.environment(home, 1, None, capture_output=mode)
             config = tomllib.loads((Path(env["NOSH_HOME"]) / "config.toml").read_text())
-            self.assertEqual(config.get("shell", {}).get("capture_user_output", "off"), mode)
-            if mode == "off":
-                self.assertNotIn("shell", config, "legacy builds must not see an unknown capture key")
+            self.assertEqual(config.get("shell", {}).get("capture_output"), mode)
+            if mode is None:
+                self.assertNotIn("shell", config, "binary defaults must not be silently overridden")
 
     def test_invalid_capture_settings_and_missing_initial_failure_are_rejected(self):
-        for change in ({"capture_user_output": "all"}, {"capture_user_output": True},
-                       {"capture_user_output": "off"}, {"capture_user_output": None},
+        for change in ({"capture_output": "all"}, {"capture_output": True},
+                       {"capture_output": "off"}, {"capture_output": None},
                        {"completions": [{"kind": "agent"}, {"kind": "agent"}]}):
             data = copy.deepcopy(self.data)
             data["scenarios"] = [dict(self.scenario, **change)]

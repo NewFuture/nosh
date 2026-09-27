@@ -81,9 +81,9 @@ def discover_tools(scenarios: list[dict]) -> dict:
 
 
 def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None,
-                capture_user_output: str = "off") -> dict[str, str]:
-    if capture_user_output not in ("off", "last"):
-        raise ValueError("capture_user_output must be off or last")
+                capture_output: str | None = None) -> dict[str, str]:
+    if capture_output not in (None, "off", "last"):
+        raise ValueError("capture_output must be off or last")
     env = fixtures.project_environment(home, tools)
     env.update({
         "NOSH_HOME": str(home / "nosh"),
@@ -94,7 +94,7 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
     })
     config = home / "nosh"
     config.mkdir(mode=0o700)
-    shell_config = '[shell]\ncapture_user_output = "last"\n' if capture_user_output == "last" else ""
+    shell_config = f'[shell]\ncapture_output = "{capture_output}"\n' if capture_output is not None else ""
     (config / "config.toml").write_text(
         shell_config + '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
         '[model]\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
@@ -151,6 +151,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),
         "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
+                     "capture_output": "binary_default",
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",
                      "path": "<trial-home>/bin:/usr/bin:/bin", "tty_size": [40, 160], "process_per_trial": True,
@@ -177,7 +178,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         root, home, facts = workspace.prepare(scenario)
         trace = home.parent / "engine.jsonl"
         env = environment(home, args.threads, None if args.legacy else trace, workspace.tools,
-                          capture_user_output=scenario.get("capture_user_output", "off"))
+                          capture_output=scenario.get("capture_output"))
         if scenario["check"] in NATIVE_CHECKS:
             facts["tools"] = workspace.tools
         if scenario["check"] == "versions":

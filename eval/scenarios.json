@@ -309,7 +309,7 @@
       "title": "Explain the original one-shot diagnostic without rerunning",
       "mode": "repl",
       "fixture": "one-shot-failure",
-      "capture_user_output": "last",
+      "capture_output": "last",
       "inputs": ["python3 once.py", "# 解释刚才的错误，引用错误编号，并说明修复方法。不要重跑程序。"],
       "completions": [{"kind": "shell", "exit_code": 17, "contains": ["CAPTURE-", "REGION is unset"]}, {"kind": "agent"}],
       "group": "expanded",

@@ -139,7 +139,7 @@ fn main() {
     if control.is_none()
         && interactive_config
             .as_ref()
-            .is_some_and(|c| c.capture_user_output == nosh_shell::CaptureUserOutput::Last)
+            .is_some_and(|c| c.capture_output == nosh_shell::CaptureOutput::Last)
     {
         let relay = std::env::current_exe().and_then(|exe| {
             use std::os::unix::process::CommandExt;
@@ -268,7 +268,7 @@ fn run_shell(
         Ok(s) => s,
         Err(c) => return c,
     };
-    shell.configure_output_capture(cfg.capture_user_output, control);
+    shell.configure_output_capture(cfg.capture_output, control);
     // Ctrl-C stops a model download (the partial file is kept).
     shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);

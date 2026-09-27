@@ -13,7 +13,11 @@ fn probe(mode: &str, unavailable: bool) {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
-        format!("[shell]\ncapture_user_output = \"{mode}\"\n"),
+        if mode == "default" {
+            String::new()
+        } else {
+            format!("[shell]\ncapture_output = \"{mode}\"\n")
+        },
     )
     .unwrap();
     std::fs::write(home.path().join(".bashrc"),
@@ -146,7 +150,7 @@ fn probe(mode: &str, unavailable: bool) {
     let text = String::from_utf8_lossy(&output);
     assert!(status.success(), "{status}: {text}");
     let shell_pid = shell_pid.unwrap_or_else(|| panic!("missing shell identity: {text}"));
-    assert_eq!(shell_pid != pid, mode == "last" && !unavailable, "{text}");
+    assert_eq!(shell_pid != pid, mode != "off" && !unavailable, "{text}");
     assert_eq!(
         text.contains("continuing without capture"),
         unavailable,
@@ -168,5 +172,6 @@ fn probe(mode: &str, unavailable: bool) {
 fn capture_setting_selects_the_session_relay_and_preserves_rc_and_environment() {
     probe("off", false);
     probe("last", false);
-    probe("last", true);
+    probe("default", false);
+    probe("default", true);
 }
