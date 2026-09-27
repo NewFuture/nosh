@@ -445,7 +445,10 @@ pub(crate) fn relative_path(path: &Path, cwd: &Path) -> std::path::PathBuf {
     let mut prefix = std::path::PathBuf::new();
     for ancestor in cwd.ancestors() {
         if let Ok(tail) = path.strip_prefix(ancestor) {
-            return prefix.join(tail);
+            if !tail.as_os_str().is_empty() {
+                prefix.push(tail);
+            }
+            return prefix;
         }
         prefix.push("..");
     }
