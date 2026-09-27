@@ -53,6 +53,7 @@ struct Request {
     text: String,
     generation: u64,
     session: Arc<SessionState>,
+    options: Arc<ParserOptions>,
 }
 
 struct ResultState {
@@ -88,6 +89,7 @@ struct LexCache {
 pub(super) struct InputFeedback {
     shared: Arc<Shared>,
     session: Arc<SessionState>,
+    options: Arc<ParserOptions>,
     generation: u64,
     prefix: String,
     ai_enabled: bool,
@@ -97,7 +99,12 @@ pub(super) struct InputFeedback {
 }
 
 impl InputFeedback {
-    pub(super) fn new(session: SessionState, cfg: &TriggerConfig, colors: bool) -> Self {
+    pub(super) fn new(
+        session: SessionState,
+        options: ParserOptions,
+        cfg: &TriggerConfig,
+        colors: bool,
+    ) -> Self {
         let shared = Arc::new(Shared {
             work: Mutex::new(Work::default()),
             wake: Condvar::new(),
@@ -122,6 +129,7 @@ impl InputFeedback {
         Self {
             shared,
             session: Arc::new(session),
+            options: Arc::new(options),
             generation: 0,
             prefix: cfg.ai_prefix.clone(),
             ai_enabled: cfg.ai_enabled,
@@ -131,9 +139,10 @@ impl InputFeedback {
         }
     }
 
-    pub(super) fn refresh(&mut self, session: SessionState) {
+    pub(super) fn refresh(&mut self, session: SessionState, options: ParserOptions) {
         self.generation = self.generation.wrapping_add(1);
         self.session = Arc::new(session);
+        self.options = Arc::new(options);
         if let Ok(mut work) = self.shared.work.try_lock() {
             work.result = None;
             work.latest = None;
@@ -256,6 +265,7 @@ impl InputFeedback {
                 text: line.to_owned(),
                 generation: self.generation,
                 session: self.session.clone(),
+                options: self.options.clone(),
             });
             self.shared.wake.notify_one();
         }
@@ -345,12 +355,13 @@ fn lex(line: &str) -> Vec<Span> {
                     previous.is_whitespace() || ";|&(){}".contains(previous)
                 }))
         {
+            i = line[i..].find('\n').map_or(line.len(), |offset| i + offset);
             spans.push(Span {
                 start,
-                end: line.len(),
+                end: i,
                 kind: Kind::Comment,
             });
-            break;
+            continue;
         }
         if "|&;<>(){}".contains(c) {
             i += c.len_utf8();
@@ -491,8 +502,10 @@ fn run_worker(shared: Arc<Shared>, analysis: impl Fn(&Request) -> ResultState) {
                     break;
                 }
             }
+            let Some(request) = work.latest.take() else {
+                continue;
+            };
             work.started = Some(Instant::now());
-            let request = work.latest.take().unwrap();
             work.active = Some((request.text.clone(), request.generation));
             request
         };
@@ -518,7 +531,7 @@ fn analyze(request: &Request) -> ResultState {
     } else {
         Status::Ready
     };
-    let mut parser = Parser::new(text.as_bytes(), &ParserOptions::default());
+    let mut parser = Parser::new(text.as_bytes(), &request.options);
     match parser.parse_program() {
         Err(e) if trigger::is_incomplete(&e) => status = Status::Pending("unfinished shell syntax"),
         Err(e) => {
@@ -547,11 +560,15 @@ fn analyze(request: &Request) -> ResultState {
         }
         Ok(_) => {}
     }
+    if text.contains("<<") && matches!(status, Status::Ready) {
+        status = Status::Unknown("here-document contents need shell context");
+    }
     if matches!(status, Status::Ready) {
         let words = lex(text);
         let dynamic = text.contains("$(")
             || text.contains('`')
             || text.contains("PATH=")
+            || text.contains([';', '\n', '|', '&'])
             || text.contains("function ")
             || text.contains("()")
             || ["eval ", "alias ", "unalias ", "source ", ". ", "enable "]
@@ -574,13 +591,19 @@ fn analyze(request: &Request) -> ResultState {
                         value,
                         "if" | "then"
                             | "else"
+                            | "elif"
                             | "fi"
                             | "for"
+                            | "in"
                             | "do"
                             | "done"
                             | "while"
+                            | "until"
+                            | "select"
                             | "case"
                             | "esac"
+                            | "time"
+                            | "coproc"
                     )
                 {
                     continue;
@@ -688,6 +711,7 @@ mod tests {
                 shutdown: AtomicBool::new(false),
             }),
             session: Arc::new(SessionState::default()),
+            options: Arc::new(ParserOptions::default()),
             generation: 0,
             prefix: "#".into(),
             ai_enabled: true,
@@ -708,8 +732,12 @@ mod tests {
             for span in lex(line) {
                 assert!(line.is_char_boundary(span.start) && line.is_char_boundary(span.end));
             }
-            let feedback =
-                InputFeedback::new(SessionState::default(), &TriggerConfig::default(), true);
+            let feedback = InputFeedback::new(
+                SessionState::default(),
+                ParserOptions::default(),
+                &TriggerConfig::default(),
+                true,
+            );
             let rendered = feedback.highlight(line, 0);
             assert_eq!(
                 rendered
@@ -722,11 +750,21 @@ mod tests {
         }
         assert!(lex("echo 'abc").iter().any(|s| s.kind == Kind::Pending));
         assert!(lex("echo x |").iter().any(|s| s.kind == Kind::Pending));
+        let multiline = "echo ok # note\nnot_a_command_xyz";
+        let spans = lex(multiline);
+        let last = spans.last().unwrap();
+        assert_eq!(&multiline[last.start..last.end], "not_a_command_xyz");
+        assert_eq!(last.kind, Kind::Command);
     }
 
     #[test]
     fn stale_results_and_over_budget_input_are_not_used() {
-        let feedback = InputFeedback::new(SessionState::default(), &TriggerConfig::default(), true);
+        let feedback = InputFeedback::new(
+            SessionState::default(),
+            ParserOptions::default(),
+            &TriggerConfig::default(),
+            true,
+        );
         assert!(matches!(
             feedback.feedback(&"x".repeat(MAX_INPUT + 1)).1,
             Status::Unavailable(_)
@@ -751,6 +789,7 @@ mod tests {
                 text: s.into(),
                 generation: 0,
                 session: Arc::new(session.clone()),
+                options: Arc::new(ParserOptions::default()),
             })
         };
         assert!(matches!(
@@ -780,6 +819,18 @@ mod tests {
         ));
         assert!(matches!(
             check("alias new=echo; new").status,
+            Status::Unknown(_)
+        ));
+        assert!(matches!(
+            check("cat <<EOF\nnot_a_command_xyz\nEOF\n").status,
+            Status::Unknown(_)
+        ));
+        assert!(matches!(
+            check("cd dir; ./script").status,
+            Status::Unknown(_)
+        ));
+        assert!(matches!(
+            check("chmod +x ./script && ./script").status,
             Status::Unknown(_)
         ));
     }
@@ -812,7 +863,7 @@ mod tests {
     #[test]
     fn session_generation_rejects_stale_results() {
         let mut feedback = without_worker();
-        feedback.refresh(SessionState::default());
+        feedback.refresh(SessionState::default(), ParserOptions::default());
         {
             let mut work = feedback.shared.work.lock().unwrap();
             work.result = Some(ResultState {
@@ -885,6 +936,27 @@ mod tests {
         ));
         drop(feedback);
         release_tx.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn refresh_during_coalescing_does_not_terminate_worker() {
+        let mut feedback = without_worker();
+        let shared = feedback.shared.clone();
+        let worker = std::thread::spawn(move || run_worker(shared, analyze));
+        assert!(matches!(feedback.feedback("echo old").1, Status::Querying));
+        std::thread::sleep(Duration::from_millis(5));
+        let mut session = SessionState::default();
+        session.builtins.insert("echo".into());
+        feedback.refresh(session, ParserOptions::default());
+        std::thread::sleep(COALESCE_DELAY * 2);
+        let limit = Instant::now() + Duration::from_secs(2);
+        while matches!(feedback.feedback("echo new").1, Status::Querying) && Instant::now() < limit
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(feedback.feedback("echo new").1, Status::Ready));
+        drop(feedback);
         worker.join().unwrap();
     }
 }

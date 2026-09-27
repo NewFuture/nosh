@@ -774,6 +774,9 @@ fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> (Reedline, Arc<Mutex
     }
     let feedback = Arc::new(Mutex::new(InputFeedback::new(
         shell.snapshot(),
+        sh.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .parser_options(),
         &cfg.trigger,
         colors,
     )));
@@ -871,7 +874,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         if let Some(feedback) = &feedback
             && let Ok(mut feedback) = feedback.try_lock()
         {
-            feedback.refresh(shell.snapshot());
+            feedback.refresh(
+                shell.snapshot(),
+                validator
+                    .shell
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .parser_options(),
+            );
         }
         let prompt = ReplPrompt::build(shell, &ai.badge(), feedback.clone());
         let initial = prefill.take().unwrap_or_default();
