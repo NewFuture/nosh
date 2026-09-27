@@ -1,5 +1,6 @@
 //! Advisory input feedback. The editor never waits for parsing or filesystem I/O.
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ const MAX_TOKENS: usize = 256;
 const MAX_DEPTH: usize = 32;
 const MAX_PATH_DIRS: usize = 32;
 const QUERY_TIMEOUT: Duration = Duration::from_millis(150);
+const COALESCE_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -72,6 +74,13 @@ struct Work {
 struct Shared {
     work: Mutex<Work>,
     wake: Condvar,
+    shutdown: AtomicBool,
+}
+
+struct LexCache {
+    text: String,
+    spans: Vec<Span>,
+    status: Option<Status>,
 }
 
 /// One worker per editor, one replaceable request, one result. A blocked worker
@@ -83,7 +92,7 @@ pub(super) struct InputFeedback {
     prefix: String,
     ai_enabled: bool,
     colors: bool,
-    cache: Mutex<Option<(String, Vec<Span>)>>,
+    cache: Mutex<Option<LexCache>>,
     display: Mutex<Status>,
 }
 
@@ -92,13 +101,18 @@ impl InputFeedback {
         let shared = Arc::new(Shared {
             work: Mutex::new(Work::default()),
             wake: Condvar::new(),
+            shutdown: AtomicBool::new(false),
         });
-        let worker = shared.clone();
         // Never create a replacement worker if parsing or metadata blocks.
-        let spawned = std::thread::Builder::new()
-            .name("nosh-input-feedback".into())
-            .spawn(move || run_worker(worker));
-        if spawned.is_err() {
+        let spawned = colors
+            && std::thread::Builder::new()
+                .name("nosh-input-feedback".into())
+                .spawn({
+                    let worker = shared.clone();
+                    move || run_worker(worker, analyze)
+                })
+                .is_ok();
+        if !spawned {
             shared
                 .work
                 .lock()
@@ -134,14 +148,20 @@ impl InputFeedback {
 
     pub(super) fn message(&self) -> Option<String> {
         let status = self.display.try_lock().ok()?.clone();
-        Some(match status {
+        let message = match status {
             Status::Ready => return None,
             Status::Pending(reason) => format!("… {reason}"),
             Status::Error(reason) => format!("! {reason}"),
             Status::Unknown(reason) => format!("? {reason}"),
             Status::Querying => "… checking".into(),
             Status::Unavailable(reason) => format!("! feedback unavailable: {reason}"),
-        })
+        };
+        Some(crate::style::clip_line(
+            &crate::style::visible(&message),
+            64,
+            0,
+            "...",
+        ))
     }
 
     fn feedback(&self, line: &str) -> (Vec<Span>, Status) {
@@ -154,42 +174,49 @@ impl InputFeedback {
                 Status::Unavailable("input exceeds feedback budget"),
             );
         }
-        if self.ai_enabled && !self.prefix.is_empty() && line.trim_start().starts_with(&self.prefix)
-        {
-            return (
-                vec![Span {
-                    start: 0,
-                    end: line.len(),
-                    kind: Kind::String,
-                }],
-                Status::Ready,
-            );
-        }
-        if self.ai_enabled && trigger::apostrophe_prose(line.trim()) {
-            return (Vec::new(), Status::Unknown("natural language"));
-        }
-        let spans = if let Ok(mut cache) = self.cache.try_lock() {
-            if let Some((old, spans)) = cache.as_ref()
-                && old == line
+        let (spans, lexical_status) = if let Ok(mut cache) = self.cache.try_lock() {
+            if let Some(cached) = cache.as_ref()
+                && cached.text == line
             {
-                spans.clone()
+                (cached.spans.clone(), cached.status.clone())
             } else {
-                let spans = lex(line);
-                *cache = Some((line.to_owned(), spans.clone()));
-                spans
+                let (spans, status) = if self.ai_enabled
+                    && !self.prefix.is_empty()
+                    && line.trim_start().starts_with(&self.prefix)
+                {
+                    (
+                        vec![Span {
+                            start: 0,
+                            end: line.len(),
+                            kind: Kind::String,
+                        }],
+                        Some(Status::Ready),
+                    )
+                } else if self.ai_enabled && trigger::apostrophe_prose(line.trim()) {
+                    (Vec::new(), Some(Status::Unknown("natural language")))
+                } else {
+                    let spans = lex(line);
+                    let status = if spans.len() >= MAX_TOKENS {
+                        Some(Status::Unavailable("token budget exceeded"))
+                    } else if nesting(line) > MAX_DEPTH {
+                        Some(Status::Unavailable("nesting budget exceeded"))
+                    } else if spans.iter().any(|s| s.kind == Kind::Pending) {
+                        Some(Status::Pending("unfinished input"))
+                    } else {
+                        None
+                    };
+                    (spans, status)
+                };
+                *cache = Some(LexCache {
+                    text: line.to_owned(),
+                    spans: spans.clone(),
+                    status: status.clone(),
+                });
+                (spans, status)
             }
         } else {
             return (Vec::new(), Status::Unavailable("feedback busy"));
         };
-        if spans.len() >= MAX_TOKENS {
-            return (spans, Status::Unavailable("token budget exceeded"));
-        }
-        if nesting(line) > MAX_DEPTH {
-            return (spans, Status::Unavailable("nesting budget exceeded"));
-        }
-        if spans.iter().any(|s| s.kind == Kind::Pending) {
-            return (spans, Status::Pending("unfinished input"));
-        }
         let Ok(mut work) = self.shared.work.try_lock() else {
             return (spans, Status::Unavailable("feedback busy"));
         };
@@ -204,6 +231,9 @@ impl InputFeedback {
             work.stopped = true;
             work.latest = None;
             return (spans, Status::Unavailable("feedback query timed out"));
+        }
+        if let Some(status) = lexical_status {
+            return (spans, status);
         }
         if let Some(result) = &work.result
             && result.generation == self.generation
@@ -235,11 +265,12 @@ impl InputFeedback {
 
 impl Drop for InputFeedback {
     fn drop(&mut self) {
+        self.shared.shutdown.store(true, Ordering::Release);
         if let Ok(mut work) = self.shared.work.try_lock() {
             work.stopped = true;
             work.latest = None;
-            self.shared.wake.notify_one();
         }
+        self.shared.wake.notify_one();
     }
 }
 
@@ -434,22 +465,38 @@ fn nesting(line: &str) -> usize {
     maximum
 }
 
-fn run_worker(shared: Arc<Shared>) {
+fn run_worker(shared: Arc<Shared>, analysis: impl Fn(&Request) -> ResultState) {
     loop {
         let request = {
             let mut work = shared.work.lock().unwrap_or_else(|e| e.into_inner());
-            while work.latest.is_none() && !work.stopped {
+            while work.latest.is_none() && !work.stopped && !shared.shutdown.load(Ordering::Acquire)
+            {
                 work = shared.wake.wait(work).unwrap_or_else(|e| e.into_inner());
             }
-            if work.stopped {
+            if work.stopped || shared.shutdown.load(Ordering::Acquire) {
                 return;
+            }
+            // Wait once for a quiet interval, replacing intermediate edits.
+            // This is event-driven, not a periodic editor or filesystem poll.
+            loop {
+                let (next, timeout) = shared
+                    .wake
+                    .wait_timeout(work, COALESCE_DELAY)
+                    .unwrap_or_else(|e| e.into_inner());
+                work = next;
+                if work.stopped || shared.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if timeout.timed_out() {
+                    break;
+                }
             }
             work.started = Some(Instant::now());
             let request = work.latest.take().unwrap();
             work.active = Some((request.text.clone(), request.generation));
             request
         };
-        let result = std::panic::catch_unwind(|| analyze(&request));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analysis(&request)));
         let mut work = shared.work.lock().unwrap_or_else(|e| e.into_inner());
         work.started = None;
         work.active = None;
@@ -507,7 +554,9 @@ fn analyze(request: &Request) -> ResultState {
             || text.contains("PATH=")
             || text.contains("function ")
             || text.contains("()")
-            || text.contains("eval ");
+            || ["eval ", "alias ", "unalias ", "source ", ". ", "enable "]
+                .iter()
+                .any(|name| text.contains(name));
         for word in words
             .iter()
             .filter(|w| matches!(w.kind, Kind::Command | Kind::Word | Kind::Path))
@@ -566,9 +615,11 @@ fn analyze(request: &Request) -> ResultState {
                     });
                 } else if word.kind == Kind::Path
                     && text[..word.start].trim_end().ends_with('<')
-                    && !text[..word.start].contains([';', '|', '&'])
+                    && !matches!(status, Status::Error(_))
                 {
                     status = Status::Unknown("input path missing in current snapshot");
+                } else if word.kind != Kind::Path && !matches!(status, Status::Error(_)) {
+                    status = Status::Unknown("path not found in current snapshot");
                 }
             }
         }
@@ -634,6 +685,7 @@ mod tests {
             shared: Arc::new(Shared {
                 work: Mutex::new(Work::default()),
                 wake: Condvar::new(),
+                shutdown: AtomicBool::new(false),
             }),
             session: Arc::new(SessionState::default()),
             generation: 0,
@@ -691,7 +743,9 @@ mod tests {
         let mut session = SessionState::default();
         session.cwd = std::env::temp_dir();
         session.vars.insert("PATH".into(), String::new());
-        session.builtins.extend(["echo".into(), "cat".into()]);
+        session
+            .builtins
+            .extend(["echo".into(), "cat".into(), "touch".into()]);
         let check = |s: &str| {
             analyze(&Request {
                 text: s.into(),
@@ -722,7 +776,11 @@ mod tests {
         ));
         assert!(matches!(
             check("touch input; cat < input").status,
-            Status::Ready | Status::Error(_)
+            Status::Unknown(_)
+        ));
+        assert!(matches!(
+            check("alias new=echo; new").status,
+            Status::Unknown(_)
         ));
     }
 
@@ -773,5 +831,60 @@ mod tests {
             feedback.feedback(&"(".repeat(MAX_DEPTH + 1)).1,
             Status::Unavailable("nesting budget exceeded")
         ));
+    }
+
+    #[test]
+    fn command_lookup_respects_current_path_and_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("example_command");
+        std::fs::write(&executable, "").unwrap();
+        let mut session = SessionState::default();
+        session.cwd = dir.path().to_path_buf();
+        session.vars.insert("PATH".into(), ":missing".into());
+        assert_eq!(find_command("example_command", &session), Some(false));
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_command("example_command", &session), Some(true));
+        session.vars.insert("PATH".into(), "/nonexistent".into());
+        assert_eq!(find_command("example_command", &session), Some(false));
+        session.vars.insert("PATH".into(), ".".into());
+        assert_eq!(find_command("example_command", &session), Some(true));
+    }
+
+    #[test]
+    fn blocked_query_never_blocks_edit_cancel_or_shutdown() {
+        let feedback = without_worker();
+        let shared = feedback.shared.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            run_worker(shared, |request| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                analyze(request)
+            });
+        });
+        assert!(matches!(
+            feedback.feedback("echo start").1,
+            Status::Querying
+        ));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let start = Instant::now();
+        assert!(matches!(
+            feedback.feedback("echo changed").1,
+            Status::Querying
+        ));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        {
+            let mut work = feedback.shared.work.lock().unwrap();
+            work.started = Some(Instant::now() - QUERY_TIMEOUT - Duration::from_millis(1));
+        }
+        assert!(matches!(
+            feedback.feedback("echo cancelled").1,
+            Status::Unavailable("feedback query timed out")
+        ));
+        drop(feedback);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
     }
 }
