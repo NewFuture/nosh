@@ -530,8 +530,11 @@ class CheckTests(unittest.TestCase):
         facts = fixtures.create(root, "history")
         answer = "\n\n".join(f"{i}. **Commit**\n   - Feature: {subject}\n   - Component: `{component}`"
                              for i, (component, _, subject) in enumerate(fixtures.HISTORY, 1))
-        self.assertTrue(checks.judge({"check": "history"}, answer, facts, root, facts["before"],
-                                    self.result, self.metrics).passed)
+        verdict = checks.judge({"check": "history"}, answer, facts, root, facts["before"],
+                               self.result, self.metrics)
+        self.assertTrue(verdict.passed)
+        self.assertNotIn("components", verdict.details["facts"],
+                         "history component names are not capture evaluation state")
         swapped = answer.replace("Component: `llm`", "Component: `hub`", 1)
         self.assertFalse(checks.judge({"check": "history"}, swapped, facts, root, facts["before"],
                                      self.result, self.metrics).passed)

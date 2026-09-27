@@ -782,14 +782,15 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
           metrics: dict, evidence: dict | None = None) -> Verdict:
     kind = scenario["check"]
     reasons = []
-    components = None
+    capture_verdicts = None
     if result.exit_code != 0:
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
     if kind in CAPTURE_CHECKS:
-        components = captured_components(scenario, answer, facts, root, after, result, evidence)
-        reasons.extend(f"{name}: {reason}" for name, item in components.items() for reason in item["reasons"])
+        capture_verdicts = captured_components(scenario, answer, facts, root, after, result, evidence)
+        reasons.extend(f"{name}: {reason}" for name, item in capture_verdicts.items()
+                       for reason in item["reasons"])
     elif kind == "captured-failure":
         reasons.extend(captured_failure(scenario, answer, facts, root, after, result, evidence))
     elif kind in PROJECT_CHECKS:
@@ -896,10 +897,10 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                 blocks.extend(paragraph.splitlines())
             else:
                 blocks.extend(re.split(r"(?m)^(?=(?:\d+[.)]|[-*])\s)", paragraph))
-        components = [component for component, _ in facts["history"]]
+        history_components = [component for component, _ in facts["history"]]
         for component, feature in facts["history"]:
             if not any(re.search(rf"\b{component}\b", block, re.I) and re.search(aliases[feature], block, re.I)
-                       and sum(bool(re.search(rf"\b{c}\b", block, re.I)) for c in components) == 1
+                       and sum(bool(re.search(rf"\b{c}\b", block, re.I)) for c in history_components) == 1
                        for block in blocks):
                 reasons.append(f"missing or unassociated commit fact: {component}/{feature}")
     elif kind == "archive":
@@ -917,8 +918,8 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     if "expect" in scenario and scenario["fixture"] == "port" and not facts["listener"].get("alive_at_end"):
         reasons.append("the owned listener did not survive the task")
     fact_result = {"passed": not reasons, "reasons": list(reasons)}
-    if components is not None:
-        fact_result["components"] = components
+    if capture_verdicts is not None:
+        fact_result["components"] = capture_verdicts
     ux = experience(scenario, answer, metrics)
     if ux:
         reasons.extend(f"experience {name}: {detail}" for name, detail in ux.items() if detail["passed"] is False)
