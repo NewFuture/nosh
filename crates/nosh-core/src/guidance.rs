@@ -79,8 +79,8 @@ impl GuidanceCache {
         self.files.retain(|cached, _| cached == path);
         let mut warnings = Vec::new();
         let (stamp, contents) = self.read_cached(path, ctx, &mut warnings);
-        let mut key = format!("README:{:?}:{path:?}:{stamp:?}", ctx.cwd);
-        let source = crate::project::relative_path(path, &ctx.cwd);
+        let source = document_source(path, &ctx.cwd);
+        let mut key = format!("README:{:?}:{path:?}:{stamp:?}:{source:?}", ctx.cwd);
         let mut text = format!(
             "[README reference {}]\n",
             json!(source.display().to_string())
@@ -169,7 +169,8 @@ impl GuidanceCache {
         let mut all_complete = true;
         for path in paths {
             let (stamp, contents) = self.read_cached(&path, ctx, &mut warnings);
-            key.push_str(&format!("{path:?}:{stamp:?}\n"));
+            let source = document_source(&path, &ctx.cwd);
+            key.push_str(&format!("{path:?}:{stamp:?}:{source:?}\n"));
             let Some(contents) = contents else { continue };
             if stamp.is_none() {
                 key.push_str(&contents);
@@ -177,7 +178,6 @@ impl GuidanceCache {
             let count = contents.chars().count();
             let complete = count <= budget;
             all_complete &= complete;
-            let source = crate::project::relative_path(&path, &ctx.cwd);
             text.push_str(&format!(
                 "[AGENTS.md {}{}]\n",
                 json!(source.display().to_string()),
@@ -202,6 +202,15 @@ impl GuidanceCache {
             text,
             complete: all_complete,
         }
+    }
+}
+
+fn document_source(path: &Path, cwd: &Path) -> PathBuf {
+    let relative = crate::project::relative_path(path, cwd);
+    // Native commands resolve ".." physically, unlike the lexical read tools.
+    match (path.canonicalize(), cwd.join(&relative).canonicalize()) {
+        (Ok(source), Ok(resolved)) if source == resolved => relative,
+        _ => path.to_path_buf(),
     }
 }
 
@@ -465,6 +474,55 @@ mod tests {
             assert!(cache.files.contains_key(&source));
             assert_eq!(cache.files.len(), 1);
             std::fs::remove_file(source).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_sources_fall_back_when_relative_paths_cross_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let inside = repo.join("inside");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let cwd = repo.join("link");
+        let ctx = Context::new(&cwd, &repo).with_home(root.path());
+        for name in ["README.md", "AGENTS.md"] {
+            let source = repo.join(name);
+            let wrong = root.path().join(name);
+            std::fs::write(&source, "Repository document.").unwrap();
+            std::fs::write(&wrong, "Different document.").unwrap();
+            let stamp = FileStamp::of(&source).unwrap();
+            let mut cache = GuidanceCache::default();
+            symlink(&inside, &cwd).unwrap();
+            let first = cache.load(&ctx);
+            let relative = Path::new("..").join(name).display().to_string();
+            assert!(first.text.contains(&json!(relative).to_string()));
+
+            std::fs::remove_file(&cwd).unwrap();
+            symlink(&outside, &cwd).unwrap();
+            let changed = cache.load(&ctx);
+            assert_ne!(first.key, changed.key);
+            assert!(
+                changed
+                    .text
+                    .contains(&json!(source.display().to_string()).to_string())
+            );
+            assert!(changed.text.contains("Repository document."));
+            assert!(!changed.text.contains("Different document."));
+            assert_eq!(FileStamp::of(&source), Some(stamp));
+            assert!(cache.files.contains_key(&source));
+
+            std::fs::remove_file(&cwd).unwrap();
+            symlink(&inside, &cwd).unwrap();
+            assert_eq!(first.key, cache.load(&ctx).key);
+            std::fs::remove_file(&cwd).unwrap();
+            std::fs::remove_file(source).unwrap();
+            std::fs::remove_file(wrong).unwrap();
         }
     }
 

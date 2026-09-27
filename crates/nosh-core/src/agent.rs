@@ -160,7 +160,7 @@ pub struct Agent {
     redactor: Arc<dyn Redactor>,
 }
 
-const SUMMARIZE: &str = "[system] Step limit reached. Do not call any more tools. Summarize what you found in the user's language and suggest the next step.";
+const SUMMARIZE: &str = "Step limit reached for the preceding user request only. Finish it without tools, with supported results and the next step in its language. Later user requests may use tools normally.";
 
 impl Agent {
     pub fn new(
@@ -344,6 +344,8 @@ impl Agent {
         if self.guidance_sent.as_deref() == Some(guidance.key.as_str()) {
             return (None, None);
         }
+        // Even an incomplete replacement clears the previously delivered scope.
+        self.guidance_sent = None;
         let mut text = guidance.text;
         if self.engine.message_count(sid) > 0 {
             text.insert_str(0, "[project documents cleared]\n");

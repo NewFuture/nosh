@@ -535,8 +535,16 @@ fn step_limit_asks_for_a_summary() {
     let mut sh = shell();
     let engine = MockChatEngine::with_responder(|history| match history.last() {
         Some(Message::System(u)) if u.contains("Step limit reached") => vec![text("Summary.")],
+        Some(Message::User(u)) if u == "next task" => {
+            vec![call("run_command", json!({"command": "printf fresh-task"}))]
+        }
+        Some(Message::Tool(result)) if result.contains("fresh-task") => {
+            vec![text("Next task done.")]
+        }
         _ => vec![call("run_command", json!({"command": "true"}))],
     });
+    let received = engine.received();
+    let specs = engine.specs();
     let mut a = agent(
         engine,
         AgentConfig {
@@ -554,6 +562,27 @@ fn step_limit_asks_for_a_summary() {
     assert_eq!(out.steps, 4);
     assert_eq!(out.answer, "Summary.");
     assert_eq!(out.status.exit_code(), 1);
+    let next = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "next task"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(next.status, TaskStatus::Completed);
+    assert_eq!(next.steps, 2);
+    assert_eq!(next.commands_run, 1);
+    assert_eq!(specs.lock().unwrap().len(), 1);
+    let records = received.lock().unwrap();
+    let control = records
+        .iter()
+        .flatten()
+        .find_map(|message| match message {
+            Message::System(text) if text.contains("Step limit reached") => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert!(control.contains("preceding user request only"));
+    assert!(control.contains("Later user requests may use tools normally"));
 }
 
 #[test]
@@ -972,6 +1001,51 @@ fn agents_guidance_is_scoped_cached_refreshed_and_cleared() {
         assert!(!message.contains("must-not-load-legacy"));
         assert!(!message.contains("must-not-load-readme"));
     }
+    drop(records);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn incomplete_guidance_does_not_suppress_its_restored_version() {
+    let _g = setup();
+    let root = tmpdir("restored-guidance");
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let source = root.join("AGENTS.md");
+    std::fs::write(&source, "Unchanged scoped instruction.").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let engine = MockChatEngine::with_responder(|_| vec![text("ok")]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    for protected in [false, true, false, false] {
+        a.cfg.protected = if protected {
+            vec![source.clone()]
+        } else {
+            vec![]
+        };
+        a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "describe"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+    }
+    let records = received.lock().unwrap();
+    let messages: Vec<_> = records
+        .iter()
+        .flatten()
+        .filter_map(|message| match message {
+            Message::System(text) if text.starts_with("[context]\n") => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 4);
+    assert!(messages[0].contains("Unchanged scoped instruction."));
+    assert!(messages[1].contains("[project documents cleared]"));
+    assert!(messages[1].contains("guidance unavailable"));
+    assert!(!messages[1].contains("Unchanged scoped instruction."));
+    assert!(messages[2].contains("Unchanged scoped instruction."));
+    assert!(!messages[3].contains("Unchanged scoped instruction."));
     drop(records);
     std::fs::remove_dir_all(root).unwrap();
 }
