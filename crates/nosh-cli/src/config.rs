@@ -13,6 +13,7 @@ pub struct Config {
     pub trigger_on_error: bool,
     pub on_failure: OnFailure,
     pub capture_output: CaptureOutput,
+    pub input_assist: bool,
     pub nl_guard: bool,
     pub builtin_name: String,
     pub approval: ApprovalMode,
@@ -41,6 +42,7 @@ impl Default for Config {
             trigger_on_error: true,
             on_failure: OnFailure::Hint,
             capture_output: CaptureOutput::Last,
+            input_assist: true,
             nl_guard: true,
             builtin_name: "ai".into(),
             approval: ApprovalMode::Confirm,
@@ -72,6 +74,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "trigger_on_error",
             "on_failure",
             "capture_output",
+            "input_assist",
             "nl_guard",
             "builtin_name",
             "suggest_key",
@@ -232,6 +235,9 @@ impl Config {
         }
         if let Some(v) = r.bool("shell", "trigger_on_error") {
             c.trigger_on_error = v;
+        }
+        if let Some(v) = r.bool("shell", "input_assist") {
+            c.input_assist = v;
         }
         if let Some(v) = r.str("shell", "on_failure") {
             match OnFailure::parse(&v) {
@@ -422,6 +428,22 @@ on = true
                     .any(|w| w.contains("shell.capture_output"))
             );
         }
+    }
+
+    #[test]
+    fn input_assist_is_enabled_by_default_and_has_a_real_boolean_switch() {
+        assert!(Config::default().input_assist);
+        let disabled = Config::parse("[shell]\ninput_assist = false");
+        assert!(!disabled.input_assist);
+        assert!(disabled.warnings.is_empty());
+        let invalid = Config::parse("[shell]\ninput_assist = \"off\"");
+        assert!(invalid.input_assist);
+        assert!(
+            invalid
+                .warnings
+                .iter()
+                .any(|w| w.contains("shell.input_assist: expected true or false"))
+        );
     }
 
     #[test]

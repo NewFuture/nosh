@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use brush_core::openfiles::{self, OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, ShellVariable, SourceInfo};
 
+use crate::input_assist;
 use crate::procs;
 use crate::user_output::Utf8Decoder;
 use crate::{CaptureOutput, OutputState, OutputUnavailable, UserOutput, pty};
@@ -848,11 +849,24 @@ impl EmbeddedShell {
     }
 
     pub fn resolve(&self, name: &str) -> Resolution {
+        self.resolve_with_path(name, None)
+    }
+
+    pub(crate) fn resolve_with_path(&self, name: &str, path: Option<&str>) -> Resolution {
+        self.resolve_scoped(name, path, false)
+    }
+
+    pub(crate) fn resolve_scoped(
+        &self,
+        name: &str,
+        path: Option<&str>,
+        defined_function: bool,
+    ) -> Resolution {
         let mut sh = self.lock();
         if let Some(a) = sh.aliases().get(name) {
             return Resolution::Alias(a.clone());
         }
-        if sh.funcs().get(name).is_some() {
+        if defined_function || sh.funcs().get(name).is_some() {
             return Resolution::Function;
         }
         if sh.is_keyword(name) {
@@ -869,10 +883,25 @@ impl EmbeddedShell {
                 Resolution::NotFound
             };
         }
+        if let Some(path) = path {
+            return path
+                .split(':')
+                .map(|directory| sh.working_dir().join(directory).join(name))
+                .find(|candidate| is_executable(candidate))
+                .map_or(Resolution::NotFound, Resolution::File);
+        }
         match sh.find_first_executable_in_path(name) {
             Some(p) => Resolution::File(p),
             None => Resolution::NotFound,
         }
+    }
+
+    pub(crate) fn parser_options(&self) -> brush_parser::ParserOptions {
+        self.lock().parser_options()
+    }
+
+    pub(crate) fn has_command_traps(&self) -> bool {
+        has_command_traps(&self.lock())
     }
 
     /// Candidate command names for spelling correction (PATH, aliases,
@@ -880,7 +909,8 @@ impl EmbeddedShell {
     /// entry (slow on network/WSL mounts); callers verify a match with
     /// [`Self::resolve`].
     pub fn command_names(&mut self) -> Arc<Vec<String>> {
-        let path = self.var("PATH").unwrap_or_default();
+        let path = self.var("PATH");
+        let cwd = self.cwd();
         let (aliases, funcs): (Vec<String>, Vec<String>) = {
             let sh = self.lock();
             (
@@ -888,13 +918,19 @@ impl EmbeddedShell {
                 sh.funcs().iter().map(|(k, _)| k.clone()).collect(),
             )
         };
-        let key = format!("{path}\0{}\0{}", aliases.join(" "), funcs.join(" "));
+        let key = format!(
+            "{:?}\0{}\0{}\0{}",
+            path,
+            cwd.display(),
+            aliases.join(" "),
+            funcs.join(" ")
+        );
         if let Some((k, names)) = &self.path_cache
             && *k == key
         {
             return names.clone();
         }
-        let scanned = path_names(&self.path_scan, &path);
+        let scanned = path_names(&self.path_scan, path.as_deref(), &cwd);
         let mut set: BTreeSet<String> = scanned.iter().cloned().collect();
         set.extend(aliases);
         set.extend(funcs);
@@ -906,11 +942,140 @@ impl EmbeddedShell {
 
     /// Lists PATH in the background so the first correction is instant.
     pub fn warm_command_names(&self) {
-        let path = self.var("PATH").unwrap_or_default();
+        let path = self.var("PATH");
+        let cwd = self.cwd();
         let cache = self.path_scan.clone();
         std::thread::spawn(move || {
-            path_names(&cache, &path);
+            path_names(&cache, path.as_deref(), &cwd);
         });
+    }
+
+    pub(crate) fn input_index(&self) -> input_assist::SharedIndex {
+        self.path_scan.clone()
+    }
+
+    pub(crate) fn input_context(
+        &self,
+        trigger: &crate::trigger::TriggerConfig,
+        abbreviations: &input_assist::Abbreviations,
+    ) -> Result<input_assist::Context, String> {
+        Self::input_context_from_shared(&self.shell, trigger, abbreviations)
+    }
+
+    pub(crate) fn input_context_from_shared(
+        shared: &Mutex<BrushShell>,
+        trigger: &crate::trigger::TriggerConfig,
+        abbreviations: &input_assist::Abbreviations,
+    ) -> Result<input_assist::Context, String> {
+        fn copy(text: &str, remaining: &mut usize) -> Result<String, String> {
+            *remaining = remaining
+                .checked_sub(text.len() + 32)
+                .ok_or("session snapshot limit")?;
+            Ok(text.to_owned())
+        }
+        fn names<'a>(
+            names: impl Iterator<Item = &'a String>,
+            remaining: &mut usize,
+        ) -> Result<BTreeSet<String>, String> {
+            let mut result = BTreeSet::new();
+            for name in names.take(input_assist::MAX_NAMES + 1) {
+                if result.len() == input_assist::MAX_NAMES {
+                    return Err("session name limit".into());
+                }
+                result.insert(copy(name, remaining)?);
+            }
+            Ok(result)
+        }
+        let sh = shared
+            .try_lock()
+            .map_err(|_| "shell snapshot busy or unavailable")?;
+        let mut remaining = input_assist::MAX_CONTEXT;
+        let variable = |name: &str, remaining: &mut usize| -> Result<Option<String>, String> {
+            let Some(variable) = sh.env_var(name) else {
+                return Ok(None);
+            };
+            if variable.attribute_flags(&sh).contains('n') {
+                return Err(format!("{name} requires dynamic resolution"));
+            }
+            match variable.value() {
+                brush_core::ShellValue::String(value) => copy(value, remaining).map(Some),
+                brush_core::ShellValue::Unset(_) => Ok(None),
+                _ => Err(format!("{name} is not a static scalar")),
+            }
+        };
+        let path = variable("PATH", &mut remaining)?;
+        let home = variable("HOME", &mut remaining)?;
+        let oldpwd = variable("OLDPWD", &mut remaining)?;
+        let cdpath = variable("CDPATH", &mut remaining)?.is_some_and(|s| !s.is_empty());
+        let cwd = sh.working_dir();
+        let cwd = PathBuf::from(copy(
+            cwd.to_str().ok_or("non-UTF-8 working directory")?,
+            &mut remaining,
+        )?);
+        let builtins = names(
+            sh.builtins()
+                .iter()
+                .filter_map(|(name, builtin)| (!builtin.disabled).then_some(name)),
+            &mut remaining,
+        )?;
+        let functions = names(sh.funcs().iter().map(|(name, _)| name), &mut remaining)?;
+        let aliases = if sh.options().expand_aliases {
+            names(sh.aliases().keys(), &mut remaining)?
+        } else {
+            BTreeSet::new()
+        };
+        #[derive(serde::Deserialize)]
+        struct HashSnapshot {
+            cache: BTreeMap<String, PathBuf>,
+        }
+        let hashed_commands = if sh.options().remember_command_locations {
+            // Serialize into a capped memory writer, rather than cloning the
+            // opaque PathCache through its unbounded `to_value()` projection.
+            let bytes = input_assist::bounded_json(sh.program_location_cache(), remaining)
+                .map_err(|e| e.to_string())?;
+            remaining = remaining.saturating_sub(bytes.len());
+            serde_json::from_slice::<HashSnapshot>(&bytes)
+                .map_err(|e| e.to_string())?
+                .cache
+        } else {
+            BTreeMap::new()
+        };
+        let abbreviations = input_assist::Abbreviations {
+            revision: abbreviations.revision,
+            applicable: names(abbreviations.applicable.iter(), &mut remaining)?,
+        };
+        let options = sh.parser_options();
+        let context = input_assist::Context {
+            cwd,
+            path,
+            home,
+            oldpwd,
+            cdpath,
+            hashed_commands,
+            check_hash: sh.options().check_hashtable_before_command_exec,
+            command_traps: has_command_traps(&sh),
+            builtins,
+            aliases,
+            functions,
+            abbreviations,
+            extglob: options.enable_extended_globbing,
+            posix: options.posix_mode,
+            sh: options.sh_mode,
+            ai_enabled: trigger.ai_enabled,
+            ai_prefix: copy(&trigger.ai_prefix, &mut remaining)?,
+            ai_builtin: copy(&trigger.builtin_name, &mut remaining)?,
+            ai_builtin_shadowed: sh.aliases().contains_key(&trigger.builtin_name)
+                || sh.funcs().get(&trigger.builtin_name).is_some()
+                || sh
+                    .builtins()
+                    .get(&trigger.builtin_name)
+                    .is_some_and(|b| !b.disabled),
+            trigger_on_error: trigger.trigger_on_error,
+        };
+        drop(sh);
+        input_assist::write_json(&context, &mut std::io::sink(), input_assist::MAX_CONTEXT)
+            .map_err(|e| e.to_string())?;
+        Ok(context)
     }
 
     /// The prompt: the user's `PS1` if their rc set one, else `~/dir ❯ `.
@@ -1197,33 +1362,32 @@ const BUILTIN_NAMES: &[&str] = &[
 ];
 
 fn is_executable(p: &Path) -> bool {
+    use brush_core::sys::fs::PathExt;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(p)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0 && p.executable())
 }
 
-type PathScan = Arc<Mutex<Option<(String, Arc<Vec<String>>)>>>;
+fn has_command_traps(sh: &BrushShell) -> bool {
+    use brush_core::traps::TrapSignal;
+    [TrapSignal::Debug, TrapSignal::Err, TrapSignal::Return]
+        .into_iter()
+        .any(|signal| sh.traps().handles(signal))
+}
+
+type PathScan = input_assist::SharedIndex;
 
 /// Entry names of every PATH directory, cached per PATH value.
-fn path_names(cache: &PathScan, path: &str) -> Arc<Vec<String>> {
-    if let Some((p, names)) = &*cache.lock().unwrap_or_else(|e| e.into_inner())
-        && p == path
+fn path_names(cache: &PathScan, path: Option<&str>, cwd: &Path) -> Arc<Vec<String>> {
+    if let Some(index) = &*cache.lock().unwrap_or_else(|e| e.into_inner())
+        && index.path.as_deref() == path
+        && index.cwd == cwd
     {
-        return names.clone();
+        return index.names.clone();
     }
-    let mut set = BTreeSet::new();
-    for dir in path.split(':').filter(|d| !d.is_empty()) {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for e in rd.flatten() {
-                if let Some(n) = e.file_name().to_str()
-                    && !n.starts_with('.')
-                {
-                    set.insert(n.to_string());
-                }
-            }
-        }
-    }
-    let names = Arc::new(set.into_iter().collect::<Vec<_>>());
-    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((path.to_string(), names.clone()));
+    let index = input_assist::scan_index(cwd, path);
+    let names = index.names.clone();
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(index);
     names
 }
 

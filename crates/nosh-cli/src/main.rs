@@ -13,6 +13,11 @@ mod shell_cmd;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static INPUT_WORKER_ALLOCATOR: nosh_shell::input_assist::WorkerAllocator =
+    nosh_shell::input_assist::WorkerAllocator;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "nosh",
@@ -116,6 +121,14 @@ enum Cmd {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--__nosh_input_worker"))
+    {
+        let code = nosh_shell::input_assist::run_worker_from_env().unwrap_or_else(|| {
+            eprintln!("nosh: missing internal input worker context");
+            2
+        });
+        std::process::exit(code);
+    }
     // SAFETY: bootstrap runs before runtime threads or environment readers.
     let control = match unsafe { nosh_shell::pty::inherited_control() } {
         Ok(control) => control,
@@ -281,6 +294,21 @@ fn run_shell(
             ai_enabled: ai_on,
         },
         on_failure: cfg.on_failure,
+        input_assist: nosh_shell::input_assist::Config {
+            enabled: cfg.input_assist,
+            worker: if cfg.input_assist {
+                match nosh_shell::input_assist::WorkerCommand::nosh() {
+                    Ok(worker) => Some(worker),
+                    Err(error) => {
+                        eprintln!("nosh: input diagnostics unavailable: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            },
+        },
+        input_abbreviations: Default::default(),
     };
     if !ai_on {
         return nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, repl_cfg);

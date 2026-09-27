@@ -2,8 +2,10 @@
 //! the interactive REPL, and the AI trigger pipeline (design §4).
 
 pub mod backend;
+mod command_context;
 pub mod guard;
 pub mod history;
+pub mod input_assist;
 pub mod procs;
 pub mod pty;
 pub mod repl;

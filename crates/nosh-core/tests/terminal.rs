@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,11 @@ use nosh_core::{AgentUi, JsonUi, TermUi};
 use nosh_hub::{BarProgress, Progress};
 use nosh_permissions::Risk;
 use nosh_shell::{style, term};
+
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static INPUT_WORKER_ALLOCATOR: nosh_shell::input_assist::WorkerAllocator =
+    nosh_shell::input_assist::WorkerAllocator;
 
 const BEGIN: &str = "nosh-terminal-probe-begin\n";
 const END: &str = "nosh-terminal-probe-end";
@@ -84,11 +90,28 @@ fn resize(fd: i32, columns: u16) {
     );
 }
 
-fn read_output(mut reader: impl Read) -> String {
+fn read_output(mut reader: impl Read, observed: Arc<Mutex<Vec<u8>>>) -> String {
     let mut bytes = Vec::new();
-    if let Err(e) = reader.read_to_end(&mut bytes) {
-        // Linux PTYs report EIO rather than EOF when the slave is closed.
-        assert_eq!(e.raw_os_error(), Some(libc::EIO), "{e}");
+    let mut chunk = [0; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&chunk[..n]);
+                let mut observed = observed.lock().unwrap();
+                assert!(
+                    observed.len() + n < 32 * 1024 * 1024,
+                    "terminal capture limit"
+                );
+                observed.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                // Linux PTYs report EIO rather than EOF when the slave is closed.
+                assert_eq!(e.raw_os_error(), Some(libc::EIO), "{e}");
+                break;
+            }
+        }
     }
     String::from_utf8(bytes).unwrap().replace("\r\n", "\n")
 }
@@ -104,6 +127,13 @@ fn framed(output: &str) -> String {
         .to_string()
 }
 
+type KeyStep<'a> = (&'a str, &'a [u8]);
+
+struct ProbeTimings {
+    startup: Duration,
+    input: Vec<Duration>,
+}
+
 struct Probe<'a> {
     mode: &'a str,
     terminal: Option<&'a str>,
@@ -115,6 +145,8 @@ struct Probe<'a> {
     columns: u16,
     initial: &'a str,
     keys: Option<&'a [u8]>,
+    steps: &'a [KeyStep<'a>],
+    input_assist: bool,
 }
 
 impl Default for Probe<'_> {
@@ -130,12 +162,19 @@ impl Default for Probe<'_> {
             columns: 80,
             initial: "",
             keys: None,
+            steps: &[],
+            input_assist: true,
         }
     }
 }
 
 impl Probe<'_> {
     fn run(self) -> (String, String) {
+        let (out, err, _) = self.run_with_timings();
+        (out, err)
+    }
+
+    fn run_with_timings(self) -> (String, String, ProbeTimings) {
         let home = tempfile::tempdir().unwrap();
         let stdout = self.stdout_tty.then(|| Pty::new(80));
         let stderr = self.stderr_tty.then(|| Pty::new(self.columns));
@@ -145,6 +184,10 @@ impl Probe<'_> {
             .args(["--exact", "terminal_probe", "--nocapture"])
             .env("NOSH_TERMINAL_PROBE", self.mode)
             .env("NOSH_TERMINAL_INITIAL", self.initial)
+            .env(
+                "NOSH_TERMINAL_INPUT_ASSIST",
+                if self.input_assist { "1" } else { "0" },
+            )
             .env_remove("LC_ALL")
             .env_remove("LC_CTYPE")
             .env_remove("LANG")
@@ -195,6 +238,7 @@ impl Probe<'_> {
             }
         }
         let mut input = input.map(|t| t.master.try_clone().unwrap());
+        let launched = Instant::now();
         let mut child = command.spawn().unwrap();
         drop(command);
         if self.stdin_pipe {
@@ -219,20 +263,74 @@ impl Probe<'_> {
             }
             None => Box::new(child.stderr.take().unwrap()),
         };
-        let out = thread::spawn(move || read_output(out));
-        let err = thread::spawn(move || read_output(err));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let out_observed = observed.clone();
+        let err_observed = observed.clone();
+        let out = thread::spawn(move || read_output(out, out_observed));
+        let err = thread::spawn(move || read_output(err, err_observed));
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut keys = self.keys;
+        let mut steps = self.steps.iter();
+        let mut next = steps.next();
+        let mut observed_start = 0;
+        let mut sent = Instant::now();
+        let mut timings = Vec::new();
+        let mut startup = None;
+        let mut blocked_at = None;
+        let marker = blocked_input_marker(child.id());
+        let mut terminal_scan = 0;
+        let mut cursor_replies = 0;
+        let needs_cursor_reply = self.mode.starts_with("repl")
+            && self
+                .terminal
+                .is_some_and(|t| !matches!(t, "" | "dumb" | "unknown"));
         let status = loop {
-            if let Some(bytes) = keys {
+            if let Some(input) = input.as_mut() {
+                let requests = {
+                    let bytes = observed.lock().unwrap();
+                    let requests = bytes[terminal_scan..]
+                        .windows(4)
+                        .filter(|s| *s == b"\x1b[6n")
+                        .count();
+                    terminal_scan = bytes.len().saturating_sub(3);
+                    requests
+                };
+                for _ in 0..requests {
+                    input.write_all(b"\x1b[1;1R").unwrap();
+                    cursor_replies += 1;
+                }
+            }
+            if (keys.is_some() || next.is_some()) && (!needs_cursor_reply || cursor_replies > 0) {
                 let input = input.as_mut().unwrap();
                 let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
                 // SAFETY: tcgetattr writes to valid storage, read only on success.
                 if unsafe { libc::tcgetattr(input.as_raw_fd(), attrs.as_mut_ptr()) } == 0
                     && unsafe { attrs.assume_init() }.c_lflag & libc::ICANON == 0
                 {
-                    input.write_all(bytes).unwrap();
-                    keys = None;
+                    startup.get_or_insert_with(|| launched.elapsed());
+                    if let Some(bytes) = keys.take() {
+                        observed_start = observed.lock().unwrap().len();
+                        sent = Instant::now();
+                        input.write_all(bytes).unwrap();
+                    } else if let Some((needle, bytes)) = next {
+                        let ready = if *needle == "@worker-blocked" {
+                            marker.exists()
+                        } else {
+                            String::from_utf8_lossy(&observed.lock().unwrap()[observed_start..])
+                                .contains(needle)
+                        };
+                        if ready {
+                            if *needle == "@worker-blocked" {
+                                blocked_at = Some(Instant::now());
+                            } else {
+                                timings.push(sent.elapsed());
+                            }
+                            observed_start = observed.lock().unwrap().len();
+                            sent = Instant::now();
+                            input.write_all(bytes).unwrap();
+                            next = steps.next();
+                        }
+                    }
                 }
             }
             if let Some(status) = child.try_wait().unwrap() {
@@ -241,6 +339,9 @@ impl Probe<'_> {
             if Instant::now() >= deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
+                if marker.exists() {
+                    std::fs::remove_file(&marker).unwrap();
+                }
                 panic!(
                     "terminal probe timed out: {:?} {:?}",
                     out.join(),
@@ -249,10 +350,31 @@ impl Probe<'_> {
             }
             thread::sleep(Duration::from_millis(5));
         };
+        let exited = Instant::now();
         let out = out.join().unwrap();
         let err = err.join().unwrap();
+        if let Some(blocked_at) = blocked_at {
+            std::fs::remove_file(marker).unwrap();
+            assert!(
+                exited.duration_since(blocked_at) < Duration::from_millis(500),
+                "editing/cancel/exit waited for a diagnostic timeout: {:?}",
+                exited.duration_since(blocked_at)
+            );
+            println!(
+                "input_assist_blocked_edit_cancel_exit_us={}",
+                exited.duration_since(blocked_at).as_micros()
+            );
+        }
         assert!(status.success(), "{status}: {out:?}\n{err:?}");
-        (framed(&out), framed(&err))
+        assert!(next.is_none(), "probe exited before staged input completed");
+        (
+            framed(&out),
+            framed(&err),
+            ProbeTimings {
+                startup: startup.unwrap_or_default(),
+                input: timings,
+            },
+        )
     }
 }
 
@@ -330,19 +452,39 @@ fn terminal_probe() {
                 ui.tool_start("run_command", "echo \u{4e2d}\u{6587}", Some(risk), label);
             }
         }
-        "repl" => {
+        "repl" | "repl-blocked" => {
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
                 ..nosh_shell::ShellOptions::default()
             })
             .unwrap();
+            shell.run_user_line("PATH=/usr/bin:/bin; PS1='probe> '");
+            let worker = nosh_shell::input_assist::WorkerCommand {
+                program: std::env::current_exe().unwrap(),
+                args: vec![
+                    "--exact".into(),
+                    if mode == "repl-blocked" {
+                        "blocked_input_worker_probe".into()
+                    } else {
+                        "input_worker_probe".into()
+                    },
+                    "--nocapture".into(),
+                ],
+            };
+            let config = nosh_shell::ReplConfig {
+                trigger: nosh_shell::TriggerConfig {
+                    ai_enabled: false,
+                    ..Default::default()
+                },
+                input_assist: nosh_shell::input_assist::Config {
+                    enabled: std::env::var("NOSH_TERMINAL_INPUT_ASSIST").as_deref() != Ok("0"),
+                    worker: Some(worker),
+                },
+                ..Default::default()
+            };
             assert_eq!(
-                nosh_shell::repl::run(
-                    &mut shell,
-                    &mut nosh_shell::repl::NoAi,
-                    nosh_shell::ReplConfig::default()
-                ),
-                0
+                nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, config),
+                if mode == "repl-blocked" { 130 } else { 0 }
             );
         }
         _ => panic!("unknown probe"),
@@ -351,6 +493,181 @@ fn terminal_probe() {
     eprintln!("{END}");
 }
 
+#[test]
+fn input_worker_probe() {
+    if let Some(code) = nosh_shell::input_assist::run_worker_from_env() {
+        std::process::exit(code);
+    }
+}
+
+fn blocked_input_marker(parent: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from("/tmp").join(format!("nosh-pty-input-blocked-{parent}"))
+}
+
+#[test]
+fn blocked_input_worker_probe() {
+    if std::env::var("NOSH_INPUT_WORKER").as_deref() == Ok("lookup") {
+        // SAFETY: getppid takes no pointers and reports this worker's parent.
+        let parent = unsafe { libc::getppid() };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(blocked_input_marker(parent as u32))
+            .unwrap();
+        while unsafe { libc::getppid() } == parent {
+            thread::park_timeout(Duration::from_secs(1));
+        }
+        std::process::exit(0);
+    }
+    input_worker_probe();
+}
+
+#[test]
+fn input_assist_updates_without_another_key_and_keeps_unicode_input_unchanged() {
+    for no_color in ["", "1"] {
+        let initial = "printf '%s\\n' '中文e\u{301}👩\u{200d}💻";
+        let steps: &[KeyStep<'_>] = &[("Incomplete:", b"'\rexit 0\r")];
+        let (out, err) = Probe {
+            mode: "repl",
+            stdout_tty: true,
+            stderr_tty: true,
+            keys: Some(initial.as_bytes()),
+            steps,
+            no_color,
+            ..Default::default()
+        }
+        .run();
+        assert_eq!(style::strip_ansi(&out).trim(), "中文e\u{301}👩\u{200d}💻");
+        assert!(err.contains("Incomplete:"), "{err:?}");
+        if no_color == "1" {
+            for color in ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[35m"] {
+                assert!(!err.contains(color), "{err:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn input_assist_blocked_worker_does_not_delay_edit_cancel_or_exit() {
+    let steps: &[KeyStep<'_>] = &[
+        ("@worker-blocked", b"printf '%s\\n' EDITx"),
+        ("EDITx", b"\x7f\r"),
+        ("EDIT\r\n", b"\x03"),
+        ("probe> ", b"\x04"),
+    ];
+    let (out, _) = Probe {
+        mode: "repl-blocked",
+        stdout_tty: true,
+        stderr_tty: true,
+        no_color: "1",
+        steps,
+        ..Default::default()
+    }
+    .run();
+    assert_eq!(style::strip_ansi(&out).trim(), "EDIT");
+}
+
+#[test]
+fn input_assist_can_be_disabled_without_changing_submission() {
+    let keys = b"printf '%s\\n' unchanged\rexit 0\r";
+    for enabled in [false, true] {
+        let (out, _) = Probe {
+            mode: "repl",
+            stdout_tty: true,
+            stderr_tty: true,
+            input_assist: enabled,
+            keys: Some(keys),
+            ..Default::default()
+        }
+        .run();
+        assert_eq!(style::strip_ansi(&out).trim(), "unchanged");
+    }
+}
+
+#[test]
+#[ignore = "fixed-device input latency comparison; no model"]
+fn input_assist_latency_comparison() {
+    for single_key in [true, false] {
+        let mut off = Vec::new();
+        let mut on = Vec::new();
+        let mut startup_off = Vec::new();
+        let mut startup_on = Vec::new();
+        for round in 0..5 {
+            for enabled in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let text: Vec<String> = (0..40)
+                    .map(|i| {
+                        if single_key {
+                            format!("echo {}", "x".repeat(i + 1))
+                        } else {
+                            format!("echo latency_{i:02}")
+                        }
+                    })
+                    .collect();
+                let keys: Vec<Vec<u8>> = text
+                    .iter()
+                    .skip(1)
+                    .map(|line| {
+                        if single_key {
+                            vec![b'x']
+                        } else {
+                            format!("\x15{line}").into_bytes()
+                        }
+                    })
+                    .chain(std::iter::once(b"\x15exit 0\r".to_vec()))
+                    .collect();
+                let steps: Vec<KeyStep<'_>> = text
+                    .iter()
+                    .zip(&keys)
+                    .map(|(text, keys)| (text.as_str(), keys.as_slice()))
+                    .collect();
+                let (_, _, timings) = Probe {
+                    mode: "repl",
+                    stdout_tty: true,
+                    stderr_tty: true,
+                    no_color: "1",
+                    input_assist: enabled,
+                    keys: Some(text[0].as_bytes()),
+                    steps: &steps,
+                    ..Default::default()
+                }
+                .run_with_timings();
+                if enabled { &mut on } else { &mut off }
+                    .extend(timings.input.into_iter().skip(usize::from(single_key)));
+                if enabled {
+                    &mut startup_on
+                } else {
+                    &mut startup_off
+                }
+                .push(timings.startup);
+            }
+        }
+        for (enabled, mut values, mut startup) in
+            [(false, off, startup_off), (true, on, startup_on)]
+        {
+            values.sort_unstable();
+            startup.sort_unstable();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "input_assist": enabled,
+                    "input_pattern": if single_key { "single-key" } else { "replacement-burst" },
+                    "samples": values.len(),
+                    "observer_poll_ms": 5,
+                    "p50_us": values[values.len() / 2].as_micros(),
+                    "p95_us": values[values.len() * 95 / 100].as_micros(),
+                    "p99_us": values[values.len() * 99 / 100].as_micros(),
+                    "max_us": values.last().unwrap().as_micros(),
+                    "startup_p50_us": startup[startup.len() / 2].as_micros(),
+                    "startup_max_us": startup.last().unwrap().as_micros(),
+                })
+            );
+        }
+    }
+}
 #[test]
 fn redirected_answers_have_no_thinking_newline_or_decoration() {
     for stderr_tty in [false, true] {
