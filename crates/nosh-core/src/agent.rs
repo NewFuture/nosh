@@ -394,7 +394,7 @@ impl Agent {
         loop {
             if out.steps >= self.cfg.max_steps && !summarizing {
                 summarizing = true;
-                pending.push(Message::User(SUMMARIZE.into()));
+                pending.push(Message::System(SUMMARIZE.into()));
             }
             cancel.reset();
             out.steps += 1;
@@ -448,6 +448,7 @@ impl Agent {
             let mut denied = false;
             let mut aborted = false;
             let mut handed_off = false;
+            let calls_cwd = shell.cwd();
             for call in &step.tool_calls {
                 if denied || aborted || handed_off {
                     pending.push(Message::Tool(
@@ -511,6 +512,11 @@ impl Agent {
                 out.status = TaskStatus::Completed;
                 self.carry = pending;
                 break;
+            }
+            if shell.cwd() != calls_cwd {
+                pending.push(Message::System(crate::project::describe(
+                    &self.cfg.permission_context(shell),
+                )));
             }
         }
         if out.status == TaskStatus::Completed && out.denied > 0 && out.commands_run == 0 {
@@ -756,12 +762,6 @@ impl Agent {
                 "Command stopped while waiting for a terminal or password, but earlier parts of this shell program may already have run. Check the current state and the entire command before running it yourself; it will not be retried automatically."
             )));
             return Exec::Handoff(command.to_string(), text);
-        }
-        if r.diff.cwd.is_some() {
-            text.push('\n');
-            text.push_str(&crate::project::describe(
-                &self.cfg.permission_context(shell),
-            ));
         }
         Exec::CommandResult(text)
     }
@@ -1081,7 +1081,7 @@ mod tests {
                     first.clone(),
                     Message::User("failed task".into()),
                     second.clone(),
-                    Message::User(SUMMARIZE.into()),
+                    Message::System(SUMMARIZE.into()),
                 ],
                 &mut crate::RecordUi::default(),
             )

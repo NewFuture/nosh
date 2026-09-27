@@ -97,7 +97,7 @@ fn multi_step_task_uses_tool_results() {
     assert_eq!(out.steps, 2);
     assert_eq!(out.answer, "It printed hello.");
     let rec = received.lock().unwrap();
-    let [Message::User(background), Message::User(task)] = rec[0].as_slice() else {
+    let [Message::System(background), Message::User(task)] = rec[0].as_slice() else {
         panic!("background and request must be separate");
     };
     assert!(background.starts_with("[context]\n"), "{background}");
@@ -315,7 +315,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         };
         let [
             Message::Tool(restored),
-            Message::User(background),
+            Message::System(background),
             Message::User(followup),
         ] = &received[2][..]
         else {
@@ -534,7 +534,7 @@ fn step_limit_asks_for_a_summary() {
     let _g = setup();
     let mut sh = shell();
     let engine = MockChatEngine::with_responder(|history| match history.last() {
-        Some(Message::User(u)) if u.contains("Step limit reached") => vec![text("Summary.")],
+        Some(Message::System(u)) if u.contains("Step limit reached") => vec![text("Summary.")],
         _ => vec![call("run_command", json!({"command": "true"}))],
     });
     let mut a = agent(
@@ -791,7 +791,7 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
         .iter()
         .flatten()
         .filter_map(|message| {
-            if let Message::User(text) = message
+            if let Message::System(text) = message
                 && text.starts_with("[context]\n")
             {
                 Some(text.as_str())
@@ -800,7 +800,7 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
             }
         })
         .collect();
-    assert_eq!(contexts.len(), 4);
+    assert_eq!(contexts.len(), 5);
     assert!(
         context_field(contexts[0], "project")
             .unwrap()
@@ -817,16 +817,21 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
     );
     assert!(context_field(contexts[2], "project_root").is_none());
     assert_eq!(
-        context_field(contexts[3], "project"),
+        context_field(contexts[4], "project"),
         Some("no known manifest")
     );
-    assert_eq!(context_field(contexts[3], "git"), Some("none detected"));
+    assert_eq!(context_field(contexts[4], "git"), Some("none detected"));
     let results = tool_results(&records);
+    assert!(!results[0].contains("[context]"));
     assert!(
-        context_field(&results[0], "project")
+        context_field(contexts[3], "project")
             .unwrap()
             .starts_with("node;")
     );
+    let [Message::Tool(_), Message::System(updated)] = records[2].as_slice() else {
+        panic!("cwd changes must append system context after tool results");
+    };
+    assert_eq!(context_field(updated, "cwd"), Some(node.to_str().unwrap()));
     assert_eq!(
         specs.lock().unwrap().len(),
         1,
@@ -859,7 +864,7 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
         &mut RecordUi::default(),
     );
     let check = |messages: &[Vec<Message>]| {
-        let Message::User(message) = &messages[0][0] else {
+        let Message::System(message) = &messages[0][0] else {
             panic!("expected task")
         };
         assert!(
@@ -942,7 +947,7 @@ fn agents_guidance_is_scoped_cached_refreshed_and_cleared() {
         .iter()
         .flatten()
         .filter_map(|message| match message {
-            Message::User(text) if text.starts_with("[context]\n") => Some(text.as_str()),
+            Message::System(text) if text.starts_with("[context]\n") => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -998,7 +1003,7 @@ fn cancelled_generation_resends_guidance_on_the_next_task() {
     let received = received.lock().unwrap();
     assert_eq!(received.len(), 2);
     for append in received.iter() {
-        let Message::User(message) = &append[0] else {
+        let Message::System(message) = &append[0] else {
             panic!("expected task with scoped guidance");
         };
         assert!(message.contains("scoped instruction after cancellation"));
@@ -1076,7 +1081,7 @@ fn readme_references_refresh_and_remain_optional_for_suggestions() {
         .iter()
         .flatten()
         .filter_map(|message| match message {
-            Message::User(text) if text.starts_with("[context]\n") => Some(text.as_str()),
+            Message::System(text) if text.starts_with("[context]\n") => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -1110,7 +1115,7 @@ fn readme_references_refresh_and_remain_optional_for_suggestions() {
         .unwrap();
         assert_eq!(result.unwrap().command, "echo ok");
         let received = received.lock().unwrap();
-        let Message::User(message) = &received[0][0] else {
+        let Message::System(message) = &received[0][0] else {
             panic!("expected reference context in the task");
         };
         assert_eq!(message.contains("reference unavailable"), blocked);
@@ -1471,7 +1476,7 @@ fn repl_pipeline_with_mock_engine() {
         let Some(append) = rec.last() else {
             panic!("expected a task message");
         };
-        let [Message::User(background), Message::User(request)] = append.as_slice() else {
+        let [Message::System(background), Message::User(request)] = append.as_slice() else {
             panic!("expected separate background and request");
         };
         assert!(background.starts_with("[context]\n"), "{background}");

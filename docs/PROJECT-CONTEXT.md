@@ -4,9 +4,11 @@
 
 ## 消息契约
 
-system 与工具 schema 在对话内保持稳定。项目事实、文档和附件不提升为可信 system 内容；不能从背景推导额外任务。
+初始 System 与工具 schema 在对话内保持稳定。动态背景使用独立 System 消息；只有角色边界采用特殊 token，正文按普通文本编码，不能注入角色或工具调用 token。消息角色不改变“参考资料不是任务”的规则或执行权限。
 
-agent、`-s` 和 Ctrl+G 统一发送**两个 User 消息**：背景（context、最近命令、项目文档、附件、真实失败事实），然后是原始请求。请求不改写、不拼接背景；内部 `Trigger` 只负责路由。只有失败后直接求助但没有请求文本时，生成默认的失败解释请求。
+agent、`-s` 和 Ctrl+G 统一发送 **System 背景 + User 原始请求**。背景包含 context、最近命令、项目文档、附件和真实失败事实；请求不改写、不拼接背景。内部 `Trigger` 只负责路由；只有失败后直接求助但没有请求文本时，生成默认的失败解释请求。
+
+会话支持追加 System，不修改或重复初始规则。追加的 System 参与消息计数、回退及缓存前缀复用；达到步数上限的收尾要求也使用 System。真实工具结果继续使用原有工具协议。
 
 ## 最小事实
 
@@ -20,7 +22,7 @@ agent、`-s` 和 Ctrl+G 统一发送**两个 User 消息**：背景（context、
 模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
 
 ```text
-<|im_start|>user
+<|im_start|>system
 [context]
 cwd: /work/app
 project: rust; name=app; edition=2021; workspace=true
@@ -51,7 +53,7 @@ lang: zh
 
 | 层 | 当前边界 |
 |---|---|
-| 项目事实 | 每任务重新发现、发送；命令实际改变 cwd 后补充新事实。同 cwd 不代表 manifest、Git、环境或保护设置没变 |
+| 项目事实 | 每任务作为 System 重新发送；一轮工具执行后 cwd 改变，在工具结果之后追加新 System 事实。同 cwd 不代表 manifest、Git、环境或保护设置没变 |
 | 文档内容缓存 | 按路径与 `FileStamp` 复用；作用域和当前保护仍重新检查 |
 | 文档投递去重 | 成功送达后才去重，不完整指引不记为完成；内容／作用域变化重新发送，消失显式清除，错误／取消／新会话重新确认 |
 | LLM KV 缓存 | 复用相同 token 前缀；在历史末尾重复追加相同 context 仍有新开销，不能省掉新会话应有的上下文 |
@@ -63,6 +65,6 @@ lang: zh
 - **先补刷新一致性**：已完成命令改变 cwd 后，下一模型步前更新文档作用域；不承诺在复合命令中途拦截或重写执行。
 - **先去重，再做复杂缓存**：状态照算，完整快照未变则不重发，变化则整份替换；请求、附件和真实失败事实不去重。
 
-标签格式、独立请求消息和文档精简已进入代码，行为效果尚未测量。后续比较应覆盖完整输入成本（含文档、schema、消息模板）及任务正确性；历史 JSON 渲染转换的 token 报告不代表当前收益。
+标签格式、System 背景、独立请求和文档精简已进入代码，行为效果尚未测量。后续比较应覆盖完整输入成本（含文档、schema、消息模板）及任务正确性；历史 JSON 渲染转换的 token 报告不代表当前收益。
 
 实现入口：[project.rs](../crates/nosh-core/src/project.rs)、[guidance.rs](../crates/nosh-core/src/guidance.rs)、[prompt.rs](../crates/nosh-core/src/prompt.rs)、[agent.rs](../crates/nosh-core/src/agent.rs)。

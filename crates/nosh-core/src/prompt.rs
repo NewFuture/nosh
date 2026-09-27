@@ -258,14 +258,14 @@ pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str
     task_messages(shell, input, notes)
         .into_iter()
         .filter_map(|message| match message {
-            Message::User(text) => Some(text),
+            Message::System(text) | Message::User(text) => Some(text),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Background followed by the unchanged request, both ordinary user messages.
+/// System context followed by the unchanged user request; both bodies are plain text.
 pub fn task_messages(
     shell: &EmbeddedShell,
     input: &TaskInput,
@@ -351,7 +351,7 @@ pub(crate) fn task_messages_with_context(
     } else {
         input.text.clone()
     };
-    vec![Message::User(msg), Message::User(request)]
+    vec![Message::System(msg), Message::User(request)]
 }
 
 #[cfg(test)]
@@ -418,8 +418,8 @@ mod tests {
             let mut input = TaskInput::new(trigger, request);
             input.attachment = Some(Attachment::from_bytes("stdin", b"input"));
             let messages = task_messages(&shell, &input, Some("Keep existing files."));
-            let [Message::User(background), Message::User(actual)] = messages.as_slice() else {
-                panic!("background and request must be separate user messages");
+            let [Message::System(background), Message::User(actual)] = messages.as_slice() else {
+                panic!("system context must precede the user request");
             };
             assert!(background.contains(&format!("\ncwd: {}", shell.cwd().display())));
             assert!(!background.contains("trigger="), "{background}");
@@ -448,8 +448,8 @@ mod tests {
             duration: Duration::from_secs(1),
         });
         let messages = task_messages(&shell, &input, None);
-        let [Message::User(background), Message::User(request)] = messages.as_slice() else {
-            panic!("background and request must be separate user messages");
+        let [Message::System(background), Message::User(request)] = messages.as_slice() else {
+            panic!("system context must precede the user request");
         };
         assert!(background.contains("\nexit: 101"));
         assert!(background.contains("\nfailed_command: cargo build --offline"));

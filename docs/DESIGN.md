@@ -488,7 +488,7 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 
 ```text
 sid = 取得或新建对话（任务前按 §5.7 检查预算）
-append user(标签化背景 + 项目文档 [+ 附件]), user(原始请求)
+append system(标签化背景 + 项目文档 [+ 附件]), user(原始请求)
 for step in 1..=max_steps (默认 10):
     events = engine.step(sid, pending)            // 尽量复用公共前缀
     if ContextFull: 回退本次追加，压缩旧工具结果后重试一次；回退或压缩失败则结束任务并报错
@@ -507,11 +507,12 @@ for step in 1..=max_steps (默认 10):
 
 - **错误回灌**：遇到 XML 解析失败、未知工具、缺少参数或参数类型错误时，以工具结果的形式返回 `error: …`，让模型自己修正。同一种错误最多重试 2 次。
 - **拒绝时附带理由**：用户拒绝时可以输入理由，理由会反馈给模型，模型据此调整方案。
-- **达到步数上限时**：要求模型根据已有的信息做总结，并给出下一步建议。
+- **目录变化**：一轮工具调用结束后，如 cwd 已改变，在工具结果之后追加 System 项目事实，不把背景伪装成用户请求。
+- **达到步数上限时**：通过 System 控制消息要求模型根据已有的信息做总结，并给出下一步建议。
 
 ### 5.4 Prompt
 
-system 在同一对话内保持稳定，Available 分组、Rules 保留通用约束；标签化背景和原始请求分为两个 User 消息。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
+初始 system 在同一对话内保持稳定，Available 分组、Rules 保留通用约束；动态背景用独立 System，原始请求用 User。动态 System 正文按普通文本编码，不允许注入特殊 token。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
 
 上下文格式、项目发现、AGENTS/README 加载、缓存与保护边界统一见 [Project context 设计](PROJECT-CONTEXT.md)。实际 system 文本以 [prompt.rs](../crates/nosh-core/src/prompt.rs) 为准，不在多处复制规则全文。
 
@@ -1005,7 +1006,7 @@ nosh connect user@host --push-model    把本地模型推送到主机
 - **协议**：JSON Lines，发送请求后以流的形式返回事件；调度规则见 §7.6。
 
 ```text
-→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[context]\ncwd: /work\nlang: zh"},{"role":"user","content":"哪个进程占用了 8080？"}]}
+→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"system","content":"[context]\ncwd: /work\nlang: zh"},{"role":"user","content":"哪个进程占用了 8080？"}]}
 ← {"id":2,"ev":"text","text":"我先看看端口占用情况。"}
 ← {"id":2,"ev":"tool_call","name":"run_command","args":{"command":"ss -ltnp 'sport = :8080'"}}
 ← {"id":2,"ev":"done","reason":"stop","usage":{"prompt":1236,"cached":1180,"completion":41,"tok_s":14.1}}
@@ -1310,7 +1311,7 @@ Available:
   containers: docker
 # Rules
 ...<|im_end|>
-<|im_start|>user
+<|im_start|>system
 [context]
 cwd: /home/u/proj
 project: node; name=proj; scripts=build, test
@@ -1342,7 +1343,7 @@ LISTEN 0 511 *:8080 *:* users:(("node",pid=4312,fd=21))
 8080 端口已被另一个 **node 进程（PID 4312）** 占用，所以 `npm start` 失败了。可以先结束它：`kill 4312`，或者换一个端口启动。<|im_end|>
 ```
 
-- 整个 system 消息（从 `<s>` 到第一个 `<|im_end|>`）都是静态前缀；当前在内存中复用，M2 再缓存到磁盘。动态信息都放在任务头里。
+- 第一个 system 消息（从 `<s>` 到第一个 `<|im_end|>`）是静态前缀；当前在内存中复用，M2 再缓存到磁盘。动态背景追加为另一个 System 消息，正文采用普通文本编码；更新不改写历史前缀。
 - `<function`、`</function>`、`<param`、`</param>`、`<tool_response>` 各自是单个 special token。工具说明里作为示例出现的这些文本，也会被编码成 special token，这与 HF 官方的行为一致。
 
 ## 附录 B：registry 片段

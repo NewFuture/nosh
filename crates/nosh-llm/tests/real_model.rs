@@ -174,7 +174,7 @@ fn produces_parseable_tool_call() {
         .step(
             sid,
             vec![
-                Message::User("[context]\ncwd: /tmp".into()),
+                Message::System("[context]\ncwd: /tmp".into()),
                 Message::User("List the files in the current directory.".into()),
             ],
             &mut |ev| {
