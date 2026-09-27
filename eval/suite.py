@@ -11,6 +11,8 @@ from . import fixtures
 from .approval import APPROVAL_CHECKS
 
 LEGACY_CHECKS = {"largest", "port", "lines", "rename", "python", "typos", "failure", "history", "archive", "cwd"}
+CAPTURE_CHECKS = {"captured-diagnosis": False, "captured-citation": True}
+CAPTURE_PARTS = ("capture", "diagnosis", "citation")
 
 
 CHECK_FIXTURES = {
@@ -23,6 +25,8 @@ CHECK_FIXTURES = {
     "versions": "python", "clarification": "python",
     "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
     "captured-failure": "one-shot-failure",
+    "captured-diagnosis": "diagnostic-failure",
+    "captured-citation": "diagnostic-failure",
 }
 
 
@@ -71,7 +75,7 @@ def load_suite(path: Path) -> dict:
             raise ValueError("capture_output must be off or last")
         if capture == "last" and scenario.get("mode") != "repl":
             raise ValueError("user output capture requires REPL mode")
-        if scenario.get("check") == "captured-failure" and capture != "last":
+        if scenario.get("check") in {"captured-failure", *CAPTURE_CHECKS} and capture != "last":
             raise ValueError("captured failure diagnosis requires capture_output=last")
         sid = scenario.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid) or sid in ids:
@@ -128,7 +132,7 @@ def load_suite(path: Path) -> dict:
                         raise ValueError(f"correction completion does not match inputs: {sid}")
                 if corrections is None and completions[-1]["kind"] != "agent":
                     raise ValueError(f"the final REPL input must ask the agent: {sid}")
-                if (scenario["check"] in ("build-failure", "test-failure", "port-failure", "captured-failure")
+                if (scenario["check"] in {"build-failure", "test-failure", "port-failure", "captured-failure", *CAPTURE_CHECKS}
                         and completions[0]["kind"] != "shell"):
                     raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):

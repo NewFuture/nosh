@@ -13,7 +13,7 @@ from . import driver, fixtures
 from .approval import PROJECT_POLICIES, command_groups, project_actions, shell_parts
 from .driver import PROMPT
 from .fixtures import artifact, protected_files
-from .suite import NATIVE_CHECKS as PROJECT_CHECKS
+from .suite import CAPTURE_CHECKS, NATIVE_CHECKS as PROJECT_CHECKS
 
 FILE_NAME = re.compile(r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:bin|txt|md|py|js|rs|sh)(?![\w-]|\.\w)")
 LANGUAGES = {
@@ -51,7 +51,7 @@ def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) 
     return state
 
 
-def response_prose(answer: str) -> str:
+def response_prose(answer: str, keep_inline: bool = False) -> str:
     lines = []
     fence = None
     for line in answer.splitlines():
@@ -65,7 +65,7 @@ def response_prose(answer: str) -> str:
         if fence is None and not line.lstrip().startswith(">"):
             lines.append(line)
     prose = "\n".join(lines)
-    prose = re.sub(r"(`+).*?\1", "", prose)
+    prose = re.sub(r"`+", "", prose) if keep_inline else re.sub(r"(`+).*?\1", "", prose)
     prose = re.sub(r"https?://[^\s，。！？]+", "", prose)
     prose = re.sub(r"(?<![\w])(?:[\w.?-]+[/\\])+[\w.?-]*", "", prose)
     prose = re.sub(r"[\w.?-]+\.(?:py|js|rs|md|txt|json|toml|log|bin)(?!\w)", "", prose)
@@ -668,19 +668,15 @@ def check_archive(answer: str, root: Path, before: dict, after: dict) -> list[st
         archive.unlink(missing_ok=True)
 
 
-def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
-                     after: dict, result, evidence: dict | None) -> list[str]:
+def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
+                      result, evidence: dict | None) -> tuple[list[str], set[str]]:
     reasons = []
     if not result.turns or result.turns[0].get("exit_code") != 17:
         reasons.append("the original one-shot failure was not observed")
     original = result.turns[0]["output"] if result.turns else ""
     codes = set(re.findall(r"\bCAPTURE-[0-9a-f]{8}\b", original))
-    if len(codes) != 1 or not any(code in answer for code in codes):
-        reasons.append("answer does not cite the actual one-shot error identifier")
-    if "REGION" not in answer or not re.search(r"unset|missing|未设置|缺失|没有设置|未配置", answer, re.I):
-        reasons.append("answer does not explain the missing REGION setting")
-    if not re.search(r"\bexport\b|configur|set\b|设置|配置", answer, re.I):
-        reasons.append("answer provides no remedy for REGION")
+    if len(codes) != 1:
+        reasons.append("the original diagnostic identifier was not uniquely observed")
     counter = root / "calls.count"
     if counter.is_symlink() or not counter.is_file() or counter.read_text(encoding="utf-8") != "1":
         reasons.append("the one-shot program was rerun")
@@ -693,14 +689,14 @@ def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
     tasks = [message["text"] for message in messages
              if message.get("role") == "user" and message.get("text", "").startswith("[task ")]
     if len(tasks) != 1 or "\n[user_output " not in tasks[0]:
-        return reasons + ["the first model request lacks captured output evidence"]
+        return reasons + ["the first model request lacks captured output evidence"], codes
     header, separator, body = tasks[0].split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None
     except json.JSONDecodeError:
         metadata = None
     if not isinstance(metadata, dict):
-        return reasons + ["invalid captured output metadata"]
+        return reasons + ["invalid captured output metadata"], codes
     if (metadata.get("state") != "captured" or metadata.get("source") != "terminal"
             or type(metadata.get("command_id")) is not int or metadata.get("command_id") != 1
             or metadata.get("command") != scenario["inputs"][0]
@@ -718,18 +714,83 @@ def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
             reasons.append("captured byte count does not match the output block")
         if not any(code in captured for code in codes) or "REGION is unset" not in captured:
             reasons.append("the first model request does not contain the actual diagnostic")
+        if scenario["check"] in CAPTURE_CHECKS and (
+                "diagnostic_id: " not in captured or "error_code: REGION_UNSET" not in captured
+                or "exit_code: 17" not in captured):
+            reasons.append("the distinct diagnostic_id, error_code and exit_code fields were not captured")
+    return reasons, codes
+
+
+def region_diagnosis(answer: str) -> list[str]:
+    reasons = []
+    if "REGION" not in answer or not re.search(r"unset|missing|未设置|缺失|没有设置|未配置", answer, re.I):
+        reasons.append("answer does not explain the missing REGION setting")
+    if not re.search(r"\bexport\b|configur|set\b|设置|配置", answer, re.I):
+        reasons.append("answer provides no remedy for REGION")
     return reasons
+
+
+def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
+                     after: dict, result, evidence: dict | None) -> list[str]:
+    """Keep the revision-3 combined citation contract available for old cases."""
+    reasons, codes = captured_evidence(scenario, facts, root, after, result, evidence)
+    if len(codes) != 1 or not any(code in answer for code in codes):
+        reasons.append("answer does not cite the actual one-shot error identifier")
+    return reasons + region_diagnosis(answer)
+
+
+def unsupported_diagnostic_claims(answer: str) -> list[str]:
+    """Bounded known-contradiction checks, not a general semantic truth judge."""
+    reasons = []
+    prose = response_prose(answer, keep_inline=True)
+    for clause in re.split(r"[。！？!?；;\n，,]", prose):
+        conditional = re.search(
+            r"如果|例如|比如|举例|假设|假如|可能|或许|不一定|无法|不能|不是|并非|未提供|没有.*依据"
+            r"|\b(?:if|example|assuming|hypothetical|may|might|could|unknown|unspecified|not)\b", clause, re.I,
+        )
+        if conditional:
+            continue
+        domain = re.search(r"\b(?:kubernetes|k8s|aws|azure|gcp)\b|内容审核|内容审查|安全过滤", clause, re.I)
+        assertion = re.search(r"用于|用来|属于|来自|对应|需要|要求|是|\b(?:is|uses?|requires?|for)\b", clause, re.I)
+        if domain and assertion:
+            reasons.append("unsupported application-purpose assertion: " + clause.strip())
+        if (re.search(r"(?:退出码|退出代码|\bexit(?:[ _-]*code)?)\s*(?:为|是|[:=])?\s*17", clause, re.I)
+                and re.search(r"TERMINATE|EXPIRE|SIG[A-Z]+|\berrno\b|\bsignal\b|信号|系统定义", clause, re.I)):
+            reasons.append("unsupported exit-code interpretation: " + clause.strip())
+    if re.search(r"(?:不是|并非|not)[^。！？\n]{0,12}REGION[^。！？\n]{0,8}(?:未设置|未配置|unset|missing)", prose, re.I):
+        reasons.append("answer denies the observed missing REGION setting")
+    return reasons
+
+
+def captured_components(scenario: dict, answer: str, facts: dict, root: Path,
+                        after: dict, result, evidence: dict | None) -> dict:
+    capture, codes = captured_evidence(scenario, facts, root, after, result, evidence)
+    diagnosis = region_diagnosis(answer) + unsupported_diagnostic_claims(answer)
+    required = CAPTURE_CHECKS[scenario["check"]]
+    citation = ([] if len(codes) == 1 and any(code in answer for code in codes)
+                else ["answer does not cite the diagnostic_id field"])
+    return {
+        "capture": {"passed": not capture, "required": True, "reasons": capture},
+        "diagnosis": {"passed": not diagnosis, "required": True, "reasons": diagnosis,
+                      "grounding_scope": "known_assertions_only"},
+        "citation": {"passed": not citation if required else None, "required": required,
+                     "reasons": citation if required else []},
+    }
 
 
 def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result,
           metrics: dict, evidence: dict | None = None) -> Verdict:
     kind = scenario["check"]
     reasons = []
+    components = None
     if result.exit_code != 0:
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
-    if kind == "captured-failure":
+    if kind in CAPTURE_CHECKS:
+        components = captured_components(scenario, answer, facts, root, after, result, evidence)
+        reasons.extend(f"{name}: {reason}" for name, item in components.items() for reason in item["reasons"])
+    elif kind == "captured-failure":
         reasons.extend(captured_failure(scenario, answer, facts, root, after, result, evidence))
     elif kind in PROJECT_CHECKS:
         if evidence is None:
@@ -856,6 +917,8 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     if "expect" in scenario and scenario["fixture"] == "port" and not facts["listener"].get("alive_at_end"):
         reasons.append("the owned listener did not survive the task")
     fact_result = {"passed": not reasons, "reasons": list(reasons)}
+    if components is not None:
+        fact_result["components"] = components
     ux = experience(scenario, answer, metrics)
     if ux:
         reasons.extend(f"experience {name}: {detail}" for name, detail in ux.items() if detail["passed"] is False)

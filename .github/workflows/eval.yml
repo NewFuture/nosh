@@ -3,8 +3,12 @@ name: Evaluation
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: Origin branch containing the source commit (default main)
+        type: string
+        default: 'main'
       source_revision:
-        description: Exact main commit to evaluate (empty pins current main)
+        description: Exact source commit to evaluate (empty pins source_ref)
         type: string
         default: ''
 
@@ -50,34 +54,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: freeze main source and record the environment
+      - name: freeze selected source and record the environment
         env:
+          REQUESTED_REF: ${{ inputs.source_ref }}
           REQUESTED_SOURCE: ${{ inputs.source_revision }}
         run: |
-          git fetch --no-tags origin main
-          source="${REQUESTED_SOURCE:-$(git rev-parse origin/main)}"
-          if [[ ! "$source" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::source_revision must be a full lowercase commit SHA"
-            exit 2
-          fi
-          if ! git merge-base --is-ancestor "$source" origin/main; then
-            echo "::error::source_revision must be on main"
-            exit 2
-          fi
+          source_ref="${REQUESTED_REF:-main}"
+          source="$(python3 -c 'import os; from eval.run import resolve_source_revision; print(resolve_source_revision(os.environ.get("REQUESTED_REF") or "main", os.environ.get("REQUESTED_SOURCE") or ""))')"
           EVAL_SOURCE="$RUNNER_TEMP/nosh-evaluation-source"
           EVAL_ARTIFACTS="$GITHUB_WORKSPACE/target/evaluation-artifacts"
           {
             echo "EVAL_SOURCE_REVISION=$source"
+            echo "EVAL_SOURCE_REF=$source_ref"
             echo "EVAL_SOURCE=$EVAL_SOURCE"
             echo "EVAL_ARTIFACTS=$EVAL_ARTIFACTS"
-            echo "EVAL_BINARY=$GITHUB_WORKSPACE/target/evaluation-main/release/nosh"
+            echo "EVAL_BINARY=$GITHUB_WORKSPACE/target/evaluation-source/release/nosh"
             echo "NOSH_HOME=$RUNNER_TEMP/nosh-evaluation-model"
           } >> "$GITHUB_ENV"
           mkdir -p "$EVAL_SOURCE" "$EVAL_ARTIFACTS"
           git archive --format=tar --output="$RUNNER_TEMP/evaluation-source.tar" "$source"
           tar -xf "$RUNNER_TEMP/evaluation-source.tar" -C "$EVAL_SOURCE"
           {
-            printf 'Main source: %s\nHarness source: %s\n' "$source" "$GITHUB_SHA"
+            printf 'Source ref: %s\nSource: %s\nHarness source: %s\n' "$source_ref" "$source" "$GITHUB_SHA"
             rustc -Vv
             cargo --version
             node --version
@@ -88,19 +86,19 @@ jobs:
           } > "$EVAL_ARTIFACTS/environment.txt"
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ runner.temp }}/nosh-evaluation-source -> ${{ github.workspace }}/target/evaluation-main
-          key: evaluation-clean-main-release
+          workspaces: ${{ runner.temp }}/nosh-evaluation-source -> ${{ github.workspace }}/target/evaluation-source
+          key: evaluation-clean-source-release
       - name: evaluation harness tests (no model)
         timeout-minutes: 10
         run: python3 -m unittest discover -s eval -v
-      - name: build the pinned clean main
+      - name: build the pinned clean source
         timeout-minutes: 30
         working-directory: ${{ runner.temp }}/nosh-evaluation-source
         run: |
           echo "EVAL_BUILD_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_TARGET \
             cargo build --release --locked -p nosh-cli --bin nosh \
-            --target-dir "$GITHUB_WORKSPACE/target/evaluation-main"
+            --target-dir "$GITHUB_WORKSPACE/target/evaluation-source"
       - name: write verified build provenance
         run: |
           python3 - <<'PY'
@@ -111,14 +109,14 @@ jobs:
           data = {
               "schema_version": 1,
               "source_revision": os.environ["EVAL_SOURCE_REVISION"],
-              "source_ref": "main",
+              "source_ref": os.environ["EVAL_SOURCE_REF"],
               "source_clean": True,
               "source_archive_sha256": fixtures.file_hash(Path(os.environ["RUNNER_TEMP"]) / "evaluation-source.tar"),
               "binary_sha256": fixtures.file_hash(Path(os.environ["EVAL_BINARY"])),
               "build_cwd": os.environ["EVAL_SOURCE"],
               "command": ["env", "-u", "RUSTFLAGS", "-u", "CARGO_ENCODED_RUSTFLAGS", "-u", "CARGO_BUILD_TARGET",
                           "cargo", "build", "--release", "--locked", "-p", "nosh-cli", "--bin", "nosh",
-                          "--target-dir", str(Path(os.environ["GITHUB_WORKSPACE"]) / "target" / "evaluation-main")],
+                          "--target-dir", str(Path(os.environ["GITHUB_WORKSPACE"]) / "target" / "evaluation-source")],
               "cargo_build_jobs": 2,
               "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
               "cargo": subprocess.check_output(["cargo", "--version"], text=True).strip(),
@@ -141,7 +139,7 @@ jobs:
       - name: prepare the pinned checkpoint artifact client
         timeout-minutes: 5
         run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@2.3.2
-      - name: collect the serial 250-trial campaign
+      - name: collect the complete serial campaign
         id: campaign
         uses: actions/github-script@v7
         with:
@@ -162,7 +160,7 @@ jobs:
               '--build-info', path.join(root, 'build-info.json'),
               '--threads', '2', '--repeat', '2',
               '--timeout', process.env.EVAL_TRIAL_TIMEOUT_S,
-              '--label', `main-${process.env.EVAL_SOURCE_REVISION.slice(0, 7)}-expanded-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
+              '--label', `source-${process.env.EVAL_SOURCE_REVISION.slice(0, 7)}-full-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
               '--output', path.join(root, 'campaign')];
             const child = spawn('nice', args, {stdio: ['ignore', 'pipe', 'pipe']});
             child.stdout.on('data', data => { process.stdout.write(data); log.write(data); });
@@ -229,16 +227,12 @@ jobs:
               raise SystemExit("harness source does not match its recorded commit")
           data["metadata"]["harness_revision"] = revision
           report.save(data, path.parent)
-          complete = (len(data["metadata"]["scenarios"]) == 25
-                      and data["metadata"]["seeds"] == [0, 1, 2, 3, 4]
-                      and data["metadata"]["repeat"] == 2
-                      and len(data["trials"]) == 250
-                      and not any(t["status"] == "error" for t in data["trials"])
-                      and not data.get("error"))
+          complete = run.campaign_complete(data, run.load_suite(run.HERE / "scenarios.json"))
           provenance = {
               "schema_version": 1, "complete": complete,
               "dataset_revision": data["metadata"].get("dataset_revision", 1),
-              "source_revision": os.environ["EVAL_SOURCE_REVISION"], "harness_revision": revision,
+              "source_revision": os.environ["EVAL_SOURCE_REVISION"],
+              "source_ref": os.environ["EVAL_SOURCE_REF"], "harness_revision": revision,
               "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "workflow_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
               "runner_environment": "GitHub-hosted Ubuntu; no local CPU/RAM used",
@@ -252,7 +246,7 @@ jobs:
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
               stream.write(f"## Expanded evaluation: {'complete' if complete else 'incomplete'}\n\n")
               stream.write(f"Dataset revision {provenance['dataset_revision']}; "
-                           f"main `{provenance['source_revision']}`; harness `{revision}`.\n\n")
+                           f"source `{provenance['source_ref']}` at `{provenance['source_revision']}`; harness `{revision}`.\n\n")
               stream.write(f"Hosted trial deadline: {provenance['trial_timeout_s']} seconds; "
                            "not timing-equivalent to local runs with a different deadline.\n\n")
               stream.write("Model failures are retained; workflow success does not mean a 100% task pass rate.\n\n")

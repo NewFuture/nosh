@@ -22,7 +22,7 @@ OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
     "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
 }
-FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "one-shot-failure", "history", "logs"} | PROJECT_FIXTURES
+FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "one-shot-failure", "diagnostic-failure", "history", "logs"} | PROJECT_FIXTURES
 PROJECT = {
     "main.py": "from lib.maths import add\nvalues = [1, 2, 3]\nresult = add(values[0], values[1])\nprint(result)\nprint(len(values))\n",
     "lib/maths.py": "def add(a, b):\n    return a + b\ndef square(value):\n    return value * value\nprint(square(3))\n",
@@ -280,6 +280,23 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
               "    print(f'{code}: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
               "else:\n"
               "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
+              "raise SystemExit(17)\n")
+    elif kind == "diagnostic-failure":
+        write(root, "calls.count", "0")
+        write(root, "once.py",
+              "import os\nfrom pathlib import Path\nimport sys\n"
+              "counter = Path('calls.count')\n"
+              "count = int(counter.read_text()) + 1\ncounter.write_text(str(count))\n"
+              "if count > 1:\n"
+              "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
+              "    raise SystemExit(17)\n"
+              "if os.environ.get('REGION'):\n"
+              "    raise SystemExit(0)\n"
+              "diagnostic_id = 'CAPTURE-' + os.urandom(4).hex()\n"
+              "print(f'diagnostic_id: {diagnostic_id}', file=sys.stderr)\n"
+              "print('error_code: REGION_UNSET', file=sys.stderr)\n"
+              "print('message: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
+              "print('exit_code: 17', file=sys.stderr)\n"
               "raise SystemExit(17)\n")
     elif kind == "logs":
         write(root, "logs/app.log", "INFO service started\nERROR fixture error\n")

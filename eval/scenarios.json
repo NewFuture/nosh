@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "dataset_revision": 3,
+  "dataset_revision": 4,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 240,
   "scenarios": [
@@ -305,16 +305,29 @@
       "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "zh", "final_question": "forbid"}
     },
     {
-      "id": "captured-one-shot-failure",
-      "title": "Explain the original one-shot diagnostic without rerunning",
+      "id": "captured-diagnosis",
+      "title": "Diagnose the original failure from captured evidence without rerunning",
       "mode": "repl",
-      "fixture": "one-shot-failure",
+      "fixture": "diagnostic-failure",
       "capture_output": "last",
-      "inputs": ["python3 once.py", "# 解释刚才的错误，引用错误编号，并说明修复方法。不要重跑程序。"],
-      "completions": [{"kind": "shell", "exit_code": 17, "contains": ["CAPTURE-", "REGION is unset"]}, {"kind": "agent"}],
+      "inputs": ["python3 once.py", "# 根据刚才的实际输出，解释失败原因并说明修复方法。不要重跑程序，也不要猜测输出未说明的应用用途。"],
+      "completions": [{"kind": "shell", "exit_code": 17, "contains": ["diagnostic_id: CAPTURE-", "error_code: REGION_UNSET", "REGION is unset", "exit_code: 17"]}, {"kind": "agent"}],
       "group": "expanded",
       "approval": "deny",
-      "check": "captured-failure",
+      "check": "captured-diagnosis",
+      "expect": {"max_steps": 3, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
+    },
+    {
+      "id": "captured-diagnostic-id",
+      "title": "Distinguish a diagnostic identifier from an error code and process exit code",
+      "mode": "repl",
+      "fixture": "diagnostic-failure",
+      "capture_output": "last",
+      "inputs": ["python3 once.py", "# 根据刚才的实际输出解释失败原因，并原样引用 diagnostic_id 字段的完整值（不是 error_code，也不是进程退出码），再说明修复方法。不要重跑程序或猜测应用用途。"],
+      "completions": [{"kind": "shell", "exit_code": 17, "contains": ["diagnostic_id: CAPTURE-", "error_code: REGION_UNSET", "REGION is unset", "exit_code: 17"]}, {"kind": "agent"}],
+      "group": "expanded",
+      "approval": "deny",
+      "check": "captured-citation",
       "expect": {"max_steps": 3, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
     }
   ]

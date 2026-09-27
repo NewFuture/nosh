@@ -11,17 +11,54 @@ import unittest
 from eval import checks, driver, fixtures, run, suite
 
 
+def capture_trial(base, scenario):
+    root = base / "project"
+    facts = fixtures.create(root, scenario["fixture"])
+    original = subprocess.run([sys.executable, "once.py"], cwd=root,
+                              env=fixtures.project_environment(base / "home"),
+                              capture_output=True, text=True, check=False)
+    if original.returncode != 17:
+        raise AssertionError(f"fixture did not fail: {original}")
+    code = re.search(r"CAPTURE-[0-9a-f]{8}", original.stderr)[0]
+    metadata = {
+        "command_id": 1, "command": scenario["inputs"][0],
+        "execution_cwd": str(root), "exit": 17, "source": "terminal", "state": "captured",
+        "mixed": False, "incomplete": False, "truncated": False,
+        "retained_bytes": len(original.stderr.encode("utf-8")),
+    }
+    result = driver.Result(exit_code=0, turns=[{
+        "kind": "shell", "exit_code": 17, "output": original.stderr,
+    }])
+    answer = f"错误 {code} 表示 REGION 未设置，配置该环境变量即可解决。"
+    metrics = {"task_status": "completed", "steps": 1, "confirmations": 0}
+    return root, facts, original.stderr, metadata, result, answer, metrics
+
+
+def observed_input(text, metadata):
+    message = f"[task trigger=hash]\n[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
+    return {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": message}]}]}
+
+
 class CaptureEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.data = suite.load_suite(run.HERE / "scenarios.json")
-        self.scenario = next(s for s in self.data["scenarios"] if s["check"] == "captured-failure")
+        self.scenario = {
+            "id": "captured-one-shot-failure", "title": "Revision 3 capture contract",
+            "mode": "repl", "fixture": "one-shot-failure", "capture_output": "last",
+            "inputs": ["python3 once.py", "# 解释错误并引用错误编号，不要重跑"],
+            "completions": [{"kind": "shell", "exit_code": 17, "contains": ["CAPTURE-", "REGION is unset"]},
+                            {"kind": "agent"}],
+            "group": "expanded", "approval": "deny", "check": "captured-failure",
+            "expect": {"max_steps": 3, "max_confirmations": 0, "response_language": "zh",
+                       "final_question": "forbid"},
+        }
 
     def test_binary_defaults_and_explicit_capture_overrides_are_distinct(self):
         for scenario in self.data["scenarios"]:
-            expected = "last" if scenario["check"] == "captured-failure" else None
+            expected = "last" if scenario["check"] in suite.CAPTURE_CHECKS else None
             self.assertEqual(scenario.get("capture_output"), expected)
         for mode in ("off", "last", None):
             home = self.base / (mode or "default")
@@ -44,28 +81,10 @@ class CaptureEvaluationTests(unittest.TestCase):
                 suite.load_suite(path)
 
     def prepare(self):
-        root = self.base / "project"
-        facts = fixtures.create(root, "one-shot-failure")
-        original = subprocess.run([sys.executable, "once.py"], cwd=root,
-                                  capture_output=True, text=True, check=False)
-        self.assertEqual(original.returncode, 17)
-        code = re.search(r"CAPTURE-[0-9a-f]{8}", original.stderr)[0]
-        metadata = {
-            "command_id": 1, "command": self.scenario["inputs"][0],
-            "execution_cwd": str(root), "exit": 17, "source": "terminal", "state": "captured",
-            "mixed": False, "incomplete": False, "truncated": False,
-            "retained_bytes": len(original.stderr.encode("utf-8")),
-        }
-        result = driver.Result(exit_code=0, turns=[{
-            "kind": "shell", "exit_code": 17, "output": original.stderr,
-        }])
-        answer = f"错误 {code} 表示 REGION 未设置，配置该环境变量即可解决。"
-        metrics = {"task_status": "completed", "steps": 1, "confirmations": 0}
-        return root, facts, original.stderr, metadata, result, answer, metrics
+        return capture_trial(self.base, self.scenario)
 
     def evidence(self, text, metadata):
-        message = f"[task trigger=hash]\n[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
-        return {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": message}]}]}
+        return observed_input(text, metadata)
 
     def test_real_one_shot_error_requires_original_engine_input_and_count(self):
         root, facts, text, metadata, result, answer, metrics = self.prepare()
