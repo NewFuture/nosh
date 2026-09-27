@@ -161,14 +161,16 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
     let cancel = loaded.engine.cancel_handle();
     shell.interrupts().on_interrupt(move || cancel.cancel());
     let env = Environment::detect(&shell);
-    let sampling = agent_config(cfg, ApprovalMode::Confirm, seed).sampling;
-    let r = nosh_core::suggest::suggest(
+    let config = agent_config(cfg, ApprovalMode::Confirm, seed);
+    let context = config.permission_context(&shell);
+    let r = nosh_core::suggest::suggest_with_context(
         loaded.engine.as_mut(),
         &env,
         &shell,
         &text,
         Trigger::Cli,
-        sampling,
+        config.sampling,
+        &context,
     );
     if shell.interrupts().count() > 0 {
         return 130;

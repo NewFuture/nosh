@@ -55,6 +55,14 @@ fn tool_results(received: &[Vec<Message>]) -> Vec<String> {
         .collect()
 }
 
+fn project_context(message: &str) -> serde_json::Value {
+    let line = message
+        .lines()
+        .find_map(|line| line.strip_prefix("[project] "))
+        .unwrap();
+    serde_json::from_str(line).unwrap()
+}
+
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("nosh-flow-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -711,6 +719,147 @@ fn suggest_and_ctrl_g_use_text_without_tools_or_execution() {
     );
     assert!(!dir.join("suggested").exists());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn project_context_refreshes_between_tasks_and_after_agent_cd() {
+    let _g = setup();
+    let root = tmpdir("project-context");
+    let rust = root.join("rust");
+    let node = root.join("node");
+    let plain = root.join("plain");
+    for dir in [&rust, &node, &plain] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(rust.join("Cargo.toml"), "[package]\nname='rust-project'\n").unwrap();
+    std::fs::write(
+        node.join("package.json"),
+        r#"{"name":"node-project","scripts":{"build":"must-not-run"}}"#,
+    )
+    .unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", rust.display()));
+    let destination = node.clone();
+    let engine = MockChatEngine::with_responder(move |history| match history.last() {
+        Some(Message::User(text)) if text.ends_with("\nchange project") => {
+            vec![call(
+                "run_command",
+                json!({"command": format!("cd {}", destination.display())}),
+            )]
+        }
+        _ => vec![text("Context received.")],
+    });
+    let received = engine.received();
+    let specs = engine.specs();
+    let mut agent = agent(engine, AgentConfig::default());
+    for request in ["describe", "change project", "describe"] {
+        let result = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, request),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(result.status, TaskStatus::Completed);
+    }
+    sh.run_user_line(&format!("cd {}", plain.display()));
+    agent.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "describe"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    let records = received.lock().unwrap();
+    let contexts: Vec<_> = records
+        .iter()
+        .flatten()
+        .filter_map(|message| {
+            if let Message::User(text) = message {
+                Some(project_context(text))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(contexts.len(), 4);
+    assert_eq!(contexts[0]["types"], json!(["rust"]));
+    assert_eq!(contexts[2]["types"], json!(["node"]));
+    assert_eq!(contexts[2]["root"], json!(node));
+    assert_eq!(contexts[3]["status"], "none_detected");
+    assert_eq!(contexts[3]["git"]["status"], "none_detected");
+    let results = tool_results(&records);
+    assert_eq!(project_context(&results[0])["types"], json!(["node"]));
+    assert_eq!(
+        specs.lock().unwrap().len(),
+        1,
+        "project changes must not replace the system prefix"
+    );
+    drop(records);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions() {
+    use nosh_shell::AiHandler;
+    let _g = setup();
+    let root = tmpdir("protected-project-context");
+    let manifest = root.join("package.json");
+    std::fs::write(&manifest, r#"{"name":"never-expose-this-package-name"}"#).unwrap();
+    let cfg = AgentConfig {
+        protected: vec![manifest],
+        ..AgentConfig::default()
+    };
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let engine = MockChatEngine::new(vec![vec![text("ok")]]);
+    let received = engine.received();
+    let mut a = agent(engine, cfg.clone());
+    a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "describe"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    let check = |messages: &[Vec<Message>]| {
+        let Message::User(message) = &messages[0][0] else {
+            panic!("expected task")
+        };
+        let context = project_context(message);
+        assert_eq!(context["manifests"][0]["metadata"], "unavailable");
+        assert!(!message.contains("never-expose-this-package-name"));
+    };
+    check(&received.lock().unwrap());
+
+    let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
+    let received = engine.received();
+    let suggestion = nosh_core::suggest::suggest_with_context(
+        &mut engine,
+        &env(),
+        &sh,
+        "suggest",
+        Trigger::Cli,
+        cfg.sampling,
+        &cfg.permission_context(&sh),
+    )
+    .unwrap();
+    assert_eq!(suggestion.unwrap().command, "echo ok");
+    check(&received.lock().unwrap());
+
+    let engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
+    let received = engine.received();
+    let mut engine = Some(engine);
+    let mut ai = ShellAi::new(
+        Box::new(move || {
+            Ok(nosh_core::LoadedEngine {
+                engine: Box::new(engine.take().unwrap()),
+                description: "mock".into(),
+            })
+        }),
+        cfg,
+        Box::new(Scripted::new([])),
+    );
+    assert_eq!(ai.suggest(&mut sh, "suggest").as_deref(), Some("echo ok"));
+    check(&received.lock().unwrap());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

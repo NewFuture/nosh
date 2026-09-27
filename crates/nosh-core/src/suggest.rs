@@ -22,6 +22,27 @@ pub fn suggest(
     trigger: Trigger,
     sampling: SamplingParams,
 ) -> Result<Option<Suggestion>, LlmError> {
+    suggest_with_context(
+        engine,
+        env,
+        shell,
+        text,
+        trigger,
+        sampling,
+        &crate::AgentConfig::default().permission_context(shell),
+    )
+}
+
+/// Suggests with the caller's configured protected paths.
+pub fn suggest_with_context(
+    engine: &mut dyn ChatEngine,
+    env: &Environment,
+    shell: &EmbeddedShell,
+    text: &str,
+    trigger: Trigger,
+    sampling: SamplingParams,
+    context: &nosh_permissions::Context,
+) -> Result<Option<Suggestion>, LlmError> {
     let spec = SessionSpec {
         system: prompt::suggest_system_prompt(env),
         tools: tools::specs(ToolSet::Suggest),
@@ -30,7 +51,8 @@ pub fn suggest(
         max_new_tokens: 256,
     };
     let sid = engine.open(spec)?;
-    let msg = prompt::task_message(shell, &TaskInput::new(trigger, text), None);
+    let msg =
+        prompt::task_message_with_context(shell, &TaskInput::new(trigger, text), None, context);
     engine.cancel_handle().reset();
     let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
     engine.close(sid);

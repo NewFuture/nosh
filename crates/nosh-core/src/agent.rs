@@ -56,6 +56,30 @@ impl Default for AgentConfig {
     }
 }
 
+impl AgentConfig {
+    /// Live paths and settings shared by command assessment and automatic context reads.
+    pub fn permission_context(&self, shell: &EmbeddedShell) -> Context {
+        let mut ctx = Context::new(shell.cwd(), shell.workspace());
+        if let Some(h) = shell.home() {
+            ctx = ctx.with_home(h);
+        }
+        ctx.aliases = shell.aliases();
+        ctx.functions = shell.functions();
+        for (name, value, exported) in shell.scalar_vars() {
+            if exported {
+                ctx.exported.insert(name.clone());
+            }
+            ctx.variables.insert(name, value);
+        }
+        ctx.protected = self.protected.clone();
+        for path in [nosh_hub::paths::config_dir(), nosh_hub::paths::state_dir()] {
+            ctx.protected
+                .push(std::path::absolute(&path).unwrap_or(path));
+        }
+        ctx
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TaskStatus {
     #[default]
@@ -242,30 +266,6 @@ impl Agent {
         }
     }
 
-    fn perm_context(&self, shell: &EmbeddedShell) -> Context {
-        let mut ctx = Context::new(shell.cwd(), shell.workspace());
-        if let Some(h) = shell.home() {
-            ctx = ctx.with_home(h);
-        }
-        ctx.aliases = shell.aliases();
-        ctx.functions = shell.functions();
-        for (name, value, exported) in shell.scalar_vars() {
-            if exported {
-                ctx.exported.insert(name.clone());
-            }
-            ctx.variables.insert(name, value);
-        }
-        ctx.protected = self.cfg.protected.clone();
-        // nosh's own settings and state wherever they are (macOS keeps them
-        // under ~/Library/Application Support; NOSH_HOME, XDG_CONFIG_HOME),
-        // besides the XDG defaults the analysis always protects.
-        for path in [nosh_hub::paths::config_dir(), nosh_hub::paths::state_dir()] {
-            ctx.protected
-                .push(std::path::absolute(&path).unwrap_or(path));
-        }
-        ctx
-    }
-
     fn step(
         &mut self,
         sid: SessionId,
@@ -374,10 +374,11 @@ impl Agent {
         let notes =
             prompt::project_notes(&cwd0).filter(|(path, _)| !self.notes_seen.contains(path));
         let mut attached_notes = notes.as_ref().map(|(path, _)| path.clone());
-        pending.push(Message::User(prompt::task_message(
+        pending.push(Message::User(prompt::task_message_with_context(
             shell,
             &input,
             notes.as_ref().map(|(_, text)| text.as_str()),
+            &self.cfg.permission_context(shell),
         )));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
@@ -610,7 +611,7 @@ impl Agent {
         let mut command = original.to_string();
         let mut edited = false;
         for _ in 0..4 {
-            let report = assess_command(&command, &self.perm_context(shell));
+            let report = assess_command(&command, &self.cfg.permission_context(shell));
             let risk = report.risk();
             let label = match decide(
                 &report,
@@ -744,6 +745,12 @@ impl Agent {
             )));
             return Exec::Handoff(command.to_string(), text);
         }
+        if r.diff.cwd.is_some() {
+            text.push('\n');
+            text.push_str(&crate::project::describe(
+                &self.cfg.permission_context(shell),
+            ));
+        }
         Exec::CommandResult(text)
     }
 
@@ -757,7 +764,7 @@ impl Agent {
     ) -> Exec {
         let cwd = shell.cwd();
         let path = tools::tool_path(call, &cwd);
-        let ctx = self.perm_context(shell);
+        let ctx = self.cfg.permission_context(shell);
         let detail = path.display().to_string();
         let mut risk = Risk::Safe;
         let mut label = format!("{} · auto", Risk::Safe);

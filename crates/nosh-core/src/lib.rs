@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod approval;
 pub mod handler;
+mod project;
 pub mod prompt;
 pub mod suggest;
 pub mod tools;
