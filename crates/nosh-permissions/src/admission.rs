@@ -43,6 +43,27 @@ fn base(op: &Operation) -> &str {
         .unwrap_or("")
 }
 
+fn recognized_program(op: &Operation) -> bool {
+    op.argv.first().is_some_and(|name| {
+        !name.contains('/')
+            || crate::analyze::in_system_bin_dir(name)
+            || name == "./gradlew" && op.payload
+    })
+}
+
+fn ordinary_move_or_copy(op: &Operation) -> bool {
+    recognized_program(op)
+        && matches!(base(op), "mv" | "cp")
+        && op.risk < Risk::Dangerous
+        && !op.opaque
+        && !op.payload
+        && op.known.iter().all(|known| *known)
+        && op
+            .paths
+            .iter()
+            .all(|path| !path.extra && path.resolved.is_some())
+}
+
 fn build_goal(goal: &str) -> bool {
     matches!(
         goal,
@@ -68,7 +89,7 @@ fn build_goals(args: &[String], valued_options: &[&str]) -> bool {
 fn development(op: &Operation) -> bool {
     let args = &op.argv;
     let known = |i: usize| op.known.get(i) == Some(&true);
-    if !known(0) {
+    if !known(0) || !recognized_program(op) || op.known.iter().any(|known| !known) {
         return false;
     }
     let sub = args.get(1).map(String::as_str);
@@ -260,7 +281,10 @@ fn ordinary_variables(op: &Operation, ctx: &Context) -> bool {
 }
 
 fn diagnostic(op: &Operation, ctx: &Context) -> bool {
-    if op.known.iter().any(|known| !known) || ctx.timeout > Duration::from_secs(60) {
+    if !recognized_program(op)
+        || op.known.iter().any(|known| !known)
+        || ctx.timeout > Duration::from_secs(60)
+    {
         return false;
     }
     match base(op) {
@@ -305,21 +329,25 @@ fn diagnostic(op: &Operation, ctx: &Context) -> bool {
 struct GitProbe<'a> {
     cwd: &'a Path,
     ctx: &'a Context,
+    program: &'a str,
 }
 
 impl GitProbe<'_> {
     fn run(&self, args: &[&str]) -> Result<Option<String>, String> {
         // Use a system Git for evidence, never execute a project-named program.
-        let git = self
-            .ctx
-            .variables
-            .get("PATH")
-            .and_then(|path| {
-                std::env::split_paths(path)
-                    .map(|dir| dir.join("git"))
-                    .find(|path| path.is_file())
-            })
-            .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
+        let git = if self.program.contains('/') {
+            PathBuf::from(self.program)
+        } else {
+            self.ctx
+                .variables
+                .get("PATH")
+                .and_then(|path| {
+                    std::env::split_paths(path)
+                        .map(|dir| dir.join("git"))
+                        .find(|path| path.is_file())
+                })
+                .unwrap_or_else(|| PathBuf::from("/usr/bin/git"))
+        };
         if !git.is_file() {
             return Err("system Git is unavailable for recovery evidence".into());
         }
@@ -561,7 +589,14 @@ impl GitProbe<'_> {
 }
 
 fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection> {
-    let probe = GitProbe { cwd: &op.cwd, ctx };
+    if !recognized_program(op) {
+        return Err("path-qualified program is not a recognized Git executable".into());
+    }
+    let probe = GitProbe {
+        cwd: &op.cwd,
+        ctx,
+        program: &op.argv[0],
+    };
     probe.no_executable_config()?;
     let sub = op.argv.get(1).map(String::as_str).unwrap_or("");
     if op.known.iter().any(|k| !k) {
@@ -678,6 +713,17 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
             ))
         }
         "fetch" | "ls-remote" => {
+            if ctx.exported.contains("SSH_ASKPASS")
+                && (ctx.unknown_variables.contains("SSH_ASKPASS")
+                    || ctx
+                        .variables
+                        .get("SSH_ASKPASS")
+                        .is_some_and(|value| !value.is_empty()))
+            {
+                return Err(
+                    "remote authentication can execute SSH_ASKPASS; authorization required".into(),
+                );
+            }
             if op
                 .argv
                 .iter()
@@ -750,10 +796,12 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
 }
 
 fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
-    // A shell command runs after these checks. Without an execution-time
-    // exclusive write, metadata/Git snapshots cannot guarantee no data loss.
+    // Moves/copies have their own convenience category. Other content changes
+    // still need authorization rather than a claimed recovery guarantee.
     if !matches!(base(op), "mkdir" | "touch") || op.paths.iter().any(|path| path.extra) {
-        return Err("file content changes need authorization: preflight checks do not atomically prevent overwrites".into());
+        return Err(
+            "this file content change is outside the automatic operation categories".into(),
+        );
     }
     if op.known.iter().any(|known| !known) {
         return Err("file arguments or output contents are determined at runtime".into());
@@ -853,6 +901,13 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
         }
         if !op.variables.is_empty() && !ordinary_variables(op, &report.context) {
             return Err("session changes are not limited to known, ordinary values".into());
+        }
+        if ordinary_move_or_copy(op) {
+            result.reasons.push(format!(
+                "ordinary {}: native file semantics, not an atomic recovery guarantee",
+                base(op)
+            ));
+            continue;
         }
         if prior_effects_unknown {
             return Err("an earlier build or opaque operation can change later recovery evidence; split the calls or approve the program".into());

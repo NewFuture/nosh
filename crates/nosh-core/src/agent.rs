@@ -1562,9 +1562,8 @@ mod permission_tests {
         let commands = [
             "ping -c 1 router.local > existing",
             "mvn test deploy",
-            "mv first destination; mv second destination",
-            "mv first missing",
-            "cp first missing",
+            "mv first /dev/null",
+            "cp first /etc/file",
             "printf new > missing",
             "npm run build --prefix=/etc",
             "mvn test --file=/etc/pom.xml",
@@ -1586,6 +1585,38 @@ mod permission_tests {
             assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), name);
         }
         assert!(!root.join("missing").exists());
+    }
+
+    #[test]
+    fn routine_copy_and_move_execute_without_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::write(root.join("source"), "content").unwrap();
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
+            working_dir: Some(root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        shell.set_workspace(root.clone());
+        let mut agent = fake_agent(Auto, UserRules::default());
+        agent.command_runner = EmbeddedShell::run_agent_command;
+        let mut approvals = Scripted::new([]);
+        let mut ui = RecordUi::default();
+        let result = agent.exec_call(
+            &mut shell,
+            &call("cp source copied && mv copied moved"),
+            &mut approvals,
+            &mut ui,
+        );
+        assert!(matches!(result, Exec::CommandResult(_)));
+        assert!(approvals.seen.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("moved")).unwrap(),
+            "content"
+        );
+        assert!(!root.join("copied").exists());
+        assert!(ui.events.iter().any(|event| event.contains("ordinary cp")));
+        assert!(ui.events.iter().any(|event| event.contains("ordinary mv")));
     }
 
     #[test]

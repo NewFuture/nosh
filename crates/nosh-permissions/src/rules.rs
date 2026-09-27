@@ -247,6 +247,15 @@ pub fn opt_value<'a>(args: &'a [Arg], short: Option<char>, long: &[&str]) -> Vec
 }
 
 fn option_targets(args: &[Arg], short: Option<char>, long: &[&str]) -> Vec<Target> {
+    option_targets_with_values(args, short, long, "")
+}
+
+fn option_targets_with_values(
+    args: &[Arg],
+    short: Option<char>,
+    long: &[&str],
+    short_values: &str,
+) -> Vec<Target> {
     let mut targets = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -264,12 +273,21 @@ fn option_targets(args: &[Arg], short: Option<char>, long: &[&str]) -> Vec<Targe
             }
             value.map(|value| arg.value.len() - value.len())
         } else if let Some(short) = short
-            && let Some(rest) = arg
-                .value
-                .strip_prefix('-')
-                .and_then(|rest| rest.strip_prefix(short))
+            && let Some(rest) = arg.value.strip_prefix('-')
         {
-            (!rest.is_empty()).then_some(arg.value.len() - rest.len())
+            let found = rest.char_indices().find(|(index, flag)| {
+                (*index == 0 || !short_values.is_empty())
+                    && (*flag == short || short_values.contains(*flag))
+            });
+            let Some((index, flag)) = found else { continue };
+            let value = &rest[index + flag.len_utf8()..];
+            if flag != short {
+                if value.is_empty() {
+                    args.next();
+                }
+                continue;
+            }
+            (!value.is_empty()).then_some(arg.value.len() - value.len())
         } else {
             continue;
         };
@@ -326,10 +344,12 @@ pub const KEY_VARS: &[&str] = &[
 
 pub fn var_assignment_risk(name: &str) -> Option<(Risk, String)> {
     match name {
-        "LD_PRELOAD" | "LD_AUDIT" | "BASH_ENV" | "ENV" | "PROMPT_COMMAND" => Some((
-            Risk::Dangerous,
-            format!("sets {name} (can inject code into later commands)"),
-        )),
+        "LD_PRELOAD" | "LD_AUDIT" | "BASH_ENV" | "ENV" | "PROMPT_COMMAND" | "SSH_ASKPASS" => {
+            Some((
+                Risk::Dangerous,
+                format!("sets {name} (can inject code into later commands)"),
+            ))
+        }
         n if SENSITIVE_VARS.contains(&n) || n.starts_with("GIT_") => {
             Some((Risk::Mutating, format!("modifies session variable {name}")))
         }
@@ -767,7 +787,12 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             };
             v.deletes = to_null;
             let mut t = targets(ops);
-            t.extend(option_targets(args, Some('t'), &["target-directory"]));
+            t.extend(option_targets_with_values(
+                args,
+                Some('t'),
+                &["target-directory"],
+                "St",
+            ));
             v.writes(t)
         }
         "cp" | "install" | "ln" | "link" => {
@@ -775,7 +800,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 args,
                 &["-t", "--target-directory", "-S", "--suffix", "-m", "--mode"],
             );
-            let mut writes = option_targets(args, Some('t'), &["target-directory"]);
+            let mut writes =
+                option_targets_with_values(args, Some('t'), &["target-directory"], "Stmgo");
             let mut reads = Vec::new();
             if writes.is_empty() {
                 if let Some((last, rest)) = ops.split_last() {
@@ -796,7 +822,12 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 args,
                 &["-d", "--date", "-r", "--reference", "-t"],
             )))
-            .reads(option_targets(args, Some('r'), &["reference"])),
+            .reads(option_targets_with_values(
+                args,
+                Some('r'),
+                &["reference"],
+                "drt",
+            )),
         "mkfifo" | "mknod" | "mktemp" => {
             Verdict::mutating("creates files or directories").writes(targets(operands_skipping(
                 args,
@@ -894,7 +925,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "sort" => {
-            let out = option_targets(args, Some('o'), &["output"]);
+            let out = option_targets_with_values(args, Some('o'), &["output"], "kSoTt");
             if out.is_empty() {
                 Verdict::safe("sort").reads(targets(ops()))
             } else {
@@ -1757,12 +1788,25 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
     let mut v = Verdict::mutating(format!("network access ({name})")).net();
     match name {
         "curl" => {
-            v.writes
-                .extend(option_targets(args, Some('o'), &["output"]));
-            v.writes
-                .extend(option_targets(args, Some('c'), &["cookie-jar"]));
-            v.reads
-                .extend(option_targets(args, Some('T'), &["upload-file"]));
+            let value_flags = "AbcCdDeEFHKmoPQrtTuUwxXyYz";
+            v.writes.extend(option_targets_with_values(
+                args,
+                Some('o'),
+                &["output"],
+                value_flags,
+            ));
+            v.writes.extend(option_targets_with_values(
+                args,
+                Some('c'),
+                &["cookie-jar"],
+                value_flags,
+            ));
+            v.reads.extend(option_targets_with_values(
+                args,
+                Some('T'),
+                &["upload-file"],
+                value_flags,
+            ));
             for a in args {
                 if let Some(p) = a
                     .value

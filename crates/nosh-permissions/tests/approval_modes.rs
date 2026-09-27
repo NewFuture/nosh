@@ -254,6 +254,10 @@ fn non_content_file_changes_and_ordinary_network_diagnostics_are_automatic() {
     std::fs::write(dir.path().join("old.txt"), "original").unwrap();
     std::fs::write(dir.path().join("existing.txt"), "keep").unwrap();
     for command in [
+        "mv old.txt new.txt",
+        "mv old.txt existing.txt",
+        "cp old.txt new.txt",
+        "cp old.txt existing.txt",
         "mkdir new-dir",
         "touch fresh.txt",
         "export NOTE=hello",
@@ -269,8 +273,6 @@ fn non_content_file_changes_and_ordinary_network_diagnostics_are_automatic() {
         );
     }
     for command in [
-        "mv old.txt new.txt",
-        "mv old.txt existing.txt",
         "mv *.txt target",
         "ping -f router.local",
         "ping -b 255.255.255.255",
@@ -454,7 +456,7 @@ fn project_code_uncertainty_is_not_confused_with_explicit_high_risk() {
 }
 
 #[test]
-fn directory_denies_cover_descendants_and_renames_require_authorization() {
+fn directory_denies_cover_descendants_and_ordinary_renames_are_automatic() {
     let (dir, context) = fixture();
     let rule = UserRule::compile(
         RuleSpec {
@@ -480,7 +482,7 @@ fn directory_denies_cover_descendants_and_renames_require_authorization() {
     file.set_len(2 * 1024 * 1024).unwrap();
     assert_eq!(
         policy("mv large renamed", Auto, &context, &UserRules::default()).decision,
-        Decision::Ask { strong: false }
+        Decision::Allow
     );
     std::fs::write(dir.path().join("second"), "two").unwrap();
     assert_eq!(
@@ -491,7 +493,7 @@ fn directory_denies_cover_descendants_and_renames_require_authorization() {
             &UserRules::default()
         )
         .decision,
-        Decision::Ask { strong: false }
+        Decision::Allow
     );
     assert_eq!(
         policy("mkdir -p created", Auto, &context, &UserRules::default()).decision,
@@ -658,6 +660,21 @@ fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
     }
     git(&["config", "remote.origin.tagOpt", "--no-tags"]);
     assert_allowed("git fetch origin");
+    let mut askpass = context.clone();
+    askpass
+        .variables
+        .insert("SSH_ASKPASS".into(), "/fixture/askpass".into());
+    askpass.exported.insert("SSH_ASKPASS".into());
+    let result = policy("git fetch origin", Auto, &askpass, &UserRules::default());
+    assert!(
+        matches!(result.decision, Decision::Ask { .. }),
+        "{result:?}"
+    );
+    assert!(result.source.label().contains("SSH_ASKPASS"), "{result:?}");
+    assert_eq!(
+        policy("git add file.txt", Auto, &askpass, &UserRules::default()).decision,
+        Decision::Allow
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
         "updated"
@@ -861,7 +878,7 @@ fn quoted_noninteractive_flag_is_not_a_sudo_option_value() {
 }
 
 #[test]
-fn compound_file_effects_cannot_reuse_stale_non_overwrite_evidence() {
+fn routine_move_copy_sequences_do_not_require_recovery_proofs() {
     let (dir, context) = fixture();
     for file in ["first", "second"] {
         std::fs::write(dir.path().join(file), file).unwrap();
@@ -872,10 +889,7 @@ fn compound_file_effects_cannot_reuse_stale_non_overwrite_evidence() {
         "cargo test; mv second destination",
     ] {
         let result = policy(command, Auto, &context, &UserRules::default());
-        assert!(
-            matches!(result.decision, Decision::Ask { .. }),
-            "{command}: {result:?}"
-        );
+        assert_eq!(result.decision, Decision::Allow, "{command}: {result:?}");
     }
     assert_eq!(
         policy(
@@ -885,7 +899,7 @@ fn compound_file_effects_cannot_reuse_stale_non_overwrite_evidence() {
             &UserRules::default()
         )
         .decision,
-        Decision::Ask { strong: false }
+        Decision::Allow
     );
     let rules = UserRules {
         allow: vec![UserRule::prefix("mv").unwrap()],
@@ -1092,16 +1106,27 @@ fn increasing_list_depth_cannot_escape_a_deny() {
 }
 
 #[test]
-fn non_atomic_file_operations_need_authorization_even_when_target_is_missing() {
+fn routine_moves_and_copies_are_not_gated_on_atomic_execution() {
     let (dir, context) = fixture();
     std::fs::write(dir.path().join("source"), "keep").unwrap();
     for command in [
         "mv source dest",
         "mv -n source dest",
         "cp source dest",
-        "printf new > dest",
-        "echo new >> dest",
+        "cp -r source dest",
     ] {
+        assert_eq!(
+            policy(command, Auto, &context, &UserRules::default()).decision,
+            Decision::Allow,
+            "{command}"
+        );
+        assert_eq!(
+            policy(command, Confirm, &context, &UserRules::default()).decision,
+            Decision::Ask { strong: false },
+            "{command}"
+        );
+    }
+    for command in ["printf new > dest", "echo new >> dest"] {
         assert!(
             matches!(
                 policy(command, Auto, &context, &UserRules::default()).decision,
@@ -1301,4 +1326,163 @@ fn absolute_path_scopes_follow_root_aliases_but_not_escaping_children() {
         );
     }
     assert!(dir.path().exists());
+}
+
+#[test]
+fn known_tool_basenames_do_not_trust_arbitrary_path_programs() {
+    let (_dir, context) = fixture();
+    for (name, args) in [
+        ("cargo", "test"),
+        ("git", "fetch"),
+        ("ping", "router.local"),
+        ("mv", "a b"),
+        ("cp", "a b"),
+        ("ls", ""),
+    ] {
+        let executable = context.cwd.join(name);
+        std::fs::write(&executable, b"\0opaque executable fixture").unwrap();
+        for program in [format!("./{name}"), executable.display().to_string()] {
+            let command = format!("{program} {args}");
+            let result = policy(&command, Auto, &context, &UserRules::default());
+            assert!(
+                matches!(result.decision, Decision::Ask { .. }),
+                "{command}: {result:?}"
+            );
+        }
+    }
+    for command in ["/usr/bin/cargo test", "/bin/cp a b", "/bin/mv a b"] {
+        assert_eq!(
+            policy(command, Auto, &context, &UserRules::default()).decision,
+            Decision::Allow,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn unknown_development_options_do_not_hide_fix_modes() {
+    let (_dir, mut context) = fixture();
+    context.unknown_variables.insert("MODE".into());
+    for command in [
+        "cargo clippy \"$MODE\"",
+        "eslint \"$MODE\" .",
+        "cargo test \"$MODE\"",
+    ] {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert!(
+            matches!(result.decision, Decision::Ask { .. }),
+            "{command}: {result:?}"
+        );
+    }
+    context.unknown_variables.remove("MODE");
+    context
+        .variables
+        .insert("MODE".into(), "--workspace".into());
+    assert_eq!(
+        policy(
+            "cargo test \"$MODE\"",
+            Auto,
+            &context,
+            &UserRules::default()
+        )
+        .decision,
+        Decision::Allow
+    );
+    context.variables.insert("MODE".into(), "--fix".into());
+    assert!(matches!(
+        policy(
+            "cargo clippy \"$MODE\"",
+            Auto,
+            &context,
+            &UserRules::default()
+        )
+        .decision,
+        Decision::Ask { .. }
+    ));
+}
+
+#[test]
+fn short_option_clusters_do_not_hide_path_effects() {
+    let (_dir, context) = fixture();
+    for command in [
+        "sort -ro/etc/out input",
+        "sort -ro /etc/out input",
+        "curl -sSo/etc/out https://example.invalid",
+        "mv -vt/etc input",
+        "cp -vt/etc input",
+        "touch -ar/etc/reference dest",
+    ] {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert!(
+            matches!(result.decision, Decision::Ask { .. }),
+            "{command}: {result:?}"
+        );
+    }
+    assert_eq!(
+        policy("sort -k1,2ro input", Auto, &context, &UserRules::default()).decision,
+        Decision::Allow
+    );
+    let report = assess_command("curl -sSo/etc/out https://example.invalid", &context);
+    assert!(
+        report
+            .operations
+            .iter()
+            .flat_map(|op| &op.paths)
+            .any(|path| { path.lexical.as_deref() == Some(std::path::Path::new("/etc/out")) })
+    );
+}
+
+#[test]
+fn convenience_does_not_require_splitting_every_post_build_read() {
+    let (_dir, context) = fixture();
+    std::fs::write(context.cwd.join("result.log"), "fixture").unwrap();
+    let result = policy(
+        "cargo test; cat result.log",
+        Auto,
+        &context,
+        &UserRules::default(),
+    );
+    assert_eq!(result.decision, Decision::Allow, "{result:?}");
+    assert!(result.source.label().contains("not guaranteed recoverable"));
+    assert!(matches!(
+        policy(
+            "cargo test; cat ~/.ssh/key",
+            Auto,
+            &context,
+            &UserRules::default()
+        )
+        .decision,
+        Decision::Ask { .. }
+    ));
+}
+
+#[test]
+fn routine_file_convenience_does_not_override_destructive_effects_or_denies() {
+    let (_dir, context) = fixture();
+    for command in [
+        "mv a /dev/null",
+        "cp a /etc/file",
+        "mv a /etc/file",
+        "cp a ../../outside",
+        "mv a b; rm -rf child",
+    ] {
+        assert_eq!(
+            policy(command, Auto, &context, &UserRules::default()).decision,
+            Decision::Ask { strong: true },
+            "{command}"
+        );
+    }
+    for name in ["mv", "cp"] {
+        let rule = UserRule::prefix(name).unwrap();
+        let result = policy(
+            &format!("{name} a b"),
+            Auto,
+            &context,
+            &UserRules {
+                allow: vec![rule.clone()],
+                deny: vec![rule],
+            },
+        );
+        assert!(matches!(result.source, DecisionSource::UserDeny(_)));
+    }
 }

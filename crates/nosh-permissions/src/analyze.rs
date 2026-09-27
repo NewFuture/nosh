@@ -223,7 +223,7 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
     "/run/current-system/sw/bin",
 ];
 
-fn in_system_bin_dir(name: &str) -> bool {
+pub(crate) fn in_system_bin_dir(name: &str) -> bool {
     name.rsplit_once('/')
         .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
 }
@@ -1922,11 +1922,9 @@ impl Analyzer<'_> {
                 self.add(Risk::Mutating, format!("runs shell script {name}"));
                 return;
             }
-            if !name.starts_with('/') && !name.starts_with('~') {
-                self.opaque();
-                self.add(Risk::Mutating, format!("runs local program {name}"));
-                return;
-            }
+            self.opaque();
+            self.add(Risk::Mutating, format!("runs local program {name}"));
+            return;
         }
         if let Some(i) = self.operation {
             self.report.operations[i].transparent |= matches!(
