@@ -755,6 +755,8 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
         r#"{"name":"node-project","scripts":{"build":"must-not-run"}}"#,
     )
     .unwrap();
+    std::fs::write(rust.join("AGENTS.md"), "Rust scoped instruction.").unwrap();
+    std::fs::write(node.join("README.md"), "Node project reference.").unwrap();
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", rust.display()));
     let destination = node.clone();
@@ -801,6 +803,16 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
         })
         .collect();
     assert_eq!(contexts.len(), 5);
+    assert!(contexts[0].contains("[AGENTS.md \"AGENTS.md\"]"));
+    assert!(contexts[0].contains("Rust scoped instruction."));
+    assert!(!contexts[1].contains("Rust scoped instruction."));
+    assert!(contexts[2].contains("[project documents cleared]"));
+    assert!(contexts[2].contains("[README reference \"README.md\"]"));
+    assert!(contexts[2].contains("Node project reference."));
+    assert!(!contexts[2].contains("Rust scoped instruction."));
+    assert!(!contexts[2].contains(&node.join("README.md").display().to_string()));
+    assert!(!contexts[3].contains("Node project reference."));
+    assert!(contexts[4].contains("[project documents cleared]"));
     assert!(
         context_field(contexts[0], "project")
             .unwrap()

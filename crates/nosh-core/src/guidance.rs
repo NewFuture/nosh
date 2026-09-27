@@ -79,8 +79,12 @@ impl GuidanceCache {
         self.files.retain(|cached, _| cached == path);
         let mut warnings = Vec::new();
         let (stamp, contents) = self.read_cached(path, ctx, &mut warnings);
-        let mut key = format!("README:{path:?}:{stamp:?}");
-        let mut text = format!("[README reference {}]\n", json!(path.display().to_string()));
+        let mut key = format!("README:{:?}:{path:?}:{stamp:?}", ctx.cwd);
+        let source = crate::project::relative_path(path, &ctx.cwd);
+        let mut text = format!(
+            "[README reference {}]\n",
+            json!(source.display().to_string())
+        );
         if let Some(contents) = contents {
             if stamp.is_none() {
                 key.push_str(&contents);
@@ -155,7 +159,11 @@ impl GuidanceCache {
         }
         paths.reverse();
         self.files.retain(|path, _| paths.contains(path));
-        let mut key = String::new();
+        let mut key = if paths.is_empty() {
+            String::new()
+        } else {
+            format!("scope:{:?}\n", ctx.cwd)
+        };
         let mut text = String::new();
         let mut budget = GUIDANCE_CHARS;
         let mut all_complete = true;
@@ -169,9 +177,10 @@ impl GuidanceCache {
             let count = contents.chars().count();
             let complete = count <= budget;
             all_complete &= complete;
+            let source = crate::project::relative_path(&path, &ctx.cwd);
             text.push_str(&format!(
                 "[AGENTS.md {}{}]\n",
-                json!(path.display().to_string()),
+                json!(source.display().to_string()),
                 if complete { "" } else { " not loaded" },
             ));
             if complete {
@@ -296,7 +305,12 @@ mod tests {
         let ctx = Context::new(root.path(), root.path()).with_home(root.path());
         let mut cache = GuidanceCache::default();
         let fallback = cache.load(&ctx);
-        assert!(fallback.text.contains("README reference"));
+        assert!(
+            fallback
+                .text
+                .starts_with("[README reference \"README.md\"]\n")
+        );
+        assert!(!fallback.text.contains(&root.path().display().to_string()));
         assert!(fallback.text.contains("readme instructions"));
         assert!(
             fallback
@@ -310,6 +324,8 @@ mod tests {
         std::fs::write(root.path().join("AGENTS.md"), "Use project conventions.").unwrap();
         let snapshot = cache.load(&ctx);
         assert!(snapshot.complete);
+        assert!(snapshot.text.starts_with("[AGENTS.md \"AGENTS.md\"]\n"));
+        assert!(!snapshot.text.contains(&root.path().display().to_string()));
         assert!(snapshot.text.contains("Use project conventions."));
         assert!(
             snapshot
@@ -429,6 +445,27 @@ mod tests {
         assert!(updated.text.contains("updated nearby reference"));
         std::fs::remove_file(&nearest).unwrap();
         assert_eq!(first.key, cache.load(&ctx).key);
+    }
+
+    #[test]
+    fn relative_sources_are_bound_to_cwd_without_changing_file_cache_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("src");
+        std::fs::create_dir(&child).unwrap();
+        for name in ["README.md", "AGENTS.md"] {
+            let source = root.path().join(name);
+            std::fs::write(&source, "Shared project document.").unwrap();
+            let mut cache = GuidanceCache::default();
+            let parent = cache.load(&Context::new(root.path(), root.path()).with_home(root.path()));
+            let nested = cache.load(&Context::new(&child, root.path()).with_home(root.path()));
+            assert_ne!(parent.key, nested.key);
+            let relative = Path::new("..").join(name).display().to_string();
+            assert!(nested.text.contains(&json!(relative).to_string()));
+            assert!(!nested.text.contains(&root.path().display().to_string()));
+            assert!(cache.files.contains_key(&source));
+            assert_eq!(cache.files.len(), 1);
+            std::fs::remove_file(source).unwrap();
+        }
     }
 
     #[test]

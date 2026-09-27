@@ -441,19 +441,20 @@ fn discover(ctx: &Context) -> Value {
     json!({"status": status, "root": root.map(|p| p.display().to_string()), "types": types, "manifests": entries, "git": git, "warnings": warnings})
 }
 
+pub(crate) fn relative_path(path: &Path, cwd: &Path) -> std::path::PathBuf {
+    let mut prefix = std::path::PathBuf::new();
+    for ancestor in cwd.ancestors() {
+        if let Ok(tail) = path.strip_prefix(ancestor) {
+            return prefix.join(tail);
+        }
+        prefix.push("..");
+    }
+    path.to_path_buf()
+}
+
 fn relative_root(root: &str, cwd: &Path) -> Option<String> {
     let root = Path::new(root);
-    if root == cwd {
-        return None;
-    }
-    if let Ok(tail) = cwd.strip_prefix(root) {
-        let mut relative = std::path::PathBuf::new();
-        for _ in tail.components() {
-            relative.push("..");
-        }
-        return Some(relative.display().to_string());
-    }
-    Some(root.display().to_string())
+    (root != cwd).then(|| relative_path(root, cwd).display().to_string())
 }
 
 fn compact(snapshot: &Value, cwd: &Path) -> Value {

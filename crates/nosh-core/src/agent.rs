@@ -335,6 +335,25 @@ impl Agent {
         Ok(())
     }
 
+    fn project_documents(
+        &mut self,
+        context: &Context,
+        sid: SessionId,
+    ) -> (Option<String>, Option<String>) {
+        let guidance = self.guidance.load(context);
+        if self.guidance_sent.as_deref() == Some(guidance.key.as_str()) {
+            return (None, None);
+        }
+        let mut text = guidance.text;
+        if self.engine.message_count(sid) > 0 {
+            text.insert_str(0, "[project documents cleared]\n");
+        }
+        (
+            (!text.is_empty()).then_some(text),
+            guidance.complete.then_some(guidance.key),
+        )
+    }
+
     /// Runs one task to completion in the shared shell session.
     pub fn run_task(
         &mut self,
@@ -374,15 +393,7 @@ impl Agent {
         let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
         let permission_context = self.cfg.permission_context(shell);
-        let guidance = self.guidance.load(&permission_context);
-        let changed_guidance = self.guidance_sent.as_deref() != Some(guidance.key.as_str());
-        let complete_guidance = guidance.complete;
-        let mut notes = guidance.text;
-        if changed_guidance && self.engine.message_count(sid) > 0 {
-            notes.insert_str(0, "[project documents cleared]\n");
-        }
-        let notes = (changed_guidance && !notes.is_empty()).then_some(notes);
-        let mut guidance_key = (changed_guidance && complete_guidance).then_some(guidance.key);
+        let (notes, mut guidance_key) = self.project_documents(&permission_context, sid);
         pending.extend(prompt::task_messages_with_context(
             shell,
             &input,
@@ -514,9 +525,15 @@ impl Agent {
                 break;
             }
             if shell.cwd() != calls_cwd {
-                pending.push(Message::System(crate::project::describe(
-                    &self.cfg.permission_context(shell),
-                )));
+                let context = self.cfg.permission_context(shell);
+                let (notes, key) = self.project_documents(&context, sid);
+                let mut text = crate::project::describe(&context);
+                if let Some(notes) = notes {
+                    text.push('\n');
+                    text.push_str(notes.trim_end());
+                }
+                guidance_key = key;
+                pending.push(Message::System(text));
             }
         }
         if out.status == TaskStatus::Completed && out.denied > 0 && out.commands_run == 0 {
