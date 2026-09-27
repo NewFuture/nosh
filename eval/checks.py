@@ -78,22 +78,23 @@ def response_prose(answer: str, keep_inline: bool = False) -> str:
     return prose.strip()
 
 
-def without_history_literals(prose: str, facts: dict) -> str:
+def history_prose(answer: str, facts: dict) -> str:
     log = facts.get("git_log", "")
-    prose = prose.replace("**", "").replace("__", "")
-    subjects = {
-        response_prose(subject).replace("**", "").replace("__", "")
-        for subject in re.findall(r"(?m)^ {4}(\S.*)$", log)
-    }
+    subjects = set(re.findall(r"(?m)^ {4}(\S.*)$", log))
     for subject in sorted(subjects, key=len, reverse=True):
-        if subject.strip():
-            pattern = r"\s+".join(re.escape(word) for word in subject.split())
-            prose = re.sub(r"(?<!\w)" + pattern + r"(?!\w)", "", prose)
-    commits = set(facts.get("commit_ids", [])) | set(re.findall(r"(?m)^commit ([0-9a-f]{40})\b", log))
+        words = []
+        for word in subject.split():
+            stem = word.rstrip(":,.;!?")
+            words.append(r"[`*_]*" + re.escape(stem) + r"[`*_]*" + re.escape(word[len(stem):]))
+        # Match the full source text before paths or inline code can erase its identity.
+        pattern = r"(?<!\w)" + r"\s+".join(words) + r"[`*_]*(?!\w)"
+        answer = re.sub(pattern, "", answer)
+    commits = {sha.lower() for sha in facts.get("commit_ids", [])}
+    commits.update(re.findall(r"(?m)^commit ([0-9a-f]{40})\b", log))
     return re.sub(
         r"(?<!\w)[0-9a-f]{7,40}(?!\w)",
-        lambda match: "" if any(commit.startswith(match[0]) for commit in commits) else match[0],
-        prose,
+        lambda match: "" if any(commit.startswith(match[0].lower()) for commit in commits) else match[0],
+        response_prose(answer), flags=re.I,
     )
 
 
@@ -163,7 +164,7 @@ def experience(scenario: dict, answer: str, metrics: dict, *, facts: dict | None
         details["final_question"]["clarification_request"] = clarification
     text = re.sub(
         r"(?i)(?<![a-z0-9_])(?:node(?:\.js)?|python3?|cargo|rust|javascript|unittest|npm|git|cli|json|toml|pid)(?![a-z0-9_])",
-        "", without_history_literals(prose, facts) if facts is not None else prose,
+        "", history_prose(answer, facts) if facts is not None else prose,
     )
     text = re.sub(r"\bv?\d+(?:\.\d+)+(?:[-+][\w.]+)?", "", text)
     chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
@@ -240,59 +241,60 @@ def version_queries(command: str, root: Path, facts: dict) -> set[str]:
 
 def version_claims(answer: str) -> dict[str, list[str]]:
     claims: dict[str, list[str]] = {name: [] for name in VERSION_ALIASES}
-    version = r"(?<![\w.])v?(\d+(?:\.\d+)+)(?![\w.])"
+    version = r"(?<![a-z0-9_.])v?(\d+(?:\.\d+)+)(?![a-z0-9_]|\.\d)"
     label = r"(?<![a-z0-9_])(?:" + "|".join(VERSION_ALIASES.values()) + r")(?![a-z0-9_])"
     horizontal = {}
-    vertical = None
+    version_column = None
     pending = None
 
     def tool(text):
         return next((name for name, alias in VERSION_ALIASES.items()
                      if re.fullmatch(rf"\s*(?:{alias})(?:\s*(?:version|版本))?\s*[:：]?\s*", text, re.I)), None)
 
-    def record(name, text):
+    def record(name, text, *, required=False):
+        text = re.sub(r"(?:[<>]=?|[≥≤])\s*v?\d+(?:\.\d+)+", "", text, flags=re.I)
         values = re.findall(version, text, re.I)
-        if not values and re.search(r"\b(?:unknown|unavailable|not found|not installed)\b|未知|未安装|未找到", text, re.I):
-            values = ["unavailable"]
+        if ((required and not values)
+                or re.search(r"\b(?:unknown|unavailable|not found|not installed|n/a)\b|未知|未安装|未找到", text, re.I)):
+            values.append("unavailable")
         claims[name].extend(values)
         return bool(values)
 
     for raw in answer.splitlines():
         line = raw.replace("**", "").replace("__", "").replace("`", "").strip()
+        if not line:
+            horizontal, version_column = {}, None
+            continue
         if "|" in line:
             pending = None
             cells = [cell.strip() for cell in line.strip("|").split("|")]
-            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            if not any(cells) or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
                 continue
             columns = {index: name for index, cell in enumerate(cells) if (name := tool(cell)) is not None}
-            if len(columns) > 1 and not re.search(version, line, re.I):
-                horizontal, vertical, pending = columns, None, None
+            if columns and (len(columns) > 1 or len(cells) == 1) and not re.search(version, line, re.I):
+                horizontal, version_column = columns, None
                 continue
-            name_column = next((i for i, cell in enumerate(cells)
-                                if re.fullmatch(r"tool|command|name|工具|命令|名称|程序", cell, re.I)), None)
             value_column = next((i for i, cell in enumerate(cells)
                                  if re.fullmatch(r"(?:installed\s+)?version|(?:当前)?版本", cell, re.I)), None)
-            if name_column is not None and value_column is not None:
-                horizontal, vertical, pending = {}, (name_column, value_column), None
+            if value_column is not None and not columns:
+                horizontal, version_column = {}, value_column
                 continue
             if horizontal:
                 for index, name in horizontal.items():
-                    if index < len(cells):
-                        record(name, cells[index])
-                continue
-            if vertical is not None and max(vertical) < len(cells):
-                name = tool(cells[vertical[0]])
-                if name is not None:
-                    record(name, cells[vertical[1]])
+                    record(name, cells[index] if index < len(cells) else "", required=True)
                 continue
             if len(columns) == 1:
                 index, name = next(iter(columns.items()))
-                record(name, " ".join(cell for i, cell in enumerate(cells) if i != index))
+                if version_column is None:
+                    value = " ".join(cell for i, cell in enumerate(cells) if i != index)
+                else:
+                    value = cells[version_column] if version_column < len(cells) else ""
+                record(name, value, required=True)
                 continue
         else:
-            horizontal, vertical = {}, None
+            horizontal, version_column = {}, None
         labels = list(re.finditer(label, line, re.I))
-        if not labels and pending is not None and re.fullmatch(version, line.strip("- :："), re.I):
+        if not labels and pending is not None and re.fullmatch(version, line.strip("- :：。."), re.I):
             record(pending, line)
         pending = None
         for index, match in enumerate(labels):
@@ -443,7 +445,7 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
             blocks = re.split(r"\n\s*\n|(?=^[ \t]*(?:[-*]|\d+[.)])[ \t]+)", answer, flags=re.M)
             blocks = [line for block in blocks for line in (block.splitlines() if "|" in block else [block])]
             order = []
-            listed = []
+            listed = set()
             listing = True
             history = list(reversed(facts["history"]))
             for position, raw in enumerate(blocks):
@@ -482,7 +484,7 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                     if item or "|" in raw:
                         if index in listed:
                             reasons.append(f"duplicate recent commit entry: {history[index][0]}")
-                        listed.append(index)
+                        listed.add(index)
                     if index not in order:
                         order.append(index)
                     listing = True
@@ -495,21 +497,25 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
             for sha in re.findall(r"\b[0-9a-f]{7,40}\b", answer):
                 if not any(commit.startswith(sha) for commit in facts["commit_ids"]):
                     reasons.append(f"unknown commit hash: {sha}")
-            prose = without_history_literals(response_prose(answer), facts)
+            prose = history_prose(answer, facts)
             for clause in re.split(r"[。！？!?；;\n，,]", prose):
                 counts = re.findall(r"(?<![\d.])(\d+)\s*(?:个|条|次)?\s*(?:提交|commits?\b|记录)", clause, re.I)
                 counts.extend(re.findall(
                     r"(?:提交|commits?)\s*[（(]\s*(?:共|total(?:\s+of)?\s*:?)?\s*(\d+)\s*(?:个|条|次)?\s*[）)]",
                     clause, re.I,
                 ))
-                inventory = bool(re.search(r"仓库|全部|所有|\brepository\b|\brepo\b|entire history", clause, re.I))
                 displayed = bool(re.search(
-                    r"最近|最新|以下|列出|展示|记录|共|[（(]|\b(?:last|latest|recent|following|shown|listed)\b",
+                    r"最近|最新|以下|列出|展示|\b(?:last|latest|recent|following|shown|listed)\b",
                     clause, re.I,
+                ))
+                inventory = not displayed and bool(re.search(
+                    r"仓库|全部|所有|共|合计|总计|\b(?:repository|repo|total)\b|entire history", clause, re.I,
                 ))
                 expected_count = len(history) if inventory else len(order)
                 for count in set(map(int, counts)):
-                    if count > len(history) or ((inventory or displayed) and count != expected_count):
+                    if count > len(history) or (
+                        (inventory or displayed or clause.endswith((":", "："))) and count != expected_count
+                    ):
                         reasons.append(f"incorrect recent commit count: {count}, expected {expected_count}")
     elif kind == "versions":
         queried = set()
@@ -553,7 +559,8 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
             )[0]
             diagnosis = diagnosis.replace("`", "").replace("**", "")
             if re.search(
-                r"(?:编译器|compiler)\s*(?:expected|expects?|期望(?:赋值)?(?:的)?(?:类型)?(?:是|为)?)"
+                r"(?:^|[。！？.!?；;\n])\s*(?:[-*]\s*)?(?:编译器|(?:the\s+)?compiler)"
+                r"\s*(?:expected|expects?|期望(?:赋值)?(?:的)?(?:类型)?(?:是|为)?)"
                 r"\s*(?:type\s+)?(?:&?str\b|string\b|字符串)", diagnosis, re.I,
             ):
                 reasons.append("answer reverses the compiler's expected i32 and actual string types")
@@ -586,7 +593,9 @@ def mentioned_files(answer: str, known: dict | list) -> list[str]:
 
 def python_count_reasons(answer: str, facts: dict) -> list[str]:
     directories = {parent.as_posix() for name in facts["before"] for parent in Path(name).parents} - {"."}
-    scopes = []
+    headings = []
+    paragraph = None
+    paragraph_has_body = False
     reasons = []
     patterns = (
         r"(?<![\d.])([+-]?\d+(?:\.\d+)?)\s*(?:个\s*)?python\s*(?:文件|files?\b)",
@@ -616,40 +625,45 @@ def python_count_reasons(answer: str, facts: dict) -> list[str]:
     for raw in answer.splitlines():
         line = raw.replace("**", "").replace("`", "").strip()
         if not line:
-            # Bold directory labels scope a paragraph, not a later overall summary.
-            while scopes and scopes[-1][2] and scopes[-1][3]:
-                scopes.pop()
+            if paragraph_has_body:
+                paragraph = None
             continue
-        matches = sorted((match for pattern in patterns for match in re.finditer(pattern, line, re.I)),
-                         key=lambda match: match.start())
+        has_count = any(re.search(pattern, line, re.I) for pattern in patterns)
         heading = re.match(r"^(#{1,6})\s+", line)
-        bold_heading = raw.strip().startswith("**") and raw.strip().endswith("**") and not matches
-        directory_heading = line.endswith((":", "：")) and not matches
-        if heading or bold_heading or directory_heading:
-            level = len(heading[1]) if heading else 1
-            while scopes and scopes[-1][0] >= level:
-                scopes.pop()
-            inherited = scopes[-1][1] if scopes else (None, False)
-            scopes.append((level, scope_in(line, inherited, heading=True), heading is None, False))
-        elif scopes:
-            level, scope, paragraph, _ = scopes[-1]
-            scopes[-1] = (level, scope, paragraph, True)
-        current = scopes[-1][1] if scopes else (None, False)
-        for match in matches:
-            count_text = match[1]
-            if not re.fullmatch(r"\+?\d+", count_text):
-                reasons.append(f"invalid Python file count: {count_text}")
-                continue
-            directory, recursive = scope_in(line if len(matches) == 1 else line[:match.start()], current)
-            if directory is None:
-                expected = len(facts["python"])
-            elif recursive:
-                expected = sum(directory == "." or name.startswith(directory + "/") for name in facts["python"])
-            else:
-                expected = sum(Path(name).parent.as_posix() == directory for name in facts["python"])
-            count = int(count_text)
-            if count != expected:
-                reasons.append(f"incorrect Python file count: {count} in {directory or 'project'}, expected {expected}")
+        if heading:
+            level = len(heading[1])
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            inherited = headings[-1][1] if headings else (None, False)
+            headings.append((level, scope_in(line, inherited, heading=True)))
+            paragraph = None
+        current = headings[-1][1] if headings else (None, False)
+        if not heading and not has_count and (
+            line.endswith((":", "：")) or (raw.strip().startswith("**") and raw.strip().endswith("**"))
+        ):
+            paragraph = scope_in(line, current, heading=True)
+            paragraph_has_body = False
+        else:
+            paragraph_has_body = True
+        current = paragraph if paragraph is not None else current
+        for clause in re.split(r"[，,；;。]", line):
+            matches = sorted((match for pattern in patterns for match in re.finditer(pattern, clause, re.I)),
+                             key=lambda match: match.start())
+            for match in matches:
+                count_text = match[1]
+                if not re.fullmatch(r"\+?\d+", count_text):
+                    reasons.append(f"invalid Python file count: {count_text}")
+                    continue
+                directory, recursive = scope_in(clause if len(matches) == 1 else clause[:match.start()], current)
+                if directory is None:
+                    expected = len(facts["python"])
+                elif recursive:
+                    expected = sum(directory == "." or name.startswith(directory + "/") for name in facts["python"])
+                else:
+                    expected = sum(Path(name).parent.as_posix() == directory for name in facts["python"])
+                count = int(count_text)
+                if count != expected:
+                    reasons.append(f"incorrect Python file count: {count} in {directory or 'project'}, expected {expected}")
     return reasons
 
 
@@ -874,6 +888,7 @@ def archive_command(command: str, root: Path) -> tuple[list[str], Path]:
     created = zipped = False
     archive = None
     operands = []
+    input_cwd = cwd
     i = 0
     while i < len(args):
         word = args[i]
@@ -891,12 +906,14 @@ def archive_command(command: str, root: Path) -> tuple[list[str], Path]:
                 if archive is not None:
                     raise ValueError("multiple archive paths")
                 archive = (cwd / value).resolve()
-            elif (cwd / value).resolve() != root / "logs":
-                raise ValueError("tar directory escapes logs")
+            else:
+                input_cwd = (input_cwd / value).resolve()
+                if input_cwd != root / "logs":
+                    raise ValueError("tar directory escapes logs")
         elif (word.startswith("-") and word != "--") or (i == 0 and re.fullmatch(r"[czvf]+", word)):
             traditional = not word.startswith("-")
             flags = word if traditional else word[1:]
-            if (not flags or any(c not in "czvf" for c in flags)
+            if (not flags or any(c not in "czvf" for c in flags) or flags.count("f") > 1
                     or (not traditional and "f" in flags and not flags.endswith("f"))):
                 raise ValueError(f"unsupported tar flags: {word}")
             created |= "c" in flags
@@ -907,20 +924,15 @@ def archive_command(command: str, root: Path) -> tuple[list[str], Path]:
                     raise ValueError("invalid archive path")
                 archive = (cwd / args[i]).resolve()
         elif word == "--":
-            operands.extend(args[i + 1:])
+            operands.extend((input_cwd / name).resolve() for name in args[i + 1:])
             break
         else:
-            operands.append(word)
+            operands.append((input_cwd / word).resolve())
         i += 1
     if not created or not zipped or archive != root / "logs.tar.gz":
         raise ValueError("expected gzip creation at logs.tar.gz")
-    if not operands or any(p not in (".", "./", "logs", "logs/", "./logs", "./logs/") for p in operands):
+    if not operands or any(path != root / "logs" for path in operands):
         raise ValueError("only the fixture logs directory can be archived")
-    # A bare '.' at the fixture root would include unrelated files/the archive.
-    if cwd == root and any(p in (".", "./") for p in operands) and not any(
-        p in ("-C", "--directory", "--directory=logs") for p in args
-    ):
-        raise ValueError("'.' must refer to logs, not its parent")
     return ["tar", *args], cwd
 
 
