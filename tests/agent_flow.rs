@@ -110,7 +110,7 @@ fn multi_step_task_uses_tool_results() {
     let spec = &specs.lock().unwrap()[0];
     assert!(spec.system.contains("<tool_def_sep>"));
     let names: Vec<_> = spec.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["run_command", "read_file", "list_dir"]);
+    assert_eq!(names, ["run_command", "read_file", "grep"]);
     assert!(
         ui.events
             .iter()
@@ -909,6 +909,79 @@ fn reads_through_dotdot_or_symlinks_still_ask() {
 }
 
 #[test]
+fn grep_checks_protected_roots_dotdot_symlinks_and_descendants() {
+    let _g = setup();
+    let dir = tmpdir("grep-protected");
+    std::fs::create_dir(dir.join("private")).unwrap();
+    std::fs::create_dir(dir.join("public")).unwrap();
+    std::fs::write(dir.join("private/secret"), "needle").unwrap();
+    std::fs::write(dir.join("private/second"), "needle again").unwrap();
+    std::os::unix::fs::symlink(dir.join("private/secret"), dir.join("link")).unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    for path in ["public/../private/secret", "link", "."] {
+        let engine = MockChatEngine::new(vec![
+            vec![call("grep", json!({"pattern": "needle", "path": path}))],
+            vec![text("Denied.")],
+        ]);
+        let received = engine.received();
+        let mut a = Agent::new(
+            Box::new(engine),
+            AgentConfig {
+                protected: vec![dir.join("private")],
+                ..Default::default()
+            },
+            env(),
+            ToolSet::ReadOnly,
+        );
+        let mut approval = Scripted::new([ApprovalResponse::Deny { reason: None }]);
+        let outcome = a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Pipe, "find text"),
+            &mut approval,
+            &mut RecordUi::default(),
+        );
+        assert_eq!(outcome.denied, 1);
+        assert_eq!(approval.seen.len(), 1, "{path}");
+        assert_eq!(approval.seen[0].tool, "grep");
+        let results = tool_results(&received.lock().unwrap());
+        assert!(results[0].contains("[denied by user]"), "{results:?}");
+        assert!(!results[0].contains("needle"), "{results:?}");
+    }
+    let engine = MockChatEngine::new(vec![
+        vec![call(
+            "grep",
+            json!({"pattern": "needle", "path": "private"}),
+        )],
+        vec![text("Found.")],
+    ]);
+    let received = engine.received();
+    let mut a = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            protected: vec![dir.join("private")],
+            ..Default::default()
+        },
+        env(),
+        ToolSet::ReadOnly,
+    );
+    let mut approval = Scripted::new([ApprovalResponse::Approve]);
+    a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Pipe, "find text"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(
+        approval.seen.len(),
+        1,
+        "one approval covers the explicitly requested protected root"
+    );
+    assert!(tool_results(&received.lock().unwrap())[0].contains("secret:1:needle"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn read_only_tools_and_protected_paths() {
     let _g = setup();
     let dir = tmpdir("read");
@@ -917,7 +990,7 @@ fn read_only_tools_and_protected_paths() {
     sh.run_user_line(&format!("cd {}", dir.display()));
     let engine = MockChatEngine::new(vec![
         vec![
-            call("list_dir", json!({})),
+            call("grep", json!({"pattern": "alpha"})),
             call("read_file", json!({"path": "notes.txt"})),
             call("read_file", json!({"path": "/etc/hostname"})),
         ],
@@ -956,12 +1029,12 @@ fn unavailable_tools_are_rejected_before_approval_or_execution() {
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
     for (set, names) in [
-        (ToolSet::Full, "run_command, read_file, list_dir"),
-        (ToolSet::ReadOnly, "read_file, list_dir"),
+        (ToolSet::Full, "run_command, read_file, grep"),
+        (ToolSet::ReadOnly, "read_file, grep"),
         (ToolSet::Suggest, ""),
     ] {
         let name = if set == ToolSet::Full {
-            "unknown_tool"
+            "list_dir"
         } else {
             "run_command"
         };

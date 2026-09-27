@@ -95,7 +95,7 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 |---|---|---|
 | 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
 | 推理 | CPU、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、GPU 与资源自适应未实现 |
-| 工具与权限 | 三个内置工具；建议模式无工具；confirm/auto/yolo，当前默认 confirm；用户规则与会话放行 | [新三档语义、默认 auto 与 UI 标识](APPROVAL-MODES.md) 待实现；`grep/write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
+| 工具与权限 | 三个内置工具（run_command/read_file/grep）；建议模式无工具；confirm/auto/yolo，当前默认 confirm；用户规则与会话放行 | [新三档语义、默认 auto 与 UI 标识](APPROVAL-MODES.md) 待实现；`write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
 | 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
 | 本地数据 | shell 历史、agent 截断输出落盘；用户采集缓冲仅在内存；本地 `Redactor` 为 `NoRedact` | 显式评测 trace 仍记录输入；agent history/audit、自动清理、无痕模式和文件备份未实现 |
@@ -207,7 +207,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 共享核心    Session = Shell（brush-core、AI 触发）
                     + Harness（agent 循环、prompt、上下文）
                     + Permissions（风险分析、策略、终端审批）
-                    + Tools（run_command、read_file、list_dir）
+                    + Tools（run_command、read_file、grep）
 ──────────────────────────────────────────────────────────────────────────────
 推理与模型  nosh-llm：ChatEngine（模板、分词、工具调用解析、采样、KV 缓存）
             nosh-hub：registry、选源下载、校验、离线导入
@@ -459,9 +459,9 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 
 | 入口 | 可用工具 | 执行方式 |
 |---|---|---|
-| shell 内（`#`、出错触发、`ai`）、无管道附件的 `nosh -a` | run_command、read_file、list_dir | 按审批模式执行（见 §6.3） |
+| shell 内（`#`、出错触发、`ai`）、无管道附件的 `nosh -a` | run_command、read_file、grep | 按审批模式执行（见 §6.3） |
 | 建议（Ctrl+G、`nosh -s`） | 无工具 | 直接返回完整 shell program，校验后输出或预填，从不执行 |
-| `nosh -a` 的管道附件 | `read_file`、`list_dir` | stdin 的内容截断后作为附件，不注册 `run_command` |
+| `nosh -a` 的管道附件 | `read_file`、`grep` | stdin 的内容截断后作为附件，不注册 `run_command` |
 
 **建议模式边界**：每次仅生成一轮，最多 256 个新 token；只接受完整回答中的一个 shell program，可带单一 shell fence 或 `$ ` 前缀。拒绝隐藏字符，而不是删除后继续返回。语法与有限名称检查（§5.4）不替代执行前权限分析，也不等于建议内容已获安全批准，见 [suggest.rs](../crates/nosh-core/src/suggest.rs)。
 
@@ -565,17 +565,18 @@ Available: {git, docker, python3, ...}
 |---|---|---|---|
 | `run_command` | `command`、`timeout_sec?`（默认 60，上限 600） | 按命令内容分析 | 在共享会话中执行（见 §4.3、§4.4） |
 | `read_file` | `path`、`start_line?`、`end_line?` | Safe（受保护路径除外） | 带行号，默认最多读 400 行 |
-| `list_dir` | `path?`、`depth?`（1–3，默认 1） | Safe（受保护起始路径除外） | 遵循 .gitignore，最多展示 300 项；同次列表统一大小单位，避免小模型混排 KB/MB |
+| `grep` | `pattern`、`path?`、`glob?` | Safe（受保护路径除外） | 内嵌 Rust ripgrep regex，递归搜索文件内容；返回相对路径、行号和匹配行，不搜索文件名 |
 
 当前内置工具仅上述三个，其他工具仍属未来扩展。普通 agent 的纯建议在最终文本中展示，不执行、不预填。终端/密码交接由 harness 根据执行结果决定，不作为模型工具暴露。
 
 工具名称和集合成员由 `BuiltinTool` / `ToolSet` 统一维护，声明和执行准入共用同一目录；分发先解析为枚举，再进入穷尽匹配，不为每次调用重新构造 JSON Schema。未知工具或当前集合禁用的工具仍回灌原有错误，不进入审批或执行；`commands_run` 根据真实执行结果计数，而不是根据模型请求的工具名计数。
 
-**已知限制**：`list_dir` 当前只对起始路径做权限判断，递归列举不会逐层重新审批，可能展示受保护子目录的文件名和大小；逐层检查是设计目标，不是已有保证（[MVP 报告 §6 #13](MVP-REPORT.md#6-已知问题)）。
+`grep` 使用 `grep-regex`、`grep-searcher` 与 `ignore`，不依赖系统 `rg`。默认遵循忽略规则，跳过隐藏／二进制文件和递归遇到的符号链接；不跟随目录链接。显式指定文件链接时仍解析真实路径做审批。搜索前检查受保护根，普通根下的受保护文件也须审批；明确批准的保护目录覆盖该次目录内搜索，不授予会话级放行。最多返回 200 个匹配行，并受 6,000 字符反馈预算限制，截断明确标记；零匹配、非法 regex/glob、无效路径与读取错误不会伪装成成功匹配。
+
+`list_dir` 已移除，不保留执行别名。普通模式需要目录名称、文件名筛选或大小信息时，通过 `run_command` 使用 `ls` 等 shell 命令。只读附件模式仍不开放命令执行，不因缺少列表工具临时放宽权限；管道文本过滤与文件内容搜索是不同接口。
 
 | 规划工具（尚未注册） | 参数草图 | 设计意图 |
 |---|---|---|
-| `grep`（M2） | `pattern`、`path?`、`glob?` | 基于 ripgrep regex 的递归内容搜索，不搜索文件名 |
 | `write_file`（M2） | `path`、`content` | Mutating；先展示 diff、备份，再写入，配套 `ai undo` |
 | `ask_user`（后续扩展） | `question`、`options?` | 需求不明确时向用户澄清 |
 
@@ -1221,7 +1222,7 @@ nosh/
 
 - `nosh-remote`：远程协议、会话宿主和客户端；系统 SSH 优先，`russh` 作为备用方案。
 - `xtask`：registry 生成、基准、分发；shell 集成脚本随 §9.2 交付。
-- 需要时引入 `portable-pty/interprocess`、`grep-searcher/similar`、`landlock/seccompiler`，不视为当前依赖。
+- 内容搜索已使用 `grep-regex`、`grep-searcher` 与 `ignore`。需要时再引入 `portable-pty/interprocess`、`similar`、`landlock/seccompiler`，不视为当前依赖。
 - CUDA 使用 NVIDIA 运行时，Metal 使用系统框架，均不属于当前 CPU 构建。
 
 | 目标产物 | 平台 | 说明 |
@@ -1299,7 +1300,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 |---|---|---|
 | **M0 验证** | 1–2 周 | 验证工作并入 MVP 计划与报告：模型任务能力、CPU 性能、brush 嵌入及共享会话。原设想的更大任务集和参考实现对比不因 MVP 完成而自动视为已覆盖 |
 | **M1 本地版 MVP（已完成）** | 6 周 | 按 [MVP 计划](MVP-PLAN.md) 交付 Linux shell、AI 触发/纠错、共享会话、权限 v1、四个工具、CPU 进程内推理、下载/导入与 CLI；没有共享进程、资源自适应或沙箱。后续完成 f16 KV、x86/ARM 权重释放及多平台 CI，结果见 [MVP 报告](MVP-REPORT.md) |
-| **M2 完善 + 远程基础（未完成）** | 5 周 | **推理**：共享 engine、多会话 KV、磁盘前缀缓存、资源自适应、约束解码、PLD、融合 GEMV。**可靠性**：补齐固定 seed 判定复现验收、比较 temperature、优化工具输出。**交互**：其他 shell 的 Ctrl+G、LLM 摘要、后台下载、WSL PATH 缓存；本地用户输出采集见[独立设计](OUTPUT-CAPTURE.md)。**工具/安全**：`grep/write_file/ai undo`、数据保留、项目/管理员策略、运行时写入预览。**平台/远程**：托管 pwsh、SSH pty/control、带外审批、自动部署、远程 Redactor；推动 brush 的 pid、取消、进程组、信号及进程创建钩子 |
+| **M2 完善 + 远程基础（未完成）** | 5 周 | **推理**：共享 engine、多会话 KV、磁盘前缀缓存、资源自适应、约束解码、PLD、融合 GEMV。**可靠性**：补齐固定 seed 判定复现验收、比较 temperature、优化工具输出。**交互**：其他 shell 的 Ctrl+G、LLM 摘要、后台下载、WSL PATH 缓存；本地用户输出采集见[独立设计](OUTPUT-CAPTURE.md)。**工具/安全**：`write_file/ai undo`、数据保留、项目/管理员策略、运行时写入预览。**平台/远程**：托管 pwsh、SSH pty/control、带外审批、自动部署、远程 Redactor；推动 brush 的 pid、取消、进程组、信号及进程创建钩子 |
 | **M3 远程完善与生态** | 4 周以上 | 断线保持与重连、多端附着、文件与模型推送；系统级共享 engine；CUDA 版；Landlock/seccomp 沙箱；自定义工具、钩子、MCP |
 
 原列在 M2 的 nosh 内 Ctrl+G、AI 输出块、基础工具结果压缩和固定 seed 评测运行器已提前落地；不要重复列为未开始任务。评测工具已存在与模型可靠性/复现验收已通过是不同状态。

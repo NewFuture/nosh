@@ -16,6 +16,7 @@ pub struct Environment {
 }
 
 const PROBE_TOOLS: &[&str] = &[
+    "ls",
     "git",
     "docker",
     "podman",

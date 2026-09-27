@@ -570,8 +570,9 @@ impl Agent {
         };
         match tool {
             BuiltinTool::RunCommand => self.run_command(shell, call, approval, ui),
-            BuiltinTool::ReadFile => self.read_tool(shell, call, approval, ui, tools::read_file),
-            BuiltinTool::ListDir => self.read_tool(shell, call, approval, ui, tools::list_dir),
+            BuiltinTool::ReadFile | BuiltinTool::Grep => {
+                self.read_tool(shell, call, approval, ui, tool)
+            }
         }
     }
 
@@ -760,16 +761,64 @@ impl Agent {
         call: &ToolCall,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
-        read: fn(&ToolCall, &Path) -> Result<String, String>,
+        tool: BuiltinTool,
     ) -> Exec {
         let cwd = shell.cwd();
         let path = tools::tool_path(call, &cwd);
         let ctx = self.cfg.permission_context(shell);
+        let (risk, label) = match self.approve_read(&path, &ctx, call, approval, ui) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        ui.tool_start(&call.name, &path.display().to_string(), Some(risk), &label);
+        let root_protected = matches!(
+            classify_path_real(&path, &ctx, true).0,
+            PathClass::Protected(_)
+        );
+        let mut denied = None;
+        let result = match tool {
+            BuiltinTool::ReadFile => tools::read_file(call, &cwd),
+            BuiltinTool::Grep => tools::grep(call, &cwd, |child| {
+                if !root_protected
+                    && child != path
+                    && let Err(error) = self.approve_read(child, &ctx, call, approval, ui)
+                {
+                    denied = Some(error);
+                    return Err("reading a protected grep path was denied".into());
+                }
+                Ok(())
+            }),
+            BuiltinTool::RunCommand => unreachable!("commands are dispatched separately"),
+        };
+        if let Some(error) = denied {
+            ui.tool_end("protected grep path denied");
+            return error;
+        }
+        match result {
+            Ok(text) => {
+                ui.tool_end(&format!("{} lines", text.lines().count().saturating_sub(1)));
+                Exec::Result(text)
+            }
+            Err(error) => {
+                ui.tool_end(&format!("error: {error}"));
+                Exec::Result(format!("error: {error}"))
+            }
+        }
+    }
+
+    fn approve_read(
+        &mut self,
+        path: &Path,
+        ctx: &Context,
+        call: &ToolCall,
+        approval: &mut dyn ApprovalChannel,
+        ui: &mut dyn AgentUi,
+    ) -> Result<(Risk, String), Exec> {
         let detail = path.display().to_string();
         let mut risk = Risk::Safe;
         let mut label = format!("{} · auto", Risk::Safe);
         // Also through symlinks: a link in the workspace to ~/.ssh is protected.
-        if let (PathClass::Protected(what), _) = classify_path_real(&path, &ctx, true) {
+        if let (PathClass::Protected(what), _) = classify_path_real(path, ctx, true) {
             risk = Risk::Mutating;
             let why = format!("reads a protected path ({what})");
             let report = RiskReport {
@@ -784,7 +833,7 @@ impl Agent {
             match decide(&report, &shown, self.cfg.mode, &self.cfg.rules, &self.allow) {
                 Decision::Allow => label = format!("{risk} · allowed"),
                 Decision::Deny { reason } => {
-                    return Exec::Denied(format!("[denied by policy] {reason}"));
+                    return Err(Exec::Denied(format!("[denied by policy] {reason}")));
                 }
                 Decision::Ask { strong } => {
                     let req = ApprovalRequest {
@@ -800,26 +849,15 @@ impl Agent {
                             label = format!("{risk} · approved");
                         }
                         _ => {
-                            return Exec::Denied(
+                            return Err(Exec::Denied(
                                 "[denied by user] The user did not allow reading this path.".into(),
-                            );
+                            ));
                         }
                     }
                 }
             }
         }
-        ui.tool_start(&call.name, &detail, Some(risk), &label);
-        let r = read(call, &cwd);
-        match r {
-            Ok(t) => {
-                ui.tool_end(&format!("{} lines", t.lines().count().saturating_sub(1)));
-                Exec::Result(t)
-            }
-            Err(e) => {
-                ui.tool_end(&format!("error: {e}"));
-                Exec::Result(format!("error: {e}"))
-            }
-        }
+        Ok((risk, label))
     }
 }
 
