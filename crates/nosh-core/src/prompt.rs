@@ -95,7 +95,7 @@ If a command needs a terminal or a password, the harness hands control back to t
    Distinguish evidence from hypotheses; do not invent an exit-code meaning or application purpose.\n\
    Empty output is valid. If evidence is missing, partial or mixed, say so; do not invent diagnostics.\n\
 6. Each user turn starts with a [task ...] header describing the current session state.\n\
-7. End with a brief answer in the user's language, including the key command(s).",
+7. If the user's goal is missing, ask for it before using tools. Otherwise, answer as soon as the requested result is known, briefly in the user's language with the key command(s). State a clear next step directly, not an offer to continue. Do not ask a closing question once the task is complete. Ask only for an essential choice that cannot be inferred.",
         env.os,
         env.arch,
         env.user,
@@ -343,6 +343,9 @@ mod tests {
         assert!(p.contains("header describing the current session state"));
         assert!(p.contains("inspect only missing information needed for the task"));
         assert!(p.contains("Stop when the requested task succeeds."));
+        assert!(p.contains("If the user's goal is missing, ask for it before using tools."));
+        assert!(p.contains("Do not ask a closing question once the task is complete."));
+        assert!(p.contains("Ask only for an essential choice that cannot be inferred."));
         assert!(!p.contains("Inspect before you modify"));
         assert_eq!(p, system_prompt(&env));
         assert!(suggest_system_prompt(&env).contains("ONLY one complete bash program"));
