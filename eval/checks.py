@@ -33,6 +33,7 @@ VERSION_FLAGS = {
     "node": {"--version", "-v"},
     "python3": {"--version", "-V"},
 }
+VERSION_ALIASES = {"cargo": r"cargo", "node": r"node(?:\.js)?", "python3": r"python3?"}
 
 
 @dataclass
@@ -79,9 +80,15 @@ def response_prose(answer: str, keep_inline: bool = False) -> str:
 
 def without_history_literals(prose: str, facts: dict) -> str:
     log = facts.get("git_log", "")
-    subjects = set(re.findall(r"(?m)^ {4}(\S.*)$", log))
+    prose = prose.replace("**", "").replace("__", "")
+    subjects = {
+        response_prose(subject).replace("**", "").replace("__", "")
+        for subject in re.findall(r"(?m)^ {4}(\S.*)$", log)
+    }
     for subject in sorted(subjects, key=len, reverse=True):
-        prose = re.sub(r"(?<!\w)" + re.escape(subject) + r"(?!\w)", "", prose)
+        if subject.strip():
+            pattern = r"\s+".join(re.escape(word) for word in subject.split())
+            prose = re.sub(r"(?<!\w)" + pattern + r"(?!\w)", "", prose)
     commits = set(facts.get("commit_ids", [])) | set(re.findall(r"(?m)^commit ([0-9a-f]{40})\b", log))
     return re.sub(
         r"(?<!\w)[0-9a-f]{7,40}(?!\w)",
@@ -140,6 +147,8 @@ def experience(scenario: dict, answer: str, metrics: dict, *, facts: dict | None
         r"(?:确认|回复确认|告诉我是否|告知(?:我)?是否)"
         r"|(?:^|[。！？.!?，,；;\n])\s*告诉我(?:是否|要不要|需不需要|何时)"
         r"|等(?:待)?[你您](?:的)?确认|确认后我"
+        r"|(?:如果|若|如)[你您]?(?:还)?(?:有)?(?:需要?|希望|想)[^。！？!?；;\n]*"
+        r"(?:请|可以|随时)[你您]?(?:再|随时)?(?:告诉我|告知我|联系我)"
         r"|\b(?:would you like|do you want|shall I|should I|please confirm|please let me know"
         r"|let me know (?:if|whether|when|your))\b", closing, re.I,
     ) or clarification_request(closing))
@@ -227,6 +236,71 @@ def version_queries(command: str, root: Path, facts: dict) -> set[str]:
         queries.add(groups[0][0])
         may_fallback = True
     return queries
+
+
+def version_claims(answer: str) -> dict[str, list[str]]:
+    claims: dict[str, list[str]] = {name: [] for name in VERSION_ALIASES}
+    version = r"(?<![\w.])v?(\d+(?:\.\d+)+)(?![\w.])"
+    label = r"(?<![a-z0-9_])(?:" + "|".join(VERSION_ALIASES.values()) + r")(?![a-z0-9_])"
+    horizontal = {}
+    vertical = None
+    pending = None
+
+    def tool(text):
+        return next((name for name, alias in VERSION_ALIASES.items()
+                     if re.fullmatch(rf"\s*(?:{alias})(?:\s*(?:version|版本))?\s*[:：]?\s*", text, re.I)), None)
+
+    def record(name, text):
+        values = re.findall(version, text, re.I)
+        if not values and re.search(r"\b(?:unknown|unavailable|not found|not installed)\b|未知|未安装|未找到", text, re.I):
+            values = ["unavailable"]
+        claims[name].extend(values)
+        return bool(values)
+
+    for raw in answer.splitlines():
+        line = raw.replace("**", "").replace("__", "").replace("`", "").strip()
+        if "|" in line:
+            pending = None
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                continue
+            columns = {index: name for index, cell in enumerate(cells) if (name := tool(cell)) is not None}
+            if len(columns) > 1 and not re.search(version, line, re.I):
+                horizontal, vertical, pending = columns, None, None
+                continue
+            name_column = next((i for i, cell in enumerate(cells)
+                                if re.fullmatch(r"tool|command|name|工具|命令|名称|程序", cell, re.I)), None)
+            value_column = next((i for i, cell in enumerate(cells)
+                                 if re.fullmatch(r"(?:installed\s+)?version|(?:当前)?版本", cell, re.I)), None)
+            if name_column is not None and value_column is not None:
+                horizontal, vertical, pending = {}, (name_column, value_column), None
+                continue
+            if horizontal:
+                for index, name in horizontal.items():
+                    if index < len(cells):
+                        record(name, cells[index])
+                continue
+            if vertical is not None and max(vertical) < len(cells):
+                name = tool(cells[vertical[0]])
+                if name is not None:
+                    record(name, cells[vertical[1]])
+                continue
+            if len(columns) == 1:
+                index, name = next(iter(columns.items()))
+                record(name, " ".join(cell for i, cell in enumerate(cells) if i != index))
+                continue
+        else:
+            horizontal, vertical = {}, None
+        labels = list(re.finditer(label, line, re.I))
+        if not labels and pending is not None and re.fullmatch(version, line.strip("- :："), re.I):
+            record(pending, line)
+        pending = None
+        for index, match in enumerate(labels):
+            name = tool(match[0])
+            description = line[match.end():labels[index + 1].start() if index + 1 < len(labels) else len(line)]
+            if not record(name, description) and not description.strip(" :：=-"):
+                pending = name
+    return claims
 
 
 def completed_commands(evidence: dict, root: Path, facts: dict, action: str, after: dict) -> list[dict]:
@@ -366,33 +440,78 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                                for item in entries[name])):
                     reasons.append(f"missing, contradictory or incorrectly staged change: {name}")
         else:
-            blocks = re.split(r"\n\s*\n|(?m:^\s*(?:[-*]|\d+[.)])\s+)", answer)
+            blocks = re.split(r"\n\s*\n|(?=^[ \t]*(?:[-*]|\d+[.)])[ \t]+)", answer, flags=re.M)
             blocks = [line for block in blocks for line in (block.splitlines() if "|" in block else [block])]
             order = []
+            listed = []
+            listing = True
             history = list(reversed(facts["history"]))
-            for block in blocks:
+            for position, raw in enumerate(blocks):
+                item = re.match(r"^[ \t]*(?:[-*]|\d+[.)])[ \t]+", raw)
+                block = raw[item.end():] if item else raw
+                block = block.replace("`", "").replace("**", "").strip()
+                if not block or re.fullmatch(r"[\s|:-]+", block):
+                    continue
+                if re.match(r"^(?:#{1,6}\s*)?(?:note|summary|next steps|注意|备注|说明|总结|建议)\s*[:：]", block, re.I):
+                    listing = False
+                    continue
+                if "|" in raw:
+                    if position + 1 < len(blocks) and re.fullmatch(r"[\s|:-]+", blocks[position + 1]):
+                        continue
+                    cells = [cell.strip().lower() for cell in block.strip("|").split("|")]
+                    if all(cell in {
+                        "#", "commit", "commits", "sha", "hash", "component", "subject", "message",
+                        "description", "feature", "提交", "哈希", "组件", "说明", "描述", "功能", "序号",
+                    } for cell in cells):
+                        continue
                 components = [i for i, (component, _) in enumerate(history) if re.search(rf"\b{component}\b", block, re.I)]
                 feature_matches = [i for i, (_, feature) in enumerate(history)
                                    if re.search(HISTORY_ALIASES[feature], block, re.I)]
-                label = re.match(r"^\s*([a-zA-Z_-]+)\s*[:：]", block.replace("`", "").replace("**", ""))
+                label = re.match(r"^\s*([a-zA-Z_-]+)\s*[:：]", block)
                 if label and label[1].lower() not in {c for c, _ in history} | {"note", "summary"}:
                     reasons.append(f"unknown commit component: {label[1]}")
+                index = None
                 if len(components) == 1:
                     index = components[0]
                     if not re.search(HISTORY_ALIASES[history[index][1]], block, re.I):
                         reasons.append(f"incorrect/unrecognized recent commit fact: {history[index][0]}")
-                    elif index not in order:
+                        index = None
+                elif not components and len(feature_matches) == 1:
+                    index = feature_matches[0]
+                if index is not None:
+                    if item or "|" in raw:
+                        if index in listed:
+                            reasons.append(f"duplicate recent commit entry: {history[index][0]}")
+                        listed.append(index)
+                    if index not in order:
                         order.append(index)
-                elif not components and len(feature_matches) == 1 and feature_matches[0] not in order:
-                    order.append(feature_matches[0])
+                    listing = True
+                elif (item or "|" in raw) and listing:
+                    reasons.append(f"unrecognized recent commit entry: {block[:120]}")
+                elif block.endswith((":", "：")):
+                    listing = bool(re.search(r"提交|commits?|history", block, re.I))
             if not order or order[0] != 0 or order != sorted(order):
                 reasons.append("recent history must identify the newest commit and keep newest-first order")
             for sha in re.findall(r"\b[0-9a-f]{7,40}\b", answer):
                 if not any(commit.startswith(sha) for commit in facts["commit_ids"]):
                     reasons.append(f"unknown commit hash: {sha}")
+            prose = without_history_literals(response_prose(answer), facts)
+            for clause in re.split(r"[。！？!?；;\n，,]", prose):
+                counts = re.findall(r"(?<![\d.])(\d+)\s*(?:个|条|次)?\s*(?:提交|commits?\b|记录)", clause, re.I)
+                counts.extend(re.findall(
+                    r"(?:提交|commits?)\s*[（(]\s*(?:共|total(?:\s+of)?\s*:?)?\s*(\d+)\s*(?:个|条|次)?\s*[）)]",
+                    clause, re.I,
+                ))
+                inventory = bool(re.search(r"仓库|全部|所有|\brepository\b|\brepo\b|entire history", clause, re.I))
+                displayed = bool(re.search(
+                    r"最近|最新|以下|列出|展示|记录|共|[（(]|\b(?:last|latest|recent|following|shown|listed)\b",
+                    clause, re.I,
+                ))
+                expected_count = len(history) if inventory else len(order)
+                for count in set(map(int, counts)):
+                    if count > len(history) or ((inventory or displayed) and count != expected_count):
+                        reasons.append(f"incorrect recent commit count: {count}, expected {expected_count}")
     elif kind == "versions":
-        aliases = {"cargo": r"cargo", "node": r"node(?:\.js)?", "python3": r"python3?"}
-        label = r"(?<![a-z0-9_])(?:" + "|".join(aliases.values()) + r")(?![a-z0-9_])"
         queried = set()
         for execution in evidence.get("executions") or []:
             call = execution["call"]
@@ -407,15 +526,15 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                 continue
             output_lines = {line.strip() for line in execution["result"].splitlines()}
             queried.update(name for name in commands if facts["versions"][name] in output_lines)
+        claims = version_claims(answer)
         for name, version in facts["versions"].items():
             if name not in queried:
                 reasons.append(f"no successful {name} version query was observed")
-            number = re.search(r"\d+\.\d+\.\d+", version)[0]
-            matches = list(re.finditer(r"(?<![a-z0-9_])" + aliases[name] + r"(?![a-z0-9_])", answer, re.I))
-            if not any(re.search(r"(?<![\d.])v?" + re.escape(number) + r"(?![\d.])",
-                                 re.split(label, answer[m.end():], maxsplit=1, flags=re.I)[0])
-                       for m in matches):
-                reasons.append(f"missing or incorrect {name} version: {number}")
+            number = re.search(r"\d+(?:\.\d+)+", version)[0]
+            if not claims[name] or any(value != number for value in claims[name]):
+                reasons.append(
+                    f"missing, incorrect or contradictory {name} version: expected {number}, found {claims[name]}"
+                )
     elif kind == "clarification":
         if clarification_request(response_prose(answer)) is None:
             reasons.append("clarification does not ask for the missing task or objective")
@@ -425,8 +544,19 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                 or any(s not in result.turns[0]["output"] for s in expected["contains"])):
             reasons.append("the declared original command failure was not observed")
         if kind == "build-failure":
-            if not all(re.search(p, answer, re.I) for p in (r"src/main\.rs", r"i32|整数", r"str|string|字符串", r"类型|type")):
-                reasons.append("answer omits the string/integer type mismatch in src/main.rs")
+            if "src/main.rs" not in mentioned_files(answer, facts["before"]):
+                reasons.append("answer does not identify the affected file src/main.rs")
+            if not all(re.search(p, answer, re.I) for p in (r"i32|整数", r"str|string|字符串", r"类型|type")):
+                reasons.append("answer omits the string/integer type mismatch")
+            diagnosis = re.split(
+                r"修复|解决|改法|\b(?:fix|repair|solution|remedy)\b", answer, maxsplit=1, flags=re.I,
+            )[0]
+            diagnosis = diagnosis.replace("`", "").replace("**", "")
+            if re.search(
+                r"(?:编译器|compiler)\s*(?:expected|expects?|期望(?:赋值)?(?:的)?(?:类型)?(?:是|为)?)"
+                r"\s*(?:type\s+)?(?:&?str\b|string\b|字符串)", diagnosis, re.I,
+            ):
+                reasons.append("answer reverses the compiler's expected i32 and actual string types")
             remedy = r"改为|改成|替换|转换|解析|parse|replace|convert"
         elif kind == "test-failure":
             if not all(re.search(p, answer, re.I) for p in (r"maths\.py|add", r"减|subtract|a\s*-\s*b", r"加|addition|a\s*\+\s*b")):
@@ -452,6 +582,75 @@ def mentioned_files(answer: str, known: dict | list) -> list[str]:
         if canonical not in result:
             result.append(canonical)
     return result
+
+
+def python_count_reasons(answer: str, facts: dict) -> list[str]:
+    directories = {parent.as_posix() for name in facts["before"] for parent in Path(name).parents} - {"."}
+    scopes = []
+    reasons = []
+    patterns = (
+        r"(?<![\d.])([+-]?\d+(?:\.\d+)?)\s*(?:个\s*)?python\s*(?:文件|files?\b)",
+        r"python\s*(?:文件|files?\b)\s*(?:[（(]\s*(?:共|共有)\s*|[:：]\s*|共有\s*)([+-]?\d+(?:\.\d+)?)",
+    )
+
+    def scope_in(text, default, heading=False):
+        markers = []
+        for pattern, directory in (
+            (r"全项目|整个项目|整个仓库|全部目录|项目中|project[- ]wide|whole project|entire project|overall|grand total", None),
+            (r"项目根目录|根目录|project root|root directory", "."),
+        ):
+            markers.extend((match.end(), directory) for match in re.finditer(pattern, text, re.I))
+        for directory in directories:
+            pattern = r"(?<![a-zA-Z0-9_./-])(?:\./)?" + re.escape(directory) + r"(/?)(?![a-zA-Z0-9_./-])"
+            for match in re.finditer(pattern, text):
+                if (match[1] or re.match(r"\s*(?:目录|文件夹|directory|folder)", text[match.end():], re.I)
+                        or re.search(r"(?:目录|文件夹|directory|folder)\s*$", text[:match.start()], re.I)
+                        or (heading and text.strip(" #*:：/") == directory)):
+                    markers.append((match.end(), directory))
+        recursive = bool(re.search(r"递归|含子目录|包含子目录|recursiv|including subdirectories", text, re.I))
+        if not markers:
+            return default[0], default[1] or recursive
+        directory = max(markers, key=lambda marker: marker[0])[1]
+        return directory, recursive
+
+    for raw in answer.splitlines():
+        line = raw.replace("**", "").replace("`", "").strip()
+        if not line:
+            # Bold directory labels scope a paragraph, not a later overall summary.
+            while scopes and scopes[-1][2] and scopes[-1][3]:
+                scopes.pop()
+            continue
+        matches = sorted((match for pattern in patterns for match in re.finditer(pattern, line, re.I)),
+                         key=lambda match: match.start())
+        heading = re.match(r"^(#{1,6})\s+", line)
+        bold_heading = raw.strip().startswith("**") and raw.strip().endswith("**") and not matches
+        directory_heading = line.endswith((":", "：")) and not matches
+        if heading or bold_heading or directory_heading:
+            level = len(heading[1]) if heading else 1
+            while scopes and scopes[-1][0] >= level:
+                scopes.pop()
+            inherited = scopes[-1][1] if scopes else (None, False)
+            scopes.append((level, scope_in(line, inherited, heading=True), heading is None, False))
+        elif scopes:
+            level, scope, paragraph, _ = scopes[-1]
+            scopes[-1] = (level, scope, paragraph, True)
+        current = scopes[-1][1] if scopes else (None, False)
+        for match in matches:
+            count_text = match[1]
+            if not re.fullmatch(r"\+?\d+", count_text):
+                reasons.append(f"invalid Python file count: {count_text}")
+                continue
+            directory, recursive = scope_in(line if len(matches) == 1 else line[:match.start()], current)
+            if directory is None:
+                expected = len(facts["python"])
+            elif recursive:
+                expected = sum(directory == "." or name.startswith(directory + "/") for name in facts["python"])
+            else:
+                expected = sum(Path(name).parent.as_posix() == directory for name in facts["python"])
+            count = int(count_text)
+            if count != expected:
+                reasons.append(f"incorrect Python file count: {count} in {directory or 'project'}, expected {expected}")
+    return reasons
 
 
 def line_counts(answer: str, facts: dict) -> list[str]:
@@ -953,7 +1152,8 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
             absent = re.search(
                 r"(?:\bno\s+|\bwithout\s+|没有\s*|无\s*|未(?:发现|找到)\s*|不存在\s*)"
                 r"(?:任何\s*)?python\s*(?:文件|files?\b)"
-                r"|python\s*(?:文件|files?\b)\s*[:：]?\s*(?:不存在|没有|未找到|无)",
+                r"|python\s*(?:文件|files?\b)\s*[:：]?\s*(?:不存在|没有|未找到|无)"
+                r"|(?<![\d.])0\s*(?:个\s*)?python\s*(?:文件|files?\b)",
                 plain, re.I,
             )
             if absent:
@@ -989,10 +1189,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
                 reasons.append(f"Python files classified as non-Python: {misclassified_python}")
         if not re.search(r"[\u4e00-\u9fff]", answer):
             reasons.append("answer is not in Chinese")
-        counts = re.findall(r"(\d+)\s*(?:个\s*)?python\s*(?:文件|files?\b)",
-                            answer.replace("**", "").replace("`", ""), re.I)
-        if any(int(count) != len(facts["python"]) for count in counts):
-            reasons.append(f"incorrect Python file count: {counts}")
+        reasons.extend(python_count_reasons(answer, facts))
     elif kind == "typos":
         expected = scenario["corrections"]
         if len(result.turns) != len(expected) or any(
