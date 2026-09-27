@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "dataset_revision": 4,
+  "dataset_revision": 5,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 240,
   "scenarios": [
@@ -310,7 +310,7 @@
       "mode": "repl",
       "fixture": "diagnostic-failure",
       "capture_output": "last",
-      "inputs": ["python3 once.py", "# 根据刚才的实际输出，解释失败原因并说明修复方法。不要重跑程序，也不要猜测输出未说明的应用用途。"],
+      "inputs": ["python3 once.py", "ai fix 根据刚才的实际输出解释失败原因并说明修复方法。不要重跑程序，也不要猜测输出未说明的应用用途。"],
       "completions": [{"kind": "shell", "exit_code": 17, "contains": ["diagnostic_id: CAPTURE-", "error_code: REGION_UNSET", "REGION is unset", "exit_code: 17"]}, {"kind": "agent"}],
       "group": "expanded",
       "approval": "deny",
@@ -323,7 +323,7 @@
       "mode": "repl",
       "fixture": "diagnostic-failure",
       "capture_output": "last",
-      "inputs": ["python3 once.py", "# 根据刚才的实际输出解释失败原因，并原样引用 diagnostic_id 字段的完整值（不是 error_code，也不是进程退出码），再说明修复方法。不要重跑程序或猜测应用用途。"],
+      "inputs": ["python3 once.py", "ai fix 根据刚才的实际输出解释失败原因，并原样引用 diagnostic_id 字段的完整值（不是 error_code，也不是进程退出码），再说明修复方法。不要重跑程序或猜测应用用途。"],
       "completions": [{"kind": "shell", "exit_code": 17, "contains": ["diagnostic_id: CAPTURE-", "error_code: REGION_UNSET", "REGION is unset", "exit_code: 17"]}, {"kind": "agent"}],
       "group": "expanded",
       "approval": "deny",

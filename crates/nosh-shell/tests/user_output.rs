@@ -13,7 +13,7 @@ use nosh_shell::pty::{Control, SessionPty, Snapshot};
 use nosh_shell::repl::{GuardChoice, Pipeline, ReplUi};
 use nosh_shell::{
     AgentExecOpts, AiHandler, AiOutcome, AiRequest, Badge, CaptureOutput, EmbeddedShell, NullSink,
-    OutputState, OutputUnavailable, ReplConfig, ShellOptions,
+    OnFailure, OutputState, OutputUnavailable, ReplConfig, ShellOptions, Trigger,
 };
 
 const ROLE: &str = "NOSH_PTY_TEST_ROLE";
@@ -191,8 +191,14 @@ fn pty_probe() {
             let mut pipeline = Pipeline::new(ReplConfig::default());
             let mut ai = RecordingAi::default();
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "sh once.sh");
-            pipeline.process(&mut shell, &mut ai, &mut QuietUi, "ai fix");
+            pipeline.process(
+                &mut shell,
+                &mut ai,
+                &mut QuietUi,
+                "ai fix cite the diagnostic id",
+            );
             let request = &ai.0[0];
+            assert_eq!(request.text, "cite the diagnostic id");
             let output = request.user_output.as_ref().unwrap();
             assert_eq!(output.state, OutputState::Captured);
             assert_eq!(output.command_id, request.failed.as_ref().unwrap().id);
@@ -200,9 +206,15 @@ fn pty_probe() {
             assert_eq!(std::fs::read_to_string("calls").unwrap(), "1");
             let first_id = output.command_id;
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "帮我解释刚才的输出");
-            let prose = ai.0.last().unwrap().user_output.as_ref().unwrap();
-            assert_eq!(prose.command_id, first_id);
-            assert!(prose.text.contains("ONCE_ERROR"));
+            assert!(
+                ai.0.last().unwrap().user_output.is_none(),
+                "ordinary natural-language tasks must not inherit terminal output"
+            );
+            pipeline.process(&mut shell, &mut ai, &mut QuietUi, "# unrelated task");
+            assert!(
+                ai.0.last().unwrap().user_output.is_none(),
+                "ordinary hash tasks must not inherit terminal output"
+            );
 
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "sh -c 'exit 17'");
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "#");
@@ -214,9 +226,24 @@ fn pty_probe() {
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "echo )");
             let parse_error = ai.0.last().unwrap();
             assert!(parse_error.failed.is_none());
-            let previous = parse_error.user_output.as_ref().unwrap();
-            assert_eq!(previous.command_id, first_id + 1);
-            assert_eq!(previous.command, "sh -c 'exit 17'");
+            assert!(
+                parse_error.user_output.is_none(),
+                "parse errors must not inherit unrelated terminal output"
+            );
+            let mut auto = Pipeline::new(ReplConfig {
+                on_failure: OnFailure::Auto,
+                ..ReplConfig::default()
+            });
+            let mut auto_ai = RecordingAi::default();
+            auto.process(
+                &mut shell,
+                &mut auto_ai,
+                &mut QuietUi,
+                "sh -c 'printf AUTO_ERROR >&2; exit 18'",
+            );
+            let automatic = auto_ai.0.last().unwrap();
+            assert_eq!(automatic.trigger, Trigger::Failed { exit: 18 });
+            assert_eq!(automatic.user_output.as_ref().unwrap().text, "AUTO_ERROR");
             for command in ["printf '' | grep -q absent", "sh -c 'exit 130'"] {
                 pipeline.process(&mut shell, &mut ai, &mut QuietUi, command);
                 assert!(pipeline.last_failure().is_none());

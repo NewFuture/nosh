@@ -129,6 +129,7 @@ pub struct Agent {
     outputs: Vec<OutputRecord>,
     next_output: usize,
     notes_seen: HashSet<PathBuf>,
+    user_outputs_seen: HashSet<u64>,
     hooked: bool,
     /// Filters what the agent writes to disk (see [`tools::Redactor`]).
     redactor: Arc<dyn Redactor>,
@@ -155,6 +156,7 @@ impl Agent {
             outputs: Vec::new(),
             next_output: 1,
             notes_seen: HashSet::new(),
+            user_outputs_seen: HashSet::new(),
             hooked: false,
             redactor: Arc::new(NoRedact),
         }
@@ -182,6 +184,7 @@ impl Agent {
         }
         self.carry.clear();
         self.notes_seen.clear();
+        self.user_outputs_seen.clear();
     }
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
@@ -298,7 +301,7 @@ impl Agent {
     pub fn run_task(
         &mut self,
         shell: &mut EmbeddedShell,
-        input: TaskInput,
+        mut input: TaskInput,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> TaskOutcome {
@@ -323,6 +326,14 @@ impl Agent {
                 return out;
             }
         };
+        if input
+            .user_output
+            .as_ref()
+            .is_some_and(|output| self.user_outputs_seen.contains(&output.command_id))
+        {
+            input.user_output = None;
+        }
+        let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
         let notes = prompt::project_notes(&cwd0)
             .filter(|(p, _)| self.notes_seen.insert(p.clone()))
@@ -342,7 +353,12 @@ impl Agent {
             cancel.reset();
             out.steps += 1;
             let step = match self.step(sid, std::mem::take(&mut pending), ui) {
-                Ok(s) => s,
+                Ok(s) => {
+                    if let Some(command_id) = attached_output.take() {
+                        self.user_outputs_seen.insert(command_id);
+                    }
+                    s
+                }
                 Err(e) => {
                     ui.error(&e.to_string());
                     out.status = TaskStatus::Failed;
