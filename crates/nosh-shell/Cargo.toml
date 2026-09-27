@@ -17,6 +17,7 @@ libc.workspace = true
 nosh-hub.workspace = true
 nu-ansi-term.workspace = true
 reedline.workspace = true
+signal-hook.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-segmentation.workspace = true

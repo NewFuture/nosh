@@ -14,6 +14,7 @@ use reedline::{
     ReedlineMenu, Signal, Suggestion, ValidationResult,
 };
 
+use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
 use crate::{style, term};
@@ -25,6 +26,7 @@ pub struct AiRequest {
     pub text: String,
     /// The failed command, for `trigger=failed`.
     pub failed: Option<UserCommand>,
+    pub user_output: Option<UserOutput>,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +72,7 @@ impl AiHandler for NoAi {
                 trigger: Trigger::Builtin,
                 text: String::new(),
                 failed: None,
+                user_output: None,
             },
         )
     }
@@ -304,6 +307,7 @@ impl Pipeline {
         ui: &mut dyn ReplUi,
         line: &str,
     ) -> LineOutcome {
+        self.last_failure = None;
         let run = shell.run_user_line(line);
         if run.exit_shell {
             return LineOutcome::Exit(run.exit_code);
@@ -352,10 +356,21 @@ fn ask(
     text: String,
     failed: Option<UserCommand>,
 ) -> LineOutcome {
+    let user_output = shell
+        .last_user_output()
+        .filter(|output| match trigger {
+            Trigger::Failed { .. } => failed
+                .as_ref()
+                .is_some_and(|command| command.id == output.command_id),
+            Trigger::Hash | Trigger::Builtin => true,
+            _ => false,
+        })
+        .cloned();
     let req = AiRequest {
         trigger,
         text,
         failed,
+        user_output,
     };
     let out = isolate(|| ai.handle(shell, req)).unwrap_or_default();
     LineOutcome::Continue(out.prefill)

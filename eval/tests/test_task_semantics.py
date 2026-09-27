@@ -268,13 +268,13 @@ class DatasetRevisionTests(ProjectWorkCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_current_suite_declares_the_second_dataset_without_changing_task_shape(self):
+    def test_current_suite_adds_opt_in_capture_without_changing_prior_tasks(self):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 2)
+        self.assertEqual(data["dataset_revision"], 3)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
-        self.assertEqual(len(scenarios), 25)
+        self.assertEqual(len(scenarios), 26)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
         self.assertEqual(scenarios["zh-git-commit"]["fixture"], "staged-git")
         self.assertEqual(scenarios["zh-git-diff"]["fixture"], "dirty-git")

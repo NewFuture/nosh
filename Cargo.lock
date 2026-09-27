@@ -1863,6 +1863,7 @@ dependencies = [
  "nosh-permissions",
  "nosh-shell",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 
@@ -1934,6 +1935,7 @@ dependencies = [
  "reedline",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

@@ -104,6 +104,59 @@ fn commands_from_stdin() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "got:hello\n1\n2\n");
 }
 
+#[test]
+fn capture_configuration_preserves_noninteractive_and_unavailable_paths() {
+    let home = empty_home("capture");
+    std::fs::write(
+        home.join("config.toml"),
+        "[shell]\ncapture_user_output = \"last\"\n",
+    )
+    .unwrap();
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["-c", "printf raw"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"raw");
+    assert!(out.stderr.is_empty());
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .env("TERM", "dumb")
+        .args(["--safe", "-i"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("continuing without capture"));
+    std::fs::write(
+        home.join("config.toml"),
+        "[shell]\ncapture_user_output = \"off\"\n",
+    )
+    .unwrap();
+    let direct = nosh()
+        .env("NOSH_HOME", &home)
+        .env("TERM", "dumb")
+        .args(["--safe", "-i"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), direct.status.code());
+    assert_eq!(out.stdout, direct.stdout);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn a_plain_environment_value_cannot_authorize_an_internal_pty_host() {
+    let output = nosh()
+        .env("NOSH_INTERNAL_PTY_FD", "1")
+        .args(["-c", "printf must-not-run"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PTY host bootstrap"));
+}
+
 fn empty_home(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("nosh-cli-empty-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);

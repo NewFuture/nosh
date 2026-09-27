@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -667,6 +668,59 @@ def check_archive(answer: str, root: Path, before: dict, after: dict) -> list[st
         archive.unlink(missing_ok=True)
 
 
+def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
+                     after: dict, result, evidence: dict | None) -> list[str]:
+    reasons = []
+    if not result.turns or result.turns[0].get("exit_code") != 17:
+        reasons.append("the original one-shot failure was not observed")
+    original = result.turns[0]["output"] if result.turns else ""
+    codes = set(re.findall(r"\bCAPTURE-[0-9a-f]{8}\b", original))
+    if len(codes) != 1 or not any(code in answer for code in codes):
+        reasons.append("answer does not cite the actual one-shot error identifier")
+    if "REGION" not in answer or not re.search(r"unset|missing|未设置|缺失|没有设置|未配置", answer, re.I):
+        reasons.append("answer does not explain the missing REGION setting")
+    if not re.search(r"\bexport\b|configur|set\b|设置|配置", answer, re.I):
+        reasons.append("answer provides no remedy for REGION")
+    counter = root / "calls.count"
+    if counter.is_symlink() or not counter.is_file() or counter.read_text(encoding="utf-8") != "1":
+        reasons.append("the one-shot program was rerun")
+    protected = lambda files: {name: item for name, item in files.items() if name != "calls.count"}
+    if protected(after) != protected(facts["before"]):
+        reasons.append("diagnosis changed protected fixture files")
+    starts = [event for event in (evidence or {}).get("inputs") or []
+              if event.get("ev") == "step_start"]
+    messages = starts[0].get("messages", []) if starts else []
+    tasks = [message["text"] for message in messages
+             if message.get("role") == "user" and message.get("text", "").startswith("[task ")]
+    if len(tasks) != 1 or "\n[user_output " not in tasks[0]:
+        return reasons + ["the first model request lacks captured output evidence"]
+    header, separator, body = tasks[0].split("\n[user_output ", 1)[1].partition("\n")
+    try:
+        metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None
+    except json.JSONDecodeError:
+        metadata = None
+    if not isinstance(metadata, dict):
+        return reasons + ["invalid captured output metadata"]
+    if (metadata.get("state") != "captured" or metadata.get("source") != "terminal"
+            or type(metadata.get("command_id")) is not int or metadata.get("command_id") != 1
+            or metadata.get("command") != scenario["inputs"][0]
+            or metadata.get("execution_cwd") != str(root) or metadata.get("exit") != 17
+            or metadata.get("mixed") is not False or metadata.get("incomplete") is not False
+            or metadata.get("truncated") is not False):
+        reasons.append("captured output is unavailable, incomplete, mixed or assigned to another command")
+    retained = metadata.get("retained_bytes")
+    if type(retained) is not int or not 0 < retained <= 4096:
+        reasons.append("captured output violates the nonempty 4096-byte evidence budget")
+    else:
+        encoded = body.encode("utf-8")
+        captured = encoded[:retained].decode("utf-8", errors="strict")
+        if not encoded[retained:].startswith(b"\n[/user_output]"):
+            reasons.append("captured byte count does not match the output block")
+        if not any(code in captured for code in codes) or "REGION is unset" not in captured:
+            reasons.append("the first model request does not contain the actual diagnostic")
+    return reasons
+
+
 def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result,
           metrics: dict, evidence: dict | None = None) -> Verdict:
     kind = scenario["check"]
@@ -675,7 +729,9 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
-    if kind in PROJECT_CHECKS:
+    if kind == "captured-failure":
+        reasons.extend(captured_failure(scenario, answer, facts, root, after, result, evidence))
+    elif kind in PROJECT_CHECKS:
         if evidence is None:
             raise ValueError("project checks require native execution and final-state evidence")
         reasons.extend(project_judgment(scenario, answer, facts, root, after, result, evidence))

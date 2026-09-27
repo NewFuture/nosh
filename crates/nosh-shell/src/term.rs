@@ -37,14 +37,16 @@ pub fn stderr_columns() -> Option<usize> {
 }
 
 /// Discards pending typeahead so buffered keystrokes cannot answer a prompt.
-pub fn flush_input() {
+pub fn flush_input() -> io::Result<()> {
     use std::os::fd::AsRawFd;
+    crate::pty::flush_input()?;
     if let Ok(tty) = std::fs::OpenOptions::new().read(true).open("/dev/tty") {
         // SAFETY: valid open fd for the duration of the call.
-        unsafe {
-            libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH);
+        if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } < 0 {
+            return Err(io::Error::last_os_error());
         }
     }
+    Ok(())
 }
 
 pub fn is_ctrl(k: &KeyEvent, c: char) -> bool {

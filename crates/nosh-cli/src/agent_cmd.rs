@@ -103,6 +103,7 @@ pub fn run_agent(
         trigger,
         text,
         failed: None,
+        user_output: None,
         attachment: stdin.map(|b| Attachment::from_bytes("stdin", &b)),
     };
     let env = Environment::detect(&shell);

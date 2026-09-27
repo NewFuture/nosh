@@ -44,7 +44,7 @@ class ExpandedContractTests(unittest.TestCase):
         short = [s for s in SUITE["scenarios"] if s["group"] == "expanded" and len(s["inputs"]) == 1]
         self.assertEqual(len(short), 12)
         self.assertTrue(all(not s["inputs"][0].startswith("#") and s["mode"] == "repl" for s in short))
-        self.assertEqual(len(SCENARIOS), 25)
+        self.assertEqual(len(SCENARIOS), 26)
 
     def test_strict_experience_and_completion_contracts(self):
         cases = [
@@ -625,19 +625,19 @@ class ExpandedReportTests(unittest.TestCase):
             })
         return data
 
-    def test_250_trial_denominator_groups_and_weighted_means(self):
+    def test_260_trial_denominator_groups_and_weighted_means(self):
         data = self.data()
         rows = {r["group"]: r for r in report.groups(data)}
-        self.assertEqual(rows["all"]["planned"], 250)
-        self.assertEqual(rows["all"]["missing"], 247)
+        self.assertEqual(rows["all"]["planned"], 260)
+        self.assertEqual(rows["all"]["missing"], 257)
         self.assertEqual(rows["all"]["steps"], 2)
         self.assertEqual(rows["model"]["steps"], 3)
-        self.assertEqual(rows["model"]["planned"], 240)
+        self.assertEqual(rows["model"]["planned"], 250)
         self.assertEqual(rows["local"]["planned"], 10)
-        self.assertEqual(rows["expanded"]["planned"], 150)
+        self.assertEqual(rows["expanded"]["planned"], 160)
         self.assertEqual(rows["mvp"]["planned"], 100)
         data["metadata"]["repeat"] = 1
-        self.assertEqual(report.groups(data)[0]["planned"], 125)
+        self.assertEqual(report.groups(data)[0]["planned"], 130)
 
     def test_v2_round_trip_and_no_success_shaped_missing_grades(self):
         data = self.data()
@@ -647,7 +647,7 @@ class ExpandedReportTests(unittest.TestCase):
             loaded = json.loads((root / "report.json").read_text(encoding="utf-8"))
             report.validate(loaded)
             text = (root / "report.md").read_text(encoding="utf-8")
-            self.assertIn("3/250", text)
+            self.assertIn("3/260", text)
             self.assertIn("Declared experience budgets", text)
             self.assertIn("facts=pass", text)
         data["trials"][0]["grading"]["experience"] = None

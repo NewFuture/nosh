@@ -22,6 +22,7 @@ CHECK_FIXTURES = {
     "git-diff": "dirty-git", "git-commit": "staged-git", "recent-history": "history",
     "versions": "python", "clarification": "python",
     "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
+    "captured-failure": "one-shot-failure",
 }
 
 
@@ -62,9 +63,16 @@ def load_suite(path: Path) -> dict:
         fields = {"id", "title", "mode", "fixture", "inputs", "input",
                   "corrections", "stdin_command", "approval", "check"}
         if suite["schema_version"] == 2:
-            fields |= {"group", "expect", "completions"}
+            fields |= {"group", "expect", "completions", "capture_user_output"}
         if set(scenario) - fields:
             raise ValueError("unknown scenario fields")
+        capture = scenario.get("capture_user_output", "off")
+        if capture not in ("off", "last"):
+            raise ValueError("capture_user_output must be off or last")
+        if capture == "last" and scenario.get("mode") != "repl":
+            raise ValueError("user output capture requires REPL mode")
+        if scenario.get("check") == "captured-failure" and capture != "last":
+            raise ValueError("captured failure diagnosis requires capture_user_output=last")
         sid = scenario.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid) or sid in ids:
             raise ValueError(f"invalid/duplicate scenario id: {sid}")
@@ -120,7 +128,7 @@ def load_suite(path: Path) -> dict:
                         raise ValueError(f"correction completion does not match inputs: {sid}")
                 if corrections is None and completions[-1]["kind"] != "agent":
                     raise ValueError(f"the final REPL input must ask the agent: {sid}")
-                if (scenario["check"] in ("build-failure", "test-failure", "port-failure")
+                if (scenario["check"] in ("build-failure", "test-failure", "port-failure", "captured-failure")
                         and completions[0]["kind"] != "shell"):
                     raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):

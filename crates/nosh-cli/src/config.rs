@@ -5,13 +5,14 @@ use std::path::PathBuf;
 
 use nosh_hub::SourceSelection;
 use nosh_permissions::ApprovalMode;
-use nosh_shell::OnFailure;
+use nosh_shell::{CaptureUserOutput, OnFailure};
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub ai_prefix: String,
     pub trigger_on_error: bool,
     pub on_failure: OnFailure,
+    pub capture_user_output: CaptureUserOutput,
     pub nl_guard: bool,
     pub builtin_name: String,
     pub approval: ApprovalMode,
@@ -39,6 +40,7 @@ impl Default for Config {
             ai_prefix: "#".into(),
             trigger_on_error: true,
             on_failure: OnFailure::Hint,
+            capture_user_output: CaptureUserOutput::Off,
             nl_guard: true,
             builtin_name: "ai".into(),
             approval: ApprovalMode::Confirm,
@@ -69,6 +71,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "ai_prefix",
             "trigger_on_error",
             "on_failure",
+            "capture_user_output",
             "nl_guard",
             "builtin_name",
             "suggest_key",
@@ -238,6 +241,14 @@ impl Config {
                     .push("shell.on_failure: hint | auto | off".into()),
             }
         }
+        if let Some(v) = r.str("shell", "capture_user_output") {
+            match CaptureUserOutput::parse(&v) {
+                Some(mode) => c.capture_user_output = mode,
+                None => r
+                    .warnings
+                    .push("shell.capture_user_output: off | last".into()),
+            }
+        }
         if let Some(v) = r.str("shell", "nl_guard") {
             match v.as_str() {
                 "destructive" => c.nl_guard = true,
@@ -393,6 +404,32 @@ on = true
         let c = Config::parse("[shell\nx=");
         assert_eq!(c.ai_prefix, "#");
         assert_eq!(c.warnings.len(), 1);
+    }
+
+    #[test]
+    fn user_output_capture_is_opt_in_and_validated() {
+        assert_eq!(
+            Config::default().capture_user_output,
+            CaptureUserOutput::Off
+        );
+        for (value, expected) in [
+            ("off", CaptureUserOutput::Off),
+            ("last", CaptureUserOutput::Last),
+        ] {
+            let config = Config::parse(&format!("[shell]\ncapture_user_output = \"{value}\"\n"));
+            assert_eq!(config.capture_user_output, expected);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        }
+        for value in ["\"all\"", "true", "42"] {
+            let config = Config::parse(&format!("[shell]\ncapture_user_output = {value}\n"));
+            assert_eq!(config.capture_user_output, CaptureUserOutput::Off);
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("shell.capture_user_output"))
+            );
+        }
     }
 
     #[test]

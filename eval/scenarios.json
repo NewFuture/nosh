@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "dataset_revision": 2,
+  "dataset_revision": 3,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 240,
   "scenarios": [
@@ -303,6 +303,19 @@
       "approval": "port-failure",
       "check": "port-failure",
       "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "zh", "final_question": "forbid"}
+    },
+    {
+      "id": "captured-one-shot-failure",
+      "title": "Explain the original one-shot diagnostic without rerunning",
+      "mode": "repl",
+      "fixture": "one-shot-failure",
+      "capture_user_output": "last",
+      "inputs": ["python3 once.py", "# 解释刚才的错误，引用错误编号，并说明修复方法。不要重跑程序。"],
+      "completions": [{"kind": "shell", "exit_code": 17, "contains": ["CAPTURE-", "REGION is unset"]}, {"kind": "agent"}],
+      "group": "expanded",
+      "approval": "deny",
+      "check": "captured-failure",
+      "expect": {"max_steps": 3, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
     }
   ]
 }

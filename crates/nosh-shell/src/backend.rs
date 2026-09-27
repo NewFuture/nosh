@@ -11,6 +11,8 @@ use brush_core::openfiles::{self, OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, ShellVariable, SourceInfo};
 
 use crate::procs;
+use crate::user_output::Utf8Decoder;
+use crate::{CaptureUserOutput, OutputState, OutputUnavailable, UserOutput, pty};
 
 pub type BrushShell = brush_core::Shell;
 
@@ -252,7 +254,9 @@ pub enum Resolution {
 /// A command the user ran (for the `[recent]` task header).
 #[derive(Debug, Clone)]
 pub struct UserCommand {
+    pub id: u64,
     pub line: String,
+    pub cwd: PathBuf,
     pub exit: i32,
     pub duration: Duration,
 }
@@ -314,6 +318,10 @@ pub struct EmbeddedShell {
     workspace: PathBuf,
     interrupts: Arc<Interrupts>,
     recent: Vec<UserCommand>,
+    next_command_id: u64,
+    capture_mode: CaptureUserOutput,
+    capture_control: Option<pty::Control>,
+    last_output: Option<UserOutput>,
     path_cache: Option<(String, Arc<Vec<String>>)>,
     path_scan: PathScan,
 }
@@ -367,6 +375,10 @@ impl EmbeddedShell {
             workspace,
             interrupts: Arc::new(Interrupts::default()),
             recent: Vec::new(),
+            next_command_id: 1,
+            capture_mode: CaptureUserOutput::Off,
+            capture_control: None,
+            last_output: None,
             path_cache: None,
             path_scan: PathScan::default(),
         };
@@ -421,6 +433,24 @@ impl EmbeddedShell {
 
     pub fn recent_commands(&self) -> &[UserCommand] {
         &self.recent
+    }
+
+    pub fn configure_output_capture(
+        &mut self,
+        mode: CaptureUserOutput,
+        control: Option<pty::Control>,
+    ) {
+        self.capture_mode = mode;
+        self.capture_control = control;
+        self.last_output = None;
+    }
+
+    pub fn last_user_output(&self) -> Option<&UserOutput> {
+        self.last_output.as_ref().filter(|output| {
+            self.recent
+                .last()
+                .is_some_and(|command| command.id == output.command_id)
+        })
     }
 
     /// SIGINT feeds [`Interrupts`]; interactive shells also shrug off
@@ -575,13 +605,55 @@ impl EmbeddedShell {
     }
 
     fn run_line(&mut self, line: &str, stdin: Option<OpenFile>) -> UserRun {
-        let start = Instant::now();
+        let id = self.next_command_id;
+        let Some(next) = id.checked_add(1) else {
+            eprintln!("nosh: user command identifiers exhausted");
+            return UserRun {
+                exit_code: 1,
+                exit_shell: true,
+            };
+        };
+        self.next_command_id = next;
+        self.last_output = None;
+        let cwd = self.cwd();
         let rt = self.rt.clone();
         let ints = self.interrupts.clone();
+        let ints_at_start = ints.count();
         let interactive = self.interactive;
-        let (code, exit_shell) = {
+        let control = (self.capture_mode == CaptureUserOutput::Last)
+            .then(|| self.capture_control.clone())
+            .flatten();
+        let mut capture_started = false;
+        let (code, exit_shell, duration, mixed, stopped) = {
             let mut sh = self.lock();
             let _ = sh.check_for_completed_jobs();
+            let jobs_before: HashSet<_> = if control.is_some() {
+                sh.jobs().jobs.iter().map(|j| j.id).collect()
+            } else {
+                HashSet::new()
+            };
+            let mut mixed = control.is_some()
+                && sh
+                    .jobs()
+                    .jobs
+                    .iter()
+                    .any(|j| !matches!(j.state, brush_core::jobs::JobState::Stopped));
+            if control.is_some() {
+                mixed |= sh.parse_string(line.to_string()).is_ok_and(|program| {
+                    program
+                        .complete_commands
+                        .iter()
+                        .flat_map(|list| &list.0)
+                        .any(|item| matches!(item.1, brush_parser::ast::SeparatorOperator::Async))
+                });
+            }
+            if let Some(control) = &control {
+                match control.begin(id) {
+                    Ok(()) => capture_started = true,
+                    Err(error) => eprintln!("nosh: user output capture unavailable: {error}"),
+                }
+            }
+            let start = Instant::now();
             let mut params = sh.default_exec_params();
             if let Some(f) = stdin {
                 params.set_fd(OpenFiles::STDIN_FD, f);
@@ -592,15 +664,17 @@ impl EmbeddedShell {
                 // foreground child gets its own); give up on the line then,
                 // like bash does on Ctrl-C.
                 let scopes = scope_depth(sh.env());
-                let ints0 = ints.count();
                 let r = rt.block_on(async {
+                    if ints.count() > ints_at_start {
+                        return None;
+                    }
                     let fut = sh.run_string(line.to_string(), &source, &params);
                     tokio::pin!(fut);
                     let mut tick = tokio::time::interval(Duration::from_millis(50));
                     loop {
                         tokio::select! {
                             r = &mut fut => break Some(r),
-                            _ = tick.tick() => if ints.count() > ints0 {
+                            _ = tick.tick() => if ints.count() > ints_at_start {
                                 break None;
                             },
                         }
@@ -615,7 +689,7 @@ impl EmbeddedShell {
             };
             drop(params);
             sh.increment_interactive_line_offset(line.lines().count().max(1));
-            match res {
+            let (code, exit_shell) = match res {
                 Some(Ok(r)) => (
                     i32::from(u8::from(r.exit_code)),
                     matches!(r.next_control_flow, ExecutionControlFlow::ExitShell),
@@ -629,13 +703,55 @@ impl EmbeddedShell {
                     sh.set_last_exit_status(130);
                     (130, false)
                 }
-            }
+            };
+            mixed |= control.is_some()
+                && sh
+                    .jobs()
+                    .jobs
+                    .iter()
+                    .any(|j| !matches!(j.state, brush_core::jobs::JobState::Stopped));
+            let stopped = control.is_some()
+                && sh.jobs().jobs.iter().any(|j| {
+                    !jobs_before.contains(&j.id)
+                        && matches!(j.state, brush_core::jobs::JobState::Stopped)
+                });
+            (code, exit_shell, start.elapsed(), mixed, stopped)
         };
-        self.recent.push(UserCommand {
+        let command = UserCommand {
+            id,
             line: line.trim().to_string(),
+            cwd,
             exit: code,
-            duration: start.elapsed(),
-        });
+            duration,
+        };
+        let mut output = if self.capture_mode == CaptureUserOutput::Off {
+            UserOutput::unavailable(&command, OutputState::NotCaptured)
+        } else if let Some(control) = control {
+            if capture_started {
+                match control.finish(id) {
+                    Ok(snapshot) => {
+                        UserOutput::captured(&command, snapshot, mixed, stopped || code == 130)
+                    }
+                    Err(error) => {
+                        eprintln!("nosh: user output capture unavailable: {error}");
+                        UserOutput::unavailable(
+                            &command,
+                            OutputState::Unavailable(OutputUnavailable::ControlFailure),
+                        )
+                    }
+                }
+            } else {
+                UserOutput::unavailable(
+                    &command,
+                    OutputState::Unavailable(OutputUnavailable::ControlFailure),
+                )
+            }
+        } else {
+            UserOutput::unavailable(&command, OutputState::Unavailable(OutputUnavailable::NoPty))
+        };
+        output.mixed = mixed;
+        self.last_output = Some(output);
+        self.recent.push(command);
         if self.recent.len() > 5 {
             self.recent.remove(0);
         }
@@ -1167,8 +1283,8 @@ struct Capture {
     limit: usize,
     out: Vec<u8>,
     err: Vec<u8>,
-    pend_out: Vec<u8>,
-    pend_err: Vec<u8>,
+    pend_out: Utf8Decoder,
+    pend_err: Utf8Decoder,
     truncated: bool,
 }
 
@@ -1178,8 +1294,8 @@ impl Capture {
             limit,
             out: Vec::new(),
             err: Vec::new(),
-            pend_out: Vec::new(),
-            pend_err: Vec::new(),
+            pend_out: Utf8Decoder::default(),
+            pend_err: Utf8Decoder::default(),
             truncated: false,
         }
     }
@@ -1201,27 +1317,8 @@ impl Capture {
             return;
         }
         store.extend_from_slice(bytes);
-        pend.extend_from_slice(bytes);
-        let mut valid = 0;
-        while valid < pend.len() {
-            match std::str::from_utf8(&pend[valid..]) {
-                Ok(_) => {
-                    valid = pend.len();
-                    break;
-                }
-                Err(e) => {
-                    valid += e.valid_up_to();
-                    if let Some(bad) = e.error_len() {
-                        valid += bad;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        if valid > 0 {
-            let chunk = String::from_utf8_lossy(&pend[..valid]).into_owned();
-            pend.drain(..valid);
+        let chunk = pend.push(bytes);
+        if !chunk.is_empty() {
             if is_err {
                 sink.stderr(&chunk);
             } else {
@@ -1231,13 +1328,13 @@ impl Capture {
     }
 
     fn flush(&mut self, sink: &mut dyn OutputSink) {
-        if !self.pend_out.is_empty() {
-            sink.stdout(&String::from_utf8_lossy(&self.pend_out));
-            self.pend_out.clear();
+        let out = self.pend_out.finish();
+        if !out.is_empty() {
+            sink.stdout(&out);
         }
-        if !self.pend_err.is_empty() {
-            sink.stderr(&String::from_utf8_lossy(&self.pend_err));
-            self.pend_err.clear();
+        let err = self.pend_err.finish();
+        if !err.is_empty() {
+            sink.stderr(&err);
         }
     }
 

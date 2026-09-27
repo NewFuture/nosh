@@ -80,7 +80,10 @@ def discover_tools(scenarios: list[dict]) -> dict:
     return tools
 
 
-def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None) -> dict[str, str]:
+def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None,
+                capture_user_output: str = "off") -> dict[str, str]:
+    if capture_user_output not in ("off", "last"):
+        raise ValueError("capture_user_output must be off or last")
     env = fixtures.project_environment(home, tools)
     env.update({
         "NOSH_HOME": str(home / "nosh"),
@@ -91,8 +94,9 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
     })
     config = home / "nosh"
     config.mkdir(mode=0o700)
+    shell_config = '[shell]\ncapture_user_output = "last"\n' if capture_user_output == "last" else ""
     (config / "config.toml").write_text(
-        '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
+        shell_config + '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
         '[model]\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
         encoding="utf-8",
     )
@@ -172,7 +176,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
     try:
         root, home, facts = workspace.prepare(scenario)
         trace = home.parent / "engine.jsonl"
-        env = environment(home, args.threads, None if args.legacy else trace, workspace.tools)
+        env = environment(home, args.threads, None if args.legacy else trace, workspace.tools,
+                          capture_user_output=scenario.get("capture_user_output", "off"))
         if scenario["check"] in NATIVE_CHECKS:
             facts["tools"] = workspace.tools
         if scenario["check"] == "versions":

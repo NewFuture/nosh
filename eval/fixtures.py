@@ -22,7 +22,7 @@ OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
     "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
 }
-FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "history", "logs"} | PROJECT_FIXTURES
+FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "one-shot-failure", "history", "logs"} | PROJECT_FIXTURES
 PROJECT = {
     "main.py": "from lib.maths import add\nvalues = [1, 2, 3]\nresult = add(values[0], values[1])\nprint(result)\nprint(len(values))\n",
     "lib/maths.py": "def add(a, b):\n    return a + b\ndef square(value):\n    return value * value\nprint(square(3))\n",
@@ -269,6 +269,18 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
         facts["renames"] = {n: n[:-4] + ".md" for n in snapshot(root) if n.endswith(".txt")}
     elif kind == "failure":
         write(root, "broken.py", "import json\nwith open('config.json') as stream:\n    settings = json.load(stream)\nprint(settings)\n")
+    elif kind == "one-shot-failure":
+        write(root, "calls.count", "0")
+        write(root, "once.py",
+              "import os\nfrom pathlib import Path\nimport sys\n"
+              "counter = Path('calls.count')\n"
+              "count = int(counter.read_text()) + 1\ncounter.write_text(str(count))\n"
+              "if count == 1:\n"
+              "    code = 'CAPTURE-' + os.urandom(4).hex()\n"
+              "    print(f'{code}: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
+              "else:\n"
+              "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
+              "raise SystemExit(17)\n")
     elif kind == "logs":
         write(root, "logs/app.log", "INFO service started\nERROR fixture error\n")
         write(root, "logs/old/access.log", "GET /health 200\n")
