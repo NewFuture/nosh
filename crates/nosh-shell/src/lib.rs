@@ -2,6 +2,7 @@
 //! the interactive REPL, and the AI trigger pipeline (design §4).
 
 pub mod backend;
+mod feedback;
 pub mod guard;
 pub mod history;
 pub mod procs;

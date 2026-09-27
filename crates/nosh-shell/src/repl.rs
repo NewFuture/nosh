@@ -15,6 +15,7 @@ use reedline::{
 };
 
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
+use crate::feedback::InputFeedback;
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
 use crate::{style, term};
 
@@ -434,10 +435,15 @@ struct ReplPrompt {
     right: String,
     right_color: Color,
     continuation: String,
+    feedback: Option<Arc<Mutex<InputFeedback>>>,
 }
 
 impl ReplPrompt {
-    fn build(shell: &EmbeddedShell, badge: &Badge) -> Self {
+    fn build(
+        shell: &EmbeddedShell,
+        badge: &Badge,
+        feedback: Option<Arc<Mutex<InputFeedback>>>,
+    ) -> Self {
         let (left, custom) = shell.prompt();
         let ok = shell.last_exit_status() == 0;
         let (left, indicator) = if custom {
@@ -473,6 +479,7 @@ impl ReplPrompt {
                 Color::DarkGray
             },
             continuation: shell.continuation_prompt(),
+            feedback,
         }
     }
 }
@@ -487,7 +494,15 @@ impl Prompt for ReplPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        self.right.as_str().into()
+        let message = self
+            .feedback
+            .as_ref()
+            .and_then(|feedback| feedback.try_lock().ok()?.message());
+        match message {
+            Some(message) if self.right.is_empty() => Cow::Owned(message),
+            Some(message) => Cow::Owned(format!("{} · {message}", self.right)),
+            None => self.right.as_str().into(),
+        }
     }
 
     fn render_prompt_indicator(&self, _: PromptEditMode) -> Cow<'_, str> {
@@ -717,7 +732,7 @@ impl reedline::Validator for LineValidator {
     }
 }
 
-fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
+fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> (Reedline, Arc<Mutex<InputFeedback>>) {
     let (rt, sh) = shell.shared();
     let mut kb = reedline::default_emacs_keybindings();
     kb.add_binding(
@@ -757,7 +772,12 @@ fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
     if colors {
         hinter = hinter.with_style(Style::new().italic().fg(Color::DarkGray));
     }
-    Reedline::create()
+    let feedback = Arc::new(Mutex::new(InputFeedback::new(
+        shell.snapshot(),
+        &cfg.trigger,
+        colors,
+    )));
+    let editor = Reedline::create()
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_completer(Box::new(ShellCompleter {
@@ -771,17 +791,23 @@ fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
             prefix: cfg.trigger.ai_prefix.clone(),
         }))
         .with_hinter(Box::new(hinter))
-        .with_highlighter(Box::new(NoHighlight))
-        .with_edit_mode(Box::new(Emacs::new(kb)))
+        .with_highlighter(Box::new(FeedbackHighlighter(feedback.clone())))
+        .with_edit_mode(Box::new(Emacs::new(kb)));
+    (editor, feedback)
 }
 
-struct NoHighlight;
+struct FeedbackHighlighter(Arc<Mutex<InputFeedback>>);
 
-impl reedline::Highlighter for NoHighlight {
-    fn highlight(&self, line: &str, _cursor: usize) -> reedline::StyledText {
-        let mut t = reedline::StyledText::new();
-        t.push((Style::new(), line.to_string()));
-        t
+impl reedline::Highlighter for FeedbackHighlighter {
+    fn highlight(&self, line: &str, cursor: usize) -> reedline::StyledText {
+        match self.0.try_lock() {
+            Ok(feedback) => feedback.highlight(line, cursor),
+            Err(_) => {
+                let mut text = reedline::StyledText::new();
+                text.push((Style::new(), line.to_owned()));
+                text
+            }
+        }
     }
 }
 
@@ -827,8 +853,12 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
     shell.warm_command_names();
-    let mut editor =
-        (style::stdout().ansi && std::io::stdin().is_terminal()).then(|| build_editor(shell, &cfg));
+    let (mut editor, feedback) = if style::stdout().ansi && std::io::stdin().is_terminal() {
+        let (editor, feedback) = build_editor(shell, &cfg);
+        (Some(editor), Some(feedback))
+    } else {
+        (None, None)
+    };
     let validator = LineValidator {
         shell: shell.shared().1,
         prefix: cfg.trigger.ai_prefix.clone(),
@@ -838,7 +868,12 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let mut prefill: Option<String> = None;
     let code = loop {
         shell.pre_prompt();
-        let prompt = ReplPrompt::build(shell, &ai.badge());
+        if let Some(feedback) = &feedback
+            && let Ok(mut feedback) = feedback.try_lock()
+        {
+            feedback.refresh(shell.snapshot());
+        }
+        let prompt = ReplPrompt::build(shell, &ai.badge(), feedback.clone());
         let initial = prefill.take().unwrap_or_default();
         let signal = if let Some(ed) = editor.as_mut() {
             if !initial.is_empty() {

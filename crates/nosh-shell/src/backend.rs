@@ -98,6 +98,7 @@ pub struct SessionState {
     pub exported: BTreeSet<String>,
     pub functions: BTreeSet<String>,
     pub aliases: BTreeMap<String, String>,
+    pub builtins: BTreeSet<String>,
     pub last_exit: i32,
 }
 
@@ -726,6 +727,12 @@ impl EmbeddedShell {
                 .aliases()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            builtins: sh
+                .builtins()
+                .iter()
+                .filter(|(_, registration)| !registration.disabled)
+                .map(|(name, _)| name.clone())
                 .collect(),
             last_exit: i32::from(sh.last_exit_status()),
         }
