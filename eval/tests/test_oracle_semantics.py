@@ -332,5 +332,131 @@ class ClarificationSemanticsTests(FixtureOracleTestCase):
                 self.assertTrue(checks.experience(scenario, answer, self.metrics)["final_question"]["passed"])
 
 
+class RevisedOracleSmokeTests(FixtureOracleTestCase):
+    def setUp(self):
+        self.prepare("project")
+        self.scenario = {"check": "versions"}
+        self.facts["versions"] = {
+            "cargo": "cargo 1.98.1 (example)",
+            "node": "v22.23.3",
+            "python3": "Python 3.14.4",
+        }
+        self.evidence = {"executions": [{
+            "call": {"name": "run_command", "args": {
+                "command": "cargo --version; node --version; python3 --version",
+            }},
+            "state": "executed", "exit_code": 0,
+            "result": "\n".join(self.facts["versions"].values()),
+        }]}
+        self.versions = "工具版本：cargo 1.98.1；node v22.23.3；python3 3.14.4。"
+
+    def test_version_queries_require_real_output_not_a_fallback_claim(self):
+        execution = self.evidence["executions"][0]
+        execution["call"]["args"]["command"] = (
+            'cargo --version 2>/dev/null || echo "cargo not found"; '
+            'node -v 2>&1; python3 -V'
+        )
+        self.assertTrue(self.grade(self.versions).passed)
+        execution["result"] = "cargo not found\nv22.23.3\nPython 3.14.4"
+        self.assertFalse(self.grade(self.versions).passed)
+        with self.assertRaises(ValueError):
+            checks.version_queries(
+                'cargo --version || echo "cargo 1.98.1 (example)"', self.root, self.facts,
+            )
+
+    def test_version_tables_keep_columns_and_reject_contradictions(self):
+        horizontal = "| cargo | node | python3 |\n|---|---|---|\n| 1.98.1 | v22.23.3 | 3.14.4 |"
+        vertical = "| 工具 | 版本 |\n|---|---|\n| cargo | 1.98.1 |\n| node | v22.23.3 |\n| python3 | 3.14.4 |"
+        for answer in (horizontal, vertical, self.versions + "\n要求 python3 >=3.11。"):
+            with self.subTest(answer=answer):
+                self.assertTrue(self.grade(answer).passed)
+        for answer in (
+            horizontal.replace("1.98.1 | v22.23.3", "22.23.3 | 1.98.1"),
+            vertical.replace("v22.23.3", ""),
+            vertical + "\n| node | unavailable |",
+            self.versions + "\nnode: 20.0.0",
+        ):
+            with self.subTest(answer=answer):
+                self.assertFalse(self.grade(answer).passed)
+
+    def test_traditional_tar_still_checks_paths_and_archive_contents(self):
+        self.prepare("logs")
+        before = self.facts["before"]
+        for command in ("tar czf logs.tar.gz logs", "tar cfz logs.tar.gz -C logs ."):
+            with self.subTest(command=command):
+                self.assertEqual(checks.check_archive(command, self.root, before, before), [])
+        for command in (
+            "tar czf ../outside.tar.gz logs",
+            "tar czf logs.tar.gz .",
+            "tar czf logs.tar.gz logs; echo extra",
+        ):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                checks.archive_command(command, self.root)
+
+    def test_line_shares_check_both_the_part_and_the_total(self):
+        table = LineCountSemanticsTests.TABLE
+        summary = "Python accounts for 15 of the 29 lines."
+        self.assertEqual(checks.line_counts(table + "\n" + summary, self.facts), [])
+        for wrong in (summary.replace("15", "16"), summary.replace("29", "30")):
+            with self.subTest(summary=wrong):
+                self.assertTrue(checks.line_counts(table + "\n" + wrong, self.facts))
+
+    def test_python_counts_and_negative_directory_notes_keep_their_scope(self):
+        self.scenario = {"check": "python"}
+        answer = (
+            "全项目共3个Python文件：main.py、lib/maths.py、tools/report.py。\n"
+            "根目录有1个Python文件：main.py。\n"
+            "scripts/目录没有Python文件（只有check.sh）。\n"
+            "tools/目录有1个Python文件：report.py。"
+        )
+        self.assertTrue(self.grade(answer).passed)
+        self.assertFalse(self.grade(answer.replace("根目录有1个", "根目录有2个")).passed)
+        self.assertFalse(self.grade(answer + "\n非 Python 文件：\n- main.py").passed)
+
+    def test_history_language_exempts_only_matching_source_text(self):
+        self.scenario = {
+            "check": "recent-history",
+            "expect": {"max_steps": 3, "max_confirmations": 0,
+                       "response_language": "zh", "final_question": "forbid"},
+        }
+        self.facts["git_log"] = "commit " + "a" * 40 + "\n    docs: update README.md\n"
+        answer = "最近提交如下。\n1. `aaaaaaa` docs: update `README.md`"
+        language = lambda text: checks.experience(
+            self.scenario, text, self.metrics, facts=self.facts,
+        )["response_language"]
+        self.assertTrue(language(answer)["passed"])
+        self.assertFalse(language(
+            answer + "\nThe project still needs several unrelated actions before we can call this work complete."
+        )["passed"])
+
+    def test_recent_history_rejects_false_counts_and_extra_entries(self):
+        self.scenario = {"check": "recent-history"}
+        self.facts.update(
+            history=[["shell", "pipeline"], ["core", "truncate"], ["docs", "offline"]],
+            commit_ids=["a" * 40, "b" * 40, "c" * 40],
+            git_before={"head": "captured"},
+        )
+        self.evidence["final_state"] = {"git": dict(self.facts["git_before"])}
+        answer = "仓库最近2个提交：\n1. docs: document offline usage\n2. core: truncate long tool output"
+        self.assertTrue(self.grade(answer).passed)
+        self.assertFalse(self.grade(answer.replace("最近2个", "最近4个")).passed)
+        self.assertFalse(self.grade(answer + "\n3. fixture (current HEAD)").passed)
+        self.assertFalse(self.grade(answer + "\n3. core: truncate long tool output").passed)
+
+    def test_conditional_closing_offers_are_not_direct_advice(self):
+        scenario = {
+            "check": "rust-build",
+            "expect": {"max_steps": 4, "max_confirmations": 1,
+                       "response_language": "zh", "final_question": "forbid"},
+        }
+        for ending, passed in (
+            ("如果你需要查看详情，请告诉我！", False),
+            ("如果需要重新生成，可以运行构建命令。", True),
+        ):
+            with self.subTest(ending=ending):
+                result = checks.experience(scenario, "已完成。\n\n" + ending, self.metrics)
+                self.assertEqual(result["final_question"]["passed"], passed)
+
+
 if __name__ == "__main__":
     unittest.main()

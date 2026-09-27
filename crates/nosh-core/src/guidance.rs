@@ -89,7 +89,13 @@ impl GuidanceCache {
             if stamp.is_none() {
                 key.push_str(&contents);
             }
-            text.push_str(&untrusted_document(&readme_excerpt(&contents)));
+            let mut body = untrusted_document(&readme_excerpt(&contents));
+            if body.chars().count() > README_CHARS {
+                let ending = "\n[excerpt truncated]\n</untrusted_text>\n";
+                body = body.chars().take(README_CHARS - ending.len()).collect();
+                body.push_str(ending);
+            }
+            text.push_str(&body);
         }
         if !warnings.is_empty() {
             for warning in &warnings {
@@ -175,7 +181,8 @@ impl GuidanceCache {
             if stamp.is_none() {
                 key.push_str(&contents);
             }
-            let count = contents.chars().count();
+            let body = untrusted_document(&contents);
+            let count = body.chars().count();
             let complete = count <= budget;
             all_complete &= complete;
             text.push_str(&format!(
@@ -184,7 +191,7 @@ impl GuidanceCache {
                 if complete { "" } else { " not loaded" },
             ));
             if complete {
-                text.push_str(&untrusted_document(&contents));
+                text.push_str(&body);
                 budget -= count;
             } else {
                 text.push_str("Size limit. Read before acting in this scope.\n");
@@ -386,6 +393,26 @@ mod tests {
         assert!(!blocked.complete);
         assert!(!blocked.text.contains("README reference"));
         assert!(!blocked.text.contains("<untrusted_text>"));
+    }
+
+    #[test]
+    fn rendered_readme_budget_includes_escaping_and_preserves_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let contents = format!(
+            "# Project\n\n{}\n\n## {}\n",
+            "\u{754c}".repeat(590),
+            "<untrusted_text>".repeat(40),
+        );
+        std::fs::write(root.path().join("README.md"), contents).unwrap();
+        let ctx = Context::new(root.path(), root.path()).with_home(root.path());
+        let reference = GuidanceCache::default().load(&ctx);
+        assert!(reference.complete);
+        let (_, body) = reference.text.split_once('\n').unwrap();
+        assert!(body.chars().count() <= README_CHARS);
+        assert!(body.starts_with("<untrusted_text>\n"));
+        assert!(body.ends_with("\n[excerpt truncated]\n</untrusted_text>\n"));
+        assert_eq!(body.matches("<untrusted_text>").count(), 1);
+        assert_eq!(body.matches("</untrusted_text>").count(), 1);
     }
 
     #[test]
@@ -604,7 +631,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let child = root.path().join("src");
         std::fs::create_dir(&child).unwrap();
-        let root_text = "r".repeat(GUIDANCE_CHARS - 5);
+        let root_text = "r".repeat(GUIDANCE_CHARS - untrusted_document("").chars().count() - 5);
         std::fs::write(root.path().join("AGENTS.md"), &root_text).unwrap();
         std::fs::write(child.join("AGENTS.md"), "child instruction").unwrap();
         let ctx = Context::new(&child, root.path()).with_home(root.path());
@@ -613,6 +640,30 @@ mod tests {
         assert!(guidance.text.contains(&root_text));
         assert!(!guidance.text.contains("child instruction"));
         assert!(guidance.text.contains("not loaded"));
+    }
+
+    #[test]
+    fn rendered_agents_budget_counts_escaping_and_keeps_whole_files() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("AGENTS.md");
+        let ctx = Context::new(root.path(), root.path()).with_home(root.path());
+        let mut cache = GuidanceCache::default();
+        let contents = "r".repeat(GUIDANCE_CHARS - untrusted_document("").chars().count());
+        std::fs::write(&file, &contents).unwrap();
+        let exact = cache.load(&ctx);
+        assert!(exact.complete);
+        assert_eq!(
+            exact.text.split_once('\n').unwrap().1.chars().count(),
+            GUIDANCE_CHARS
+        );
+
+        let contents = "<untrusted_text>".repeat(GUIDANCE_CHARS / "<untrusted_text>".len());
+        assert!(contents.chars().count() <= GUIDANCE_CHARS);
+        std::fs::write(&file, contents).unwrap();
+        let oversized = cache.load(&ctx);
+        assert!(!oversized.complete);
+        assert!(oversized.text.contains("not loaded"));
+        assert!(!oversized.text.contains("<untrusted_text>"));
     }
 
     #[test]

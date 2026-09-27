@@ -70,7 +70,9 @@ impl ToolSet {
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::RunCommand.name().into(),
-        description: "Run a bash command in the user's shell session and return its output.".into(),
+        description:
+            "Run a bash command in the current directory; shell state persists. Returns its output."
+                .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -694,6 +696,9 @@ mod tests {
 
     #[test]
     fn tool_catalog_matches_the_advertised_schema_and_order() {
+        let command = run_command_spec();
+        assert!(command.description.contains("current directory"));
+        assert!(command.description.contains("shell state persists"));
         for (set, names) in [
             (ToolSet::Full, vec!["run_command", "read_file", "grep"]),
             (ToolSet::ReadOnly, vec!["read_file", "grep"]),
