@@ -1439,6 +1439,11 @@ mod permission_tests {
             "ping -c 1 router.local > existing",
             "mvn test deploy",
             "mv first destination; mv second destination",
+            "mv first missing",
+            "cp first missing",
+            "printf new > missing",
+            "npm run build --prefix=/etc",
+            "mvn test --file=/etc/pom.xml",
         ];
         for command in commands {
             assert!(matches!(
@@ -1456,5 +1461,64 @@ mod permission_tests {
         for name in ["first", "second", "existing"] {
             assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), name);
         }
+        assert!(!root.join("missing").exists());
+    }
+
+    #[test]
+    fn scoped_script_and_deep_read_denies_never_ask_or_execute() {
+        use nosh_permissions::RuleSpec;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("trusted.sh"), "bash -c 'printf new > blocked'\n").unwrap();
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+        shell.run_user_line(&format!("cd '{}'", root.display()));
+        shell.set_workspace(root.clone());
+        for mode in [Confirm, Auto, Yolo] {
+            let rule = UserRule::compile(
+                RuleSpec {
+                    command_exact: Some("./trusted.sh".into()),
+                    write_paths: vec!["blocked".into()],
+                    ..RuleSpec::default()
+                },
+                "script deny",
+            )
+            .unwrap();
+            let read_rule = UserRule::compile(
+                RuleSpec {
+                    tool: Some("list_dir".into()),
+                    path: Some("**".into()),
+                    max_depth: Some(1),
+                    ..RuleSpec::default()
+                },
+                "directory deny",
+            )
+            .unwrap();
+            let mut agent = fake_agent(
+                mode,
+                UserRules {
+                    allow: vec![UserRule::prefix("./trusted.sh").unwrap()],
+                    deny: vec![rule, read_rule],
+                },
+            );
+            let mut approvals = Scripted::new([]);
+            let mut ui = RecordUi::default();
+            let read = ToolCall {
+                name: "list_dir".into(),
+                args: serde_json::json!({"path": ".", "depth": 3})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            };
+            for call in [call("./trusted.sh"), read] {
+                assert!(matches!(
+                    agent.exec_call(&mut shell, &call, &mut approvals, &mut ui),
+                    Exec::Denied(_)
+                ));
+            }
+            assert!(approvals.seen.is_empty());
+            assert_eq!(count(), 0);
+            assert!(ui.events.iter().any(|event| event.contains("user deny")));
+        }
+        assert!(!root.join("blocked").exists());
     }
 }

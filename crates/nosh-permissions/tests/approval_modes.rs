@@ -244,12 +244,11 @@ fn scripts_wrappers_and_substitutions_do_not_hide_user_deny() {
 }
 
 #[test]
-fn non_overwriting_moves_and_ordinary_network_diagnostics_are_automatic() {
+fn non_content_file_changes_and_ordinary_network_diagnostics_are_automatic() {
     let (dir, context) = fixture();
     std::fs::write(dir.path().join("old.txt"), "original").unwrap();
     std::fs::write(dir.path().join("existing.txt"), "keep").unwrap();
     for command in [
-        "mv old.txt new.txt",
         "mkdir new-dir",
         "touch fresh.txt",
         "export NOTE=hello",
@@ -265,6 +264,7 @@ fn non_overwriting_moves_and_ordinary_network_diagnostics_are_automatic() {
         );
     }
     for command in [
+        "mv old.txt new.txt",
         "mv old.txt existing.txt",
         "mv *.txt target",
         "ping -f router.local",
@@ -449,7 +449,7 @@ fn project_code_uncertainty_is_not_confused_with_explicit_high_risk() {
 }
 
 #[test]
-fn directory_denies_cover_descendants_and_large_renames_need_no_byte_copy() {
+fn directory_denies_cover_descendants_and_renames_require_authorization() {
     let (dir, context) = fixture();
     let rule = UserRule::compile(
         RuleSpec {
@@ -475,7 +475,7 @@ fn directory_denies_cover_descendants_and_large_renames_need_no_byte_copy() {
     file.set_len(2 * 1024 * 1024).unwrap();
     assert_eq!(
         policy("mv large renamed", Auto, &context, &UserRules::default()).decision,
-        Decision::Allow
+        Decision::Ask { strong: false }
     );
     std::fs::write(dir.path().join("second"), "two").unwrap();
     assert_eq!(
@@ -486,7 +486,7 @@ fn directory_denies_cover_descendants_and_large_renames_need_no_byte_copy() {
             &UserRules::default()
         )
         .decision,
-        Decision::Allow
+        Decision::Ask { strong: false }
     );
     assert_eq!(
         policy("mkdir -p created", Auto, &context, &UserRules::default()).decision,
@@ -820,7 +820,7 @@ fn compound_file_effects_cannot_reuse_stale_non_overwrite_evidence() {
             &UserRules::default()
         )
         .decision,
-        Decision::Allow
+        Decision::Ask { strong: false }
     );
     let rules = UserRules {
         allow: vec![UserRule::prefix("mv").unwrap()],
@@ -851,4 +851,203 @@ fn session_grants_require_known_paths_and_working_directory() {
     let mut grants = SessionAllowList::default();
     assert!(!grants.grant(&report));
     assert!(grants.is_empty());
+}
+
+#[test]
+fn scoped_denies_follow_script_effects_without_covering_siblings() {
+    let (dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_exact: Some("./trusted.sh".into()),
+            write_paths: vec!["blocked".into()],
+            ..RuleSpec::default()
+        },
+        "script cannot write blocked",
+    )
+    .unwrap();
+    let rules = UserRules {
+        allow: vec![],
+        deny: vec![rule],
+    };
+    std::fs::write(
+        dir.path().join("trusted.sh"),
+        "bash -c 'printf hi > blocked'\n",
+    )
+    .unwrap();
+    for mode in [Confirm, Auto, Yolo] {
+        let result = policy("./trusted.sh", mode, &context, &rules);
+        assert!(
+            matches!(result.source, DecisionSource::UserDeny(_)),
+            "{result:?}"
+        );
+    }
+    std::fs::write(dir.path().join("trusted.sh"), "printf hi > allowed\n").unwrap();
+    let result = policy(
+        "./trusted.sh; printf sibling > blocked",
+        Yolo,
+        &context,
+        &rules,
+    );
+    assert_eq!(result.decision, Decision::Allow, "{result:?}");
+}
+
+#[test]
+fn attached_path_options_keep_their_actual_targets() {
+    let (_dir, context) = fixture();
+    for (plain, attached) in [
+        ("mv -t /etc file", "mv -t/etc file"),
+        (
+            "mv --target-directory /etc file",
+            "mv --target-directory=/etc file",
+        ),
+        ("cp -t /etc file", "cp -t/etc file"),
+        (
+            "cp --target-directory /etc file",
+            "cp --target-directory=/etc file",
+        ),
+        ("npm run build --prefix /etc", "npm run build --prefix=/etc"),
+        ("pnpm build -C /etc", "pnpm build -C/etc"),
+        ("yarn build --cwd /etc", "yarn build --cwd=/etc"),
+        (
+            "cargo test --manifest-path /etc/Cargo.toml",
+            "cargo test --manifest-path=/etc/Cargo.toml",
+        ),
+        (
+            "cargo build --target-dir /etc",
+            "cargo build --target-dir=/etc",
+        ),
+        (
+            "mvn test --file /etc/pom.xml",
+            "mvn test --file=/etc/pom.xml",
+        ),
+        ("mvn test -f /etc/pom.xml", "mvn test -f/etc/pom.xml"),
+        ("cmake --build /etc", "cmake --build=/etc"),
+        ("go build -o /etc/file", "go build -o/etc/file"),
+        ("tsc --outDir /etc", "tsc --outDir=/etc"),
+    ] {
+        let plain_report = assess_command(plain, &context);
+        let attached_report = assess_command(attached, &context);
+        let targets = |report: &nosh_permissions::RiskReport| {
+            report
+                .operations
+                .iter()
+                .flat_map(|op| &op.paths)
+                .map(|path| (path.kind, path.resolved.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            targets(&attached_report),
+            targets(&plain_report),
+            "{attached}"
+        );
+        assert!(
+            matches!(
+                policy(attached, Auto, &context, &UserRules::default()).decision,
+                Decision::Ask { .. }
+            ),
+            "{attached}"
+        );
+    }
+    let rules = UserRules {
+        allow: vec![
+            UserRule::compile(
+                RuleSpec {
+                    command_prefix: Some("mv".into()),
+                    write_paths: vec!["**".into()],
+                    ..RuleSpec::default()
+                },
+                "workspace moves",
+            )
+            .unwrap(),
+        ],
+        deny: vec![],
+    };
+    assert!(!matches!(
+        policy("mv -t/etc file", Yolo, &context, &rules).source,
+        DecisionSource::UserAllow(_)
+    ));
+}
+
+#[test]
+fn increasing_list_depth_cannot_escape_a_deny() {
+    let (_dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            tool: Some("list_dir".into()),
+            path: Some("**".into()),
+            max_depth: Some(1),
+            ..RuleSpec::default()
+        },
+        "deny shallow metadata",
+    )
+    .unwrap();
+    for depth in [1, 2, 3] {
+        let report = assess_read("list_dir", &context.cwd, Some(depth), &context);
+        for mode in [Confirm, Auto, Yolo] {
+            let result = evaluate(
+                &report,
+                mode,
+                &UserRules {
+                    allow: vec![rule.clone()],
+                    deny: vec![rule.clone()],
+                },
+                &SessionAllowList::default(),
+            );
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{result:?}"
+            );
+        }
+        let result = evaluate(
+            &report,
+            Confirm,
+            &UserRules {
+                allow: vec![rule.clone()],
+                deny: vec![],
+            },
+            &SessionAllowList::default(),
+        );
+        assert_eq!(
+            matches!(result.source, DecisionSource::UserAllow(_)),
+            depth == 1
+        );
+    }
+}
+
+#[test]
+fn non_atomic_file_operations_need_authorization_even_when_target_is_missing() {
+    let (dir, context) = fixture();
+    std::fs::write(dir.path().join("source"), "keep").unwrap();
+    for command in [
+        "mv source dest",
+        "mv -n source dest",
+        "cp source dest",
+        "printf new > dest",
+        "echo new >> dest",
+    ] {
+        assert!(
+            matches!(
+                policy(command, Auto, &context, &UserRules::default()).decision,
+                Decision::Ask { .. }
+            ),
+            "{command}"
+        );
+        assert_eq!(
+            policy(command, Yolo, &context, &UserRules::default()).decision,
+            Decision::Allow
+        );
+    }
+    let rules = UserRules {
+        allow: vec![UserRule::prefix("mv").unwrap()],
+        deny: vec![],
+    };
+    assert_eq!(
+        policy("mv source dest", Auto, &context, &rules).decision,
+        Decision::Allow
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source")).unwrap(),
+        "keep"
+    );
+    assert!(!dir.path().join("dest").exists());
 }

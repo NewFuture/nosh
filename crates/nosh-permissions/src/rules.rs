@@ -246,18 +246,39 @@ pub fn opt_value<'a>(args: &'a [Arg], short: Option<char>, long: &[&str]) -> Vec
     out
 }
 
-fn strip_opt_prefix(a: &Arg, short: char, long: &[&str]) -> Target {
-    let v = a.value.as_str();
-    let path = if let Some(l) = v.strip_prefix("--") {
-        l.split_once('=')
-            .map(|(n, p)| if long.contains(&n) { p } else { v })
-            .unwrap_or(v)
-    } else if let Some(r) = v.strip_prefix('-').and_then(|r| r.strip_prefix(short)) {
-        if r.is_empty() { v } else { r }
-    } else {
-        v
-    };
-    Target::after(a, &v[..v.len() - path.len()])
+fn option_targets(args: &[Arg], short: Option<char>, long: &[&str]) -> Vec<Target> {
+    let mut targets = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg.value == "--" {
+            break;
+        }
+        let attached_prefix = if let Some(rest) = arg.value.strip_prefix("--") {
+            let (name, value) = rest
+                .split_once('=')
+                .map_or((rest, None), |(name, value)| (name, Some(value)));
+            if !long.contains(&name) {
+                continue;
+            }
+            value.map(|value| arg.value.len() - value.len())
+        } else if let Some(short) = short
+            && let Some(rest) = arg
+                .value
+                .strip_prefix('-')
+                .and_then(|rest| rest.strip_prefix(short))
+        {
+            (!rest.is_empty()).then_some(arg.value.len() - rest.len())
+        } else {
+            continue;
+        };
+        if let Some(prefix) = attached_prefix {
+            targets.push(Target::after(arg, &arg.value[..prefix]));
+        } else if let Some(value) = args.next() {
+            // A separate value is literal, even when it resembles an option.
+            targets.push(Target::of(value));
+        }
+    }
+    targets
 }
 
 /// Variables whose modification changes how the session or its children behave.
@@ -744,7 +765,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             };
             v.deletes = to_null;
             let mut t = targets(ops);
-            t.extend(targets(opt_value(args, Some('t'), &["target-directory"])));
+            t.extend(option_targets(args, Some('t'), &["target-directory"]));
             v.writes(t)
         }
         "cp" | "install" | "ln" | "link" => {
@@ -752,7 +773,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 args,
                 &["-t", "--target-directory", "-S", "--suffix", "-m", "--mode"],
             );
-            let mut writes = targets(opt_value(args, Some('t'), &["target-directory"]));
+            let mut writes = option_targets(args, Some('t'), &["target-directory"]);
             let mut reads = Vec::new();
             if writes.is_empty() {
                 if let Some((last, rest)) = ops.split_last() {
@@ -868,15 +889,11 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "sort" => {
-            let out = opt_value(args, Some('o'), &["output"]);
+            let out = option_targets(args, Some('o'), &["output"]);
             if out.is_empty() {
                 Verdict::safe("sort").reads(targets(ops()))
             } else {
-                Verdict::mutating("sort writes an output file").writes(
-                    out.into_iter()
-                        .map(|a| strip_opt_prefix(a, 'o', &["output"]))
-                        .collect::<Vec<_>>(),
-                )
+                Verdict::mutating("sort writes an output file").writes(out)
             }
         }
         "uniq" => {
@@ -940,8 +957,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             if list {
                 Verdict::safe("lists an archive")
             } else {
-                let mut w = targets(opt_value(args, Some('C'), &["directory"]));
-                w.extend(targets(opt_value(args, Some('f'), &["file"])));
+                let mut w = option_targets(args, Some('C'), &["directory"]);
+                w.extend(option_targets(args, Some('f'), &["file"]));
                 Verdict::mutating("creates or extracts an archive").writes(w)
             }
         }
@@ -949,11 +966,11 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             if has_flag(args, &['l', 'v', 'Z'], &[]) {
                 Verdict::safe("lists an archive")
             } else {
-                Verdict::mutating("extracts an archive").writes(targets(opt_value(
+                Verdict::mutating("extracts an archive").writes(option_targets(
                     args,
                     Some('d'),
                     &[],
-                )))
+                ))
             }
         }
         "zip" | "gzip" | "gunzip" | "bzip2" | "bunzip2" | "xz" | "unxz" | "zstd" | "unzstd"
@@ -1116,20 +1133,18 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         | "snap" | "flatpak" | "brew" | "port" | "rpm" | "emerge" | "nix-env" | "pkg" => {
             package_manager(name, args)
         }
-        "npm" | "pnpm" | "yarn" | "bun" => js_pm(args).writes(targets(opt_value(
-            args,
-            Some('C'),
-            &["prefix", "cwd", "dir"],
-        ))),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            js_pm(args).writes(option_targets(args, Some('C'), &["prefix", "cwd", "dir"]))
+        }
         "npx" | "pnpx" | "bunx" => Verdict::mutating("downloads and runs a package").net(),
         "tsc" | "eslint" if asks_version_or_help(args) => Verdict::safe("prints version or usage"),
         "tsc" => Verdict::mutating("runs the project compiler")
-            .reads(targets(opt_value(args, Some('p'), &["project"])))
-            .writes(targets(opt_value(
+            .reads(option_targets(args, Some('p'), &["project"]))
+            .writes(option_targets(
                 args,
                 None,
                 &["outDir", "outFile", "declarationDir"],
-            ))),
+            )),
         "eslint" => Verdict::mutating("runs project lint code"),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"
         | "composer" => py_pm(args),
@@ -1144,8 +1159,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
             _ => Verdict::mutating("cargo builds or runs code"),
         })
-        .reads(targets(opt_value(args, None, &["manifest-path"])))
-        .writes(targets(opt_value(args, None, &["target-dir"]))),
+        .reads(option_targets(args, None, &["manifest-path"]))
+        .writes(option_targets(args, None, &["target-dir"])),
         "go" => (match first_word(args) {
             Some("version" | "env" | "list" | "doc" | "help") | None => {
                 Verdict::safe("go (read-only)")
@@ -1153,7 +1168,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             Some("get" | "install" | "mod") => Verdict::mutating("go (network)").net(),
             _ => Verdict::mutating("go builds or runs code"),
         })
-        .writes(targets(opt_value(args, Some('o'), &[]))),
+        .writes(option_targets(args, Some('o'), &[])),
         "make" | "cmake" | "ninja" | "meson" | "gradle" | "gradlew" | "mvn" | "ant" | "bazel"
         | "sbt" | "just" | "task" | "rake" | "ctest" | "scons" => {
             if has_flag(
@@ -1164,8 +1179,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 Verdict::safe("build tool (dry run / info)")
             } else {
                 Verdict::mutating("runs a build")
-                    .reads(targets(opt_value(args, Some('f'), &["file"])))
-                    .writes(targets(opt_value(args, Some('C'), &["directory", "build"])))
+                    .reads(option_targets(args, Some('f'), &["file"]))
+                    .writes(option_targets(args, Some('C'), &["directory", "build"]))
             }
         }
         "python" | "python2" | "python3" | "node" | "deno" | "ruby" | "perl" | "php" | "lua"
@@ -1737,19 +1752,12 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
     let mut v = Verdict::mutating(format!("network access ({name})")).net();
     match name {
         "curl" => {
-            v.writes.extend(
-                opt_value(args, Some('o'), &["output"])
-                    .into_iter()
-                    .map(|a| strip_opt_prefix(a, 'o', &["output"])),
-            );
-            v.writes.extend(
-                opt_value(args, Some('c'), &["cookie-jar"])
-                    .into_iter()
-                    .map(|a| strip_opt_prefix(a, 'c', &["cookie-jar"])),
-            );
-            for a in opt_value(args, Some('T'), &["upload-file"]) {
-                v.reads.push(Target::of(a));
-            }
+            v.writes
+                .extend(option_targets(args, Some('o'), &["output"]));
+            v.writes
+                .extend(option_targets(args, Some('c'), &["cookie-jar"]));
+            v.reads
+                .extend(option_targets(args, Some('T'), &["upload-file"]));
             for a in args {
                 if let Some(p) = a
                     .value
@@ -1772,16 +1780,10 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "wget" => {
-            v.writes.extend(
-                opt_value(args, Some('O'), &["output-document"])
-                    .into_iter()
-                    .map(|a| strip_opt_prefix(a, 'O', &["output-document"])),
-            );
-            v.writes.extend(
-                opt_value(args, Some('P'), &["directory-prefix"])
-                    .into_iter()
-                    .map(|a| strip_opt_prefix(a, 'P', &["directory-prefix"])),
-            );
+            v.writes
+                .extend(option_targets(args, Some('O'), &["output-document"]));
+            v.writes
+                .extend(option_targets(args, Some('P'), &["directory-prefix"]));
         }
         "scp" | "rsync" => {
             let ops = operands_skipping(
@@ -1854,6 +1856,35 @@ mod tests {
         let args = a(&["-o", "out.txt", "--output=b"]);
         let o = opt_value(&args, Some('o'), &["output"]);
         assert_eq!(o.len(), 2);
+    }
+
+    #[test]
+    fn path_options_distinguish_attached_prefixes_from_literal_values() {
+        for args in [
+            a(&["-o", "/etc/file"]),
+            a(&["-o/etc/file"]),
+            a(&["--output", "/etc/file"]),
+            a(&["--output=/etc/file"]),
+        ] {
+            assert_eq!(
+                option_targets(&args, Some('o'), &["output"])[0].path,
+                "/etc/file"
+            );
+        }
+        assert_eq!(
+            option_targets(&a(&["-o", "--output=literal"]), Some('o'), &["output"])[0].path,
+            "--output=literal"
+        );
+        assert!(option_targets(&a(&["--", "-o/etc/file"]), Some('o'), &["output"]).is_empty());
+        let dynamic = Arg {
+            value: "--output=$TARGET".into(),
+            dynamic: true,
+            known: Some("--output=/etc/file".into()),
+            ..Arg::lit("")
+        };
+        let target = option_targets(&[dynamic], None, &["output"]).remove(0);
+        assert_eq!(target.path, "$TARGET");
+        assert_eq!(target.known.as_deref(), Some("/etc/file"));
     }
 
     #[test]

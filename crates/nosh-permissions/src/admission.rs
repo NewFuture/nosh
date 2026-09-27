@@ -456,33 +456,6 @@ impl GitProbe<'_> {
         Ok(())
     }
 
-    fn recoverable_file(&self, path: &Path) -> Result<String, String> {
-        let meta = metadata(path)?.ok_or("original file does not exist")?;
-        if !meta.is_file() || meta.len() > SMALL_BYTES {
-            return Err("original content is not a small regular file".into());
-        }
-        let root = self
-            .run(&["rev-parse", "--show-toplevel"])?
-            .ok_or("no Git recovery source")?;
-        let relative = path
-            .strip_prefix(&root)
-            .map_err(|_| "file is outside the Git worktree")?;
-        let object = format!(":{}", relative.to_string_lossy());
-        let expected = self
-            .run(&["rev-parse", "--verify", &object])?
-            .ok_or("original content is not present in the index")?;
-        let actual = self
-            .run(&["hash-object", "--no-filters", "--", &path.to_string_lossy()])?
-            .ok_or("cannot hash original content")?;
-        if expected != actual || self.run(&["cat-file", "-e", &expected])?.is_none() {
-            return Err("current content differs from the available Git blob".into());
-        }
-        Ok(format!(
-            "original {} is available as Git blob {expected}",
-            path.display()
-        ))
-    }
-
     fn index_snapshot(&self, paths: &[&str]) -> Result<String, String> {
         let mut args = vec!["ls-files", "--stage", "-z", "--"];
         args.extend_from_slice(paths);
@@ -735,6 +708,11 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
 }
 
 fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
+    // A shell command runs after these checks. Without an execution-time
+    // exclusive write, metadata/Git snapshots cannot guarantee no data loss.
+    if !matches!(base(op), "mkdir" | "touch") || op.paths.iter().any(|path| path.extra) {
+        return Err("file content changes need authorization: preflight checks do not atomically prevent overwrites".into());
+    }
     if op.known.iter().any(|known| !known) {
         return Err("file arguments or output contents are determined at runtime".into());
     }
@@ -747,79 +725,6 @@ fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
         .collect();
     if writes.is_empty() {
         return Err("no bounded file effect was identified".into());
-    }
-    if base(op) == "mv" {
-        if op.paths.iter().any(|path| path.extra) {
-            return Err("a move with additional redirection needs authorization".into());
-        }
-        if op
-            .argv
-            .iter()
-            .skip(1)
-            .any(|a| a.starts_with('-') && a != "--" && a != "-n" && a != "--no-clobber")
-        {
-            return Err("move options change the inferred effect".into());
-        }
-        let (target, sources) = paths.split_last().ok_or("move has no destination")?;
-        let directory = metadata(target)?.is_some_and(|m| m.is_dir());
-        if sources.is_empty() || sources.len() > 1 && !directory {
-            return Err("multiple move sources require an existing destination directory".into());
-        }
-        let mut moves = Vec::new();
-        let mut destinations = std::collections::HashSet::new();
-        for source in sources {
-            let source_meta = metadata(source)?.ok_or("move source does not exist")?;
-            let target = if directory {
-                target.join(source.file_name().ok_or("move source has no file name")?)
-            } else {
-                target.clone()
-            };
-            if !destinations.insert(target.clone()) {
-                return Err("move sources would overwrite the same destination".into());
-            }
-            if !source_meta.is_file() || metadata(&target)?.is_some() {
-                return Err("move must not replace an existing destination".into());
-            }
-            let parent = metadata(target.parent().ok_or("destination has no parent")?)?
-                .ok_or("destination parent does not exist")?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if source_meta.dev() != parent.dev() {
-                    return Err("cross-filesystem move is not a low-cost rename".into());
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = parent;
-                return Err("same-filesystem evidence is unavailable".into());
-            }
-            moves.push(format!("{} -> {}", source.display(), target.display()));
-        }
-        return Ok(format!(
-            "non-overwriting same-filesystem rename: {}",
-            moves.join("; ")
-        ));
-    }
-    let producer = match base(op) {
-        "echo" => op.argv.iter().map(String::len).sum::<usize>() as u64 <= SMALL_BYTES,
-        "printf" => {
-            op.argv
-                .get(1)
-                .is_some_and(|f| f == "%s" || f == "%s\\n" || !f.contains('%'))
-                && op.argv.iter().map(String::len).sum::<usize>() as u64 <= SMALL_BYTES
-        }
-        "mkdir" | "touch" => true,
-        "rm" => op.argv.len() == 2 && !op.argv[1].starts_with('-'),
-        "cp" => {
-            op.argv.len() == 3
-                && metadata(&op.cwd.join(&op.argv[1]))?
-                    .is_some_and(|m| m.is_file() && m.len() <= SMALL_BYTES)
-        }
-        _ => false,
-    };
-    if !producer {
-        return Err("file contents or write scale are not bounded".into());
     }
     let mut reasons = Vec::new();
     for (access, path) in writes {
@@ -850,7 +755,9 @@ fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
                     path.display()
                 ));
             }
-            Some(_) => reasons.push(GitProbe { cwd: &op.cwd, ctx }.recoverable_file(path)?),
+            Some(_) => {
+                return Err("file target is not a supported non-content-changing operation".into());
+            }
         }
     }
     Ok(reasons.join("; "))

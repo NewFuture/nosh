@@ -383,6 +383,14 @@ mod tests {
         assert_eq!(k("/Library/LaunchDaemons/x.plist"), PathClass::System);
         assert_eq!(k("/Users"), PathClass::System);
         assert_eq!(k("/Users/other/f"), PathClass::Outside);
+        let read = crate::assess_read("list_dir", Path::new("/private"), Some(2), &c);
+        assert!(read.reads_protected, "{:?}", read.findings);
+        assert!(
+            read.operations[0]
+                .paths
+                .iter()
+                .any(|path| { path.resolved.as_deref() == Some(Path::new("/private/etc")) })
+        );
         // A canonicalized workspace and home are compared in the short form.
         let t = "/private/var/folders/x/T";
         let c = Context::new(format!("{t}/proj"), format!("{t}/proj")).with_home(format!("{t}/h"));

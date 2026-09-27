@@ -370,7 +370,8 @@ impl UserRule {
         {
             return false;
         }
-        if let Some(max) = self.spec.max_depth
+        if !deny
+            && let Some(max) = self.spec.max_depth
             && op
                 .paths
                 .iter()
@@ -381,21 +382,48 @@ impl UserRule {
         true
     }
 
-    pub(crate) fn denies(&self, op: &Operation, ctx: &Context) -> bool {
+    pub(crate) fn denies_operation(&self, report: &crate::RiskReport, index: usize) -> bool {
+        let op = &report.operations[index];
+        let ctx = &report.context;
         if !self.selector_matches(op, ctx, true) {
             return false;
         }
+        // A selector binds the whole script/wrapper invocation, including its
+        // descendant effects, but never a sibling command in the shell program.
+        let effects: Vec<_> = report
+            .operations
+            .iter()
+            .enumerate()
+            .skip(index)
+            .filter(|(candidate, _)| {
+                let mut current = *candidate;
+                while current > index {
+                    let Some(parent) = report.operations[current]
+                        .parent
+                        .filter(|parent| *parent < current)
+                    else {
+                        return false;
+                    };
+                    current = parent;
+                }
+                current == index
+            })
+            .map(|(_, op)| op)
+            .collect();
         let matches_any = |patterns: &[PathPattern], kinds: fn(AccessKind) -> bool| {
             patterns.is_empty()
-                || op.opaque
-                || op
-                    .paths
+                || effects.iter().any(|op| op.opaque)
+                || effects
                     .iter()
+                    .flat_map(|op| &op.paths)
                     .filter(|p| kinds(p.kind))
                     .any(|p| patterns.iter().any(|pattern| pattern.intersects(p, ctx)))
         };
         if let Some(pattern) = &self.path
-            && !op.paths.iter().any(|p| pattern.intersects(p, ctx))
+            && !effects
+                .iter()
+                .flat_map(|op| &op.paths)
+                .any(|p| pattern.intersects(p, ctx))
         {
             return false;
         }
@@ -404,14 +432,16 @@ impl UserRule {
         }) && matches_any(&self.writes, |k| {
             matches!(k, AccessKind::Write | AccessKind::Delete)
         }) && (self.spec.variables.is_empty()
-            || op.variables.iter().any(|(key, _)| {
+            || effects.iter().flat_map(|op| &op.variables).any(|(key, _)| {
                 self.spec.variables.contains(key) || ctx.unknown_variables.contains(key)
             }))
             && (self.hosts.is_empty()
-                || op.network && op.hosts.is_empty()
-                || op
-                    .hosts
+                || effects
                     .iter()
+                    .any(|op| op.opaque || op.network && op.hosts.is_empty())
+                || effects
+                    .iter()
+                    .flat_map(|op| &op.hosts)
                     .any(|host| self.hosts.iter().any(|g| g.is_match(host))))
     }
 

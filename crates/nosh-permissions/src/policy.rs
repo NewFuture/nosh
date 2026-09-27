@@ -137,11 +137,7 @@ pub fn evaluate(
 ) -> PolicyDecision {
     let result = |decision, source| PolicyDecision { decision, source };
     for rule in &rules.deny {
-        if report
-            .operations
-            .iter()
-            .any(|op| rule.denies(op, &report.context))
-        {
+        if (0..report.operations.len()).any(|index| rule.denies_operation(report, index)) {
             let mut reason = rule.explanation();
             if report.operations.iter().any(|op| {
                 op.opaque
