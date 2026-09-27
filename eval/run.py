@@ -247,9 +247,12 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                    file_snapshot=after, final_state=checks.fixture_state(scenario, facts, root, after, result))
         if result.error:
             if not args.legacy and result.timeout_phase in ("agent", "cli") and trace.is_file():
-                observed = observe(result, scenario, trace, False, seed, inflight_timeout=True)
+                observed = observe(result, scenario, trace, False, seed, deadline_timeout=True)
                 row.update(observed)
-                reason = (f"agent exceeded the {timeout:g}s trial deadline during model generation "
+                stage = ("after final generation completed but before the completion marker"
+                         if observed["deadline_state"] == "after_generation"
+                         else "during model generation")
+                reason = (f"agent exceeded the {timeout:g}s trial deadline {stage} "
                           f"({row['metrics']['steps']} started steps)")
                 if scenario.get("expect") and row["metrics"]["steps"] > scenario["expect"]["max_steps"]:
                     reason += f"; step budget is {scenario['expect']['max_steps']}"

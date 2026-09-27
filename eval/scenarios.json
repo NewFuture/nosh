@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "dataset_revision": 5,
+  "dataset_revision": 6,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 240,
   "scenarios": [
