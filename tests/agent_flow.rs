@@ -111,6 +111,44 @@ fn multi_step_task_uses_tool_results() {
 }
 
 #[test]
+fn user_output_is_attached_once_per_conversation() {
+    let _g = setup();
+    let mut sh = shell();
+    assert_eq!(sh.run_user_line("sh -c 'exit 17'").exit_code, 17);
+    let command = sh.recent_commands().last().unwrap().clone();
+    let mut output = sh.last_user_output().unwrap().clone();
+    output.state = nosh_shell::OutputState::Captured;
+    output.terminal_source = true;
+    output.text = "REGION is unset\n".into();
+    output.observed_bytes = Some(output.text.len() as u64);
+
+    let engine = MockChatEngine::with_responder(|_| vec![text("done")]);
+    let received = engine.received();
+    let mut agent = agent(engine, AgentConfig::default());
+    let mut input = TaskInput::new(Trigger::Failed { exit: 17 }, "");
+    input.failed = Some(command);
+    input.user_output = Some(output);
+    let mut ui = RecordUi::default();
+
+    for _ in 0..2 {
+        let result = agent.run_task(&mut sh, input.clone(), &mut Scripted::new([]), &mut ui);
+        assert_eq!(result.status, TaskStatus::Completed);
+    }
+    agent.reset_conversation();
+    let result = agent.run_task(&mut sh, input, &mut Scripted::new([]), &mut ui);
+    assert_eq!(result.status, TaskStatus::Completed);
+
+    let received = received.lock().unwrap();
+    let task = |index: usize| match &received[index][0] {
+        Message::User(text) => text,
+        other => panic!("expected user message, got {other:?}"),
+    };
+    assert!(task(0).contains("[user_output "));
+    assert!(!task(1).contains("[user_output "));
+    assert!(task(2).contains("[user_output "));
+}
+
+#[test]
 fn compaction_failure_preserves_executed_results_for_the_next_task() {
     use nosh_llm::{
         CancelHandle, ChatEngine, Event, LlmError, SessionId, SessionSpec, StepOutcome,

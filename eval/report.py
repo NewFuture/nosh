@@ -11,6 +11,8 @@ import re
 import statistics
 import tempfile
 
+from .suite import CAPTURE_CHECKS, CAPTURE_PARTS
+
 SCHEMA_VERSION = 2
 METRICS = ("steps", "confirmations", "ttft_s", "total_s", "peak_rss_mib")
 
@@ -72,6 +74,23 @@ def validate(report: dict) -> None:
                         or type(grading["facts"].get("passed")) is not bool
                         or not isinstance(grading["facts"].get("reasons"), list)):
                     raise ValueError(f"invalid fact grading: {key}")
+                check = scenarios[key[0]].get("check")
+                components = grading["facts"].get("components")
+                if components is not None:
+                    if check not in CAPTURE_CHECKS or not isinstance(components, dict) or set(components) != set(CAPTURE_PARTS):
+                        raise ValueError(f"invalid capture components: {key}")
+                    for name, item in components.items():
+                        required = name != "citation" or CAPTURE_CHECKS[check]
+                        if (not isinstance(item, dict) or item.get("required") is not required
+                                or not isinstance(item.get("reasons"), list)
+                                or any(not isinstance(reason, str) for reason in item["reasons"])
+                                or (required and type(item.get("passed")) is not bool)
+                                or (not required and item.get("passed") is not None)):
+                            raise ValueError(f"invalid {name} component: {key}")
+                    if grading["facts"]["passed"] and any(item["passed"] is False for item in components.values()):
+                        raise ValueError(f"passing facts have failed capture components: {key}")
+                elif check in CAPTURE_CHECKS and (trial["status"] == "pass" or grading["facts"]["passed"]):
+                    raise ValueError(f"passing capture facts have no component evidence: {key}")
                 ux = grading["experience"]
                 if ux is not None and (not isinstance(ux, dict) or set(ux) != {
                     "steps", "confirmations", "final_question", "response_language",
@@ -209,6 +228,28 @@ def grading_counts(trials: list[dict]) -> dict:
     }
 
 
+def capture_components(report: dict) -> list[dict]:
+    rows = []
+    for scenario in report["metadata"]["scenarios"]:
+        if scenario.get("check") not in CAPTURE_CHECKS:
+            continue
+        planned = len(report["metadata"]["seeds"]) * report["metadata"]["repeat"]
+        trials = [trial for trial in report["trials"] if trial["scenario_id"] == scenario["id"]]
+        for name in CAPTURE_PARTS:
+            row = {"scenario_id": scenario["id"], "component": name,
+                   "required": name != "citation" or CAPTURE_CHECKS[scenario["check"]],
+                   "planned": planned, "pass": 0, "fail": 0, "not_applicable": 0, "unobserved": planned}
+            for trial in trials:
+                item = (((trial.get("grading") or {}).get("facts") or {}).get("components") or {}).get(name)
+                if item is None:
+                    continue
+                row["unobserved"] -= 1
+                row["not_applicable" if item["passed"] is None else "pass" if item["passed"] else "fail"] += 1
+            row["measured"] = row["pass"] + row["fail"]
+            rows.append(row)
+    return rows
+
+
 def aggregate(report: dict) -> list[dict]:
     rows = []
     for scenario in report["metadata"]["scenarios"]:
@@ -298,6 +339,21 @@ def markdown(report: dict) -> str:
                      "Missing observations are not zero or a pass. Group means use individual measured trials, including failures; "
                      "the local spelling-correction cases are separate from model tasks. "
                      "Language and closing-question checks are deterministic heuristics, not a model judge."])
+        components = capture_components(report)
+        if components:
+            rows.extend(["", "## Captured output: separate verdicts", "",
+                         "| Scenario | Component | Required | Passed / measured | Failed | N/A | Unobserved / planned |",
+                         "|---|---|---|---:|---:|---:|---:|"])
+            for item in components:
+                rows.append(
+                    f"| {item['scenario_id']} | {item['component']} | {'yes' if item['required'] else 'no'} | "
+                    f"{item['pass']}/{item['measured']} | {item['fail']} | {item['not_applicable']} | "
+                    f"{item['unobserved']}/{item['planned']} |"
+                )
+            rows.extend(["", "Capture measures original evidence, attribution and single execution. Diagnosis checks the "
+                         "missing setting, remedy and explicitly covered unsupported assertions; it is not a general semantic truth proof. "
+                         "Citation is required only in the dedicated diagnostic_id task. Missing evidence is unobserved, not a pass; "
+                         "a citation failure must not be reported as a capture failure."])
     rows.extend([
         "",
         "TTFT is the engine's first-step time to its first sampled token, excluding model loading. "
@@ -369,6 +425,12 @@ def markdown(report: dict) -> str:
                     for name, item in grade["experience"].items()
                 ))
             ))
+            components = ((grade or {}).get("facts") or {}).get("components")
+            if components:
+                rows.append("Components: " + "; ".join(
+                    f"{name}={'N/A' if item['passed'] is None else 'pass' if item['passed'] else 'fail'}"
+                    for name, item in components.items()
+                ))
         answer = trial.get("answer", "")
         displayed = "\n".join(line.rstrip() for line in answer.splitlines())
         fence = "`" * max(3, 1 + max((len(s) for s in re.findall(r"`+", answer)), default=0))
@@ -385,6 +447,8 @@ def save(report: dict, directory: Path, previous: dict | None = None) -> None:
     report["summary"] = aggregate(report)
     if report["schema_version"] == 2:
         report["groups"] = groups(report)
+        if components := capture_components(report):
+            report["capture_components"] = components
     report["reproducibility"] = repetitions(report["trials"])
     if previous is not None:
         report["comparison"] = compare(report, previous)

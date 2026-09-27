@@ -116,14 +116,56 @@ enum Cmd {
 }
 
 fn main() {
-    // SAFETY: first thing in main, before anything has started a thread.
-    unsafe { nosh_llm::local::configure_thread_env() };
-    // Shells created from here on keep those values out of child processes.
-    nosh_shell::register_internal_env(nosh_llm::local::env_overrides());
+    // SAFETY: bootstrap runs before runtime threads or environment readers.
+    let control = match unsafe { nosh_shell::pty::inherited_control() } {
+        Ok(control) => control,
+        Err(error) => {
+            eprintln!("nosh: PTY host bootstrap: {error}");
+            std::process::exit(2);
+        }
+    };
     let argv0_login = std::env::args_os()
         .next()
         .is_some_and(|a| a.to_string_lossy().starts_with('-'));
     let mut cli = Cli::parse();
+    use std::io::IsTerminal;
+    let interactive = cli.cmd.is_none()
+        && !cli.agent
+        && !cli.suggest
+        && cli.command.is_none()
+        && cli.rest.is_empty()
+        && (cli.interactive || std::io::stdin().is_terminal());
+    let interactive_config = interactive.then(config::Config::load);
+    if control.is_none()
+        && interactive_config
+            .as_ref()
+            .is_some_and(|c| c.capture_output == nosh_shell::CaptureOutput::Last)
+    {
+        let relay = std::env::current_exe().and_then(|exe| {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(exe);
+            if let Some(argv0) = std::env::args_os().next() {
+                command.arg0(argv0);
+            }
+            command.args(std::env::args_os().skip(1));
+            nosh_shell::pty::SessionPty::spawn(&mut command)
+        });
+        match relay {
+            Ok(relay) => {
+                let code = relay.run().unwrap_or_else(|error| {
+                    eprintln!("nosh: terminal relay failed: {error}");
+                    70
+                });
+                std::process::exit(code);
+            }
+            Err(error) => eprintln!(
+                "nosh: user output capture unavailable; continuing without capture: {error}"
+            ),
+        }
+    }
+    // SAFETY: the active shell host still has no runtime threads.
+    unsafe { nosh_llm::local::configure_thread_env() };
+    nosh_shell::register_internal_env(nosh_llm::local::env_overrides());
     if cli.global.offline {
         nosh_hub::net::set_offline(true);
     }
@@ -139,7 +181,7 @@ fn main() {
             let cfg = config::Config::load();
             doctor::run(&cfg, &engine_setup(&cli, &cfg))
         }
-        None => run_shell(&cli, argv0_login),
+        None => run_shell(&cli, argv0_login, interactive_config, control),
     };
     std::process::exit(code);
 }
@@ -180,7 +222,12 @@ fn ai_disabled(cli: &Cli) -> bool {
     cli.global.safe || std::env::var("NOSH_DISABLE_AI").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-fn run_shell(cli: &Cli, argv0_login: bool) -> i32 {
+fn run_shell(
+    cli: &Cli,
+    argv0_login: bool,
+    interactive_config: Option<config::Config>,
+    control: Option<nosh_shell::pty::Control>,
+) -> i32 {
     let args = shell_cmd::ShellArgs {
         command: cli.command.as_deref(),
         rest: &cli.rest,
@@ -215,12 +262,13 @@ fn run_shell(cli: &Cli, argv0_login: bool) -> i32 {
     if let Some(code) = shell_cmd::run_noninteractive(&args) {
         return code;
     }
-    let cfg = config::Config::load();
+    let cfg = interactive_config.unwrap_or_else(config::Config::load);
     cfg.print_warnings();
     let mut shell = match shell_cmd::open_interactive(&args) {
         Ok(s) => s,
         Err(c) => return c,
     };
+    shell.configure_output_capture(cfg.capture_output, control);
     // Ctrl-C stops a model download (the partial file is kept).
     shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);

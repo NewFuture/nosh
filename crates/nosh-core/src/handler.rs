@@ -115,6 +115,7 @@ impl AiHandler for ShellAi {
             trigger: req.trigger,
             text: req.text,
             failed: req.failed,
+            user_output: req.user_output,
             attachment: None,
         };
         let out = agent.run_task(shell, input, approval, &mut ui);

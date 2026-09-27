@@ -163,7 +163,13 @@ impl TerminalApproval {
 
 impl ApprovalChannel for TerminalApproval {
     fn request(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
-        term::flush_input();
+        if let Err(error) = term::flush_input() {
+            let reason = format!("cannot discard terminal typeahead: {error}");
+            eprintln!("{}", style::red(&format!("nosh: {reason}")));
+            return ApprovalResponse::Deny {
+                reason: Some(reason),
+            };
+        }
         self.card(req);
         let b = &self.bar;
         if req.strong {

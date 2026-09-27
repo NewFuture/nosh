@@ -268,13 +268,13 @@ class DatasetRevisionTests(ProjectWorkCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_current_suite_declares_the_second_dataset_without_changing_task_shape(self):
+    def test_current_suite_adds_opt_in_capture_without_changing_prior_tasks(self):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 2)
+        self.assertEqual(data["dataset_revision"], 7)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
-        self.assertEqual(len(scenarios), 25)
+        self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
         self.assertEqual(scenarios["zh-git-commit"]["fixture"], "staged-git")
         self.assertEqual(scenarios["zh-git-diff"]["fixture"], "dirty-git")
@@ -299,6 +299,13 @@ class DatasetRevisionTests(ProjectWorkCase):
         revised_dirty = dict(historical, dataset_revision=2)
         with self.assertRaisesRegex(ValueError, "required facts"):
             suite.load_suite(self.write_suite(revised_dirty))
+
+        revision_four = copy.deepcopy(current)
+        revision_four["dataset_revision"] = 4
+        for scenario in revision_four["scenarios"]:
+            if scenario["check"] in suite.CAPTURE_CHECKS:
+                scenario["inputs"][-1] = "# 根据刚才的输出诊断"
+        self.assertEqual(suite.load_suite(self.write_suite(revision_four)), revision_four)
 
         for revision in (0, -1, True, 2.0, "2", None, []):
             invalid = dict(current, dataset_revision=revision)

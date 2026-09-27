@@ -78,12 +78,12 @@ class DatasetRevisionTests(unittest.TestCase):
     def test_hosted_campaign_budget_covers_every_seed_and_repeat(self):
         suite = run.load_suite(run.HERE / "scenarios.json")
         available_s = (360 - 90) * 60
-        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, available_s), 250 * 60)
-        self.assertEqual(run.validate_campaign_budget(suite, 2, 64, available_s), 250 * 64)
-        for timeout in (65, suite["timeout_s"]):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "250 trial deadlines"):
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, available_s), 270 * 60)
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 59, available_s), 270 * 59)
+        for timeout in (61, suite["timeout_s"]):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "270 trial deadlines"):
                 run.validate_campaign_budget(suite, 2, timeout, available_s)
-        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, 250 * 60), 250 * 60)
+        self.assertEqual(run.validate_campaign_budget(suite, 2, 60, 270 * 60), 270 * 60)
         self.assertEqual(suite["timeout_s"], 240, "hosted limits must not change the local suite")
         subset = dict(suite, scenarios=suite["scenarios"][:1], seeds=[0])
         self.assertEqual(run.validate_campaign_budget(subset, 2, 240, available_s), 480)

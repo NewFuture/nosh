@@ -5,13 +5,14 @@ use std::path::PathBuf;
 
 use nosh_hub::SourceSelection;
 use nosh_permissions::ApprovalMode;
-use nosh_shell::OnFailure;
+use nosh_shell::{CaptureOutput, OnFailure};
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub ai_prefix: String,
     pub trigger_on_error: bool,
     pub on_failure: OnFailure,
+    pub capture_output: CaptureOutput,
     pub nl_guard: bool,
     pub builtin_name: String,
     pub approval: ApprovalMode,
@@ -39,6 +40,7 @@ impl Default for Config {
             ai_prefix: "#".into(),
             trigger_on_error: true,
             on_failure: OnFailure::Hint,
+            capture_output: CaptureOutput::Last,
             nl_guard: true,
             builtin_name: "ai".into(),
             approval: ApprovalMode::Confirm,
@@ -69,6 +71,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "ai_prefix",
             "trigger_on_error",
             "on_failure",
+            "capture_output",
             "nl_guard",
             "builtin_name",
             "suggest_key",
@@ -238,6 +241,12 @@ impl Config {
                     .push("shell.on_failure: hint | auto | off".into()),
             }
         }
+        if let Some(v) = r.str("shell", "capture_output") {
+            match CaptureOutput::parse(&v) {
+                Some(mode) => c.capture_output = mode,
+                None => r.warnings.push("shell.capture_output: off | last".into()),
+            }
+        }
         if let Some(v) = r.str("shell", "nl_guard") {
             match v.as_str() {
                 "destructive" => c.nl_guard = true,
@@ -393,6 +402,26 @@ on = true
         let c = Config::parse("[shell\nx=");
         assert_eq!(c.ai_prefix, "#");
         assert_eq!(c.warnings.len(), 1);
+    }
+
+    #[test]
+    fn output_capture_defaults_to_last_and_validates_overrides() {
+        assert_eq!(Config::default().capture_output, CaptureOutput::Last);
+        for (value, expected) in [("off", CaptureOutput::Off), ("last", CaptureOutput::Last)] {
+            let config = Config::parse(&format!("[shell]\ncapture_output = \"{value}\"\n"));
+            assert_eq!(config.capture_output, expected);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        }
+        for value in ["\"all\"", "true", "42"] {
+            let config = Config::parse(&format!("[shell]\ncapture_output = {value}\n"));
+            assert_eq!(config.capture_output, CaptureOutput::Last);
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("shell.capture_output"))
+            );
+        }
     }
 
     #[test]

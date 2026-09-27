@@ -69,8 +69,8 @@ def execution_evidence(events: list[dict]) -> list[dict]:
 
 
 def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, seed: int,
-            inflight_timeout: bool = False) -> dict:
-    if inflight_timeout and (legacy or result.timeout_phase not in ("agent", "cli")
+            deadline_timeout: bool = False) -> dict:
+    if deadline_timeout and (legacy or result.timeout_phase not in ("agent", "cli")
                             or result.exit_code not in (-9, -15)):
         raise ValueError("task timeout recovery requires native in-flight agent observations")
     if re.search(r"(?m)^nosh: [^\n]*config\.toml:", driver.plain(result.stderr + result.transcript)):
@@ -114,6 +114,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     inputs = tools = sampling = None
     generated = []
     executions = None
+    deadline_state = None
     if not legacy and scenario["check"] != "typos":
         if not trace.is_file():
             raise ValueError("native engine trace is missing; use --legacy explicitly for an older binary")
@@ -131,9 +132,9 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         starts = [e for e in events if e["ev"] == "step_start"]
         ends = [e for e in events if e["ev"] == "step_end"]
         opens = [e for e in events if e["ev"] == "open"]
-        if not starts or len(starts) != len(ends) + int(inflight_timeout) or not opens:
+        if not starts or not opens or (not deadline_timeout and len(starts) != len(ends)):
             raise ValueError("incomplete engine observations; no successful fallback")
-        if inflight_timeout:
+        if deadline_timeout:
             pending = set()
             for event in events:
                 key = (event.get("engine"), event.get("sid"))
@@ -150,8 +151,18 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
                 elif event["ev"] == "close" and key in pending:
                     raise ValueError("closed engine is missing its step result")
             completed_tasks = sum(turn.get("kind") == "agent" for turn in result.turns)
-            if len(pending) != 1 or len(summaries) > completed_tasks:
+            if len(starts) == len(ends) + 1 and len(pending) == 1:
+                deadline_state = "during_generation"
+            elif len(starts) == len(ends) and not pending:
+                last = ends[-1]
+                if (last.get("stop") != "end_of_turn" or last.get("tool_calls") != []
+                        or last.get("errors") != []):
+                    raise ValueError("timeout was not after a completed final generation")
+                deadline_state = "after_generation"
+            else:
                 raise ValueError("timeout was not an unfinished model generation")
+            if len(summaries) != completed_tasks:
+                raise ValueError("timeout completion markers do not match completed tasks")
         if any(not isinstance(e.get("sampling"), dict) or type(e["sampling"].get("seed")) is not int
                or e["sampling"]["seed"] != seed for e in opens):
             raise ValueError("observed sampling seed differs from the requested seed")
@@ -177,12 +188,18 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         tools = [call for e in ends for call in e["tool_calls"]]
         sampling = [e["sampling"] for e in opens]
         generated = [e["text"] for e in ends]
-        if inflight_timeout:
+        if deadline_state == "during_generation":
             metrics["task_status"] = "timed_out"
             answer = ""
             notes.append("The declared trial deadline expired during model generation. "
                          "Steps include the observed in-flight call; there is no final answer. "
                          "TTFT is available only if the first step completed.")
+        elif deadline_state == "after_generation":
+            metrics["task_status"] = "timed_out"
+            answer = ends[-1]["text"].strip()
+            notes.append("The declared trial deadline expired after the final generation completed "
+                         "but before the REPL completion marker. The observed answer is preserved as "
+                         "evidence, but the trial remains a timeout failure.")
         elif scenario["mode"] != "suggest":
             answer = ends[-1]["text"].strip()
     elif not legacy and trace.exists():
@@ -196,4 +213,5 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     if scenario["check"] != "typos" and metrics["steps"] is None and not result.error:
         raise ValueError("task completion/step measurement is missing")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
-            "executions": executions, "sampling": sampling, "generated_answers": generated, "metric_notes": notes}
+            "executions": executions, "sampling": sampling, "generated_answers": generated,
+            "deadline_state": deadline_state, "metric_notes": notes}

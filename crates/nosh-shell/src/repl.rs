@@ -14,6 +14,7 @@ use reedline::{
     ReedlineMenu, Signal, Suggestion, ValidationResult,
 };
 
+use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
 use crate::{style, term};
@@ -25,6 +26,7 @@ pub struct AiRequest {
     pub text: String,
     /// The failed command, for `trigger=failed`.
     pub failed: Option<UserCommand>,
+    pub user_output: Option<UserOutput>,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +72,7 @@ impl AiHandler for NoAi {
                 trigger: Trigger::Builtin,
                 text: String::new(),
                 failed: None,
+                user_output: None,
             },
         )
     }
@@ -231,19 +234,30 @@ impl Pipeline {
         }
     }
 
-    /// Asks the AI about the last failed command (`ai fix`, bare `#`, Ctrl+G on an empty line).
+    /// Asks the AI about the last failed command (`ai fix [question]`, bare
+    /// `#`, Ctrl+G on an empty line).
     pub fn fix(
         &mut self,
         shell: &mut EmbeddedShell,
         ai: &mut dyn AiHandler,
         ui: &mut dyn ReplUi,
     ) -> LineOutcome {
+        self.fix_with_text(shell, ai, ui, String::new())
+    }
+
+    fn fix_with_text(
+        &mut self,
+        shell: &mut EmbeddedShell,
+        ai: &mut dyn AiHandler,
+        ui: &mut dyn ReplUi,
+        text: String,
+    ) -> LineOutcome {
         match self.last_failure.clone() {
             Some(cmd) => ask(
                 shell,
                 ai,
                 Trigger::Failed { exit: cmd.exit },
-                String::new(),
+                text,
                 Some(cmd),
             ),
             None => {
@@ -270,7 +284,15 @@ impl Pipeline {
                 ui.notice(&builtin_help(&self.cfg.trigger.builtin_name));
                 LineOutcome::Continue(None)
             }
-            Some("fix") if !quoted && words.len() == 1 => self.fix(shell, ai, ui),
+            Some("fix") if !quoted => self.fix_with_text(
+                shell,
+                ai,
+                ui,
+                rest.strip_prefix("fix")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            ),
             Some("auto") if !quoted && words.len() <= 2 => {
                 match words.get(1).map(String::as_str) {
                     Some("off") => self.auto_paused = true,
@@ -304,6 +326,7 @@ impl Pipeline {
         ui: &mut dyn ReplUi,
         line: &str,
     ) -> LineOutcome {
+        self.last_failure = None;
         let run = shell.run_user_line(line);
         if run.exit_shell {
             return LineOutcome::Exit(run.exit_code);
@@ -352,10 +375,23 @@ fn ask(
     text: String,
     failed: Option<UserCommand>,
 ) -> LineOutcome {
+    let user_output = if matches!(&trigger, Trigger::Failed { .. }) {
+        shell
+            .last_user_output()
+            .filter(|output| {
+                failed
+                    .as_ref()
+                    .is_some_and(|command| command.id == output.command_id)
+            })
+            .cloned()
+    } else {
+        None
+    };
     let req = AiRequest {
         trigger,
         text,
         failed,
+        user_output,
     };
     let out = isolate(|| ai.handle(shell, req)).unwrap_or_default();
     LineOutcome::Continue(out.prefill)
@@ -407,7 +443,11 @@ fn builtin_help(name: &str) -> String {
             "出错时自动触发 AI",
             "auto-trigger AI on errors",
         ),
-        ("fix", "修复上一条失败的命令", "fix the last failed command"),
+        (
+            "fix [question]",
+            "诊断上一条失败的命令",
+            "diagnose the last failed command",
+        ),
         (
             "out <n>",
             "查看 agent 命令的完整输出",
