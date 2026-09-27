@@ -13,7 +13,7 @@ use nosh_llm::{
     ToolCall, Usage,
 };
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, RiskReport, SessionAllowList, UserRules, assess_command,
+    ApprovalMode, Context, Decision, Risk, RiskReport, SessionAllowList, UserRules, assess_command,
     assess_read, evaluate,
 };
 use nosh_shell::{AgentExecOpts, EmbeddedShell};
@@ -575,16 +575,6 @@ impl Agent {
         }
     }
 
-    fn ask(
-        &mut self,
-        approval: &mut dyn ApprovalChannel,
-        req: ApprovalRequest,
-        ui: &mut dyn AgentUi,
-    ) -> ApprovalResponse {
-        ui.pause();
-        approval.request(&req)
-    }
-
     fn authorize(
         &mut self,
         tool: &str,
@@ -612,20 +602,26 @@ impl Agent {
             },
             Decision::Ask { strong } => {
                 ui.state(self.cfg.mode, Activity::Waiting);
-                let can_grant = tool == "run_command" && SessionAllowList::can_grant(report);
+                let can_grant =
+                    !strong && tool == "run_command" && SessionAllowList::can_grant(report);
                 let mut reasons = vec![source];
                 reasons.extend(report.top_reasons().into_iter().map(str::to_string));
                 let req = ApprovalRequest {
                     tool: tool.into(),
                     command: detail.into(),
-                    risk: report.risk(),
+                    risk: if strong {
+                        report.risk().max(Risk::Dangerous)
+                    } else {
+                        report.risk()
+                    },
                     reasons,
                     strong,
                     can_grant,
                     can_edit: tool == "run_command",
                     mode: self.cfg.mode,
                 };
-                match self.ask(approval, req, ui) {
+                ui.pause();
+                match approval.request(&req) {
                     ApprovalResponse::Approve => Authorization::Allowed {
                         label: format!("{} · approved once", report.risk()),
                         manual: true,
@@ -1233,7 +1229,7 @@ mod permission_tests {
                 assert!(approvals.seen[0].strong);
                 assert!(!approvals.seen[0].can_grant);
                 assert_eq!(count(), 1);
-                assert!(agent.allow.prefixes().is_empty());
+                assert!(agent.allow.is_empty());
             } else {
                 assert!(matches!(result, Exec::Denied(_)));
                 assert!(approvals.seen.is_empty());
@@ -1307,7 +1303,7 @@ mod permission_tests {
             Exec::Denied(_)
         ));
         assert_eq!(count(), 0);
-        assert!(agent.allow.prefixes().is_empty());
+        assert!(agent.allow.is_empty());
         let mut ui = RecordUi::default();
         assert!(matches!(
             agent.exec_call(
@@ -1425,5 +1421,40 @@ mod permission_tests {
         assert_eq!(approval.seen[1].risk, Risk::Dangerous);
         assert_eq!(count(), 0);
         assert_eq!(std::fs::read_to_string(protected).unwrap(), "keep");
+    }
+
+    #[test]
+    fn additional_effects_wait_for_approval_before_any_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        for name in ["first", "second", "existing"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+        shell.run_user_line(&format!("cd '{}'", root.display()));
+        shell.set_workspace(root.clone());
+        let mut agent = fake_agent(Auto, UserRules::default());
+        let mut approvals = Scripted::new([]);
+        let commands = [
+            "ping -c 1 router.local > existing",
+            "mvn test deploy",
+            "mv first destination; mv second destination",
+        ];
+        for command in commands {
+            assert!(matches!(
+                agent.exec_call(
+                    &mut shell,
+                    &call(command),
+                    &mut approvals,
+                    &mut RecordUi::default()
+                ),
+                Exec::Denied(_)
+            ));
+        }
+        assert_eq!(approvals.seen.len(), commands.len());
+        assert_eq!(count(), 0);
+        for name in ["first", "second", "existing"] {
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), name);
+        }
     }
 }

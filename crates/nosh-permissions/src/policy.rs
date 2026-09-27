@@ -79,7 +79,6 @@ struct Grant {
     operations: Vec<Operation>,
     context: Context,
     scripts: Vec<(std::path::PathBuf, String)>,
-    label: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,27 +87,17 @@ pub struct SessionAllowList {
 }
 
 impl SessionAllowList {
-    /// Display only. Prefixes never determine authorization.
-    pub fn prefix_of(command: &str) -> String {
-        let words: Vec<_> = command.split_whitespace().collect();
-        let n = if words
-            .first()
-            .is_some_and(|w| matches!(*w, "git" | "cargo" | "npm" | "docker" | "kubectl"))
-        {
-            2
-        } else {
-            1
-        };
-        words.into_iter().take(n).collect::<Vec<_>>().join(" ")
-    }
-
     pub fn can_grant(report: &RiskReport) -> bool {
         report.risk() <= Risk::Mutating
             && !report.reads_protected
             && !report.incomplete
             && !report.operations.is_empty()
             && report.operations.iter().all(|op| {
-                !op.opaque && (!op.network || !op.hosts.is_empty()) && op.known.iter().all(|k| *k)
+                op.cwd_known
+                    && !op.opaque
+                    && (!op.network || !op.hosts.is_empty())
+                    && op.known.iter().all(|k| *k)
+                    && op.paths.iter().all(|path| path.resolved.is_some())
             })
     }
 
@@ -121,7 +110,6 @@ impl SessionAllowList {
                 operations: report.operations.clone(),
                 context: report.context.clone(),
                 scripts: report.scripts.clone(),
-                label: Self::prefix_of(&report.operations[0].argv.join(" ")),
             });
         }
         true
@@ -136,8 +124,8 @@ impl SessionAllowList {
             })
     }
 
-    pub fn prefixes(&self) -> Vec<&str> {
-        self.grants.iter().map(|g| g.label.as_str()).collect()
+    pub fn is_empty(&self) -> bool {
+        self.grants.is_empty()
     }
 }
 
@@ -176,26 +164,11 @@ pub fn evaluate(
     let mut matched = Vec::new();
     let allowed = !report.operations.is_empty()
         && report.operations.iter().enumerate().all(|(index, op)| {
-            if let Some(rule) = rules.allow.iter().find(|rule| {
-                if (!report.incomplete || rule.allows_incomplete(op))
-                    && rule.allows(op, &report.context)
-                {
-                    return true;
-                }
-                let mut parent = op.parent;
-                while let Some(i) = parent.filter(|i| *i < index) {
-                    let ancestor = &report.operations[i];
-                    if ancestor.payload
-                        && (!report.incomplete || rule.allows_incomplete(ancestor))
-                        && rule.allows(ancestor, &report.context)
-                        && rule.allows_payload(op, &report.context)
-                    {
-                        return true;
-                    }
-                    parent = ancestor.parent;
-                }
-                false
-            }) {
+            if let Some(rule) = rules
+                .allow
+                .iter()
+                .find(|rule| rule.covers_operation(report, index))
+            {
                 let label = rule.explanation();
                 if !matched.contains(&label) {
                     matched.push(label);
@@ -255,14 +228,4 @@ pub fn evaluate(
         },
         DecisionSource::Mode(mode, report.top_reasons().join("; ")),
     )
-}
-
-pub fn decide(
-    report: &RiskReport,
-    _command: &str,
-    mode: ApprovalMode,
-    rules: &UserRules,
-    session: &SessionAllowList,
-) -> Decision {
-    evaluate(report, mode, rules, session).decision
 }

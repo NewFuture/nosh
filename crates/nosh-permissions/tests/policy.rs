@@ -1,7 +1,8 @@
 //! End-to-end decisions (analysis + policy) for the rule and grant logic.
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, SessionAllowList, UserRule, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, SessionAllowList, UserRule, UserRules, assess_command,
+    evaluate,
 };
 
 fn ctx() -> Context {
@@ -9,7 +10,7 @@ fn ctx() -> Context {
 }
 
 fn d(cmd: &str, mode: ApprovalMode, rules: &UserRules, grants: &SessionAllowList) -> Decision {
-    decide(&assess_command(cmd, &ctx()), cmd, mode, rules, grants)
+    evaluate(&assess_command(cmd, &ctx()), mode, rules, grants).decision
 }
 
 fn rules(allow: &[&str], deny: &[&str]) -> UserRules {

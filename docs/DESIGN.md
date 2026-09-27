@@ -258,7 +258,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 | 边界 | 当前实现与契约 | 源码 |
 |---|---|---|
 | Shell | `EmbeddedShell` 持有 brush 会话；`run_user_line` 直连终端，`run_agent_command` 采集输出；`snapshot/resolve/parse` 提供状态和解析信息 | [backend.rs](../crates/nosh-shell/src/backend.rs) |
-| 风险与策略 | `assess_command` 接收命令和 `Context`，生成 `RiskReport`；`decide` 综合模式、用户规则和会话放行，返回 Allow / Ask / Deny | [analyze.rs](../crates/nosh-permissions/src/analyze.rs)、[policy.rs](../crates/nosh-permissions/src/policy.rs) |
+| 风险与策略 | `assess_command` 接收命令和 `Context`，生成 `RiskReport`；统一 `evaluate` 综合模式、用户规则和会话授权，返回 Allow / Ask / Deny 及决策来源；规则覆盖检查收敛在 `UserRule` | [analyze.rs](../crates/nosh-permissions/src/analyze.rs)、[policy.rs](../crates/nosh-permissions/src/policy.rs)、[user_rules.rs](../crates/nosh-permissions/src/user_rules.rs) |
 | 审批 | `ApprovalChannel::request` 接收请求，返回批准、拒绝、编辑或同类放行；当前实现为终端、无终端拒绝和测试脚本 | [approval.rs](../crates/nosh-core/src/approval.rs) |
 | 推理 | `ChatEngine` 提供 open / step / rewind / close、上下文查询、工具结果压缩与取消；事件为 Text / Think / ToolCall / CallError / Prefill；回退和压缩均显式返回错误 | [engine.rs](../crates/nosh-llm/src/engine.rs) |
 | 对话日志 | 内部 `Conversation` 管理已编码消息、连续工具结果分组、原始 assistant token、回退与压缩；不持有模型或 KV | [conversation.rs](../crates/nosh-llm/src/conversation.rs) |
@@ -492,7 +492,7 @@ for step in 1..=max_steps (默认 10):
     if 没有 ToolCall 且没有 CallError: 按生成停止原因结束
     for call in calls（按顺序）:
         report = permissions.assess(call, shell)
-        match permissions.decide(report, policy):
+        match permissions.evaluate(report, policy).decision:
             Allow → 执行 | Ask → 发起审批，批准后执行 | Deny → 拒绝
         pending.push(结果（截断）+ 状态差异)
         if 需要终端或命中明确 sudo 密码诊断: 交回整条原命令并披露可能部分执行; 结束任务，不执行后续调用

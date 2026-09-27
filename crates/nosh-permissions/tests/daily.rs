@@ -5,7 +5,7 @@
 //! `cargo test -p nosh-permissions --test daily -- --nocapture`.
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
 use Kind::*;
@@ -173,8 +173,8 @@ fn convenience_first_on_daily_commands() {
     let mut asked = Vec::new();
     for (cmd, kind, _) in DAILY {
         let r = assess_command(cmd, &c);
-        let confirm = decide(&r, cmd, ApprovalMode::Confirm, &rules, &grants);
-        let auto = decide(&r, cmd, ApprovalMode::Auto, &rules, &grants);
+        let confirm = evaluate(&r, ApprovalMode::Confirm, &rules, &grants).decision;
+        let auto = evaluate(&r, ApprovalMode::Auto, &rules, &grants).decision;
         if *kind == Query && confirm != Decision::Allow {
             failures.push(format!(
                 "{cmd:?}: a query asks in confirm mode ({confirm:?})"

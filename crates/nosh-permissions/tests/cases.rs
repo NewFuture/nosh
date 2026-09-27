@@ -450,7 +450,7 @@ fn flags_are_reported() {
 /// sensitive variable, the command hash, the terminal) are session changes.
 #[test]
 fn session_changing_builtin_forms() {
-    use nosh_permissions::{ApprovalMode, Decision, SessionAllowList, UserRules, decide};
+    use nosh_permissions::{ApprovalMode, Decision, SessionAllowList, UserRules, evaluate};
     let c = ctx();
     let cases: &[(&str, Risk, bool)] = &[
         // Queries and ordinary variables: Safe.
@@ -506,13 +506,13 @@ fn session_changing_builtin_forms() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     // Auto mode runs the queries and asks for the session changes.
     let d = |cmd: &str| {
-        decide(
+        evaluate(
             &assess_command(cmd, &c),
-            cmd,
             ApprovalMode::Auto,
             &UserRules::default(),
             &SessionAllowList::default(),
         )
+        .decision
     };
     assert_eq!(d("read -r line < notes.txt"), Decision::Allow);
     assert_eq!(d("read PATH <<< /tmp"), Decision::Ask { strong: false });

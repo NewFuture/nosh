@@ -142,7 +142,7 @@ pub struct UserRule {
 }
 
 /// Compile literal shell words without evaluating any shell expression.
-pub fn command_words(text: &str) -> Result<Vec<String>, String> {
+fn command_words(text: &str) -> Result<Vec<String>, String> {
     let options = brush_parser::ParserOptions::default();
     let mut parser = brush_parser::Parser::new(BufReader::new(text.as_bytes()), &options);
     let program = parser
@@ -201,19 +201,30 @@ pub fn command_words(text: &str) -> Result<Vec<String>, String> {
     }).collect()
 }
 
-fn comparable_argv(argv: &[String]) -> Vec<&str> {
-    let mut words: Vec<_> = argv.iter().map(String::as_str).collect();
-    // This harness-owned rewrite changes prompting, not the granted privilege.
-    if words.first() == Some(&"sudo")
-        && let Some(index) = words
-            .iter()
-            .skip(1)
-            .take_while(|w| w.starts_with('-'))
-            .position(|w| matches!(*w, "-n" | "--non-interactive"))
-    {
-        words.remove(index + 1);
+fn comparable_argv(argv: &[String]) -> impl Iterator<Item = (usize, &str)> {
+    // Only the leading option is the harness-owned rewrite. A later "-n"
+    // can instead be a value, e.g. the argument of sudo's -u option.
+    let rewritten = argv.first().is_some_and(|word| word == "sudo");
+    argv.iter().enumerate().filter_map(move |(i, word)| {
+        (!(rewritten && i == 1 && matches!(word.as_str(), "-n" | "--non-interactive")))
+            .then_some((i, word.as_str()))
+    })
+}
+
+fn command_matches(words: &[String], prefix: bool, op: &Operation, deny: bool) -> bool {
+    let mut actual = comparable_argv(&op.argv);
+    for (_, expected) in comparable_argv(words) {
+        let Some((index, word)) = actual.next() else {
+            return false;
+        };
+        if op.known.get(index) != Some(&true) {
+            return deny;
+        }
+        if word != expected {
+            return false;
+        }
     }
-    words
+    prefix || actual.next().is_none()
 }
 
 impl UserRule {
@@ -245,10 +256,14 @@ impl UserRule {
             return Err(fail("max_depth must be between 1 and 3"));
         }
         if tool != "run_command"
-            && (!spec.variables.is_empty() || !spec.hosts.is_empty() || spec.allow_opaque)
+            && (!spec.variables.is_empty()
+                || !spec.hosts.is_empty()
+                || spec.allow_opaque
+                || !spec.read_paths.is_empty()
+                || !spec.write_paths.is_empty())
         {
             return Err(fail(
-                "variables, hosts and allow_opaque apply only to run_command",
+                "read_paths, write_paths, variables, hosts and allow_opaque apply only to run_command; use path for read tools",
             ));
         }
         if selector.is_none() && spec.tool.is_none() {
@@ -269,11 +284,16 @@ impl UserRule {
             .map(|text| command_words(text).map(|words| (words, spec.command_prefix.is_some())))
             .transpose()
             .map_err(|e| format!("{source}: {e}"))?;
-        let path = spec.path.as_deref().map(PathPattern::new).transpose()?;
+        let path = spec
+            .path
+            .as_deref()
+            .map(PathPattern::new)
+            .transpose()
+            .map_err(|error| fail(&error))?;
         let compile_paths = |patterns: &[String]| {
             patterns
                 .iter()
-                .map(|p| PathPattern::new(p))
+                .map(|p| PathPattern::new(p).map_err(|error| fail(&error)))
                 .collect::<Result<Vec<_>, _>>()
         };
         let reads = compile_paths(&spec.read_paths)?;
@@ -344,27 +364,10 @@ impl UserRule {
                 return false;
             }
         }
-        if let Some((words, prefix)) = &self.argv {
-            let expected = comparable_argv(words);
-            let actual = comparable_argv(&op.argv);
-            if deny && let Some(unknown) = op.known.iter().position(|known| !known) {
-                let common = unknown.min(expected.len()).min(actual.len());
-                if actual[..common] != expected[..common] || !prefix && unknown > expected.len() {
-                    return false;
-                }
-            } else {
-                if !actual.starts_with(&expected) || !prefix && actual.len() != expected.len() {
-                    return false;
-                }
-                if op
-                    .known
-                    .iter()
-                    .take(if *prefix { words.len() } else { op.known.len() })
-                    .any(|k| !k)
-                {
-                    return false;
-                }
-            }
+        if let Some((words, prefix)) = &self.argv
+            && !command_matches(words, *prefix, op, deny)
+        {
+            return false;
         }
         if let Some(max) = self.spec.max_depth
             && op
@@ -411,19 +414,42 @@ impl UserRule {
                     .any(|host| self.hosts.iter().any(|g| g.is_match(host))))
     }
 
-    pub(crate) fn allows(&self, op: &Operation, ctx: &Context) -> bool {
+    fn allows(&self, op: &Operation, ctx: &Context) -> bool {
         if !self.selector_matches(op, ctx, false) {
             return false;
         }
         self.effect_scope(op, ctx, false)
     }
 
-    pub(crate) fn allows_payload(&self, op: &Operation, ctx: &Context) -> bool {
+    pub(crate) fn covers_operation(&self, report: &crate::RiskReport, index: usize) -> bool {
+        let op = &report.operations[index];
+        if (!report.incomplete || self.allows_incomplete(op)) && self.allows(op, &report.context) {
+            return true;
+        }
+        let mut current = index;
+        while let Some(parent) = report.operations[current]
+            .parent
+            .filter(|parent| *parent < current)
+        {
+            let ancestor = &report.operations[parent];
+            if ancestor.payload
+                && (!report.incomplete || self.allows_incomplete(ancestor))
+                && self.allows(ancestor, &report.context)
+                && self.allows_payload(op, &report.context)
+            {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    fn allows_payload(&self, op: &Operation, ctx: &Context) -> bool {
         op.tool == self.spec.tool.as_deref().unwrap_or("run_command")
             && self.effect_scope(op, ctx, true)
     }
 
-    pub(crate) fn allows_incomplete(&self, op: &Operation) -> bool {
+    fn allows_incomplete(&self, op: &Operation) -> bool {
         self.spec.allow_opaque
             || (op.payload || self.argv.is_none())
                 && self.path.is_none()
@@ -517,5 +543,29 @@ mod tests {
             command_words("printf '%s' '*'").unwrap(),
             ["printf", "%s", "*"]
         );
+    }
+
+    #[test]
+    fn invalid_scopes_report_the_rule_location() {
+        for spec in [
+            RuleSpec {
+                command_prefix: Some("echo".into()),
+                write_paths: vec!["../outside".into()],
+                ..RuleSpec::default()
+            },
+            RuleSpec {
+                tool: Some("read_file".into()),
+                path: Some("[".into()),
+                ..RuleSpec::default()
+            },
+            RuleSpec {
+                tool: Some("list_dir".into()),
+                write_paths: vec!["**".into()],
+                ..RuleSpec::default()
+            },
+        ] {
+            let error = UserRule::compile(spec, "safety.allow[2]").unwrap_err();
+            assert!(error.contains("safety.allow[2]"), "{error}");
+        }
     }
 }

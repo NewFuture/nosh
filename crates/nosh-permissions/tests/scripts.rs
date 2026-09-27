@@ -1,5 +1,5 @@
-//! Convenience first (design §6): commands whose effects are unknown stay
-//! Mutating (no extra confirmation); shell scripts are analyzed with the same
+//! Commands whose effects are unknown stay Mutating and require approval
+//! unless a rule or the build/test category allows them. Scripts use the same
 //! rules instead, and only Dangerous or Forbidden contents escalate. Writes
 //! to workspace files chosen at runtime are Mutating; deletions and paths
 //! that may leave the workspace stay Dangerous.
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
 use Risk::*;
@@ -131,7 +131,7 @@ fn shell_scripts_are_analyzed_and_only_escalate_for_dangerous_contents() {
         }
         // An arbitrary script is not a common build/test entrypoint.
         if *want == Mutating {
-            let d = |m| decide(&r, cmd, m, &rules, &none);
+            let d = |m| evaluate(&r, m, &rules, &none).decision;
             if d(ApprovalMode::Auto) != (Decision::Ask { strong: false })
                 || d(ApprovalMode::Confirm) != (Decision::Ask { strong: false })
             {
@@ -261,13 +261,13 @@ fn runtime_targets_inside_the_workspace_are_mutating() {
     let cmd = "for f in *.txt; do mv \"$f\" \"${f%.txt}.md\"; done";
     let r = assess_command(cmd, &c);
     assert!(!r.writes_outside_workspace);
-    let d = decide(
+    let d = evaluate(
         &r,
-        cmd,
         ApprovalMode::Auto,
         &UserRules::default(),
         &SessionAllowList::default(),
-    );
+    )
+    .decision;
     assert_eq!(d, Decision::Ask { strong: false });
     let _ = std::fs::remove_dir_all(root);
 }

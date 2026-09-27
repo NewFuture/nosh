@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
@@ -54,7 +54,7 @@ fn check(c: &Context, cases: &[(&str, bool)], failures: &mut Vec<String>) {
     let none = SessionAllowList::default();
     for (cmd, protected) in cases {
         let r = assess_command(cmd, c);
-        let auto = decide(&r, cmd, ApprovalMode::Auto, &rules, &none);
+        let auto = evaluate(&r, ApprovalMode::Auto, &rules, &none).decision;
         let ok = if *protected {
             // Like `cat ~/.ssh/id_rsa`: Mutating, and auto mode asks once.
             r.reads_protected
@@ -148,13 +148,13 @@ fn unknown_values_do_not_imply_safe_reads() {
     let r = assess_command("cat \"$UNKNOWN\"", &c);
     assert_eq!(r.risk(), Risk::Mutating, "{:?}", r.findings);
     assert_eq!(
-        decide(
+        evaluate(
             &r,
-            "cat \"$UNKNOWN\"",
             ApprovalMode::Auto,
             &UserRules::default(),
             &SessionAllowList::default()
-        ),
+        )
+        .decision,
         Decision::Ask { strong: false }
     );
     let _ = std::fs::remove_dir_all(root);

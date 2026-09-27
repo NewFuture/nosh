@@ -43,6 +43,27 @@ fn base(op: &Operation) -> &str {
         .unwrap_or("")
 }
 
+fn build_goal(goal: &str) -> bool {
+    matches!(
+        goal,
+        "all" | "build" | "test" | "check" | "compile" | "package" | "verify"
+    )
+}
+
+fn build_goals(args: &[String], valued_options: &[&str]) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if valued_options.contains(&arg.as_str()) {
+            if args.next().is_none() {
+                return false;
+            }
+        } else if !arg.starts_with('-') && !build_goal(arg) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Deliberately accepted project-code risk, separate from recovery evidence.
 fn development(op: &Operation) -> bool {
     let args = &op.argv;
@@ -84,7 +105,41 @@ fn development(op: &Operation) -> bool {
         "python" | "python3" => {
             known(1) && known(2) && sub == Some("-m") && args.get(2).is_some_and(|s| s == "pytest")
         }
-        "cmake" => known(1) && sub == Some("--build"),
+        "cmake" => {
+            if sub != Some("--build") || args.len() < 3 || op.known.iter().any(|known| !known) {
+                return false;
+            }
+            let mut rest = args[3..].iter().peekable();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--target" | "-t" => {
+                        let mut targets = 0;
+                        while rest.peek().is_some_and(|a| !a.starts_with('-')) {
+                            if !build_goal(rest.next().unwrap()) {
+                                return false;
+                            }
+                            targets += 1;
+                        }
+                        if targets == 0 {
+                            return false;
+                        }
+                    }
+                    "--config" => {
+                        if rest.next().is_none() {
+                            return false;
+                        }
+                    }
+                    "--parallel" | "-j" => {
+                        if rest.peek().is_some_and(|a| a.parse::<u32>().is_ok()) {
+                            rest.next();
+                        }
+                    }
+                    "--verbose" | "-v" => {}
+                    _ => return false,
+                }
+            }
+            true
+        }
         "dotnet" => known(1) && matches!(sub, Some("build" | "test")),
         "make" | "gmake" | "ninja" => {
             if op.known.iter().any(|known| !known) {
@@ -114,11 +169,22 @@ fn development(op: &Operation) -> bool {
             }
             true
         }
-        "gradle" | "gradlew" | "mvn" | "meson" | "bazel" | "sbt" => {
-            known(1)
-                && matches!(
-                    sub,
-                    Some("build" | "test" | "check" | "compile" | "package" | "verify")
+        "meson" | "bazel" => known(1) && sub.is_some_and(build_goal),
+        "gradle" | "gradlew" | "mvn" | "sbt" => {
+            op.known.iter().all(|known| *known)
+                && sub.is_some_and(build_goal)
+                && build_goals(
+                    &args[1..],
+                    &[
+                        "-p",
+                        "--project-dir",
+                        "-f",
+                        "--file",
+                        "-pl",
+                        "--projects",
+                        "-s",
+                        "--settings",
+                    ],
                 )
         }
         _ => false,
@@ -273,6 +339,19 @@ impl GitProbe<'_> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .env_clear()
+            .envs(
+                self.ctx
+                    .exported
+                    .iter()
+                    .filter_map(|name| self.ctx.variables.get(name).map(|value| (name, value))),
+            )
+            .envs(
+                self.ctx
+                    .execution_variables
+                    .iter()
+                    .filter_map(|(name, value)| value.as_ref().map(|value| (name, value))),
+            )
             .env("LC_ALL", "C");
         if let Some(home) = &self.ctx.home {
             cmd.env("HOME", home);
@@ -335,7 +414,7 @@ impl GitProbe<'_> {
             ));
         }
         String::from_utf8(bytes)
-            .map(|s| Some(s.trim().to_string()))
+            .map(|s| Some(s.trim_end_matches('\n').to_string()))
             .map_err(|e| format!("invalid Git evidence: {e}"))
     }
 
@@ -662,6 +741,9 @@ fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
         return Err("no bounded file effect was identified".into());
     }
     if base(op) == "mv" {
+        if op.paths.iter().any(|path| path.extra) {
+            return Err("a move with additional redirection needs authorization".into());
+        }
         if op
             .argv
             .iter()
@@ -719,7 +801,7 @@ fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
                 .is_some_and(|f| f == "%s" || f == "%s\\n" || !f.contains('%'))
                 && op.argv.iter().map(String::len).sum::<usize>() as u64 <= SMALL_BYTES
         }
-        "mkdir" | "touch" => op.known.iter().all(|k| *k),
+        "mkdir" | "touch" => true,
         "rm" => op.argv.len() == 2 && !op.argv[1].starts_with('-'),
         "cp" => {
             op.argv.len() == 3
@@ -788,15 +870,18 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
         reasons: Vec::new(),
         development: false,
     };
+    let mut previous_paths: Vec<(&Path, bool)> = Vec::new();
+    let mut prior_effects_unknown = false;
     for (op, covered) in report.operations.iter().zip(build_scope) {
         if covered {
-            result.development = true;
-            if result.reasons.is_empty() {
+            if !result.development {
                 result.reasons.push(
                     "common build/test/check: project-code effects are not guaranteed recoverable"
                         .into(),
                 );
             }
+            result.development = true;
+            prior_effects_unknown = true;
             continue;
         }
         if op.risk == Risk::Safe && op.paths.iter().all(|p| !p.extra) && op.variables.is_empty() {
@@ -812,7 +897,36 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
         if !op.variables.is_empty() && !ordinary_variables(op, &report.context) {
             return Err("session changes are not limited to known, ordinary values".into());
         }
-        if diagnostic(op, &report.context) {
+        if prior_effects_unknown {
+            return Err("an earlier build or opaque operation can change later recovery evidence; split the calls or approve the program".into());
+        }
+        // Evidence is read before the whole shell program runs. Do not reuse
+        // it after an earlier operation could have changed the same target.
+        if previous_paths.len() + op.paths.len() > MAX_TARGETS {
+            return Err(format!("combined file effects exceed {MAX_TARGETS} targets").into());
+        }
+        for access in &op.paths {
+            if let Some(path) = &access.resolved {
+                let writes = matches!(access.kind, AccessKind::Write | AccessKind::Delete);
+                if previous_paths.iter().any(|(previous, changed)| {
+                    (writes || *changed)
+                        && (path.starts_with(previous) || previous.starts_with(path))
+                }) {
+                    return Err("overlapping file effects need authorization; initial recovery evidence may be stale".into());
+                }
+            }
+        }
+        previous_paths.extend(op.paths.iter().filter_map(|access| {
+            access.resolved.as_deref().map(|path| {
+                (
+                    path,
+                    matches!(access.kind, AccessKind::Write | AccessKind::Delete),
+                )
+            })
+        }));
+        if op.paths.iter().any(|path| path.extra) {
+            result.reasons.push(file_admission(op, &report.context)?);
+        } else if diagnostic(op, &report.context) {
             result
                 .reasons
                 .push("low-impact network diagnostic bounded by the execution deadline".into());
@@ -850,6 +964,7 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
             )
             .into());
         }
+        prior_effects_unknown |= op.opaque;
     }
     if result.reasons.is_empty() {
         return Err("no automatic-admission evidence".into());

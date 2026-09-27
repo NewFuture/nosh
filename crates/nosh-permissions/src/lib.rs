@@ -20,10 +20,9 @@ pub use admission::AutoAdmission;
 pub use analyze::assess_command;
 pub use paths::{PathClass, classify_path, classify_path_real, real_path};
 pub use policy::{
-    ApprovalMode, Decision, DecisionSource, PolicyDecision, SessionAllowList, UserRules, decide,
-    evaluate,
+    ApprovalMode, Decision, DecisionSource, PolicyDecision, SessionAllowList, UserRules, evaluate,
 };
-pub use user_rules::{RuleSpec, UserRule, command_words};
+pub use user_rules::{RuleSpec, UserRule};
 
 /// Risk levels, ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

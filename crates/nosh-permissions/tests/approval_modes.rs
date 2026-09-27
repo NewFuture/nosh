@@ -101,11 +101,15 @@ fn common_builds_are_an_explicit_convenience_exception() {
         "make -j8 test",
         "ninja",
         "cmake --build build",
+        "cmake --build build --target all --config Release --parallel 2",
         "ctest",
         "pytest -q",
         "python3 -m pytest",
         "mvn test",
+        "mvn test verify -pl app",
         "gradle build",
+        "gradle build test -p app",
+        "bazel build //app:binary",
     ] {
         let decision = policy(command, Auto, &context, &rules);
         assert_eq!(
@@ -616,4 +620,148 @@ fn physical_shell_paths_are_checked_before_lexical_dotdot_collapses() {
         .insert("HOME".into(), context.cwd.to_string_lossy().into_owned());
     let report = assess_command("HOME=/etc; cat \"$HOME/passwd\"", &context);
     assert!(report.reads_protected, "{:?}", report.findings);
+}
+
+#[test]
+fn automatic_categories_do_not_cover_extra_effects() {
+    let (dir, context) = fixture();
+    std::fs::write(dir.path().join("existing"), "keep").unwrap();
+    let failures: Vec<_> = [
+        "ping -c 1 router.local > existing",
+        "dig router.local > existing",
+        "gradle build publish",
+        "mvn test deploy",
+        "cmake --build build --target install",
+    ]
+    .into_iter()
+    .filter_map(|command| {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        (!matches!(result.decision, Decision::Ask { .. })).then(|| format!("{command}: {result:?}"))
+    })
+    .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("existing")).unwrap(),
+        "keep"
+    );
+}
+
+#[test]
+fn build_disclosure_survives_an_earlier_recoverable_operation() {
+    let (_dir, context) = fixture();
+    let result = policy(
+        "cd child && cargo test",
+        Auto,
+        &context,
+        &UserRules::default(),
+    );
+    assert_eq!(result.decision, Decision::Allow);
+    assert!(
+        result.source.label().contains("not guaranteed recoverable"),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn payload_permission_cannot_skip_an_unapproved_intermediate_operation() {
+    let (dir, context) = fixture();
+    std::fs::write(
+        dir.path().join("trusted.sh"),
+        "bash -c 'printf hi > blocked'\n",
+    )
+    .unwrap();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_exact: Some("./trusted.sh".into()),
+            write_paths: vec!["allowed".into()],
+            ..RuleSpec::default()
+        },
+        "scoped script",
+    )
+    .unwrap();
+    let result = policy(
+        "./trusted.sh",
+        Confirm,
+        &context,
+        &UserRules {
+            allow: vec![rule],
+            deny: vec![],
+        },
+    );
+    assert!(
+        !matches!(result.source, DecisionSource::UserAllow(_)),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn quoted_noninteractive_flag_is_not_a_sudo_option_value() {
+    let (_dir, context) = fixture();
+    let rules = UserRules {
+        allow: vec![UserRule::exact("sudo -u printf x").unwrap()],
+        deny: vec![],
+    };
+    let result = policy("sudo -u -n printf x", Confirm, &context, &rules);
+    assert!(
+        !matches!(result.source, DecisionSource::UserAllow(_)),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn compound_file_effects_cannot_reuse_stale_non_overwrite_evidence() {
+    let (dir, context) = fixture();
+    for file in ["first", "second"] {
+        std::fs::write(dir.path().join(file), file).unwrap();
+    }
+    for command in [
+        "mv first destination; mv second destination",
+        "mv first child; mv second child/first",
+        "cargo test; mv second destination",
+    ] {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert!(
+            matches!(result.decision, Decision::Ask { .. }),
+            "{command}: {result:?}"
+        );
+    }
+    assert_eq!(
+        policy(
+            "mv first new-first; mv second new-second",
+            Auto,
+            &context,
+            &UserRules::default()
+        )
+        .decision,
+        Decision::Allow
+    );
+    let rules = UserRules {
+        allow: vec![UserRule::prefix("mv").unwrap()],
+        deny: vec![],
+    };
+    assert_eq!(
+        policy(
+            "mv first destination; mv second destination",
+            Auto,
+            &context,
+            &rules
+        )
+        .decision,
+        Decision::Allow,
+        "auto-admission evidence must not add approval to a complete user rule"
+    );
+}
+
+#[test]
+fn session_grants_require_known_paths_and_working_directory() {
+    let (_dir, context) = fixture();
+    let mut report = assess_command("touch file", &context);
+    assert!(SessionAllowList::can_grant(&report));
+    report.operations[0].cwd_known = false;
+    assert!(!SessionAllowList::can_grant(&report));
+    report.operations[0].cwd_known = true;
+    report.operations[0].paths[0].resolved = None;
+    let mut grants = SessionAllowList::default();
+    assert!(!grants.grant(&report));
+    assert!(grants.is_empty());
 }
