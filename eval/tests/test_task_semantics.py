@@ -268,11 +268,11 @@ class DatasetRevisionTests(ProjectWorkCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_current_suite_adds_opt_in_capture_without_changing_prior_tasks(self):
+    def test_current_suite_preserves_capture_and_prior_task_contracts(self):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 7)
+        self.assertEqual(data["dataset_revision"], 8)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])

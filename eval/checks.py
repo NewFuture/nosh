@@ -28,6 +28,11 @@ HISTORY_ALIASES = {
     "truncate": r"truncat|截断", "suggest": r"suggest|建议",
     "timeout": r"time.?out|超时", "offline": r"offline|离线",
 }
+VERSION_FLAGS = {
+    "cargo": {"--version", "-V", "version"},
+    "node": {"--version", "-v"},
+    "python3": {"--version", "-V"},
+}
 
 
 @dataclass
@@ -72,6 +77,19 @@ def response_prose(answer: str, keep_inline: bool = False) -> str:
     return prose.strip()
 
 
+def without_history_literals(prose: str, facts: dict) -> str:
+    log = facts.get("git_log", "")
+    subjects = set(re.findall(r"(?m)^ {4}(\S.*)$", log))
+    for subject in sorted(subjects, key=len, reverse=True):
+        prose = re.sub(r"(?<!\w)" + re.escape(subject) + r"(?!\w)", "", prose)
+    commits = set(facts.get("commit_ids", [])) | set(re.findall(r"(?m)^commit ([0-9a-f]{40})\b", log))
+    return re.sub(
+        r"(?<!\w)[0-9a-f]{7,40}(?!\w)",
+        lambda match: "" if any(commit.startswith(match[0]) for commit in commits) else match[0],
+        prose,
+    )
+
+
 def clarification_request(prose: str) -> str | None:
     target = (
         r"目标|任务|需求|要求|问题|事项|内容|输入|文件|路径|代码|报错|错误信息|上下文|预期|期望"
@@ -102,7 +120,7 @@ def clarification_request(prose: str) -> str | None:
     return None
 
 
-def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
+def experience(scenario: dict, answer: str, metrics: dict, *, facts: dict | None = None) -> dict | None:
     expect = scenario.get("expect")
     if expect is None:
         return None
@@ -136,7 +154,7 @@ def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
         details["final_question"]["clarification_request"] = clarification
     text = re.sub(
         r"(?i)(?<![a-z0-9_])(?:node(?:\.js)?|python3?|cargo|rust|javascript|unittest|npm|git|cli|json|toml|pid)(?![a-z0-9_])",
-        "", prose,
+        "", without_history_literals(prose, facts) if facts is not None else prose,
     )
     text = re.sub(r"\bv?\d+(?:\.\d+)+(?:[-+][\w.]+)?", "", text)
     chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
@@ -147,6 +165,68 @@ def experience(scenario: dict, answer: str, metrics: dict) -> dict | None:
         "expected": language, "han_characters": chinese, "latin_words": latin, "prose": text,
     }
     return details
+
+
+def version_queries(command: str, root: Path, facts: dict) -> set[str]:
+    """Recognize version-query evidence, without extending any approval policy."""
+    segments = []
+    current = []
+    quote = operator = None
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif (i > 0 and command[i - 1].isspace()
+              and (redirect := re.match(r"2(?:>&1|>[ \t]*/dev/null)(?=\s|&&|\|\||;|$)", command[i:]))):
+            current.append(" ")
+            i += redirect.end()
+            continue
+        elif char in ";&|":
+            separator = command[i:i + 2] if command[i:i + 2] in ("&&", "||") else char
+            if separator not in (";", "&&", "||") or not "".join(current).strip():
+                raise ValueError("unsupported version query operator")
+            segments.append((operator, "".join(current).strip()))
+            current = []
+            operator = separator
+            i += len(separator)
+            continue
+        current.append(char)
+        i += 1
+    if quote is not None:
+        raise ValueError("unterminated version query quote")
+    if "".join(current).strip():
+        segments.append((operator, "".join(current).strip()))
+    elif operator != ";":
+        raise ValueError("incomplete version query")
+    if not segments:
+        raise ValueError("missing version query")
+    if shell_parts(segments[0][1])[:1] == ["cd"]:
+        if len(segments) < 2 or segments[1][0] != "&&":
+            raise ValueError("version query must follow a successful cd")
+        segments[1] = (None, segments[0][1] + " && " + segments[1][1])
+        segments.pop(0)
+    queries = set()
+    may_fallback = False
+    for operator, segment in segments:
+        if operator == "||":
+            parts = shell_parts(segment)
+            if not may_fallback or parts[:1] != ["echo"] or len(parts) < 2:
+                raise ValueError("unsupported version query fallback")
+            if any(version in " ".join(parts[1:]) for version in facts["versions"].values()):
+                raise ValueError("fallback text cannot supply version evidence")
+            may_fallback = False
+            continue
+        groups = command_groups(segment, root, facts.get("tools"))
+        if (len(groups) != 1 or len(groups[0]) != 2 or groups[0][0] not in VERSION_FLAGS
+                or groups[0][1] not in VERSION_FLAGS[groups[0][0]]):
+            raise ValueError("expected a version-only query")
+        queries.add(groups[0][0])
+        may_fallback = True
+    return queries
 
 
 def completed_commands(evidence: dict, root: Path, facts: dict, action: str, after: dict) -> list[dict]:
@@ -312,22 +392,21 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                     reasons.append(f"unknown commit hash: {sha}")
     elif kind == "versions":
         aliases = {"cargo": r"cargo", "node": r"node(?:\.js)?", "python3": r"python3?"}
-        flags = {"cargo": {"--version", "-V", "version"}, "node": {"--version", "-v"}, "python3": {"--version", "-V"}}
         label = r"(?<![a-z0-9_])(?:" + "|".join(aliases.values()) + r")(?![a-z0-9_])"
         queried = set()
         for execution in evidence.get("executions") or []:
             call = execution["call"]
             if (call["name"] != "run_command" or execution.get("exit_code") != 0
-                    or execution.get("timed_out") or execution.get("interrupted")):
+                    or execution.get("timed_out") or execution.get("interrupted")
+                    or not isinstance(call["args"].get("command"), str)
+                    or not isinstance(execution.get("result"), str)):
                 continue
             try:
-                commands = command_groups(call["args"].get("command", ""), root, facts.get("tools"))
+                commands = version_queries(call["args"]["command"], root, facts)
             except ValueError:
                 continue
-            if commands and all(len(p) == 2 and p[0] in flags and p[1] in flags[p[0]] for p in commands):
-                for parts in commands:
-                    if facts["versions"][parts[0]] in execution["result"]:
-                        queried.add(parts[0])
+            output_lines = {line.strip() for line in execution["result"].splitlines()}
+            queried.update(name for name in commands if facts["versions"][name] in output_lines)
         for name, version in facts["versions"].items():
             if name not in queried:
                 reasons.append(f"no successful {name} version query was observed")
@@ -387,7 +466,8 @@ def line_counts(answer: str, facts: dict) -> list[str]:
                       for language, suffix in suffixes.items()}
     table_files = []
     table_scopes = set()
-    line_count = r"(?<![\d.-])(\d+)\s*(?:lines?\b|loc\b|行)"
+    line_unit = r"(?:lines?\b|loc\b|行)"
+    line_count = r"(?<![\d.-])(\d+)\s*" + line_unit
     file_count = r"(?<![\d.-])(\d+)\s*(?:files?\b|个文件|文件)"
     language_label = "|".join(LANGUAGES.values())
     columns = None
@@ -404,6 +484,20 @@ def line_counts(answer: str, facts: dict) -> list[str]:
             if match:
                 values.append(int(match[1]))
         return values
+
+    def language_counts(text, cell):
+        def share(match):
+            total = int(match["total"])
+            if total != facts["total"]:
+                reasons.append(f"incorrect total line count: {total}")
+            return f"{match['part']} lines"
+        for pattern in (
+            rf"(?<![\d.-])(?P<part>\d+)(?:\s*{line_unit})?\s+(?:out\s+of|of)\s+"
+            rf"(?:the\s+)?(?:total(?:\s+of)?\s+)?(?P<total>\d+)\s*{line_unit}",
+            r"(?<![\d.-])(?P<total>\d+)\s*行\s*(?:中|内)(?:的|占|有)?\s*(?P<part>\d+)\s*行",
+        ):
+            text = re.sub(pattern, share, text)
+        return counts(text, cell, bare=True)
 
     lines = (part for raw in answer.lower().splitlines()
              for part in ([raw] if "|" in raw else re.split(r"[;；]", raw)))
@@ -489,7 +583,7 @@ def line_counts(answer: str, facts: dict) -> list[str]:
             for language, pattern in LANGUAGES.items():
                 for label in re.finditer(pattern, labels):
                     description = re.split(language_label, labels[label.end():], maxsplit=1)[0]
-                    found[language].extend(counts(description, count_cell, bare=True))
+                    found[language].extend(language_counts(description, count_cell))
                     files = [int(number) for number in re.findall(file_count, description)]
                     if file_column is not None and len(cells) > file_column and cells[file_column].isdigit():
                         files.append(int(cells[file_column]))
@@ -600,9 +694,11 @@ def archive_command(command: str, root: Path) -> tuple[list[str], Path]:
                 archive = (cwd / value).resolve()
             elif (cwd / value).resolve() != root / "logs":
                 raise ValueError("tar directory escapes logs")
-        elif word.startswith("-") and word != "--":
-            flags = word[1:]
-            if not flags or any(c not in "czvf" for c in flags) or ("f" in flags and not flags.endswith("f")):
+        elif (word.startswith("-") and word != "--") or (i == 0 and re.fullmatch(r"[czvf]+", word)):
+            traditional = not word.startswith("-")
+            flags = word if traditional else word[1:]
+            if (not flags or any(c not in "czvf" for c in flags)
+                    or (not traditional and "f" in flags and not flags.endswith("f"))):
                 raise ValueError(f"unsupported tar flags: {word}")
             created |= "c" in flags
             zipped |= "z" in flags
@@ -827,7 +923,10 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     elif kind == "port":
         if not re.search(rf"(?<!\d){facts['listener']['pid']}(?!\d)", answer):
             reasons.append("answer does not identify the fixture PID")
-        if not re.search(r"\bpython[ \t]*3(?:\.\d+)?\b", answer, re.I):
+        python = list(re.finditer(
+            r"(?<![a-z0-9_])python(?:[ \t]*(\d+(?:\.\d+)*))?(?![a-z0-9_])", answer, re.I,
+        ))
+        if not python or any(match[1] is not None and match[1].split(".")[0] != "3" for match in python):
             reasons.append("answer does not identify the Python listener")
     elif kind == "lines":
         reasons.extend(line_counts(answer, facts))
@@ -840,24 +939,46 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     elif kind == "python":
         names = [name for name in mentioned_files(answer, facts["before"]) if name.endswith(".py")]
         python_section = True
+        empty_section = False
         classified_python = set()
         incorrectly_classified = []
         misclassified_python = []
         for line in answer.splitlines():
-            if re.search(r"(?:non[- ]|not\s+)python|(?:非|不是|不属于)\s*python|(?:其他|其余).*文件|other.*files", line, re.I):
-                python_section = False
-            elif re.search(r"python\s*文件|python\s*files|个\s*python", line, re.I):
-                python_section = True
+            plain = line.replace("**", "").replace("`", "").strip()
+            line_files = mentioned_files(line, facts["before"])
+            heading = (plain.endswith((":", "：")) or re.match(r"^#{1,6}\s", plain)
+                       or (line.strip().startswith("**") and line.strip().endswith("**")))
+            if heading:
+                empty_section = False
+            absent = re.search(
+                r"(?:\bno\s+|\bwithout\s+|没有\s*|无\s*|未(?:发现|找到)\s*|不存在\s*)"
+                r"(?:任何\s*)?python\s*(?:文件|files?\b)"
+                r"|python\s*(?:文件|files?\b)\s*[:：]?\s*(?:不存在|没有|未找到|无)",
+                plain, re.I,
+            )
+            if absent:
+                classification = False
+                if not line_files:
+                    empty_section = True
+            elif re.search(r"(?:non[- ]|not\s+)python|(?:非|不是|不属于)\s*python|(?:其他|其余).*文件|other.*files", plain, re.I):
+                classification = False
+                if not line_files:
+                    python_section = False
+            elif re.search(r"python\s*文件|python\s*files|个\s*python", plain, re.I):
+                python_section = classification = True
+                empty_section = False
             elif re.fullmatch(
                 r"目录|目录结构|项目结构|文件树|directory|directory structure|directory listing|project structure|file tree",
                 line.strip().strip("*# ").rstrip(":："), re.I,
             ):
-                python_section = None
-            line_files = mentioned_files(line, facts["before"])
-            if python_section is True:
+                python_section = classification = None
+                empty_section = False
+            else:
+                classification = False if empty_section else python_section
+            if classification is True:
                 classified_python.update(name for name in line_files if name.endswith(".py"))
                 incorrectly_classified.extend(name for name in line_files if not name.endswith(".py"))
-            elif python_section is False:
+            elif classification is False:
                 misclassified_python.extend(name for name in line_files if name.endswith(".py"))
         if (set(names) != set(facts["python"]) or classified_python != set(facts["python"])
                 or incorrectly_classified or misclassified_python):
@@ -928,7 +1049,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     fact_result = {"passed": not reasons, "reasons": list(reasons)}
     if capture_verdicts is not None:
         fact_result["components"] = capture_verdicts
-    ux = experience(scenario, answer, metrics)
+    ux = experience(scenario, answer, metrics, facts=facts)
     if ux:
         reasons.extend(f"experience {name}: {detail}" for name, detail in ux.items() if detail["passed"] is False)
     return Verdict(not reasons, reasons, {"facts": fact_result, "experience": ux})
