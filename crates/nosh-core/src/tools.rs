@@ -6,7 +6,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use nosh_llm::{ToolCall, ToolSpec};
-use nosh_shell::CommandResult;
+use nosh_shell::{CommandResult, EmbeddedShell, OutputState, UserOutput};
 use serde_json::json;
 
 /// Characters of tool output fed back per call (~1.5K tokens).
@@ -116,6 +116,72 @@ pub fn list_dir_spec() -> ToolSpec {
 
 pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
     set.tools().iter().map(|t| t.spec()).collect()
+}
+
+pub(crate) fn format_user_output(output: &UserOutput) -> String {
+    let (state, reason) = match output.state {
+        OutputState::NotCaptured => ("not_captured", Some("capture_disabled")),
+        OutputState::Unavailable(reason) => ("unavailable", Some(reason.reason())),
+        OutputState::Captured => ("captured", None),
+    };
+    let metadata = json!({
+        "command_id": output.command_id,
+        "command": output.command,
+        "execution_cwd": output.cwd,
+        "exit": output.exit,
+        "duration_ms": output.duration.as_millis(),
+        "source": if output.terminal_source { "terminal" } else { "none" },
+        "state": state,
+        "reason": reason,
+        "observed_bytes": output.observed_bytes,
+        "retained_bytes": output.text.len(),
+        "truncated": output.truncated,
+        "incomplete": output.incomplete,
+        "mixed": output.mixed,
+        "command_truncated": output.command_truncated,
+        "cwd_truncated": output.cwd_truncated,
+    });
+    let mut result = format!("[user_output {metadata}]\n");
+    if output.has_body() {
+        if output.text.is_empty() {
+            result.push_str(if output.observed_bytes == Some(0) {
+                "(Capture succeeded: no terminal output.)"
+            } else {
+                "(Terminal bytes were captured, but no text remained after display cleanup.)"
+            });
+        } else {
+            result.push_str(&output.text);
+        }
+    } else if output.mixed {
+        result.push_str(
+            "(Known concurrent output: content omitted; do not attribute it to this command.)",
+        );
+    } else {
+        result.push_str("(No captured output is available. Do not invent error text.)");
+    }
+    result.push_str("\n[/user_output]");
+    result
+}
+
+/// Internal implementation for the planned `get_last_output` model tool.
+///
+/// This function is intentionally absent from [`BuiltinTool`] and every
+/// [`ToolSet`], so the model cannot call it until its policy is finalized.
+pub fn get_last_output(shell: &EmbeddedShell) -> String {
+    match shell.last_user_output() {
+        Some(output) => format_user_output(output),
+        None => {
+            let metadata = json!({
+                "state": "unavailable",
+                "reason": "no_completed_user_command",
+            });
+            format!(
+                "[user_output {metadata}]\n\
+                 (No completed user command is available.)\n\
+                 [/user_output]"
+            )
+        }
+    }
 }
 
 /// Keeps the first 60% and last 40% of `s` within `max` characters.
@@ -559,6 +625,7 @@ mod tests {
                 "run_command",
                 "read_file",
                 "list_dir",
+                "get_last_output",
                 "propose_command",
                 "READ_FILE",
                 "",
@@ -566,6 +633,52 @@ mod tests {
                 assert_eq!(set.resolve(name).is_some(), names.contains(&name));
             }
         }
+    }
+
+    #[test]
+    fn last_output_accessor_is_implemented_but_not_registered() {
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+        let empty = get_last_output(&shell);
+        assert!(empty.contains("\"reason\":\"no_completed_user_command\""));
+        assert!(
+            !ToolSet::Full
+                .tools()
+                .iter()
+                .any(|tool| tool.name() == "get_last_output")
+        );
+        assert!(ToolSet::Full.resolve("get_last_output").is_none());
+        assert!(
+            specs(ToolSet::Full)
+                .iter()
+                .all(|spec| spec.name != "get_last_output")
+        );
+
+        assert_eq!(shell.run_user_line("true").exit_code, 0);
+        let disabled = get_last_output(&shell);
+        assert!(disabled.contains("\"state\":\"not_captured\""));
+        assert!(disabled.contains("\"command\":\"true\""));
+
+        let mut output = UserOutput {
+            command_id: 7,
+            command: "cargo build".into(),
+            cwd: "/work/app".into(),
+            command_truncated: false,
+            cwd_truncated: false,
+            exit: 101,
+            duration: std::time::Duration::from_millis(25),
+            state: OutputState::Captured,
+            terminal_source: true,
+            text: "actual error\n".into(),
+            observed_bytes: Some(13),
+            truncated: false,
+            incomplete: false,
+            mixed: false,
+        };
+        let captured = format_user_output(&output);
+        assert!(captured.contains("\"command_id\":7"));
+        assert!(captured.contains("actual error"));
+        output.mixed = true;
+        assert!(!format_user_output(&output).contains("actual error"));
     }
 
     #[test]

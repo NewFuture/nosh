@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nosh_shell::{EmbeddedShell, OutputState, Trigger, UserCommand, UserOutput};
+use nosh_shell::{EmbeddedShell, Trigger, UserCommand, UserOutput};
 
 /// Facts about the machine for the static system prompt.
 #[derive(Debug, Clone, Default)]
@@ -302,47 +302,8 @@ pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str
             .as_ref()
             .is_none_or(|command| command.id == output.command_id)
     {
-        let (state, reason) = match output.state {
-            OutputState::NotCaptured => ("not_captured", Some("capture_disabled")),
-            OutputState::Unavailable(reason) => ("unavailable", Some(reason.reason())),
-            OutputState::Captured => ("captured", None),
-        };
-        let metadata = serde_json::json!({
-            "command_id": output.command_id,
-            "command": output.command,
-            "execution_cwd": output.cwd,
-            "exit": output.exit,
-            "duration_ms": output.duration.as_millis(),
-            "source": if output.terminal_source { "terminal" } else { "none" },
-            "state": state,
-            "reason": reason,
-            "observed_bytes": output.observed_bytes,
-            "retained_bytes": output.text.len(),
-            "truncated": output.truncated,
-            "incomplete": output.incomplete,
-            "mixed": output.mixed,
-            "command_truncated": output.command_truncated,
-            "cwd_truncated": output.cwd_truncated,
-        });
-        msg.push_str(&format!("\n[user_output {metadata}]\n"));
-        if output.has_body() {
-            if output.text.is_empty() {
-                msg.push_str(if output.observed_bytes == Some(0) {
-                    "(Capture succeeded: no terminal output.)"
-                } else {
-                    "(Terminal bytes were captured, but no text remained after display cleanup.)"
-                });
-            } else {
-                msg.push_str(&output.text);
-            }
-        } else if output.mixed {
-            msg.push_str(
-                "(Known concurrent output: content omitted; do not attribute it to this command.)",
-            );
-        } else {
-            msg.push_str("(No captured output is available. Do not invent error text.)");
-        }
-        msg.push_str("\n[/user_output]");
+        msg.push('\n');
+        msg.push_str(&crate::tools::format_user_output(output));
     }
     let text = match (&input.trigger, &input.failed) {
         (Trigger::Failed { exit }, Some(cmd)) => {
@@ -366,6 +327,7 @@ pub fn task_message(shell: &EmbeddedShell, input: &TaskInput, notes: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nosh_shell::OutputState;
 
     #[test]
     fn system_prompt_is_static_and_has_tool_slot() {

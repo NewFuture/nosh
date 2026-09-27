@@ -15,17 +15,21 @@ class DiagnosticContractTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.scenarios = {s["check"]: s for s in suite.load_suite(run.HERE / "scenarios.json")["scenarios"]
+        self.data = suite.load_suite(run.HERE / "scenarios.json")
+        self.scenarios = {s["check"]: s for s in self.data["scenarios"]
                           if s["check"] in suite.CAPTURE_CHECKS}
         self.scenario = self.scenarios["captured-diagnosis"]
         self.root, self.facts, self.text, self.metadata, self.result, self.answer, self.metrics = capture_trial(
             self.base, self.scenario)
 
     def grade(self, answer=None, scenario=None, evidence=None):
+        scenario = scenario or self.scenario
+        question = scenario["inputs"][-1].removeprefix("ai fix").strip()
         return checks.judge(
-            scenario or self.scenario, self.answer if answer is None else answer, self.facts,
+            scenario, self.answer if answer is None else answer, self.facts,
             self.root, fixtures.snapshot(self.root), self.result, self.metrics,
-            observed_input(self.text, self.metadata) if evidence is None else evidence,
+            observed_input(self.text, self.metadata, "failed", question)
+            if evidence is None else evidence,
         )
 
     def test_fixture_distinguishes_ids_codes_and_real_missing_setting(self):
@@ -39,6 +43,16 @@ class DiagnosticContractTests(unittest.TestCase):
                                     capture_output=True, text=True, check=False)
         self.assertEqual(configured.returncode, 0)
         self.assertEqual(configured.stderr, "")
+
+    def test_current_capture_scenarios_require_explicit_ai_fix(self):
+        data = copy.deepcopy(self.data)
+        scenario = next(item for item in data["scenarios"]
+                        if item["check"] == "captured-diagnosis")
+        scenario["inputs"][-1] = "# explain the failure"
+        path = self.base / "invalid-route.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "explicit ai fix"):
+            suite.load_suite(path)
 
     def test_ordinary_diagnosis_does_not_require_a_random_identifier(self):
         verdict = self.grade("REGION 未设置。请使用 export REGION=所需值 配置环境变量。")
@@ -66,12 +80,29 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertTrue(verdict.details["facts"]["components"]["diagnosis"]["passed"])
         for change in ({"command_id": 2}, {"mixed": True}, {"incomplete": True}, {"state": "unavailable"}):
             with self.subTest(change=change):
-                verdict = self.grade(evidence=observed_input(self.text, dict(self.metadata, **change)))
+                question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+                verdict = self.grade(evidence=observed_input(
+                    self.text, dict(self.metadata, **change), "failed", question))
                 self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
         second = subprocess.run([sys.executable, "once.py"], cwd=self.root, capture_output=True,
                                 text=True, check=False)
         self.assertNotIn("CAPTURE-", second.stderr)
         self.assertFalse(self.grade().details["facts"]["components"]["capture"]["passed"])
+
+    def test_revision_five_requires_failed_route_and_preserves_fix_question(self):
+        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        for evidence in (
+            observed_input(self.text, self.metadata),
+            observed_input(self.text, self.metadata, "failed", "different question"),
+        ):
+            with self.subTest(evidence=evidence):
+                verdict = self.grade(evidence=evidence)
+                self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
+        self.assertTrue(
+            self.grade(evidence=observed_input(
+                self.text, self.metadata, "failed", question
+            )).details["facts"]["components"]["capture"]["passed"]
+        )
 
     def test_citing_an_id_does_not_excuse_known_unsupported_claims(self):
         for assertion in (

@@ -282,19 +282,55 @@ impl Agent {
         match self.engine.step(sid, msgs.clone(), &mut sink) {
             Err(LlmError::ContextFull { .. }) => {
                 // Drop the failed append, shorten old tool output and retry once.
-                self.engine.rewind(sid, keep)?;
-                if let Err(error) = self.engine.compact_tool_results(sid, 0) {
-                    // Rewind removed these results, but their tools have already run.
-                    self.carry = msgs
-                        .into_iter()
-                        .filter(|message| matches!(message, Message::Tool(_)))
-                        .collect();
+                if let Err(error) = self.engine.rewind(sid, keep) {
+                    self.reset_conversation();
+                    self.retain_tool_messages(&msgs);
                     return Err(error);
                 }
-                self.engine.step(sid, msgs, &mut sink)
+                if let Err(error) = self.engine.compact_tool_results(sid, 0) {
+                    // Rewind removed these results, but their tools have already run.
+                    self.retain_tool_messages(&msgs);
+                    return Err(error);
+                }
+                let retry_keep = self.engine.message_count(sid);
+                match self.engine.step(sid, msgs.clone(), &mut sink) {
+                    Ok(step) => Ok(step),
+                    Err(error) => {
+                        self.rollback_failed_step(sid, retry_keep, &msgs)?;
+                        Err(error)
+                    }
+                }
             }
-            r => r,
+            Err(error) => {
+                self.rollback_failed_step(sid, keep, &msgs)?;
+                Err(error)
+            }
+            Ok(step) => Ok(step),
         }
+    }
+
+    fn retain_tool_messages(&mut self, messages: &[Message]) {
+        self.carry.extend(
+            messages
+                .iter()
+                .filter(|message| matches!(message, Message::Tool(_)))
+                .cloned(),
+        );
+    }
+
+    fn rollback_failed_step(
+        &mut self,
+        sid: SessionId,
+        keep: usize,
+        messages: &[Message],
+    ) -> Result<(), LlmError> {
+        if let Err(error) = self.engine.rewind(sid, keep) {
+            self.reset_conversation();
+            self.retain_tool_messages(messages);
+            return Err(error);
+        }
+        self.retain_tool_messages(messages);
+        Ok(())
     }
 
     /// Runs one task to completion in the shared shell session.
@@ -809,6 +845,7 @@ mod tests {
     struct RecoveryEngine {
         fail: Option<&'static str>,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        messages: usize,
     }
 
     impl RecoveryEngine {
@@ -831,18 +868,24 @@ mod tests {
         fn step(
             &mut self,
             _sid: SessionId,
-            _append: Vec<Message>,
+            append: Vec<Message>,
             _sink: &mut dyn FnMut(Event),
         ) -> Result<StepOutcome, LlmError> {
             self.record("step")?;
+            self.messages += append.len();
+            if self.fail == Some("append") {
+                return Err(LlmError::Config("append failed".into()));
+            }
             Err(LlmError::ContextFull {
                 used: 100,
                 max: 100,
             })
         }
 
-        fn rewind(&mut self, _sid: SessionId, _keep: usize) -> Result<(), LlmError> {
-            self.record("rewind")
+        fn rewind(&mut self, _sid: SessionId, keep: usize) -> Result<(), LlmError> {
+            self.record("rewind")?;
+            self.messages = keep;
+            Ok(())
         }
 
         fn compact_tool_results(
@@ -855,7 +898,7 @@ mod tests {
         }
 
         fn message_count(&self, _sid: SessionId) -> usize {
-            1
+            self.messages
         }
 
         fn context_usage(&self, _sid: SessionId) -> (usize, usize) {
@@ -877,6 +920,7 @@ mod tests {
             Box::new(RecoveryEngine {
                 fail,
                 calls: Arc::clone(&calls),
+                messages: 1,
             }),
             AgentConfig::default(),
             Environment {
@@ -903,6 +947,21 @@ mod tests {
             assert_eq!(error.to_string(), format!("{failure} failed"));
             assert_eq!(*calls.lock().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn non_context_error_rolls_back_the_appended_messages() {
+        let (mut agent, calls) = recovery_agent(Some("append"));
+        let error = agent
+            .step(
+                1,
+                vec![Message::User("evidence".into())],
+                &mut crate::RecordUi::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "append failed");
+        assert_eq!(agent.engine.message_count(1), 1);
+        assert_eq!(*calls.lock().unwrap(), ["step", "rewind"]);
     }
 
     #[test]
@@ -936,7 +995,7 @@ mod tests {
         ));
         assert_eq!(
             *calls.lock().unwrap(),
-            ["step", "rewind", "compact", "step"]
+            ["step", "rewind", "compact", "step", "rewind"]
         );
     }
 

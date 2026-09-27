@@ -173,10 +173,54 @@ impl Utf8Decoder {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ControlState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+    String,
+    StringEscape,
+}
+
+impl ControlState {
+    fn advance(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            *self = match (*self, byte) {
+                (Self::Ground, 0x1b) => Self::Escape,
+                (Self::Escape, b'[') => Self::Csi,
+                (Self::Escape, b']') => Self::Osc,
+                (Self::Escape, b'P' | b'_' | b'^') => Self::String,
+                (Self::Escape, 0x20..=0x2f) => Self::Escape,
+                (Self::Escape, _) => Self::Ground,
+                (Self::Csi, 0x18 | 0x1a) => Self::Ground,
+                (Self::Csi, 0x1b) => Self::Escape,
+                (Self::Csi, 0x40..=0x7e) => Self::Ground,
+                (Self::Csi, _) => Self::Csi,
+                (Self::Osc, 0x07) => Self::Ground,
+                (Self::Osc, 0x1b) => Self::OscEscape,
+                (Self::Osc, _) => Self::Osc,
+                (Self::OscEscape, b'\\') => Self::Ground,
+                (Self::OscEscape, 0x1b) => Self::OscEscape,
+                (Self::OscEscape, _) => Self::Osc,
+                (Self::String, 0x1b) => Self::StringEscape,
+                (Self::String, _) => Self::String,
+                (Self::StringEscape, b'\\') => Self::Ground,
+                (Self::StringEscape, 0x1b) => Self::StringEscape,
+                (Self::StringEscape, _) => Self::String,
+                (state, _) => state,
+            };
+        }
+    }
+}
+
 pub(crate) struct OutputCollector {
     utf8: Utf8Decoder,
     parser: vte::Parser<0>,
     tail: TextTail,
+    control: ControlState,
     observed: u64,
     plain_ascii: bool,
 }
@@ -187,6 +231,7 @@ impl Default for OutputCollector {
             utf8: Utf8Decoder::default(),
             parser: vte::Parser::default(),
             tail: TextTail::default(),
+            control: ControlState::default(),
             observed: 0,
             plain_ascii: true,
         }
@@ -196,6 +241,7 @@ impl Default for OutputCollector {
 impl OutputCollector {
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         self.observed = self.observed.saturating_add(bytes.len() as u64);
+        self.control.advance(bytes);
         for block in bytes.chunks(16 * 1024) {
             // A plain initial line has no parser/decoder state to carry. Keep
             // its tail in bulk rather than shifting it once per character.
@@ -212,6 +258,7 @@ impl OutputCollector {
     pub(crate) fn finish(mut self) -> CapturedOutput {
         self.parser
             .advance(&mut self.tail, self.utf8.finish().as_bytes());
+        self.tail.incomplete |= self.control != ControlState::Ground;
         CapturedOutput {
             text: String::from_utf8(self.tail.bytes.into_iter().collect())
                 .expect("terminal tail only contains whole UTF-8 characters"),
@@ -387,6 +434,31 @@ mod tests {
         assert_eq!(empty.observed, 0);
         assert!(empty.text.is_empty());
         assert!(!empty.incomplete);
+    }
+
+    #[test]
+    fn unfinished_terminal_controls_are_incomplete_across_chunks() {
+        for input in [
+            b"text\x1b".as_slice(),
+            b"text\x1b[31".as_slice(),
+            b"text\x1b]title".as_slice(),
+            b"text\x1bPdata".as_slice(),
+            b"text\x1b_string\x1b".as_slice(),
+        ] {
+            for split in 0..=input.len() {
+                let mut collector = OutputCollector::default();
+                collector.push(&input[..split]);
+                collector.push(&input[split..]);
+                let output = collector.finish();
+                assert!(output.incomplete, "{input:?} at {split}");
+                assert_eq!(output.text, "text", "{input:?} at {split}");
+            }
+        }
+        for input in [b"text\x1b[31m".as_slice(), b"text\x1b]title\x07".as_slice()] {
+            let mut collector = OutputCollector::default();
+            collector.push(input);
+            assert!(!collector.finish().incomplete, "{input:?}");
+        }
     }
 
     #[test]

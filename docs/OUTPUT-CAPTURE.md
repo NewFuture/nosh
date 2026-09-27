@@ -224,7 +224,7 @@ error[E0308]: ...
 - 后台作业存在时保守标记 `mixed`，可能牺牲可用性以避免错误归属。
 - 交互程序开启的输入回显可能出现在终端流中，不能与程序输出可靠分离。
 - 全屏程序标记不可用，不尝试保存或重建屏幕。
-- 尚未实现按需读取成功命令输出的 `get_last_output` 工具，见 §11。
+- `get_last_output` 仅有内部实现，尚未注册为模型可调用工具，见 §11。
 - 失败证据第一次进入模型后会留在该诊断对话中，直到对话重置。
 - 原生 Windows 不支持此 PTY 后端。
 
@@ -255,13 +255,15 @@ error[E0308]: ...
 | `crates/nosh-shell/src/repl.rs` | 失败 ID 配对与 AI 入口注入矩阵 |
 | `crates/nosh-cli/src/config.rs` / `main.rs` | `capture_output` 默认值、解析和启动装配 |
 | `crates/nosh-core/src/prompt.rs` | `[user_output]` 编码和模型规则 |
+| `crates/nosh-core/src/tools.rs` | 共享证据格式化与尚未注册的 `get_last_output` 内部实现 |
 | `crates/nosh-shell/tests/user_output.rs` | 真实 PTY、信号、状态和大输出回归 |
 | `crates/nosh-cli/tests/capture.rs` | 实际 CLI re-exec、默认值和降级路径 |
 | `eval/` | 版本化场景、分项判定、来源和完整性记录 |
 
 ## 11. 后续 TODO：`get_last_output`
 
-- [ ] 新增无参数模型工具 `get_last_output`，按需返回最近一条已结束用户命令的采集快照。
+- [x] 实现无参数内部函数 `get_last_output` 及共享证据格式化，按需返回最近一条已结束用户命令的采集快照。
+- [ ] 将它加入 `BuiltinTool`、普通 agent 的工具 schema 和执行分发；当前模型不可见、不可调用。
 
 目标契约：
 

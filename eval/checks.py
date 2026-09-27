@@ -690,7 +690,15 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
              if message.get("role") == "user" and message.get("text", "").startswith("[task ")]
     if len(tasks) != 1 or "\n[user_output " not in tasks[0]:
         return reasons + ["the first model request lacks captured output evidence"], codes
-    header, separator, body = tasks[0].split("\n[user_output ", 1)[1].partition("\n")
+    task = tasks[0]
+    if scenario["check"] in CAPTURE_CHECKS:
+        if not re.match(r"^\[task trigger=failed exit=17(?: |\])", task):
+            reasons.append("captured diagnosis did not use trigger=failed with exit 17")
+        question = scenario["inputs"][-1].removeprefix("ai fix").strip()
+        tail = task.split("\n[/user_output]", 1)
+        if len(tail) != 2 or not tail[1].strip().splitlines() or tail[1].strip().splitlines()[-1] != question:
+            reasons.append("the ai fix question is missing or changed in the first model request")
+    header, separator, body = task.split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None
     except json.JSONDecodeError:
