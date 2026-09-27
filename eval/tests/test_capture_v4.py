@@ -44,6 +44,16 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertEqual(configured.returncode, 0)
         self.assertEqual(configured.stderr, "")
 
+    def test_diagnostic_id_is_deterministic_per_trial_identity(self):
+        with fixtures.Workspace(self.base / "identities") as workspace:
+            ids = [
+                workspace.prepare(self.scenario, seed, 1)[2]["diagnostic_id"]
+                for seed in (3, 3, 4)
+            ]
+        self.assertEqual(ids[0], ids[1])
+        self.assertNotEqual(ids[0], ids[2])
+        self.assertRegex(ids[0], r"^CAPTURE-[0-9a-f]{8}$")
+
     def test_current_capture_scenarios_require_explicit_ai_fix(self):
         data = copy.deepcopy(self.data)
         scenario = next(item for item in data["scenarios"]

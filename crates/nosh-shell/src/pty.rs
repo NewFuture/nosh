@@ -446,7 +446,13 @@ impl SessionPty {
                     Err(e) => return Err(e),
                 }
             }
-            if descriptors[0].revents & libc::POLLIN != 0 && to_child.empty() {
+            let terminal_events = descriptors[0].revents;
+            if input_open && terminal_disconnected(terminal_events) {
+                input_open = false;
+                to_child.clear();
+                self.signal_foreground(libc::SIGHUP)?;
+            }
+            if input_open && terminal_events & libc::POLLIN != 0 && to_child.empty() {
                 let mut block = [0; BLOCK];
                 match self.terminal.file.read(&mut block) {
                     Ok(0) => {
@@ -723,6 +729,10 @@ fn pollfd(fd: RawFd, events: i16) -> libc::pollfd {
     }
 }
 
+fn terminal_disconnected(events: i16) -> bool {
+    events & (libc::POLLHUP | libc::POLLERR) != 0
+}
+
 fn wait_io(descriptors: &mut [libc::pollfd; 4], timeout: Option<Duration>) -> io::Result<()> {
     // Like crossterm's use-dev-tty backend, use select on macOS: Darwin poll
     // reports POLLNVAL for /dev/tty. Its select adapter rejects negative fds.
@@ -773,6 +783,9 @@ mod tests {
     fn inactive_descriptors_cannot_spin_on_hangup() {
         assert_eq!(pollfd(4, 0).fd, -1);
         assert_eq!(pollfd(4, libc::POLLIN).fd, 4);
+        assert!(terminal_disconnected(libc::POLLHUP));
+        assert!(terminal_disconnected(libc::POLLERR | libc::POLLIN));
+        assert!(!terminal_disconnected(libc::POLLIN));
     }
 
     #[test]

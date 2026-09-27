@@ -211,7 +211,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
     logs = output / "logs" / f"{scenario['id']}-{seed}-{repeat}"
     logs.mkdir(parents=True)
     try:
-        root, home, facts = workspace.prepare(scenario)
+        root, home, facts = workspace.prepare(scenario, seed, repeat)
         trace = home.parent / "engine.jsonl"
         env = environment(home, args.threads, None if args.legacy else trace, workspace.tools,
                           capture_output=scenario.get("capture_output"))

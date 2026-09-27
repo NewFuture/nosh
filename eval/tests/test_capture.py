@@ -13,7 +13,8 @@ from eval import checks, driver, fixtures, run, suite
 
 def capture_trial(base, scenario):
     root = base / "project"
-    facts = fixtures.create(root, scenario["fixture"])
+    facts = fixtures.create(root, scenario["fixture"],
+                            trial_identity=f"{scenario['id']}:0:0")
     original = subprocess.run([sys.executable, "once.py"], cwd=root,
                               env=fixtures.project_environment(base / "home"),
                               capture_output=True, text=True, check=False)

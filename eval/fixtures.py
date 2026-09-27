@@ -221,7 +221,8 @@ def git(root: Path, *args: str) -> str:
     )
 
 
-def create(root: Path, kind: str, env: dict | None = None) -> dict:
+def create(root: Path, kind: str, env: dict | None = None,
+           trial_identity: str | None = None) -> dict:
     if kind not in FIXTURES:
         raise ValueError(f"unknown fixture: {kind}")
     root.mkdir(mode=0o700)
@@ -270,18 +271,22 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
     elif kind == "failure":
         write(root, "broken.py", "import json\nwith open('config.json') as stream:\n    settings = json.load(stream)\nprint(settings)\n")
     elif kind == "one-shot-failure":
+        diagnostic_id = "CAPTURE-" + hashlib.sha256(
+            (trial_identity or kind).encode()).hexdigest()[:8]
         write(root, "calls.count", "0")
         write(root, "once.py",
-              "import os\nfrom pathlib import Path\nimport sys\n"
+              "from pathlib import Path\nimport sys\n"
               "counter = Path('calls.count')\n"
               "count = int(counter.read_text()) + 1\ncounter.write_text(str(count))\n"
               "if count == 1:\n"
-              "    code = 'CAPTURE-' + os.urandom(4).hex()\n"
-              "    print(f'{code}: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
+              f"    print('{diagnostic_id}: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
               "else:\n"
               "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
               "raise SystemExit(17)\n")
+        facts["diagnostic_id"] = diagnostic_id
     elif kind == "diagnostic-failure":
+        diagnostic_id = "CAPTURE-" + hashlib.sha256(
+            (trial_identity or kind).encode()).hexdigest()[:8]
         write(root, "calls.count", "0")
         write(root, "once.py",
               "import os\nfrom pathlib import Path\nimport sys\n"
@@ -292,12 +297,13 @@ def create(root: Path, kind: str, env: dict | None = None) -> dict:
               "    raise SystemExit(17)\n"
               "if os.environ.get('REGION'):\n"
               "    raise SystemExit(0)\n"
-              "diagnostic_id = 'CAPTURE-' + os.urandom(4).hex()\n"
+              f"diagnostic_id = '{diagnostic_id}'\n"
               "print(f'diagnostic_id: {diagnostic_id}', file=sys.stderr)\n"
               "print('error_code: REGION_UNSET', file=sys.stderr)\n"
               "print('message: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
               "print('exit_code: 17', file=sys.stderr)\n"
               "raise SystemExit(17)\n")
+        facts["diagnostic_id"] = diagnostic_id
     elif kind == "logs":
         write(root, "logs/app.log", "INFO service started\nERROR fixture error\n")
         write(root, "logs/old/access.log", "GET /health 200\n")
@@ -405,14 +411,17 @@ class Workspace:
         elif path.exists():
             shutil.rmtree(path)
 
-    def prepare(self, scenario: dict) -> tuple[Path, Path, dict]:
+    def prepare(self, scenario: dict, seed: int | None = None,
+                repeat: int | None = None) -> tuple[Path, Path, dict]:
         self.clean(scenario["id"])
         base = self.root / scenario["id"]
         base.mkdir(mode=0o700)
         home = base / "home"
         home.mkdir(mode=0o700)
         root = base / "files"
-        return root, home, create(root, scenario["fixture"], project_environment(home, self.tools))
+        identity = scenario["id"] if seed is None else f"{scenario['id']}:{seed}:{repeat}"
+        return root, home, create(
+            root, scenario["fixture"], project_environment(home, self.tools), identity)
 
     def __exit__(self, *_):
         if self.lock:
