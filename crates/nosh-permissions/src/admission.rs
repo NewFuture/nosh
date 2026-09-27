@@ -223,7 +223,11 @@ fn concrete_paths(op: &Operation, ctx: &Context) -> Result<Vec<PathBuf>, String>
                     path.display()
                 ));
             }
-            if access.lexical.as_ref() != Some(path) {
+            if !access
+                .lexical
+                .as_deref()
+                .is_some_and(|lexical| crate::paths::same_workspace_target(lexical, path, ctx))
+            {
                 return Err(format!("target goes through a symlink: {}", path.display()));
             }
             Ok(path.clone())

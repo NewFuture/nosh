@@ -291,9 +291,9 @@ pub fn assess_read(tool: &str, path: &Path, depth: Option<usize>, ctx: &Context)
     }
     if let Some(depth) = depth {
         for (protected, what) in paths::protected_list(ctx) {
-            if protected
-                .strip_prefix(&real)
-                .is_ok_and(|relative| relative.components().count() < depth)
+            let resolved = real_path(&protected, true).unwrap_or_else(|| protected.clone());
+            if paths::relative_path(&resolved, &real)
+                .is_some_and(|relative| relative.components().count() < depth)
             {
                 report.add(
                     Risk::Mutating,
@@ -303,7 +303,7 @@ pub fn assess_read(tool: &str, path: &Path, depth: Option<usize>, ctx: &Context)
                 op.paths.push(PathAccess {
                     kind: AccessKind::List { depth },
                     lexical: Some(protected.clone()),
-                    resolved: Some(protected),
+                    resolved: Some(resolved),
                     extra: false,
                 });
             }

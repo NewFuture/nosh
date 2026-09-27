@@ -81,7 +81,7 @@ impl PathPattern {
         } else {
             Some(ctx.workspace.as_path())
         };
-        base.and_then(|base| path.strip_prefix(base).ok())
+        base.and_then(|base| crate::paths::relative_path(path, base))
             .is_some_and(|relative| self.glob.is_match(relative))
     }
 
@@ -120,6 +120,7 @@ impl PathPattern {
                 .unwrap_or("")
         };
         let base = crate::paths::resolve(prefix, &ctx.workspace, self.home.as_deref());
+        let base = crate::real_path(&base, true).unwrap_or(base);
         access.resolved.as_ref().is_some_and(|root| {
             root.starts_with(&base)
                 || base

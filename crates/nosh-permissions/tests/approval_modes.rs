@@ -646,6 +646,65 @@ fn physical_shell_paths_are_checked_before_lexical_dotdot_collapses() {
 }
 
 #[test]
+fn canonical_targets_keep_the_aliased_workspace_scope() {
+    let (dir, original) = fixture();
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&original.workspace, &alias).unwrap();
+    let context = Context::new(&alias, &alias).with_home(original.home.unwrap());
+    let target = original.workspace.join("new-file");
+    assert_eq!(
+        nosh_permissions::classify_path(&target, &context),
+        nosh_permissions::PathClass::Workspace
+    );
+    assert_eq!(
+        policy("touch new-file", Auto, &context, &UserRules::default()).decision,
+        Decision::Allow
+    );
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("touch".into()),
+            write_paths: vec!["new-file".into()],
+            ..RuleSpec::default()
+        },
+        "workspace file",
+    )
+    .unwrap();
+    assert_eq!(
+        policy(
+            "touch new-file",
+            Confirm,
+            &context,
+            &UserRules {
+                allow: vec![rule.clone()],
+                deny: vec![],
+            }
+        )
+        .decision,
+        Decision::Allow
+    );
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), original.workspace.join("escape")).unwrap();
+    assert!(matches!(
+        policy("touch escape/file", Auto, &context, &UserRules::default()).decision,
+        Decision::Ask { .. }
+    ));
+    std::os::unix::fs::symlink(outside.path().join("target"), target).unwrap();
+    assert!(!matches!(
+        policy(
+            "touch new-file",
+            Confirm,
+            &context,
+            &UserRules {
+                allow: vec![rule],
+                deny: vec![],
+            }
+        )
+        .source,
+        DecisionSource::UserAllow(_)
+    ));
+}
+
+#[test]
 fn automatic_categories_do_not_cover_extra_effects() {
     let (dir, context) = fixture();
     std::fs::write(dir.path().join("existing"), "keep").unwrap();
