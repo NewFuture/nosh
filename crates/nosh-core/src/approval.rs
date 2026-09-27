@@ -1,11 +1,11 @@
-//! Approval channel: the terminal card (y/n/e/a, `yes` for Dangerous) and
+//! Approval channel: the terminal card (`yes` for high risk/built-in prohibitions) and
 //! non-interactive fallbacks (design §6.3, §4.5).
 
 use std::collections::VecDeque;
 use std::io::Write;
 
 use nosh_hub::tr;
-use nosh_permissions::Risk;
+use nosh_permissions::{ApprovalMode, Risk};
 use nosh_shell::{style, term};
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,8 @@ pub struct ApprovalRequest {
     pub strong: bool,
     /// Offer "allow similar for this session".
     pub can_grant: bool,
+    pub can_edit: bool,
+    pub mode: ApprovalMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,9 @@ pub enum ApprovalResponse {
     Edit(String),
     Deny {
         reason: Option<String>,
+    },
+    Unavailable {
+        reason: String,
     },
 }
 
@@ -50,11 +55,9 @@ impl ApprovalChannel for NoTerminal {
             req.risk,
             style::visible(&req.command)
         );
-        ApprovalResponse::Deny {
-            reason: Some(
-                "confirmation required but no terminal is available (the user can rerun with --auto or --yolo)"
-                    .into(),
-            ),
+        ApprovalResponse::Unavailable {
+            reason: "confirmation required but no visible, usable approval terminal is available"
+                .into(),
         }
     }
 }
@@ -119,6 +122,12 @@ impl TerminalApproval {
         let mut err = std::io::stderr();
         let _ = writeln!(
             err,
+            "{b} {} | {}",
+            crate::ui::approval_label(req.mode),
+            tr!("等待你批准", "Awaiting approval")
+        );
+        let _ = writeln!(
+            err,
             "{b} {} {} {}",
             style::dim(style::glyph("╭─", "+-")),
             style::bold(&req.tool),
@@ -163,6 +172,9 @@ impl TerminalApproval {
 
 impl ApprovalChannel for TerminalApproval {
     fn request(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
+        if !term::available() {
+            return NoTerminal.request(req);
+        }
         term::flush_input();
         self.card(req);
         let b = &self.bar;
@@ -188,7 +200,10 @@ impl ApprovalChannel for TerminalApproval {
             };
         }
         let grant = if req.can_grant {
-            tr!("  [a] 本会话同类放行", "  [a] allow similar")
+            tr!(
+                "  [a] 本会话相同操作与范围放行",
+                "  [a] allow same operation and scope"
+            )
         } else {
             ""
         };
@@ -197,10 +212,14 @@ impl ApprovalChannel for TerminalApproval {
             style::dim(&format!(
                 "{} {}",
                 style::glyph("╰─", "+-"),
-                tr!(
-                    "[y] 执行  [n] 拒绝  [e] 编辑",
-                    "[y] run  [n] deny  [e] edit"
-                )
+                if req.can_edit {
+                    tr!(
+                        "[y] 执行  [n] 拒绝  [e] 编辑",
+                        "[y] run  [n] deny  [e] edit"
+                    )
+                } else {
+                    tr!("[y] 执行  [n] 拒绝", "[y] run  [n] deny")
+                }
             )),
             style::dim(grant),
             style::dim(style::glyph(" ›", " >"))
@@ -231,7 +250,7 @@ impl ApprovalChannel for TerminalApproval {
                         reason: self.deny_reason(),
                     };
                 }
-                KeyCode::Char('e' | 'E') => {
+                KeyCode::Char('e' | 'E') if req.can_edit => {
                     eprintln!("e");
                     let prompt = format!("{b}   $ ");
                     return match term::edit_line(&prompt, &req.command) {

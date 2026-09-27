@@ -2,16 +2,16 @@
 //! command line and applies the per-command rules plus path policy.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use brush_parser::ParserOptions;
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 
-use crate::paths::{PathClass, classify_path_real, is_top_level, resolve};
+use crate::paths::{PathClass, classify_path_real, is_top_level};
 use crate::rules::{self, Arg, Target, Verdict, has_flag, opt_value};
-use crate::{Context, Risk, RiskReport};
+use crate::{AccessKind, Context, Operation, PathAccess, Risk, RiskReport};
 
 const MAX_DEPTH: usize = 8;
 /// Largest shell script whose contents are analyzed; bigger ones stay Mutating.
@@ -27,7 +27,18 @@ const PROTECTED_READ: &str = "reads protected path";
 pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
     let mut a = Analyzer {
         ctx,
-        report: RiskReport::default(),
+        report: RiskReport {
+            context: ctx.clone(),
+            ..RiskReport::default()
+        },
+        operation: None,
+        redirecting: false,
+        readonly: ctx
+            .readonly_variables
+            .iter()
+            .map(|name| (name.clone(), ctx.variables.get(name).cloned()))
+            .collect(),
+        unknown_values: ctx.unknown_variables.clone(),
         depth: 0,
         top: false,
         cwd: ctx.cwd.clone(),
@@ -43,7 +54,6 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
         vars: ctx
             .variables
             .iter()
-            .filter(|(_, v)| !v.is_empty())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         exported: ctx.exported.clone(),
@@ -51,6 +61,18 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
         replaying: false,
         calls_left: CALL_BUDGET,
     };
+    for (name, value) in &ctx.execution_variables {
+        match value {
+            Some(value) => {
+                a.vars.insert(name.clone(), value.clone());
+            }
+            None => {
+                a.vars.remove(name);
+                a.unknown_values.insert(name.clone());
+            }
+        }
+        a.exported.insert(name.clone());
+    }
     if cmd.trim().is_empty() {
         a.report.add(Risk::Safe, "empty command");
         return a.report;
@@ -66,6 +88,11 @@ pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
         );
     }
     a.program_text(cmd, true);
+    if cmd.chars().any(hidden_char) {
+        for op in &mut a.report.operations {
+            op.risk = op.risk.max(Risk::Dangerous);
+        }
+    }
     if !a.sudo_inserts.is_empty() {
         a.report.rewritten = Some(insert_sudo_n(cmd, &a.sudo_inserts));
     }
@@ -105,6 +132,10 @@ fn insert_sudo_n(cmd: &str, char_positions: &[usize]) -> String {
 struct Analyzer<'a> {
     ctx: &'a Context,
     report: RiskReport,
+    operation: Option<usize>,
+    redirecting: bool,
+    readonly: HashMap<String, Option<String>>,
+    unknown_values: HashSet<String>,
     depth: usize,
     /// Positions in the current text refer to the original command line.
     top: bool,
@@ -125,10 +156,8 @@ struct Analyzer<'a> {
     bound_vars: HashMap<String, PathBuf>,
     /// `$0` while analyzing a script: the path it was run by.
     script_path: Option<String>,
-    /// Variables with a known, non-empty value: the session's, then
-    /// assignments seen so far. Only used to find protected reads (a value
-    /// can be stale after a branch or loop); for everything else expansions
-    /// stay computed at runtime.
+    /// Known session/execute-environment values and sequential assignments.
+    /// Nonlinear control flow prevents trusting them as exact arguments.
     vars: HashMap<String, String>,
     /// Variables a child process (script, `bash -c`) inherits.
     exported: HashSet<String>,
@@ -415,6 +444,110 @@ const INLINE_CODE_DANGER: &[&str] = &[
 impl Analyzer<'_> {
     fn add(&mut self, risk: Risk, reason: impl Into<String>) {
         self.report.add(risk, reason);
+        if let Some(i) = self.operation {
+            self.report.operations[i].risk = self.report.operations[i].risk.max(risk);
+        }
+    }
+
+    fn uncertain(&mut self, risk: Risk, reason: impl Into<String>) {
+        self.report.uncertain(risk, reason);
+        if let Some(i) = self.operation {
+            self.report.operations[i].risk = self.report.operations[i].risk.max(risk);
+        }
+    }
+
+    fn finish_operation(&mut self) {
+        if let Some(i) = self.operation
+            && self.report.operations[i].payload
+        {
+            let opaque = self.report.incomplete
+                || self.report.operations[i + 1..].iter().any(|op| op.opaque);
+            self.report.operations[i].opaque |= opaque;
+        }
+    }
+
+    fn begin_operation(&mut self, argv: &[Arg]) -> Option<usize> {
+        let previous = self.operation;
+        self.operation = Some(self.report.operations.len());
+        self.report.operations.push(Operation {
+            tool: "run_command".into(),
+            parent: if self.redirecting {
+                previous.and_then(|i| self.report.operations[i].parent)
+            } else {
+                previous
+            },
+            argv: argv
+                .iter()
+                .map(|a| a.resolved().unwrap_or(&a.value).to_string())
+                .collect(),
+            known: argv
+                .iter()
+                .map(|a| {
+                    a.resolved().is_some()
+                        && !a.glob
+                        && (!a.dynamic
+                            || (!self.report.incomplete && !self.child && !self.replaying))
+                })
+                .collect(),
+            cwd: self.cwd.clone(),
+            cwd_known: !self.cwd_unknown && !self.report.incomplete,
+            opaque: (self.child || self.replaying) && argv.iter().any(|arg| arg.dynamic),
+            ..Operation::default()
+        });
+        previous
+    }
+
+    fn opaque(&mut self) {
+        if let Some(i) = self.operation {
+            self.report.operations[i].opaque = true;
+        } else {
+            self.report.incomplete = true;
+        }
+    }
+
+    fn variable(&mut self, name: &str, value: Option<String>) {
+        if let Some(i) = self.operation {
+            self.report.operations[i]
+                .variables
+                .push((name.into(), value));
+        }
+    }
+
+    fn path_access(&mut self, target: &Target, kind: AccessKind) {
+        let lexical = if target.glob
+            || self.cwd_unknown
+            || self.report.incomplete && (target.dynamic || !Path::new(&target.path).is_absolute())
+        {
+            None
+        } else {
+            match (target.dynamic, target.known.as_deref()) {
+                (false, _) => Some(self.resolve(&target.path)),
+                (true, Some(value)) => Some(self.resolve(value)),
+                _ => None,
+            }
+        };
+        let resolved = lexical.as_ref().map(|_| {
+            self.target_path(
+                target.known.as_deref().unwrap_or(&target.path),
+                kind != AccessKind::Delete,
+            )
+        });
+        let access = PathAccess {
+            kind,
+            lexical,
+            resolved,
+            extra: self.redirecting,
+        };
+        if let Some(i) = self.operation {
+            self.report.operations[i].paths.push(access);
+        } else {
+            self.report.operations.push(Operation {
+                tool: "run_command".into(),
+                cwd: self.cwd.clone(),
+                paths: vec![access],
+                ..Operation::default()
+            });
+        }
     }
 
     fn parse(&self, text: &str) -> Result<ast::Program, String> {
@@ -424,6 +557,7 @@ impl Analyzer<'_> {
 
     fn program_text(&mut self, text: &str, top: bool) {
         if self.depth >= MAX_DEPTH {
+            self.report.incomplete = true;
             self.add(Risk::Mutating, "command nesting too deep to analyze");
             return;
         }
@@ -438,13 +572,20 @@ impl Analyzer<'_> {
                 self.depth -= 1;
                 self.top = prev;
             }
-            Err(e) => self.add(Risk::Mutating, format!("could not parse the command ({e})")),
+            Err(e) => {
+                self.report.incomplete = true;
+                if top {
+                    self.report.syntax_error = Some(e.clone());
+                }
+                self.add(Risk::Mutating, format!("could not parse the command ({e})"));
+            }
         }
     }
 
     fn compound_list(&mut self, cl: &ast::CompoundList) {
         for ast::CompoundListItem(aol, sep) in &cl.0 {
             if matches!(sep, ast::SeparatorOperator::Async) {
+                self.report.incomplete = true;
                 self.add(Risk::Mutating, "starts a background job");
             }
             self.pipeline(&aol.first);
@@ -548,12 +689,17 @@ impl Analyzer<'_> {
         match c {
             ast::Command::Simple(sc) => self.simple(sc),
             ast::Command::Compound(cc, redirs) => {
+                let previous = self.begin_operation(&[]);
+                if let Some(i) = self.operation {
+                    self.report.operations[i].transparent = true;
+                }
                 self.compound(cc);
                 if let Some(r) = redirs {
                     for x in &r.0 {
                         self.redirect(x);
                     }
                 }
+                self.operation = previous;
             }
             ast::Command::Function(fd) => self.function_def(fd),
             ast::Command::ExtendedTest(e, redirs) => {
@@ -569,6 +715,9 @@ impl Analyzer<'_> {
 
     fn compound(&mut self, cc: &ast::CompoundCommand) {
         use ast::CompoundCommand as C;
+        if !matches!(cc, C::BraceGroup(_) | C::Subshell(_)) {
+            self.report.incomplete = true;
+        }
         match cc {
             C::Arithmetic(a) => {
                 self.unbind_in(&a.expr.value);
@@ -671,6 +820,7 @@ impl Analyzer<'_> {
             Ok(pieces) => {
                 let mut arg = Arg {
                     value: String::new(),
+                    quoted: false,
                     dynamic: false,
                     glob: false,
                     bound: false,
@@ -688,6 +838,7 @@ impl Analyzer<'_> {
             }
             Err(_) => Arg {
                 value: raw.to_string(),
+                quoted: false,
                 dynamic: true,
                 glob: false,
                 bound: false,
@@ -815,8 +966,12 @@ impl Analyzer<'_> {
                     }
                     push_lit(arg, s);
                 }
-                WordPiece::SingleQuotedText(s) => push_lit(arg, s),
+                WordPiece::SingleQuotedText(s) => {
+                    arg.quoted = true;
+                    push_lit(arg, s);
+                }
                 WordPiece::AnsiCQuotedText(s) => {
+                    arg.quoted = true;
                     if has_escape_obfuscation(src) || has_escape_obfuscation(s) {
                         self.add(
                             Risk::Dangerous,
@@ -827,10 +982,23 @@ impl Analyzer<'_> {
                 }
                 WordPiece::DoubleQuotedSequence(inner)
                 | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                    arg.quoted = true;
                     self.pieces(raw, inner, arg, true);
                 }
                 WordPiece::TildeExpansion(t) => match t {
-                    TildeExpr::Home => push_lit(arg, "~"),
+                    TildeExpr::Home => {
+                        if let Some(home) = self.vars.get("HOME") {
+                            push_lit(arg, home);
+                        } else if self.unknown_values.contains("HOME") || self.report.incomplete {
+                            push_expansion(arg, "~", None);
+                        } else if let Some(home) =
+                            self.ctx.user_home.as_ref().or(self.ctx.home.as_ref())
+                        {
+                            push_lit(arg, &home.to_string_lossy());
+                        } else {
+                            push_expansion(arg, "~", None);
+                        }
+                    }
                     TildeExpr::UserHome(u) => push_expansion(arg, &format!("~{u}"), None),
                     _ => push_expansion(arg, "~+", None),
                 },
@@ -842,10 +1010,6 @@ impl Analyzer<'_> {
                         );
                     }
                     match param_name(src) {
-                        Some("HOME") if src == "$HOME" || src == "${HOME}" => push_lit(arg, "~"),
-                        Some("PWD") if src == "$PWD" || src == "${PWD}" => {
-                            push_lit(arg, &self.cwd.to_string_lossy())
-                        }
                         _ if self.script_path.is_some()
                             && matches!(
                                 src,
@@ -888,6 +1052,16 @@ impl Analyzer<'_> {
     }
 
     fn simple(&mut self, sc: &ast::SimpleCommand) {
+        let declaration = sc
+            .word_or_name
+            .as_ref()
+            .and_then(|word| self.static_word(word))
+            .is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "export" | "declare" | "typeset" | "local" | "readonly"
+                )
+            });
         let mut assigns: Vec<String> = Vec::new();
         let mut values: Vec<Option<String>> = Vec::new();
         let mut redirects: Vec<&ast::IoRedirect> = Vec::new();
@@ -945,15 +1119,46 @@ impl Analyzer<'_> {
         if let Some(suffix) = &sc.suffix {
             for item in &suffix.0 {
                 match item {
-                    ast::CommandPrefixOrSuffixItem::Word(w) => argv.push(self.word(w)),
+                    ast::CommandPrefixOrSuffixItem::Word(w)
+                    | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
+                        let assignment = declaration
+                            .then(|| w.value.split_once('='))
+                            .flatten()
+                            .filter(|(name, _)| {
+                                !name.is_empty()
+                                    && name
+                                        .trim_end_matches('+')
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            });
+                        if let Some((name, value)) = assignment {
+                            let mut arg = self.word_text(value);
+                            arg.value = format!("{name}={}", arg.value);
+                            arg.known = arg.known.map(|value| format!("{name}={value}"));
+                            argv.push(arg);
+                        } else {
+                            argv.push(self.word(w));
+                        }
+                    }
                     ast::CommandPrefixOrSuffixItem::IoRedirect(r) => redirects.push(r),
-                    ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => argv.push(self.word(w)),
                     ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
                         self.compound_list(&sub.list);
                         argv.push(Arg::lit("/dev/fd/63"));
                     }
                 }
             }
+        }
+        let disappears = |arg: &Arg| arg.dynamic && !arg.quoted && arg.resolved() == Some("");
+        if argv.first().is_some_and(disappears) {
+            name_end = None;
+        }
+        argv.retain(|arg| !disappears(arg));
+        let previous_operation = self.begin_operation(&argv);
+        if let Some(i) = self.operation {
+            self.report.operations[i].extra_variables = !argv.is_empty() && !assigns.is_empty();
+        }
+        for (name, value) in assigns.iter().zip(&values) {
+            self.variable(name, value.clone());
         }
         for r in redirects {
             self.redirect(r);
@@ -964,7 +1169,13 @@ impl Analyzer<'_> {
                 self.set_var(n, v.as_deref());
             }
         }
+        let known_before: Vec<_> = self.vars.keys().cloned().collect();
         self.unbind(&assigns, &argv);
+        self.unknown_values.extend(
+            known_before
+                .into_iter()
+                .filter(|name| !self.vars.contains_key(name)),
+        );
         if argv.is_empty() {
             for n in &assigns {
                 if let Some((risk, why)) = rules::var_assignment_risk(n) {
@@ -974,7 +1185,10 @@ impl Analyzer<'_> {
             }
             if !assigns.is_empty() {
                 self.push_command(format!("{}=…", assigns.join("=… ")));
+                self.add(Risk::Mutating, "sets session variables");
+                self.report.changes_session = true;
             }
+            self.operation = previous_operation;
             return;
         }
         for n in &assigns {
@@ -1007,13 +1221,15 @@ impl Analyzer<'_> {
             self.set_var(n, v.as_deref());
             self.exported.insert(n.clone());
         }
-        self.exec(argv, name_end);
+        self.exec_inner(argv, name_end);
+        self.finish_operation();
         for (n, v, exported) in before {
             self.set_var(&n, v.as_deref());
             if !exported {
                 self.exported.remove(&n);
             }
         }
+        self.operation = previous_operation;
     }
 
     /// Records a simple command of the line (once).
@@ -1026,6 +1242,8 @@ impl Analyzer<'_> {
     fn redirect(&mut self, r: &ast::IoRedirect) {
         use ast::IoFileRedirectKind as K;
         use ast::IoFileRedirectTarget as T;
+        let previous = self.redirecting;
+        self.redirecting = true;
         match r {
             ast::IoRedirect::File(_, kind, target) => {
                 let t = match target {
@@ -1072,6 +1290,7 @@ impl Analyzer<'_> {
                 }
             }
         }
+        self.redirecting = previous;
     }
 
     fn class_of(&self, a: &Arg) -> Option<PathClass> {
@@ -1082,15 +1301,31 @@ impl Analyzer<'_> {
     }
 
     fn resolve(&self, p: &str) -> PathBuf {
-        resolve(p, &self.cwd, self.ctx.home_dir())
+        crate::paths::resolve_literal(p, &self.cwd)
+    }
+
+    fn target_path(&self, path: &str, follow_last: bool) -> PathBuf {
+        let path = Path::new(path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd.join(path)
+        };
+        let real = crate::real_path(&path, follow_last).unwrap_or(path);
+        crate::paths::resolve_literal(&real.to_string_lossy(), Path::new("/"))
     }
 
     fn function_def(&mut self, fd: &ast::FunctionDefinition) {
+        self.report.incomplete = true;
         let name = self
             .static_word(&fd.fname)
             .unwrap_or_else(|| fd.fname.value.clone());
+        let previous = self.begin_operation(&[]);
+        self.variable(&format!("function:{name}"), Some(fd.body.to_string()));
+        self.opaque();
         self.add(Risk::Mutating, format!("defines shell function {name}"));
         self.report.changes_session = true;
+        self.operation = previous;
         let mut calls = 0usize;
         let mut async_calls = false;
         count_calls(&fd.body.0, &name, &mut calls, &mut async_calls, self);
@@ -1115,6 +1350,28 @@ impl Analyzer<'_> {
     }
 
     fn write_effect(&mut self, t: &Target, v: &Verdict) {
+        self.path_access(
+            t,
+            if v.deletes {
+                AccessKind::Delete
+            } else {
+                AccessKind::Write
+            },
+        );
+        if v.recursive
+            && v.deletes
+            && !t.dynamic
+            && !t.glob
+            && matches!(
+                crate::classify_path(&self.resolve(&t.path), self.ctx),
+                PathClass::Root | PathClass::Home
+            )
+        {
+            self.add(
+                Risk::Forbidden,
+                "recursively deletes the root or a home directory",
+            );
+        }
         if t.dynamic && t.bound && !v.deletes && self.cwd_in_workspace() {
             // Chosen at runtime, but only among workspace files (`for f in
             // *.txt; do mv …`, `find . -exec cp {} {}.bak`). Deletes stay below.
@@ -1130,7 +1387,7 @@ impl Analyzer<'_> {
             } else {
                 "writes to a path computed at runtime"
             };
-            self.add(v.risk.max(Risk::Mutating).bump(), why);
+            self.uncertain(v.risk.max(Risk::Mutating).bump(), why);
             self.report.writes_outside_workspace = true;
             return;
         }
@@ -1145,9 +1402,25 @@ impl Analyzer<'_> {
             };
         }
         let lexical = self.resolve(&p);
+        if v.recursive
+            && v.deletes
+            && self
+                .vars
+                .get("HOME")
+                .is_some_and(|home| self.resolve(home) == lexical)
+        {
+            self.add(
+                Risk::Forbidden,
+                "recursively deletes the effective home directory",
+            );
+        }
         let changes = if v.deletes { "deletes" } else { "modifies" };
         // `rm` removes a symlink itself; writes go through it.
-        let (class, resolved) = classify_path_real(&lexical, self.ctx, !v.deletes);
+        let resolved = self.target_path(&p, !v.deletes);
+        let class = match classify_path_real(&lexical, self.ctx, !v.deletes).0 {
+            protected @ PathClass::Protected(_) => protected,
+            _ => crate::classify_path(&resolved, self.ctx),
+        };
         match class {
             PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
             PathClass::Protected(l) => {
@@ -1213,26 +1486,49 @@ impl Analyzer<'_> {
     }
 
     fn read_effect(&mut self, t: &Target) {
+        self.path_access(t, AccessKind::Read);
         let path = match (&t.known, t.dynamic) {
             (_, false) => t.path.as_str(),
             (Some(k), true) => k.as_str(),
-            (None, true) => return,
+            (None, true) => {
+                self.opaque();
+                self.uncertain(Risk::Mutating, "read target cannot be determined");
+                return;
+            }
         };
-        if let (PathClass::Protected(l), _) =
-            classify_path_real(&self.resolve(path), self.ctx, true)
-        {
+        if path.is_empty() {
+            return;
+        }
+        let class = match classify_path_real(&self.resolve(path), self.ctx, true).0 {
+            protected @ PathClass::Protected(_) => protected,
+            _ => crate::classify_path(&self.target_path(path, true), self.ctx),
+        };
+        if let PathClass::Protected(l) = class {
             self.add(Risk::Mutating, format!("{PROTECTED_READ} {l}"));
             self.report.reads_protected = true;
         }
     }
 
     fn apply(&mut self, v: Verdict) {
+        if v.unlisted {
+            self.opaque();
+        }
         self.add(v.risk, v.reason.clone());
         if v.network {
             self.report.network = true;
+            if let Some(i) = self.operation {
+                self.report.operations[i].network = true;
+                self.report.operations[i].hosts = network_hosts(&self.report.operations[i]);
+            }
         }
         if v.session {
             self.report.changes_session = true;
+            if self
+                .operation
+                .is_some_and(|i| self.report.operations[i].variables.is_empty())
+            {
+                self.opaque();
+            }
         }
         for w in &v.writes {
             self.write_effect(w, &v);
@@ -1260,8 +1556,19 @@ impl Analyzer<'_> {
             return true;
         }
         let Some(text) = read_script(path, by_shell, self.script_budget) else {
+            self.opaque();
             return false;
         };
+        if let Some(i) = self.operation {
+            self.report.operations[i].payload = true;
+        }
+        self.read_effect(&Target {
+            path: shown.to_string(),
+            dynamic: false,
+            glob: false,
+            bound: false,
+            known: None,
+        });
         self.script_budget -= text.len();
         // A child process sees neither the session's aliases nor its
         // functions, and of its variables only the exported ones.
@@ -1273,6 +1580,10 @@ impl Analyzer<'_> {
         let mut sub = Analyzer {
             ctx: &child_ctx,
             report: RiskReport::default(),
+            operation: None,
+            redirecting: false,
+            readonly: HashMap::new(),
+            unknown_values: self.unknown_values.clone(),
             depth: self.depth,
             top: false,
             cwd: self.cwd.clone(),
@@ -1298,10 +1609,24 @@ impl Analyzer<'_> {
         for f in sub.report.findings {
             // Protected reads ask as they would on the command line.
             if f.risk >= Risk::Dangerous || f.reason.contains(PROTECTED_READ) {
-                self.add(f.risk, format!("{shown}: {}", f.reason));
+                if f.uncertain {
+                    self.uncertain(f.risk, format!("{shown}: {}", f.reason));
+                } else {
+                    self.add(f.risk, format!("{shown}: {}", f.reason));
+                }
             }
         }
         self.report.reads_protected |= sub.report.reads_protected;
+        self.report.network |= sub.report.network;
+        self.report.writes_outside_workspace |= sub.report.writes_outside_workspace;
+        self.report.incomplete |= sub.report.incomplete;
+        let offset = self.report.operations.len();
+        for mut op in sub.report.operations {
+            op.parent = op.parent.map(|i| i + offset).or(self.operation);
+            self.report.operations.push(op);
+        }
+        self.report.scripts.push((path.to_path_buf(), text));
+        self.report.scripts.extend(sub.report.scripts);
         true
     }
 
@@ -1323,17 +1648,32 @@ impl Analyzer<'_> {
         if self.bound_vars.contains_key(name) {
             return None;
         }
-        self.vars.get(name).cloned()
+        if let Some(value) = self.readonly.get(name) {
+            return value.clone();
+        }
+        self.vars.get(name).cloned().or_else(|| {
+            (self.ctx.variables_complete
+                && !self.child
+                && !self.replaying
+                && !self.report.incomplete
+                && !self.unknown_values.contains(name))
+            .then(String::new)
+        })
     }
 
     /// Records what an assignment leaves in `name`: a known value or unknown.
     fn set_var(&mut self, name: &str, value: Option<&str>) {
         self.bound_vars.remove(name);
-        match value.filter(|v| !v.is_empty()) {
+        if self.readonly.contains_key(name) {
+            return;
+        }
+        match value {
             Some(v) => {
+                self.unknown_values.remove(name);
                 self.vars.insert(name.to_string(), v.to_string());
             }
             None => {
+                self.unknown_values.insert(name.into());
                 self.vars.remove(name);
             }
         }
@@ -1342,6 +1682,8 @@ impl Analyzer<'_> {
     /// Runs `f` as a child shell (subshell, `$(…)`, `bash -c`): `exit`/`exec`,
     /// `cd`, variables, functions and session settings stay in it.
     fn in_child(&mut self, f: impl FnOnce(&mut Self)) {
+        let readonly = self.readonly.clone();
+        let unknown = self.unknown_values.clone();
         let saved = (
             self.child,
             self.cwd.clone(),
@@ -1366,6 +1708,8 @@ impl Analyzer<'_> {
             self.exported,
             self.positional,
         ) = saved;
+        self.readonly = readonly;
+        self.unknown_values = unknown;
     }
 
     /// The output of a command substitution that needs no execution:
@@ -1386,7 +1730,6 @@ impl Analyzer<'_> {
                 ast::AndOr::Or(_) => return None,
             }
         }
-        let ctx = self.ctx;
         let mut cwd = self.cwd.clone();
         let mut out = None;
         for p in steps {
@@ -1411,22 +1754,59 @@ impl Analyzer<'_> {
                 }
                 words.push(a.value);
             }
-            let operand = || words[1..].iter().rfind(|w| !w.starts_with('-'));
-            let home = ctx.home_dir();
+            if self.ctx.aliases.contains_key(&words[0])
+                || self.ctx.functions.contains_key(&words[0])
+                || self.local_funcs.contains_key(&words[0])
+            {
+                return None;
+            }
             match words[0].as_str() {
-                "cd" => cwd = resolve(operand()?, &cwd, home),
-                "pwd" => out = Some(cwd.display().to_string()),
-                "dirname" => {
-                    let p = operand()?.trim_end_matches('/');
+                "cd" if words.len() == 2
+                    && self.vars.get("CDPATH").is_none_or(String::is_empty) =>
+                {
+                    let target = crate::paths::resolve_literal(&words[1], &cwd);
+                    if !target.is_dir() {
+                        return None;
+                    }
+                    cwd = target;
+                }
+                "pwd" if words.len() == 1 || words.len() == 2 && words[1] == "-L" => {
+                    out = Some(cwd.display().to_string())
+                }
+                "pwd" if words.len() == 2 && words[1] == "-P" => {
+                    out = Some(
+                        std::fs::canonicalize(&cwd)
+                            .ok()?
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                "dirname" if words.len() == 2 && !words[1].starts_with('-') => {
+                    let p = words[1].trim_end_matches('/');
                     out = Some(match p.rfind('/') {
+                        _ if p.is_empty() => "/".to_string(),
                         Some(0) => "/".to_string(),
                         Some(i) => p[..i].to_string(),
                         None => ".".to_string(),
                     });
                 }
-                "realpath" => out = Some(resolve(operand()?, &cwd, home).display().to_string()),
-                "readlink" if words.iter().any(|w| w == "-f" || w == "-e" || w == "-m") => {
-                    out = Some(resolve(operand()?, &cwd, home).display().to_string())
+                "realpath" if words.len() == 2 && !words[1].starts_with('-') => {
+                    out = Some(
+                        std::fs::canonicalize(cwd.join(&words[1]))
+                            .ok()?
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                "readlink"
+                    if words.len() == 3 && matches!(words[1].as_str(), "-f" | "-e" | "-m") =>
+                {
+                    out = Some(
+                        std::fs::canonicalize(cwd.join(&words[2]))
+                            .ok()?
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
                 }
                 _ => return None,
             }
@@ -1468,21 +1848,43 @@ impl Analyzer<'_> {
 
     /// Dispatches one simple command (`argv[0]` is the command name).
     fn exec(&mut self, argv: Vec<Arg>, name_end: Option<usize>) {
+        let previous = self.begin_operation(&argv);
+        self.exec_inner(argv, name_end);
+        self.finish_operation();
+        self.operation = previous;
+    }
+
+    fn exec_inner(&mut self, argv: Vec<Arg>, name_end: Option<usize>) {
         let Some(name_arg) = argv.first() else {
             return;
         };
-        if name_arg.dynamic {
-            self.add(
+        if name_arg.dynamic && (name_arg.resolved().is_none() || self.report.incomplete) {
+            self.opaque();
+            self.uncertain(
                 Risk::Dangerous,
                 format!("command name is computed at runtime ({})", name_arg.value),
             );
             return;
         }
-        let name = name_arg.value.clone();
-        let args: Vec<Arg> = argv[1..].to_vec();
+        let name = name_arg.resolved().unwrap_or(&name_arg.value).to_string();
+        let args: Vec<Arg> = argv[1..]
+            .iter()
+            .map(|arg| {
+                if !self.report.incomplete
+                    && !arg.glob
+                    && let Some(value) = arg.resolved()
+                {
+                    return Arg::lit(value);
+                }
+                arg.clone()
+            })
+            .collect();
 
         if !name.contains('/') {
             if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
+                if let Some(i) = self.operation {
+                    self.report.operations[i].transparent = true;
+                }
                 let key = format!("alias:{name}");
                 if !self.expanding.contains(&key) {
                     self.expanding.insert(key.clone());
@@ -1492,10 +1894,16 @@ impl Analyzer<'_> {
                 }
             }
             if let Some(body) = self.local_funcs.get(&name).cloned() {
+                if let Some(i) = self.operation {
+                    self.report.operations[i].transparent = true;
+                }
                 self.replay(format!("fn:{name}"), &body, &args);
                 return;
             }
             if let Some(body) = self.ctx.functions.get(&name).cloned() {
+                if let Some(i) = self.operation {
+                    self.report.operations[i].transparent = true;
+                }
                 let key = format!("fn:{name}");
                 if self.expanding.contains(&key) {
                     self.add(Risk::Mutating, format!("recursive function {name}"));
@@ -1509,22 +1917,24 @@ impl Analyzer<'_> {
         let base = basename(&name).to_string();
         if name.contains('/') && !in_system_bin_dir(&name) {
             // `./x.sh`, `/path/x.sh`, `~/bin/x.sh`: a shell script is analyzed.
-            let path = self.resolve(&name);
+            let path = self.target_path(&name, true);
             if self.script(&name, &path, false, &args) {
                 self.add(Risk::Mutating, format!("runs shell script {name}"));
                 return;
             }
             if !name.starts_with('/') && !name.starts_with('~') {
+                self.opaque();
                 self.add(Risk::Mutating, format!("runs local program {name}"));
                 return;
             }
         }
+        if let Some(i) = self.operation {
+            self.report.operations[i].transparent |= matches!(
+                base.as_str(),
+                "command" | "builtin" | "env" | "timeout" | "time" | "nice" | "nohup" | "stdbuf"
+            );
+        }
         match base.as_str() {
-            // A sourced file can set anything: forget what was known.
-            "source" | "." => {
-                self.vars.clear();
-                self.bound_vars.clear();
-            }
             "shift" => self.positional = None,
             "set"
                 if args
@@ -1564,6 +1974,37 @@ impl Analyzer<'_> {
                 }
             }
             "env" => self.env(&args),
+            "source" | "." => {
+                self.add(Risk::Mutating, "sources a script into the session");
+                self.report.changes_session = true;
+                if let Some(i) = self.operation {
+                    self.report.operations[i].payload = true;
+                }
+                if let Some(arg) = args.first() {
+                    self.read_effect(&target_of(arg));
+                }
+                if let Some(value) = args.first().filter(|a| !a.glob).and_then(Arg::resolved) {
+                    let path = self.target_path(value, true);
+                    if let Some(text) = read_script(&path, true, self.script_budget) {
+                        self.script_budget -= text.len();
+                        let positional = self.positional.clone();
+                        if args.len() > 1 {
+                            self.positional = Some(known_values(&args[1..]));
+                        }
+                        self.program_text(&text, false);
+                        self.positional = positional;
+                        self.report.scripts.push((path, text));
+                    } else {
+                        self.report.incomplete = true;
+                        self.vars.clear();
+                        self.bound_vars.clear();
+                    }
+                } else {
+                    self.report.incomplete = true;
+                    self.vars.clear();
+                    self.bound_vars.clear();
+                }
+            }
             "command" => {
                 if has_flag(&args, &['v', 'V'], &[]) {
                     self.add(Risk::Safe, "command lookup");
@@ -1663,7 +2104,24 @@ impl Analyzer<'_> {
                     self.program_text(&s, false);
                 }
             }
-            b if SHELLS.contains(&b) || b == "busybox" => self.shell_c(b, &args),
+            b if SHELLS.contains(&b) || b == "busybox" => {
+                if let Some(i) = self.operation {
+                    self.report.operations[i].payload = true;
+                    self.report.operations[i].transparent =
+                        SH_SYNTAX.contains(&b) && args.first().is_some_and(|a| a.value == "-c");
+                }
+                if ["ENV", "BASH_ENV"]
+                    .iter()
+                    .any(|name| self.exported.contains(*name))
+                {
+                    self.opaque();
+                    self.uncertain(
+                        Risk::Dangerous,
+                        "child shell startup code is not part of the visible command",
+                    );
+                }
+                self.shell_c(b, &args);
+            }
             "python" | "python2" | "python3" | "perl" | "ruby" | "node" | "php" | "lua"
             | "deno" | "bun" | "Rscript" | "julia" => {
                 let code = opt_value(&args, Some('c'), &[])
@@ -1672,6 +2130,7 @@ impl Analyzer<'_> {
                     .next()
                     .map(|a| a.value.clone());
                 if let Some(code) = code {
+                    self.opaque();
                     if INLINE_CODE_DANGER.iter().any(|p| code.contains(p)) {
                         self.add(
                             Risk::Dangerous,
@@ -1704,6 +2163,9 @@ impl Analyzer<'_> {
             "unset" => self.unset(&args),
             "cd" | "pushd" => self.cd(&args),
             "popd" => {
+                self.add(Risk::Mutating, "changes the directory stack");
+                self.report.changes_session = true;
+                self.opaque();
                 self.cwd_unknown = true;
                 self.vars.remove("OLDPWD");
             }
@@ -1721,6 +2183,32 @@ impl Analyzer<'_> {
                     self.apply(v);
                 }
             }
+        }
+        if let Some(i) = self.operation
+            && self.report.operations[i].risk >= Risk::Mutating
+            && matches!(
+                base.as_str(),
+                "cargo"
+                    | "go"
+                    | "npm"
+                    | "pnpm"
+                    | "yarn"
+                    | "make"
+                    | "gmake"
+                    | "cmake"
+                    | "ninja"
+                    | "ctest"
+                    | "pytest"
+                    | "gradle"
+                    | "mvn"
+                    | "python"
+                    | "python3"
+                    | "node"
+                    | "java"
+                    | "dotnet"
+            )
+        {
+            self.report.operations[i].opaque = true;
         }
     }
 
@@ -1830,19 +2318,63 @@ impl Analyzer<'_> {
     }
 
     fn env(&mut self, args: &[Arg]) {
+        let readonly = std::mem::take(&mut self.readonly);
+        let unknown = self.unknown_values.clone();
+        let saved = (
+            self.vars.clone(),
+            self.exported.clone(),
+            self.cwd.clone(),
+            self.cwd_unknown,
+        );
+        self.env_inner(args);
+        (self.vars, self.exported, self.cwd, self.cwd_unknown) = saved;
+        self.readonly = readonly;
+        self.unknown_values = unknown;
+    }
+
+    fn env_inner(&mut self, args: &[Arg]) {
         let mut i = 0;
         while i < args.len() {
             let v = args[i].value.clone();
             match v.as_str() {
-                "-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug" | "-" => i += 1,
-                "-u" | "--unset" | "-C" | "--chdir" => i += 2,
+                "-i" | "--ignore-environment" | "-" => {
+                    self.opaque();
+                    self.add(Risk::Mutating, "clears the child process environment");
+                    self.vars.clear();
+                    self.exported.clear();
+                    i += 1;
+                }
+                "-0" | "--null" | "-v" | "--debug" => i += 1,
+                "-u" | "--unset" => {
+                    self.opaque();
+                    self.add(Risk::Mutating, "removes a child process variable");
+                    if let Some(name) = args.get(i + 1) {
+                        self.vars.remove(&name.value);
+                        self.exported.remove(&name.value);
+                    }
+                    i += 2;
+                }
+                "-C" | "--chdir" => {
+                    self.opaque();
+                    self.add(Risk::Mutating, "changes the child process directory");
+                    if let Some(path) = args.get(i + 1).and_then(Arg::resolved) {
+                        self.cwd = self.resolve(path);
+                    } else {
+                        self.cwd_unknown = true;
+                    }
+                    i += 2;
+                }
                 "-S" | "--split-string" => {
                     if let Some(s) = args.get(i + 1) {
-                        if s.dynamic {
-                            self.add(Risk::Dangerous, "env -S with a string built at runtime");
-                        } else {
-                            let s = s.value.clone();
+                        if let Some(s) = s.resolved().filter(|_| !self.report.incomplete) {
+                            let s = s.to_string();
                             self.program_text(&s, false);
+                        } else {
+                            self.opaque();
+                            self.uncertain(
+                                Risk::Dangerous,
+                                "env -S with a string built at runtime",
+                            );
                         }
                     }
                     return;
@@ -1854,6 +2386,14 @@ impl Analyzer<'_> {
                 x if x.starts_with('-') => i += 1,
                 x if x.contains('=') && !x.starts_with('=') => {
                     let name = x.split('=').next().unwrap_or("");
+                    let value = args[i]
+                        .resolved()
+                        .and_then(|s| s.split_once('='))
+                        .map(|(_, value)| value.to_string());
+                    self.variable(name, value.clone());
+                    self.set_var(name, value.as_deref());
+                    self.exported.insert(name.to_string());
+                    self.add(Risk::Mutating, "sets a child process variable");
                     if matches!(name, "LD_PRELOAD" | "LD_AUDIT" | "BASH_ENV" | "ENV") {
                         self.add(
                             Risk::Dangerous,
@@ -1902,6 +2442,7 @@ impl Analyzer<'_> {
         let mut argv = rest;
         argv.push(Arg {
             value: "<stdin items>".into(),
+            quoted: false,
             dynamic: true,
             glob: false,
             bound: false,
@@ -1963,6 +2504,7 @@ impl Analyzer<'_> {
                         inner.push(if a.value.contains("{}") {
                             Arg {
                                 value: a.value.clone(),
+                                quoted: a.quoted,
                                 dynamic: true,
                                 glob: false,
                                 bound: bound_starts
@@ -2037,7 +2579,7 @@ impl Analyzer<'_> {
                 );
                 self.read_effect(&target_of(script));
                 if !script.dynamic && SH_SYNTAX.contains(&base) {
-                    let path = self.resolve(&script.value);
+                    let path = self.target_path(&script.value, true);
                     // Everything after the script is its arguments.
                     let after = args
                         .iter()
@@ -2087,7 +2629,17 @@ impl Analyzer<'_> {
             && (base == "export" && flags.iter().any(|f| f.contains('n'))
                 || flags.iter().any(|f| f.starts_with('+') && f.contains('x')));
         for a in &assigns {
-            let name = a.value.split('=').next().unwrap_or("");
+            let raw_name = a.value.split('=').next().unwrap_or("");
+            let name = raw_name.trim_end_matches('+');
+            if a.value.contains('=') || exports || unexports {
+                self.variable(
+                    name,
+                    a.resolved()
+                        .and_then(|v| v.split_once('=').map(|(_, v)| v.to_string())),
+                );
+                self.add(Risk::Mutating, "changes session variables");
+                self.report.changes_session = true;
+            }
             if let Some((risk, why)) = rules::var_assignment_risk(name) {
                 self.add(risk, why);
                 self.report.changes_session = true;
@@ -2097,17 +2649,36 @@ impl Analyzer<'_> {
                 continue;
             }
             if a.value.contains('=') {
-                let value = a
+                let mut value = a
                     .resolved()
                     .filter(|_| !a.glob && !converts)
                     .and_then(|r| r.split_once('='))
                     .map(|(_, v)| v.to_string());
+                if raw_name.ends_with('+') {
+                    value = value.and_then(|value| {
+                        (!self.unknown_values.contains(name)).then(|| {
+                            format!(
+                                "{}{value}",
+                                self.vars.get(name).map(String::as_str).unwrap_or("")
+                            )
+                        })
+                    });
+                }
                 self.set_var(name, value.as_deref());
             }
             if exports {
                 self.exported.insert(name.to_string());
             } else if unexports {
                 self.exported.remove(name);
+            }
+            if base == "readonly"
+                || flags
+                    .iter()
+                    .any(|flag| flag.starts_with('-') && flag.contains('r'))
+            {
+                self.readonly
+                    .entry(name.to_string())
+                    .or_insert_with(|| self.vars.get(name).cloned());
             }
         }
         if !any {
@@ -2121,29 +2692,67 @@ impl Analyzer<'_> {
             self.report.changes_session = true;
         }
         for a in rules::operands(args) {
+            self.variable(&a.value, None);
+            self.add(Risk::Mutating, "unsets a session variable");
+            self.report.changes_session = true;
             if rules::KEY_VARS.contains(&a.value.as_str()) || a.dynamic {
                 self.add(Risk::Mutating, format!("unsets key variable {}", a.value));
                 self.report.changes_session = true;
             }
             self.exported.remove(&a.value);
+            if !self.readonly.contains_key(&a.value) {
+                self.unknown_values.remove(&a.value);
+            }
         }
         self.add(Risk::Safe, "unset");
     }
 
     fn cd(&mut self, args: &[Arg]) {
-        self.add(Risk::Safe, "changes directory");
+        self.add(Risk::Mutating, "changes directory");
+        self.report.changes_session = true;
         self.vars.remove("OLDPWD");
         match rules::operands(args).first() {
             None => {
-                if let Some(h) = self.ctx.home_dir() {
-                    self.cwd = h.to_path_buf();
+                if let Some(home) = self
+                    .known_expansion("$HOME")
+                    .filter(|home| !home.is_empty())
+                {
+                    self.cwd = self.resolve(&home);
+                } else {
+                    self.cwd_unknown = true;
                 }
             }
             Some(a) if a.dynamic || a.value == "-" => self.cwd_unknown = true,
             Some(a) => {
-                self.cwd = self.resolve(&a.value);
+                self.cwd = if has_flag(args, &['P'], &[]) {
+                    self.target_path(&a.value, true)
+                } else {
+                    self.resolve(&a.value)
+                };
             }
         }
+        if rules::operands(args).len() > 1
+            || !self.cwd.is_dir()
+            || self
+                .vars
+                .get("CDPATH")
+                .is_some_and(|value| !value.is_empty())
+            || args.iter().take_while(|arg| arg.value != "--").any(|arg| {
+                arg.value.starts_with('-') && !matches!(arg.value.as_str(), "-L" | "-P" | "-")
+            })
+        {
+            self.cwd_unknown = true;
+        }
+        if self.cwd_unknown {
+            self.set_var("PWD", None);
+        } else {
+            let pwd = self.cwd.to_string_lossy().into_owned();
+            self.set_var("PWD", Some(&pwd));
+        }
+        self.variable(
+            "PWD",
+            (!self.cwd_unknown).then(|| self.cwd.to_string_lossy().into_owned()),
+        );
     }
 }
 
@@ -2155,6 +2764,81 @@ fn target_of(a: &Arg) -> Target {
         bound: a.bound,
         known: a.known.clone(),
     }
+}
+
+fn network_hosts(op: &Operation) -> Vec<String> {
+    if op.known.iter().any(|known| !known) {
+        return Vec::new();
+    }
+    let name = op.argv.first().map(|a| basename(a)).unwrap_or("");
+    if matches!(name, "ping" | "ping6") {
+        let mut hosts = Vec::new();
+        let mut i = 1;
+        while i < op.argv.len() {
+            let word = &op.argv[i];
+            if matches!(
+                word.as_str(),
+                "-c" | "-W" | "-w" | "-t" | "-I" | "-S" | "-s" | "-i" | "-l" | "-p" | "-m"
+            ) {
+                i += 2;
+                continue;
+            }
+            if !word.starts_with('-') {
+                hosts.push(word.clone());
+            }
+            i += 1;
+        }
+        return hosts;
+    }
+    if name == "curl" {
+        let mut hosts = Vec::new();
+        for arg in op.argv.iter().skip(1) {
+            if matches!(
+                arg.as_str(),
+                "-s" | "-S"
+                    | "-f"
+                    | "-I"
+                    | "-sS"
+                    | "-fsS"
+                    | "-sSf"
+                    | "--silent"
+                    | "--show-error"
+                    | "--fail"
+                    | "--head"
+            ) {
+                continue;
+            }
+            // Other URL forms and curl's configuration/redirect options stay
+            // unresolved rather than being mistaken for a scoped destination.
+            let Some(url) = arg
+                .strip_prefix("https://")
+                .or_else(|| arg.strip_prefix("http://"))
+            else {
+                return Vec::new();
+            };
+            let authority = url.split(['/', '?', '#']).next().unwrap_or("");
+            let mut parts = authority.split(':');
+            let host = parts.next().unwrap_or("");
+            if host.is_empty()
+                || !host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            {
+                return Vec::new();
+            }
+            if let Some(port) = parts.next()
+                && port.parse::<u16>().ok().filter(|p| *p != 0).is_none()
+            {
+                return Vec::new();
+            }
+            if parts.next().is_some() {
+                return Vec::new();
+            }
+            hosts.push(host.to_ascii_lowercase());
+        }
+        return hosts;
+    }
+    Vec::new()
 }
 
 /// Skips leading options (consuming values of `with_value` options).

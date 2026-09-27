@@ -3,7 +3,8 @@
 
 use std::io::Write;
 
-use nosh_permissions::Risk;
+use nosh_hub::tr;
+use nosh_permissions::{ApprovalMode, Risk};
 use nosh_shell::{OutputSink, style};
 use serde_json::{Value, json};
 
@@ -53,7 +54,36 @@ fn stats_enabled() -> bool {
     std::env::var_os("NOSH_STATS").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+pub fn approval_label(mode: ApprovalMode) -> String {
+    let name = match mode {
+        ApprovalMode::Confirm => tr!("询问", "Confirm"),
+        ApprovalMode::Auto => tr!("自动", "Auto"),
+        ApprovalMode::Yolo => "YOLO",
+    };
+    format!("{}: {name}", tr!("审批", "Approval"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Thinking,
+    Waiting,
+    Running,
+    NeedsUser,
+}
+
+impl Activity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Thinking => tr!("思考中", "Thinking"),
+            Self::Waiting => tr!("等待你批准", "Awaiting approval"),
+            Self::Running => tr!("正在执行", "Running"),
+            Self::NeedsUser => tr!("待你处理", "Needs your attention"),
+        }
+    }
+}
+
 pub trait AgentUi {
+    fn state(&mut self, _mode: ApprovalMode, _activity: Activity) {}
     fn prefill(&mut self, _done: usize, _total: usize) {}
     /// Ends any partial line before something else writes to the terminal.
     fn pause(&mut self) {}
@@ -153,6 +183,7 @@ pub struct TermUi {
     hidden: usize,
     tail: Vec<(String, bool)>,
     pub show_think: bool,
+    state: Option<(ApprovalMode, Activity)>,
 }
 
 impl TermUi {
@@ -170,6 +201,7 @@ impl TermUi {
             hidden: 0,
             tail: Vec::new(),
             show_think: false,
+            state: None,
         }
     }
 
@@ -271,6 +303,24 @@ impl TermUi {
 }
 
 impl AgentUi for TermUi {
+    fn state(&mut self, mode: ApprovalMode, activity: Activity) {
+        if self.state == Some((mode, activity)) {
+            return;
+        }
+        self.state = Some((mode, activity));
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() && activity != Activity::Waiting {
+            self.clear_status();
+            self.end_text_line();
+            eprintln!(
+                "{} {} | {}",
+                self.bar,
+                approval_label(mode),
+                activity.label()
+            );
+        }
+    }
+
     fn pause(&mut self) {
         self.clear_status();
         self.end_text_line();
@@ -313,7 +363,16 @@ impl AgentUi for TermUi {
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
-        let label = label.replace(" · ", self.stderr.glyph(" · ", " | "));
+        let label = label
+            .replace(" · ", self.stderr.glyph(" · ", " | "))
+            .replace('\n', "\\n");
+        let label = style::visible(&label);
+        let label = style::clip_line(
+            &label,
+            self.columns().unwrap_or(120).saturating_sub(8),
+            0,
+            "...",
+        );
         let risk_s = match risk {
             Some(Risk::Safe) => style::green(&label),
             Some(Risk::Mutating) => style::yellow(&label),
@@ -489,6 +548,11 @@ pub struct RecordUi {
 }
 
 impl AgentUi for RecordUi {
+    fn state(&mut self, mode: ApprovalMode, activity: Activity) {
+        self.events
+            .push(format!("state {} {activity:?}", mode.as_str()));
+    }
+
     fn text(&mut self, s: &str) {
         self.text.push_str(s);
     }

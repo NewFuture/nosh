@@ -1,12 +1,12 @@
-//! Approval policy: the confirm/auto/yolo decision matrix (design §6.3), user
-//! allow/deny rules and per-session "allow this kind" grants.
+//! Rule provenance, the three-mode matrix and bounded session grants.
 
-use crate::{Risk, RiskReport};
+use crate::admission::{AutoAdmission, automatic};
+use crate::{Context, Operation, Risk, RiskReport, UserRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
-    #[default]
     Confirm,
+    #[default]
     Auto,
     Yolo,
 }
@@ -33,391 +33,236 @@ impl ApprovalMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// Needs the user's approval; `strong` means typing `yes`.
-    Ask {
-        strong: bool,
-    },
-    Deny {
-        reason: String,
-    },
+    Ask { strong: bool },
+    Deny { reason: String },
 }
 
-/// `[safety] allow/deny` glob rules from the config (matched on the whole command).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionSource {
+    UserDeny(String),
+    UserAllow(Vec<String>),
+    Builtin(String),
+    Session,
+    ReadOnly,
+    Automatic(AutoAdmission),
+    Mode(ApprovalMode, String),
+}
+
+impl DecisionSource {
+    pub fn label(&self) -> String {
+        match self {
+            Self::UserDeny(rule) => format!("user deny: {rule}"),
+            Self::UserAllow(rules) => format!("user allow: {}", rules.join("; ")),
+            Self::Builtin(why) => format!("built-in prohibition: {why}"),
+            Self::Session => "session grant (same operation and scope)".into(),
+            Self::ReadOnly => "read-only".into(),
+            Self::Automatic(a) => a.reasons.join("; "),
+            Self::Mode(mode, why) => format!("{}: {why}", mode.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyDecision {
+    pub decision: Decision,
+    pub source: DecisionSource,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UserRules {
-    pub allow: Vec<String>,
-    pub deny: Vec<String>,
+    pub allow: Vec<UserRule>,
+    pub deny: Vec<UserRule>,
 }
 
-/// `*` matches any run of characters, `?` one character.
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star, mut mark) = (None::<usize>, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            mark = ti;
-            pi += 1;
-        } else if let Some(s) = star {
-            pi = s + 1;
-            mark += 1;
-            ti = mark;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+#[derive(Debug, Clone)]
+struct Grant {
+    operations: Vec<Operation>,
+    context: Context,
+    scripts: Vec<(std::path::PathBuf, String)>,
+    label: String,
 }
 
-impl UserRules {
-    /// A deny rule matching the whole line or any simple command in it, also
-    /// with leading words (wrappers such as `sudo`, `env X=1`) removed.
-    fn denies(&self, cmd: &str, report: &RiskReport) -> Option<&str> {
-        let mut texts: Vec<&str> = vec![cmd.trim()];
-        for c in &report.commands {
-            let mut rest = c.trim();
-            loop {
-                texts.push(rest);
-                match rest.find(char::is_whitespace) {
-                    Some(i) => rest = rest[i..].trim_start(),
-                    None => break,
-                }
-            }
-        }
-        self.deny
-            .iter()
-            .find(|p| texts.iter().any(|t| glob_match(p, t)))
-            .map(String::as_str)
-    }
-
-    /// Every simple command of the line matches an allow rule (a rule for
-    /// `git status*` must not cover `git status; rm -rf ~`).
-    fn allows(&self, report: &RiskReport) -> bool {
-        !report.commands.is_empty()
-            && report
-                .commands
-                .iter()
-                .all(|c| self.allow.iter().any(|p| glob_match(p, c.trim())))
-    }
-}
-
-/// Grants from answering `a` on an approval card: command prefixes, only for
-/// commands whose risk is at most Mutating, remembering whether the approved
-/// command used the network, wrote outside the workspace or changed the
-/// session; a later command needs a grant with the same properties.
 #[derive(Debug, Clone, Default)]
 pub struct SessionAllowList {
     grants: Vec<Grant>,
 }
 
-#[derive(Debug, Clone)]
-struct Grant {
-    prefix: String,
-    network: bool,
-    outside: bool,
-    session: bool,
-}
-
-const SUBCOMMAND_TOOLS: &[&str] = &[
-    "git",
-    "docker",
-    "podman",
-    "kubectl",
-    "npm",
-    "pnpm",
-    "yarn",
-    "cargo",
-    "go",
-    "pip",
-    "pip3",
-    "apt",
-    "apt-get",
-    "systemctl",
-    "brew",
-    "make",
-    "uv",
-    "poetry",
-    "helm",
-    "gh",
-];
-
 impl SessionAllowList {
-    /// The prefix a grant for `simple_command` covers (`git add`, `mkdir`, …).
-    pub fn prefix_of(simple_command: &str) -> String {
-        let words: Vec<&str> = simple_command.split_whitespace().collect();
-        let first = words.first().copied().unwrap_or("");
-        if SUBCOMMAND_TOOLS.contains(&first) {
-            let mut i = 1;
-            while i < words.len() && words[i].starts_with('-') {
-                i += if matches!(
-                    words[i],
-                    "-C" | "-c"
-                        | "--git-dir"
-                        | "--work-tree"
-                        | "-f"
-                        | "--file"
-                        | "-n"
-                        | "--namespace"
-                ) {
-                    2
-                } else {
-                    1
-                };
-            }
-            if let Some(sub) = words.get(i) {
-                return format!("{first} {sub}");
-            }
-        }
-        first.to_string()
+    /// Display only. Prefixes never determine authorization.
+    pub fn prefix_of(command: &str) -> String {
+        let words: Vec<_> = command.split_whitespace().collect();
+        let n = if words
+            .first()
+            .is_some_and(|w| matches!(*w, "git" | "cargo" | "npm" | "docker" | "kubectl"))
+        {
+            2
+        } else {
+            1
+        };
+        words.into_iter().take(n).collect::<Vec<_>>().join(" ")
     }
 
-    pub fn grant(&mut self, report: &RiskReport) {
-        for c in &report.commands {
-            let p = Self::prefix_of(c);
-            if p.is_empty() {
-                continue;
-            }
-            match self.grants.iter_mut().find(|g| g.prefix == p) {
-                Some(g) => {
-                    g.network |= report.network;
-                    g.outside |= report.writes_outside_workspace;
-                    g.session |= report.changes_session;
-                }
-                None => self.grants.push(Grant {
-                    prefix: p,
-                    network: report.network,
-                    outside: report.writes_outside_workspace,
-                    session: report.changes_session,
-                }),
-            }
-        }
-    }
-
-    /// Protected reads always ask again.
-    pub fn covers(&self, report: &RiskReport) -> bool {
+    pub fn can_grant(report: &RiskReport) -> bool {
         report.risk() <= Risk::Mutating
             && !report.reads_protected
-            && !report.commands.is_empty()
-            && report.commands.iter().all(|c| {
-                let p = Self::prefix_of(c);
-                self.grants.iter().any(|g| {
-                    g.prefix == p
-                        && (!report.network || g.network)
-                        && (!report.writes_outside_workspace || g.outside)
-                        && (!report.changes_session || g.session)
-                })
+            && !report.incomplete
+            && !report.operations.is_empty()
+            && report.operations.iter().all(|op| {
+                !op.opaque && (!op.network || !op.hosts.is_empty()) && op.known.iter().all(|k| *k)
+            })
+    }
+
+    pub fn grant(&mut self, report: &RiskReport) -> bool {
+        if !Self::can_grant(report) {
+            return false;
+        }
+        if !self.covers(report) {
+            self.grants.push(Grant {
+                operations: report.operations.clone(),
+                context: report.context.clone(),
+                scripts: report.scripts.clone(),
+                label: Self::prefix_of(&report.operations[0].argv.join(" ")),
+            });
+        }
+        true
+    }
+
+    pub fn covers(&self, report: &RiskReport) -> bool {
+        Self::can_grant(report)
+            && self.grants.iter().any(|grant| {
+                grant.operations == report.operations
+                    && grant.context == report.context
+                    && grant.scripts == report.scripts
             })
     }
 
     pub fn prefixes(&self) -> Vec<&str> {
-        self.grants.iter().map(|g| g.prefix.as_str()).collect()
+        self.grants.iter().map(|g| g.label.as_str()).collect()
     }
 }
 
-/// Decision matrix:
-///
-/// | mode    | Safe  | Mutating                          | Dangerous | Forbidden |
-/// |---------|-------|-----------------------------------|-----------|-----------|
-/// | confirm | allow | ask                               | ask (yes) | deny      |
-/// | auto    | allow | allow in workspace, else ask      | ask (yes) | deny      |
-/// | yolo    | allow | allow                             | ask       | deny      |
+pub fn evaluate(
+    report: &RiskReport,
+    mode: ApprovalMode,
+    rules: &UserRules,
+    session: &SessionAllowList,
+) -> PolicyDecision {
+    let result = |decision, source| PolicyDecision { decision, source };
+    for rule in &rules.deny {
+        if report
+            .operations
+            .iter()
+            .any(|op| rule.denies(op, &report.context))
+        {
+            let mut reason = rule.explanation();
+            if report.operations.iter().any(|op| {
+                op.opaque
+                    || op.network && op.hosts.is_empty()
+                    || op.paths.iter().any(|path| path.resolved.is_none())
+            }) && (!rule.spec.write_paths.is_empty()
+                || !rule.spec.read_paths.is_empty()
+                || !rule.spec.hosts.is_empty())
+            {
+                reason.push_str(" (unresolved effects cannot be excluded from this deny scope)");
+            }
+            return result(
+                Decision::Deny {
+                    reason: format!("user deny: {reason}"),
+                },
+                DecisionSource::UserDeny(reason),
+            );
+        }
+    }
+    let mut matched = Vec::new();
+    let allowed = !report.operations.is_empty()
+        && report.operations.iter().enumerate().all(|(index, op)| {
+            if let Some(rule) = rules.allow.iter().find(|rule| {
+                if (!report.incomplete || rule.allows_incomplete(op))
+                    && rule.allows(op, &report.context)
+                {
+                    return true;
+                }
+                let mut parent = op.parent;
+                while let Some(i) = parent.filter(|i| *i < index) {
+                    let ancestor = &report.operations[i];
+                    if ancestor.payload
+                        && (!report.incomplete || rule.allows_incomplete(ancestor))
+                        && rule.allows(ancestor, &report.context)
+                        && rule.allows_payload(op, &report.context)
+                    {
+                        return true;
+                    }
+                    parent = ancestor.parent;
+                }
+                false
+            }) {
+                let label = rule.explanation();
+                if !matched.contains(&label) {
+                    matched.push(label);
+                }
+                true
+            } else {
+                op.risk == Risk::Safe
+                    && (!op.opaque || op.payload)
+                    && op.paths.iter().all(|path| !path.extra)
+                    && op.variables.is_empty()
+            }
+        });
+    if allowed && !matched.is_empty() {
+        return result(Decision::Allow, DecisionSource::UserAllow(matched));
+    }
+    let risk = report.risk();
+    if risk == Risk::Forbidden {
+        let reason = report.top_reasons().join("; ");
+        let decision = if mode == ApprovalMode::Confirm {
+            Decision::Ask { strong: true }
+        } else {
+            Decision::Deny {
+                reason: format!("built-in prohibition: {reason}"),
+            }
+        };
+        return result(decision, DecisionSource::Builtin(reason));
+    }
+    if session.covers(report) {
+        return result(Decision::Allow, DecisionSource::Session);
+    }
+    if risk == Risk::Safe && !report.reads_protected && !report.changes_session {
+        return result(Decision::Allow, DecisionSource::ReadOnly);
+    }
+    if mode == ApprovalMode::Yolo {
+        return result(
+            Decision::Allow,
+            DecisionSource::Mode(
+                mode,
+                "non-prohibited operation; no per-call approval".into(),
+            ),
+        );
+    }
+    if mode == ApprovalMode::Auto && report.explicit_risk() < Risk::Dangerous {
+        return match automatic(report) {
+            Ok(admission) => result(Decision::Allow, DecisionSource::Automatic(admission)),
+            Err(error) => result(
+                Decision::Ask {
+                    strong: risk.max(error.risk) >= Risk::Dangerous,
+                },
+                DecisionSource::Mode(mode, error.reason),
+            ),
+        };
+    }
+    result(
+        Decision::Ask {
+            strong: risk >= Risk::Dangerous,
+        },
+        DecisionSource::Mode(mode, report.top_reasons().join("; ")),
+    )
+}
+
 pub fn decide(
     report: &RiskReport,
-    command: &str,
+    _command: &str,
     mode: ApprovalMode,
     rules: &UserRules,
     session: &SessionAllowList,
 ) -> Decision {
-    let risk = report.risk();
-    if risk == Risk::Forbidden {
-        let why = report
-            .findings
-            .iter()
-            .find(|f| f.risk == Risk::Forbidden)
-            .map(|f| f.reason.clone())
-            .unwrap_or_else(|| "forbidden".into());
-        return Decision::Deny { reason: why };
-    }
-    if let Some(p) = rules.denies(command, report) {
-        return Decision::Deny {
-            reason: format!("matches deny rule '{p}'"),
-        };
-    }
-    // Allow rules cover everything but Forbidden (DESIGN §6.2), except when
-    // hidden characters make the line differ from what the user can read;
-    // session grants cover at most Mutating.
-    let hidden = command.chars().any(crate::analyze::hidden_char);
-    if (!hidden && rules.allows(report)) || session.covers(report) {
-        return Decision::Allow;
-    }
-    match (risk, mode) {
-        (Risk::Safe, _) => Decision::Allow,
-        (Risk::Mutating, ApprovalMode::Yolo) => Decision::Allow,
-        (Risk::Mutating, ApprovalMode::Auto) => {
-            if report.writes_outside_workspace
-                || report.network
-                || report.changes_session
-                || report.reads_protected
-            {
-                Decision::Ask { strong: false }
-            } else {
-                Decision::Allow
-            }
-        }
-        (Risk::Mutating, ApprovalMode::Confirm) => Decision::Ask { strong: false },
-        (Risk::Dangerous, ApprovalMode::Yolo) => Decision::Ask { strong: false },
-        (Risk::Dangerous, _) => Decision::Ask { strong: true },
-        (Risk::Forbidden, _) => unreachable!(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Finding;
-
-    fn report(risk: Risk) -> RiskReport {
-        RiskReport {
-            findings: vec![Finding {
-                risk,
-                reason: "x".into(),
-            }],
-            commands: vec!["git add a.txt".into()],
-            ..RiskReport::default()
-        }
-    }
-
-    #[test]
-    fn globbing() {
-        assert!(glob_match("git status*", "git status -s"));
-        assert!(glob_match("git status*", "git status"));
-        assert!(!glob_match("git status*", "git stash"));
-        assert!(glob_match(
-            "docker system prune*",
-            "docker system prune -af"
-        ));
-        assert!(glob_match("a?c", "abc"));
-        assert!(glob_match("*", ""));
-    }
-
-    #[test]
-    fn matrix() {
-        let r = UserRules::default();
-        let s = SessionAllowList::default();
-        use ApprovalMode::*;
-        assert_eq!(
-            decide(&report(Risk::Safe), "ls", Confirm, &r, &s),
-            Decision::Allow
-        );
-        assert_eq!(
-            decide(&report(Risk::Mutating), "x", Confirm, &r, &s),
-            Decision::Ask { strong: false }
-        );
-        assert_eq!(
-            decide(&report(Risk::Mutating), "x", Auto, &r, &s),
-            Decision::Allow
-        );
-        let mut outside = report(Risk::Mutating);
-        outside.writes_outside_workspace = true;
-        assert_eq!(
-            decide(&outside, "x", Auto, &r, &s),
-            Decision::Ask { strong: false }
-        );
-        assert_eq!(decide(&outside, "x", Yolo, &r, &s), Decision::Allow);
-        assert_eq!(
-            decide(&report(Risk::Dangerous), "x", Confirm, &r, &s),
-            Decision::Ask { strong: true }
-        );
-        assert_eq!(
-            decide(&report(Risk::Dangerous), "x", Auto, &r, &s),
-            Decision::Ask { strong: true }
-        );
-        assert_eq!(
-            decide(&report(Risk::Dangerous), "x", Yolo, &r, &s),
-            Decision::Ask { strong: false }
-        );
-        assert!(matches!(
-            decide(&report(Risk::Forbidden), "x", Yolo, &r, &s),
-            Decision::Deny { .. }
-        ));
-    }
-
-    #[test]
-    fn user_rules_and_session_grants() {
-        let r = UserRules {
-            allow: vec!["git add*".into(), "rm -rf /".into()],
-            deny: vec!["docker system prune*".into()],
-        };
-        let s = SessionAllowList::default();
-        assert_eq!(
-            decide(
-                &report(Risk::Mutating),
-                "git add a.txt",
-                ApprovalMode::Confirm,
-                &r,
-                &s
-            ),
-            Decision::Allow
-        );
-        assert!(matches!(
-            decide(
-                &report(Risk::Safe),
-                "docker system prune -a",
-                ApprovalMode::Yolo,
-                &r,
-                &s
-            ),
-            Decision::Deny { .. }
-        ));
-        // allow cannot override Forbidden
-        assert!(matches!(
-            decide(
-                &report(Risk::Forbidden),
-                "rm -rf /",
-                ApprovalMode::Confirm,
-                &r,
-                &s
-            ),
-            Decision::Deny { .. }
-        ));
-
-        let mut grants = SessionAllowList::default();
-        grants.grant(&report(Risk::Mutating));
-        assert_eq!(grants.prefixes(), vec!["git add"]);
-        let none = UserRules::default();
-        assert_eq!(
-            decide(
-                &report(Risk::Mutating),
-                "git add b.txt",
-                ApprovalMode::Confirm,
-                &none,
-                &grants
-            ),
-            Decision::Allow
-        );
-        // grants never cover Dangerous
-        assert_eq!(
-            decide(
-                &report(Risk::Dangerous),
-                "git add b.txt",
-                ApprovalMode::Confirm,
-                &none,
-                &grants
-            ),
-            Decision::Ask { strong: true }
-        );
-        assert_eq!(SessionAllowList::prefix_of("mkdir -p x"), "mkdir");
-        assert_eq!(
-            SessionAllowList::prefix_of("git -C d commit -m x"),
-            "git commit"
-        );
-    }
+    evaluate(report, mode, rules, session).decision
 }

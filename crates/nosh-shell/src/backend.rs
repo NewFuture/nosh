@@ -698,6 +698,43 @@ impl EmbeddedShell {
             .collect()
     }
 
+    pub fn variable_names(&self) -> HashSet<String> {
+        self.lock()
+            .env()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// The same overlay as run_agent_command, without changing the session.
+    pub fn agent_environment(&self) -> HashMap<String, Option<String>> {
+        let shell = self.lock();
+        let writable = |name: &str| {
+            shell
+                .env_var(name)
+                .is_none_or(|var| !var.attribute_flags(&shell).contains('r'))
+        };
+        let mut values: HashMap<_, _> = ANTI_HANG_ENV
+            .iter()
+            .filter(|(name, _)| writable(name))
+            .map(|(name, value)| (name.to_string(), Some(value.to_string())))
+            .collect();
+        if writable(procs::RUN_VAR) {
+            values.insert(procs::RUN_VAR.into(), None);
+        }
+        values
+    }
+
+    pub fn readonly_variable_names(&self) -> HashSet<String> {
+        let shell = self.lock();
+        shell
+            .env()
+            .iter()
+            .filter(|(_, var)| var.attribute_flags(&shell).contains('r'))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn snapshot(&self) -> SessionState {
         let sh = self.lock();
         let mut vars = BTreeMap::new();

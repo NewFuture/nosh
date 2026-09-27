@@ -8,6 +8,7 @@ use crate::Risk;
 #[derive(Debug, Clone)]
 pub struct Arg {
     pub value: String,
+    pub quoted: bool,
     /// Contains a parameter expansion / command substitution.
     pub dynamic: bool,
     /// Contains unquoted glob characters.
@@ -15,10 +16,8 @@ pub struct Arg {
     /// Dynamic, but only names files the analysis knows to be inside the
     /// workspace (`"$f"` in `for f in *.txt`, `{}` in `find . -exec`).
     pub bound: bool,
-    /// Dynamic, but every expansion in it has a value known to the analysis
-    /// (`"$KEY"` after `KEY=~/.ssh/id_rsa`): the value it will have. Only
-    /// used to find protected reads; everything else still treats the
-    /// argument as computed at runtime.
+    /// The known expansion value. Risk analysis can use it; authorization
+    /// also checks whether the surrounding control flow makes it reliable.
     pub known: Option<String>,
 }
 
@@ -26,6 +25,7 @@ impl Arg {
     pub fn lit(s: &str) -> Self {
         Self {
             value: s.to_string(),
+            quoted: false,
             dynamic: false,
             glob: false,
             bound: false,
@@ -307,7 +307,7 @@ pub fn var_assignment_risk(name: &str) -> Option<(Risk, String)> {
             Risk::Dangerous,
             format!("sets {name} (can inject code into later commands)"),
         )),
-        n if SENSITIVE_VARS.contains(&n) => {
+        n if SENSITIVE_VARS.contains(&n) || n.starts_with("GIT_") => {
             Some((Risk::Mutating, format!("modifies session variable {name}")))
         }
         _ => None,
@@ -735,7 +735,7 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             operands_skipping(args, &["-s", "-r", "--size", "--reference"]),
         )),
         "mv" => {
-            let ops = ops();
+            let ops = operands_skipping(args, &["-t", "--target-directory", "-S", "--suffix"]);
             let to_null = ops.last().is_some_and(|a| a.value == "/dev/null");
             let mut v = if to_null {
                 Verdict::dangerous("moves files to /dev/null (destroys them)")
@@ -748,7 +748,10 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             v.writes(t)
         }
         "cp" | "install" | "ln" | "link" => {
-            let ops = ops();
+            let ops = operands_skipping(
+                args,
+                &["-t", "--target-directory", "-S", "--suffix", "-m", "--mode"],
+            );
             let mut writes = targets(opt_value(args, Some('t'), &["target-directory"]));
             let mut reads = Vec::new();
             if writes.is_empty() {
@@ -763,7 +766,12 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 .writes(writes)
                 .reads(reads)
         }
-        "mkdir" | "touch" | "mkfifo" | "mknod" | "mktemp" => {
+        "mkdir" => Verdict::mutating("creates directories")
+            .writes(targets(operands_skipping(args, &["-m", "--mode"]))),
+        "touch" => Verdict::mutating("creates files or changes timestamps").writes(targets(
+            operands_skipping(args, &["-d", "--date", "-r", "--reference", "-t"]),
+        )),
+        "mkfifo" | "mknod" | "mktemp" => {
             Verdict::mutating("creates files or directories").writes(targets(operands_skipping(
                 args,
                 &["-m", "--mode", "-t", "-d", "-r", "--reference", "-p"],
@@ -1108,11 +1116,24 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         | "snap" | "flatpak" | "brew" | "port" | "rpm" | "emerge" | "nix-env" | "pkg" => {
             package_manager(name, args)
         }
-        "npm" | "pnpm" | "yarn" | "bun" => js_pm(args),
+        "npm" | "pnpm" | "yarn" | "bun" => js_pm(args).writes(targets(opt_value(
+            args,
+            Some('C'),
+            &["prefix", "cwd", "dir"],
+        ))),
         "npx" | "pnpx" | "bunx" => Verdict::mutating("downloads and runs a package").net(),
+        "tsc" | "eslint" if asks_version_or_help(args) => Verdict::safe("prints version or usage"),
+        "tsc" => Verdict::mutating("runs the project compiler")
+            .reads(targets(opt_value(args, Some('p'), &["project"])))
+            .writes(targets(opt_value(
+                args,
+                None,
+                &["outDir", "outFile", "declarationDir"],
+            ))),
+        "eslint" => Verdict::mutating("runs project lint code"),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"
         | "composer" => py_pm(args),
-        "cargo" => match first_word(args) {
+        "cargo" => (match first_word(args) {
             Some(
                 "--version" | "-V" | "version" | "tree" | "metadata" | "locate-project"
                 | "verify-project" | "pkgid" | "help",
@@ -1122,14 +1143,17 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 Verdict::mutating("cargo (network)").net()
             }
             _ => Verdict::mutating("cargo builds or runs code"),
-        },
-        "go" => match first_word(args) {
-            Some("version" | "env" | "list" | "doc" | "help" | "vet") | None => {
+        })
+        .reads(targets(opt_value(args, None, &["manifest-path"])))
+        .writes(targets(opt_value(args, None, &["target-dir"]))),
+        "go" => (match first_word(args) {
+            Some("version" | "env" | "list" | "doc" | "help") | None => {
                 Verdict::safe("go (read-only)")
             }
             Some("get" | "install" | "mod") => Verdict::mutating("go (network)").net(),
             _ => Verdict::mutating("go builds or runs code"),
-        },
+        })
+        .writes(targets(opt_value(args, Some('o'), &[]))),
         "make" | "cmake" | "ninja" | "meson" | "gradle" | "gradlew" | "mvn" | "ant" | "bazel"
         | "sbt" | "just" | "task" | "rake" | "ctest" | "scons" => {
             if has_flag(
@@ -1140,6 +1164,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 Verdict::safe("build tool (dry run / info)")
             } else {
                 Verdict::mutating("runs a build")
+                    .reads(targets(opt_value(args, Some('f'), &["file"])))
+                    .writes(targets(opt_value(args, Some('C'), &["directory", "build"])))
             }
         }
         "python" | "python2" | "python3" | "node" | "deno" | "ruby" | "perl" | "php" | "lua"
@@ -1453,7 +1479,7 @@ fn git(args: &[Arg]) -> Verdict {
                     .iter()
                     .any(|a| a.value == "." || a.value == "--")
                 || rest.iter().any(|a| a.value == "--")
-                || (sub == "restore" && !fl(&['S'], &["staged"]));
+                || (sub == "restore" && (!fl(&['S'], &["staged"]) || fl(&['W'], &["worktree"])));
             if discards {
                 Verdict::dangerous("discards local changes")
             } else {

@@ -304,6 +304,46 @@ pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
     resolve(cwd, call.str_arg("path").unwrap_or("."))
 }
 
+pub(crate) fn prepare_read(
+    call: &ToolCall,
+    ctx: &nosh_permissions::Context,
+) -> Result<ToolCall, String> {
+    let path = match call.args.get("path") {
+        Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
+        None if call.name == "list_dir" => ".",
+        _ => return Err("missing or invalid parameter 'path'".into()),
+    };
+    let mut prepared = call.clone();
+    prepared
+        .args
+        .insert("path".into(), json!(ctx.resolve(path).to_string_lossy()));
+    let integer = |name: &str, default: i64| -> Result<i64, String> {
+        match call.args.get(name) {
+            None => Ok(default),
+            Some(value) => value
+                .as_i64()
+                .ok_or_else(|| format!("invalid integer parameter '{name}'")),
+        }
+    };
+    if call.name == "list_dir" {
+        prepared
+            .args
+            .insert("depth".into(), json!(integer("depth", 1)?.clamp(1, 3)));
+    } else {
+        let start = integer("start_line", 1)?.max(1);
+        let end = integer("end_line", start.saturating_add(READ_FILE_LINES as i64 - 1))?.max(1);
+        if end < start {
+            return Err(format!("end_line {end} is before start_line {start}"));
+        }
+        prepared.args.insert("start_line".into(), json!(start));
+        prepared.args.insert(
+            "end_line".into(),
+            json!(end.min(start.saturating_add(READ_FILE_LINES as i64 - 1))),
+        );
+    }
+    Ok(prepared)
+}
+
 /// `read_file`: numbered lines, binary files refused.
 pub fn read_file(call: &ToolCall, cwd: &Path) -> Result<String, String> {
     read_file_with(call, cwd, COUNT_BUDGET)

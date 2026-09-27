@@ -1918,6 +1918,9 @@ name = "nosh-permissions"
 version = "0.1.0"
 dependencies = [
  "brush-parser",
+ "globset",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

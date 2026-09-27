@@ -17,10 +17,16 @@ pub fn resolve(p: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    let abs = if expanded.is_absolute() {
-        expanded
+    resolve_literal(&expanded.to_string_lossy(), cwd)
+}
+
+/// Shell words have already undergone tilde/parameter expansion.
+pub(crate) fn resolve_literal(p: &str, cwd: &Path) -> PathBuf {
+    let path = Path::new(p);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        cwd.join(expanded)
+        cwd.join(path)
     };
     let mut out = PathBuf::from("/");
     for c in abs.components() {
@@ -73,12 +79,12 @@ const NULL_PATHS: &[&str] = &[
     "/dev/zero",
 ];
 
-fn protected_list(ctx: &Context) -> Vec<(PathBuf, String)> {
+pub(crate) fn protected_list(ctx: &Context) -> Vec<(PathBuf, String)> {
     let mut v: Vec<(PathBuf, String)> = vec![
         (PathBuf::from("/etc"), "/etc".into()),
         (PathBuf::from("/boot"), "/boot".into()),
     ];
-    if let Some(h) = ctx.home_dir() {
+    for h in ctx.user_home.iter().chain(ctx.home.iter()) {
         for rel in [
             ".ssh",
             ".gnupg",
@@ -156,7 +162,7 @@ pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
     }
     let home = ctx.home_dir().map(short);
     let workspace = short(&ctx.workspace);
-    if home.as_deref() == Some(p) && *workspace != *p {
+    if home.as_deref() == Some(p) || ctx.user_home.as_deref().map(short).as_deref() == Some(p) {
         return PathClass::Home;
     }
     if !workspace.as_os_str().is_empty() && under(p, &workspace) && *workspace != *Path::new("/") {

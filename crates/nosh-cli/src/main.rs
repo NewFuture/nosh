@@ -88,10 +88,10 @@ struct GlobalOpts {
     /// No rc files and no AI.
     #[arg(long, global = true)]
     safe: bool,
-    /// Approval mode auto (fewer confirmations).
+    /// Auto approval (default): low-impact operations and common builds/tests.
     #[arg(long, global = true, conflicts_with = "yolo")]
     auto: bool,
-    /// Approval mode yolo (only Dangerous asks; Forbidden still denied).
+    /// YOLO: no per-call approval for non-prohibited operations; user deny still wins.
     #[arg(long, global = true)]
     yolo: bool,
     /// Sampling seed for reproducible generations.
@@ -272,4 +272,29 @@ fn fall_back(login: bool, fallback: &str) -> i32 {
         eprintln!("nosh: could not start {fallback}: {err}");
     }
     70
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nosh_permissions::ApprovalMode;
+
+    #[test]
+    fn approval_defaults_and_explicit_overrides_are_shared() {
+        assert_eq!(config::Config::default().approval, ApprovalMode::Auto);
+        assert_eq!(nosh_core::AgentConfig::default().mode, ApprovalMode::Auto);
+        let plain = Cli::try_parse_from(["nosh"]).unwrap();
+        for mode in ["confirm", "auto", "yolo"] {
+            let cfg = config::Config::parse(&format!("[agent]\napproval = '{mode}'"));
+            assert_eq!(
+                approval_mode(&plain, &cfg),
+                ApprovalMode::parse(mode).unwrap()
+            );
+            let cli = Cli::try_parse_from(["nosh", "--auto"]).unwrap();
+            assert_eq!(approval_mode(&cli, &cfg), ApprovalMode::Auto);
+            let cli = Cli::try_parse_from(["nosh", "--yolo"]).unwrap();
+            assert_eq!(approval_mode(&cli, &cfg), ApprovalMode::Yolo);
+        }
+        assert!(Cli::try_parse_from(["nosh", "--auto", "--yolo"]).is_err());
+    }
 }

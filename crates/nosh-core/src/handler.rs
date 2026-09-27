@@ -10,7 +10,7 @@ use crate::agent::{Agent, AgentConfig};
 use crate::approval::ApprovalChannel;
 use crate::prompt::{Environment, TaskInput};
 use crate::tools::ToolSet;
-use crate::ui::TermUi;
+use crate::ui::{TermUi, approval_label};
 
 pub struct LoadedEngine {
     pub engine: Box<dyn ChatEngine>,
@@ -78,8 +78,8 @@ impl ShellAi {
 
 pub fn yolo_warning() -> String {
     tr!(
-        "YOLO 模式：Mutating 命令不再询问，Dangerous 仍需确认，Forbidden 始终拒绝。风险自负。",
-        "YOLO mode: Mutating commands run without asking; Dangerous still asks; Forbidden is always denied. Use at your own risk."
+        "YOLO：未被有效规则禁止的操作免逐次审批，包括高风险操作。用户 deny 始终优先；内置禁止仅可由有效用户白名单覆盖。不会绕过密码或外部认证。",
+        "YOLO: non-prohibited operations run without per-call approval, including high-risk operations. User deny always wins; only a valid user allow rule overrides built-in prohibitions. Passwords and external authentication are not bypassed."
     )
     .to_string()
 }
@@ -90,6 +90,13 @@ fn say(msg: &str) {
 
 impl AiHandler for ShellAi {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome {
+        if let Some(error) = &self.cfg.rules_error {
+            eprintln!("nosh: AI execution blocked by invalid safety configuration: {error}");
+            return AiOutcome {
+                prefill: None,
+                exit_code: 2,
+            };
+        }
         let show_think = self.cfg.thinking;
         let ints = shell.interrupts().count();
         if self.agent(shell).is_none() {
@@ -131,10 +138,10 @@ impl AiHandler for ShellAi {
             "mode" => match arg.map(ApprovalMode::parse) {
                 Some(Some(m)) => {
                     self.set_mode(m);
-                    say(&format!("mode: {}", m.as_str()));
+                    say(&approval_label(m));
                 }
                 Some(None) => say("usage: ai mode confirm|auto|yolo"),
-                None => say(&format!("mode: {}", self.cfg.mode.as_str())),
+                None => say(&approval_label(self.cfg.mode)),
             },
             "think" => {
                 match arg {
@@ -174,7 +181,7 @@ impl AiHandler for ShellAi {
                         "not loaded (loads on first use)"
                     ))
                 ));
-                say(&format!("mode: {}", self.cfg.mode.as_str()));
+                say(&approval_label(self.cfg.mode));
                 say(&format!(
                     "think: {}",
                     if self.cfg.thinking { "on" } else { "off" }
@@ -270,12 +277,52 @@ impl AiHandler for ShellAi {
 
     fn badge(&self) -> Badge {
         Badge {
-            mode: match self.cfg.mode {
-                ApprovalMode::Yolo => "YOLO".into(),
-                m => m.as_str().into(),
-            },
+            mode: approval_label(self.cfg.mode),
             yolo: self.cfg.mode == ApprovalMode::Yolo,
             note: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_selection_survives_loading_tasks_and_conversation_resets() {
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+        let mut ai = ShellAi::new(
+            Box::new(|| {
+                Ok(LoadedEngine {
+                    engine: Box::new(nosh_llm::MockChatEngine::with_responder(|_| {
+                        vec![nosh_llm::mock::text("done")]
+                    })),
+                    description: "fixture".into(),
+                })
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        assert_eq!(ai.mode(), ApprovalMode::Auto);
+        for mode in [
+            ApprovalMode::Confirm,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ] {
+            ai.builtin(&mut shell, &["mode".into(), mode.as_str().into()]);
+            for _ in 0..2 {
+                ai.handle(
+                    &mut shell,
+                    AiRequest {
+                        trigger: Trigger::Hash,
+                        text: "fixture".into(),
+                        failed: None,
+                    },
+                );
+                assert_eq!(ai.mode(), mode);
+                assert_eq!(ai.agent.as_ref().unwrap().cfg.mode, mode);
+                ai.builtin(&mut shell, &["clear".into()]);
+            }
         }
     }
 }

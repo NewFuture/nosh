@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use nosh_hub::SourceSelection;
-use nosh_permissions::ApprovalMode;
+use nosh_permissions::{ApprovalMode, RuleSpec, UserRule};
 use nosh_shell::OnFailure;
 
 #[derive(Debug, Clone)]
@@ -25,8 +25,9 @@ pub struct Config {
     pub thinking: bool,
     pub download_auto: bool,
     pub source_selection: SourceSelection,
-    pub allow: Vec<String>,
-    pub deny: Vec<String>,
+    pub allow: Vec<UserRule>,
+    pub deny: Vec<UserRule>,
+    pub safety_error: Option<String>,
     pub protected_paths: Vec<PathBuf>,
     pub fallback_shell: String,
     pub warnings: Vec<String>,
@@ -41,7 +42,7 @@ impl Default for Config {
             on_failure: OnFailure::Hint,
             nl_guard: true,
             builtin_name: "ai".into(),
-            approval: ApprovalMode::Confirm,
+            approval: ApprovalMode::default(),
             max_steps: 10,
             command_timeout_sec: 60,
             restore_cwd: false,
@@ -54,6 +55,7 @@ impl Default for Config {
             source_selection: SourceSelection::Auto,
             allow: Vec::new(),
             deny: Vec::new(),
+            safety_error: None,
             protected_paths: Vec::new(),
             fallback_shell: "/bin/bash".into(),
             warnings: Vec::new(),
@@ -187,6 +189,7 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => Self {
                 warnings: vec![format!("cannot be read, using defaults: {e}")],
+                safety_error: Some(format!("configuration cannot be read: {e}")),
                 ..Self::default()
             },
         };
@@ -199,6 +202,7 @@ impl Config {
         let table: toml::Table = match text.parse() {
             Ok(t) => t,
             Err(e) => {
+                c.safety_error = Some(format!("invalid configuration: {e}"));
                 c.warnings
                     .push(format!("invalid TOML, using defaults: {e}"));
                 return c;
@@ -313,17 +317,44 @@ impl Config {
                     .push("download.source_selection: auto | hf | hf-mirror | modelscope".into()),
             }
         }
-        if let Some(v) = r.list("safety", "allow") {
-            c.allow = v;
-        }
-        if let Some(v) = r.list("safety", "deny") {
-            c.deny = v;
+        for (key, target) in [("allow", &mut c.allow), ("deny", &mut c.deny)] {
+            if let Some(value) = r.get("safety", key) {
+                let compiled = value
+                    .clone()
+                    .try_into::<Vec<RuleSpec>>()
+                    .map_err(|e| format!("safety.{key}: expected rule tables: {e}"))
+                    .and_then(|rules| {
+                        rules
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, rule)| UserRule::compile(rule, format!("safety.{key}[{i}]")))
+                            .collect::<Result<Vec<_>, _>>()
+                    });
+                match compiled {
+                    Ok(rules) => *target = rules,
+                    Err(error) => {
+                        c.safety_error = Some(error.clone());
+                        r.warnings.push(error);
+                    }
+                }
+            }
         }
         if let Some(v) = r.list("safety", "protected_paths") {
             c.protected_paths = v.iter().map(|p| expand_home(p)).collect();
         }
         if let Some(v) = r.str("safety", "fallback_shell") {
             c.fallback_shell = v;
+        }
+        if c.safety_error.is_none() {
+            c.safety_error = r
+                .warnings
+                .iter()
+                .find(|w| {
+                    w.contains("safety.")
+                        || w.contains("agent.approval")
+                        || w.starts_with("safety must")
+                })
+                .cloned();
         }
         c.warnings = r.warnings;
         c
@@ -365,7 +396,7 @@ id = "minicpm5-1b:q4_k_m"
 thinking = "on"
 
 [safety]
-deny = ["docker system prune*"]
+deny = [{ command_prefix = "docker system prune" }]
 protected_paths = ["~/.secrets"]
 
 [telemetry]
@@ -380,7 +411,12 @@ on = true
         assert_eq!(c.command_timeout_sec, 60, "out of range keeps the default");
         assert_eq!(c.model_id.as_deref(), Some("minicpm5-1b:q4_k_m"));
         assert!(c.thinking);
-        assert_eq!(c.deny, vec!["docker system prune*".to_string()]);
+        assert_eq!(c.deny.len(), 1);
+        assert_eq!(
+            c.deny[0].spec.command_prefix.as_deref(),
+            Some("docker system prune")
+        );
+        assert!(c.safety_error.is_none());
         assert!(c.protected_paths[0].ends_with(".secrets"));
         let w = c.warnings.join("\n");
         assert!(w.contains("unknown key shell.colour"), "{w}");
@@ -393,6 +429,7 @@ on = true
         let c = Config::parse("[shell\nx=");
         assert_eq!(c.ai_prefix, "#");
         assert_eq!(c.warnings.len(), 1);
+        assert!(c.safety_error.is_some());
     }
 
     #[test]
@@ -401,11 +438,44 @@ on = true
         std::fs::create_dir_all(&dir).unwrap();
         let missing = Config::load_from(dir.join("missing.toml"));
         assert!(missing.warnings.is_empty(), "{:?}", missing.warnings);
+        assert_eq!(missing.approval, ApprovalMode::Auto);
+        assert!(missing.safety_error.is_none());
         // A directory cannot be read as a file (like a permission or I/O error).
         let unreadable = Config::load_from(dir.clone());
         assert_eq!(unreadable.approval, Config::default().approval);
         assert_eq!(unreadable.warnings.len(), 1, "{:?}", unreadable.warnings);
         assert!(unreadable.warnings[0].contains("cannot be read"));
+        assert!(unreadable.safety_error.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rule_tables_have_one_shape_and_invalid_rules_block_execution() {
+        for text in [
+            "[[safety.allow]]\ncommand_prefix = 'git fetch'\ncwd = '.'",
+            "[safety]\nallow = [{ command_prefix = 'git fetch', cwd = '.' }]",
+        ] {
+            let cfg = Config::parse(text);
+            assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+            assert!(cfg.safety_error.is_none());
+            assert_eq!(cfg.allow.len(), 1);
+            assert_eq!(
+                cfg.allow[0].spec.command_prefix.as_deref(),
+                Some("git fetch")
+            );
+        }
+        for text in [
+            "[safety]\nallow = ['git *']",
+            "[safety]\ndeny = [{ command_prefix = 'git **' }]",
+            "[safety]\ndeny = [{ command_prefix = 'git', command_exact = 'git status' }]",
+            "[safety]\ndeny = [{ tool = 'unknown' }]",
+            "[safety]\nalow = []",
+            "[safety]\nprotected_paths = 1",
+            "[agent]\napproval = 'typo'",
+        ] {
+            let cfg = Config::parse(text);
+            assert!(cfg.safety_error.is_some(), "{text}");
+            assert!(!cfg.warnings.is_empty(), "{text}");
+        }
     }
 }
