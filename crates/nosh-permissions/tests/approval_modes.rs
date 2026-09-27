@@ -497,6 +497,11 @@ fn directory_denies_cover_descendants_and_large_renames_need_no_byte_copy() {
 #[test]
 fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
     let (dir, mut context) = fixture();
+    // The probe must use the same Git as setup, not macOS's /usr/bin/git shim.
+    context
+        .variables
+        .insert("PATH".into(), std::env::var("PATH").unwrap());
+    context.exported.insert("PATH".into());
     let system_config = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         system_config.path(),

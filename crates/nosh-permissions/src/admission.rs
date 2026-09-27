@@ -394,7 +394,11 @@ impl GitProbe<'_> {
                     let _ = reader.join();
                     return Err(match other {
                         Err(e) => format!("cannot wait for Git evidence: {e}"),
-                        _ => "Git evidence exceeded its time budget".into(),
+                        _ => format!(
+                            "Git {} evidence exceeded its time budget ({})",
+                            args.first().copied().unwrap_or("state"),
+                            git.display()
+                        ),
                     });
                 }
             }
