@@ -15,6 +15,31 @@ from eval import approval, checks, driver, fixtures, observations, report, run
 
 
 class ContractTests(unittest.TestCase):
+    def test_workspace_cannot_inherit_project_guidance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "isolated"
+            run.validate_workspace_ancestry(work)
+            (root / "NOSH.md").write_text("Legacy name is not an instruction source")
+            run.validate_workspace_ancestry(work)
+            for name in (
+                ".git", "AGENTS.md", "README.md", "Readme.md", "readme.md", "README.rst", "README.txt", "README",
+            ):
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text("Project-specific context")
+                    with self.assertRaisesRegex(ValueError, "AGENTS.md/README ancestry"):
+                        run.validate_workspace_ancestry(work)
+                    path.unlink()
+            (root / "AGENTS.md").symlink_to(root / "missing")
+            with self.assertRaisesRegex(ValueError, "AGENTS.md/README ancestry"):
+                run.validate_workspace_ancestry(work)
+
+    def test_guidance_ancestry_does_not_treat_errors_as_absence(self):
+        with patch.object(Path, "lstat", side_effect=PermissionError("blocked")):
+            with self.assertRaisesRegex(PermissionError, "blocked"):
+                run.validate_workspace_ancestry(Path("/isolated/workspace"))
+
     def test_source_fingerprint_ignores_platform_line_endings(self):
         with tempfile.TemporaryDirectory() as temporary:
             a, b = Path(temporary) / "a.py", Path(temporary) / "b.py"

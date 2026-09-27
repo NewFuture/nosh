@@ -50,9 +50,17 @@ pub fn suggest_with_context(
         sampling,
         max_new_tokens: 256,
     };
+    let guidance = crate::guidance::GuidanceCache::default().load(context);
+    if !guidance.complete {
+        return Err(LlmError::Config(format!(
+            "AGENTS.md guidance is incomplete; review it before requesting a command suggestion.\n{}",
+            guidance.text
+        )));
+    }
     let sid = engine.open(spec)?;
+    let notes = (!guidance.text.is_empty()).then_some(guidance.text.as_str());
     let msg =
-        prompt::task_message_with_context(shell, &TaskInput::new(trigger, text), None, context);
+        prompt::task_message_with_context(shell, &TaskInput::new(trigger, text), notes, context);
     engine.cancel_handle().reset();
     let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
     engine.close(sid);

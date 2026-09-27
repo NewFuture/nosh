@@ -58,7 +58,7 @@ fn tool_results(received: &[Vec<Message>]) -> Vec<String> {
 fn project_context(message: &str) -> serde_json::Value {
     let line = message
         .lines()
-        .find_map(|line| line.strip_prefix("[project] "))
+        .find_map(|line| line.strip_prefix("[context] "))
         .unwrap();
     serde_json::from_str(line).unwrap()
 }
@@ -102,7 +102,7 @@ fn multi_step_task_uses_tool_results() {
     let Message::User(task) = &rec[0][0] else {
         panic!("first message must be the task");
     };
-    assert!(task.starts_with("[task cwd="), "{task}");
+    assert!(task.starts_with("[context] "), "{task}");
     assert!(task.ends_with("\nsay hello"));
     let results = tool_results(&rec);
     assert!(results[0].starts_with("[exit_code=0 "), "{}", results[0]);
@@ -238,7 +238,14 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         (std::time::Duration::ZERO, false, 2),
         (default_idle, true, 2),
     ] {
+        let root = tmpdir(&format!(
+            "guidance-recovery-{expected_sessions}-{force_context_reset}"
+        ));
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let guidance = root.join("AGENTS.md");
+        std::fs::write(&guidance, "temporary scoped instruction").unwrap();
         let mut sh = shell();
+        sh.run_user_line(&format!("cd {}", root.display()));
         let engine = MockChatEngine::with_responder(|history| {
             let has_result = history.iter().any(|message| match message {
                 Message::Tool(result) => result.contains("printed-once"),
@@ -285,6 +292,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
                 .contains("one-time compaction failure")
         );
         assert_eq!(agent.last_output_id(), Some(1));
+        std::fs::remove_file(guidance).unwrap();
 
         if idle_reset.is_zero() {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -312,6 +320,13 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         };
         assert_eq!(restored, original);
         assert!(followup.ends_with("\nwhat did the command print?"));
+        assert_eq!(
+            followup.contains("Previous directory-scoped project documents no longer apply"),
+            expected_sessions == 1,
+            "an errored conversation must not retain removed guidance"
+        );
+        drop(received);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -781,13 +796,14 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
         })
         .collect();
     assert_eq!(contexts.len(), 4);
-    assert_eq!(contexts[0]["types"], json!(["rust"]));
-    assert_eq!(contexts[2]["types"], json!(["node"]));
-    assert_eq!(contexts[2]["root"], json!(node));
-    assert_eq!(contexts[3]["status"], "none_detected");
-    assert_eq!(contexts[3]["git"]["status"], "none_detected");
+    assert_eq!(contexts[0]["project"]["type"], "rust");
+    assert_eq!(contexts[2]["project"]["type"], "node");
+    assert_eq!(contexts[2]["cwd"], json!(node));
+    assert!(contexts[2].get("project_root").is_none());
+    assert_eq!(contexts[3]["project"], "no known manifest");
+    assert_eq!(contexts[3]["git"], "none detected");
     let results = tool_results(&records);
-    assert_eq!(project_context(&results[0])["types"], json!(["node"]));
+    assert_eq!(project_context(&results[0])["project"]["type"], "node");
     assert_eq!(
         specs.lock().unwrap().len(),
         1,
@@ -824,7 +840,7 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
             panic!("expected task")
         };
         let context = project_context(message);
-        assert_eq!(context["manifests"][0]["metadata"], "unavailable");
+        assert_eq!(context["project"]["metadata"], "unavailable");
         assert!(!message.contains("never-expose-this-package-name"));
     };
     check(&received.lock().unwrap());
@@ -859,6 +875,212 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
     );
     assert_eq!(ai.suggest(&mut sh, "suggest").as_deref(), Some("echo ok"));
     check(&received.lock().unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agents_guidance_is_scoped_cached_refreshed_and_cleared() {
+    let _g = setup();
+    let root = tmpdir("agents-guidance");
+    let repo = root.join("repo");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(repo.join("AGENTS.md"), "first scoped instruction").unwrap();
+    std::fs::write(repo.join("NOSH.md"), "must-not-load-legacy").unwrap();
+    std::fs::write(repo.join("README.md"), "must-not-load-readme").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", repo.display()));
+    let engine = MockChatEngine::with_responder(|_| vec![text("ok")]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    let run = |a: &mut Agent, sh: &mut EmbeddedShell| {
+        a.run_task(
+            sh,
+            TaskInput::new(Trigger::Hash, "describe"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        )
+    };
+    assert_eq!(run(&mut a, &mut sh).status, TaskStatus::Completed);
+    run(&mut a, &mut sh);
+    std::fs::write(repo.join("AGENTS.md"), "newer scoped instruction").unwrap();
+    run(&mut a, &mut sh);
+    sh.run_user_line(&format!("cd {}", outside.display()));
+    run(&mut a, &mut sh);
+    sh.run_user_line(&format!("cd {}", repo.display()));
+    a.reset_conversation();
+    run(&mut a, &mut sh);
+    let records = received.lock().unwrap();
+    let messages: Vec<_> = records
+        .iter()
+        .flatten()
+        .filter_map(|message| match message {
+            Message::User(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(messages[0].contains("first scoped instruction"));
+    assert!(!messages[1].contains("first scoped instruction"));
+    assert!(messages[2].contains("newer scoped instruction"));
+    assert!(messages[3].contains("Previous directory-scoped project documents no longer apply"));
+    assert!(messages[4].contains("newer scoped instruction"));
+    for message in messages {
+        assert!(!message.contains("must-not-load-legacy"));
+        assert!(!message.contains("must-not-load-readme"));
+    }
+    drop(records);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelled_generation_resends_guidance_on_the_next_task() {
+    use nosh_llm::{CancelHandle, ChatEngine};
+    use std::sync::{Arc, OnceLock};
+
+    let _g = setup();
+    let root = tmpdir("cancelled-guidance");
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "scoped instruction after cancellation",
+    )
+    .unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let cancel: Arc<OnceLock<CancelHandle>> = Arc::default();
+    let handle = Arc::clone(&cancel);
+    let mut first = true;
+    let engine = MockChatEngine::with_responder(move |_| {
+        if std::mem::take(&mut first) {
+            handle.get().unwrap().cancel();
+        }
+        vec![text("ok")]
+    });
+    assert!(cancel.set(engine.cancel_handle()).is_ok());
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    for status in [TaskStatus::Cancelled, TaskStatus::Completed] {
+        let outcome = a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "describe"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(outcome.status, status);
+    }
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 2);
+    for append in received.iter() {
+        let Message::User(message) = &append[0] else {
+            panic!("expected task with scoped guidance");
+        };
+        assert!(message.contains("scoped instruction after cancellation"));
+    }
+    drop(received);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn suggestions_do_not_guess_when_agents_guidance_cannot_be_loaded() {
+    let _g = setup();
+    let root = tmpdir("blocked-agents");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let path = root.join("AGENTS.md");
+    std::fs::write(&path, "protected instruction content").unwrap();
+    std::fs::write(root.join("README.md"), "must-not-fall-back").unwrap();
+    let cfg = AgentConfig {
+        protected: vec![path],
+        ..AgentConfig::default()
+    };
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let mut engine = MockChatEngine::new(vec![vec![text("echo should-not-be-generated")]]);
+    let specs = engine.specs();
+    let result = nosh_core::suggest::suggest_with_context(
+        &mut engine,
+        &env(),
+        &sh,
+        "suggest",
+        Trigger::Cli,
+        cfg.sampling,
+        &cfg.permission_context(&sh),
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("AGENTS.md guidance is incomplete"));
+    assert!(!error.contains("protected instruction content"));
+    assert!(!error.contains("must-not-fall-back"));
+    assert!(
+        specs.lock().unwrap().is_empty(),
+        "no model session opens with incomplete guidance"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn readme_references_refresh_and_remain_optional_for_suggestions() {
+    let _g = setup();
+    let root = tmpdir("readme-reference");
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let readme = root.join("README.md");
+    std::fs::write(&readme, "# Project\nFirst reference.\n").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let engine = MockChatEngine::with_responder(|_| vec![text("ok")]);
+    let received = engine.received();
+    let mut a = agent(engine, AgentConfig::default());
+    for index in 0..3 {
+        if index == 2 {
+            std::fs::write(&readme, "# Project\nUpdated reference.\n").unwrap();
+        }
+        let result = a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "describe"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(result.status, TaskStatus::Completed);
+    }
+    let received = received.lock().unwrap();
+    let messages: Vec<_> = received
+        .iter()
+        .flatten()
+        .filter_map(|message| match message {
+            Message::User(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(messages[0].contains("First reference."));
+    assert!(!messages[1].contains("README reference"));
+    assert!(messages[2].contains("Updated reference."));
+    drop(received);
+
+    for protected in [vec![], vec![readme.clone()]] {
+        let blocked = !protected.is_empty();
+        let cfg = AgentConfig {
+            protected,
+            ..AgentConfig::default()
+        };
+        let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
+        let received = engine.received();
+        let result = nosh_core::suggest::suggest_with_context(
+            &mut engine,
+            &env(),
+            &sh,
+            "suggest",
+            Trigger::Cli,
+            cfg.sampling,
+            &cfg.permission_context(&sh),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap().command, "echo ok");
+        let received = received.lock().unwrap();
+        let Message::User(message) = &received[0][0] else {
+            panic!("expected reference context in the task");
+        };
+        assert_eq!(message.contains("reference unavailable"), blocked);
+        assert_eq!(message.contains("Updated reference."), !blocked);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1215,10 +1437,11 @@ fn repl_pipeline_with_mock_engine() {
             panic!("expected a task message");
         };
         let header = u.lines().next().unwrap();
-        assert!(header.starts_with("[task cwd="), "{u}");
+        assert!(header.starts_with("[context] "), "{u}");
+        let context = project_context(u);
         assert!(!header.contains("trigger="), "{u}");
-        assert!(!header.contains(" exit="), "{u}");
-        assert_eq!(header.contains(" lang=zh]"), chinese, "{u}");
+        assert!(context.get("exit").is_none());
+        assert_eq!(context["lang"] == "zh", chinese, "{u}");
         assert!(u.contains("[recent] pwd >"), "{u}");
         assert!(u.ends_with(&format!("\n{}", line.trim_start_matches("# "))));
     }

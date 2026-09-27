@@ -49,6 +49,8 @@ input_assist = false
 
 ## 命令建议与终端交接
 
+项目指引优先加载适用的 `AGENTS.md`；确实没有 AGENTS.md 时，才提供最近 README 的精简参考片段，不与指引重复加载。新任务会按当前目录与文档版本更新；读取仍受路径保护和预算约束，README 中的示例不视为待办命令。
+
 普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。
 
 `nosh -s` 和 Ctrl+G 使用无工具的独立短对话，返回一个完整 shell program，经 brush 语法和可解析命令名校验后输出或预填，从不自动执行。接受单行、单一 shell fence 和完整多行结构；拒绝说明文字、多候选、不完整语法和隐藏控制字符。静态检查递归覆盖命令／进程替换，按顺序和作用域检查可确定的函数调用；动态命令名、`eval`／`source`、条件定义和递归等复杂动态行为只能视为“无法确认”，不因此拒绝或额外显示提示。校验不证明运行成功或符合用户意图，执行前仍需检查。普通 agent 的建议只显示在最终文本中，不自动预填。
@@ -95,6 +97,8 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 | [设计文档](docs/DESIGN.md) | 架构、当前实现边界、配置与后续方案；先读 [实现状态](docs/DESIGN.md#03-实现状态) |
 | [输出采集设计](docs/OUTPUT-CAPTURE.md) | 最近用户命令输出的使用时机、上下文边界、PTY 协议、状态和兼容性 |
 | [实时输入解析设计](docs/INPUT-ASSIST.md) | 输入辅助的数据流、判定语义、后台隔离、缓存与资源边界 |
+| [Project context 设计](docs/PROJECT-CONTEXT.md) | 紧凑上下文、项目发现、AGENTS／README 加载和缓存边界 |
+| [LLM tools 设计](docs/LLM-TOOLS.md) | 工具与模式、grep、权限、结果和建议契约 |
 | [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
 | [固定 seed 的真实模型评测](eval/README.md) | 27 场景，revision 7 使用显式失败诊断、分项评分、确定性 trial 标识及总时限分类；历史 main 的 25 场景双跑基线为 48.0%，不代表新数据集成绩 |

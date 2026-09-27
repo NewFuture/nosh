@@ -152,8 +152,9 @@ pub struct Agent {
     carry: Vec<Message>,
     outputs: Vec<OutputRecord>,
     next_output: usize,
-    notes_seen: HashSet<PathBuf>,
     user_outputs_seen: HashSet<u64>,
+    guidance: crate::guidance::GuidanceCache,
+    guidance_sent: Option<String>,
     hooked: bool,
     /// Filters what the agent writes to disk (see [`tools::Redactor`]).
     redactor: Arc<dyn Redactor>,
@@ -179,8 +180,9 @@ impl Agent {
             carry: Vec::new(),
             outputs: Vec::new(),
             next_output: 1,
-            notes_seen: HashSet::new(),
             user_outputs_seen: HashSet::new(),
+            guidance: crate::guidance::GuidanceCache::default(),
+            guidance_sent: None,
             hooked: false,
             redactor: Arc::new(NoRedact),
         }
@@ -207,8 +209,8 @@ impl Agent {
             self.engine.close(sid);
         }
         self.carry.clear();
-        self.notes_seen.clear();
         self.user_outputs_seen.clear();
+        self.guidance_sent = None;
     }
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
@@ -371,14 +373,23 @@ impl Agent {
         }
         let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
-        let notes =
-            prompt::project_notes(&cwd0).filter(|(path, _)| !self.notes_seen.contains(path));
-        let mut attached_notes = notes.as_ref().map(|(path, _)| path.clone());
+        let permission_context = self.cfg.permission_context(shell);
+        let guidance = self.guidance.load(&permission_context);
+        let changed_guidance = self.guidance_sent.as_deref() != Some(guidance.key.as_str());
+        let complete_guidance = guidance.complete;
+        let notes = if changed_guidance && !guidance.text.is_empty() {
+            Some(guidance.text)
+        } else if changed_guidance && self.engine.message_count(sid) > 0 {
+            Some("No AGENTS.md guidance or README reference applies here. Previous directory-scoped project documents no longer apply.".into())
+        } else {
+            None
+        };
+        let mut guidance_key = (changed_guidance && complete_guidance).then_some(guidance.key);
         pending.push(Message::User(prompt::task_message_with_context(
             shell,
             &input,
-            notes.as_ref().map(|(_, text)| text.as_str()),
-            &self.cfg.permission_context(shell),
+            notes.as_deref(),
+            &permission_context,
         )));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
@@ -394,21 +405,23 @@ impl Agent {
                     if let Some(command_id) = attached_output.take() {
                         self.user_outputs_seen.insert(command_id);
                     }
-                    if let Some(path) = attached_notes.take() {
-                        self.notes_seen.insert(path);
-                    }
                     s
                 }
                 Err(e) => {
+                    self.guidance_sent = None;
                     ui.error(&e.to_string());
                     out.status = TaskStatus::Failed;
                     out.error = Some(e.to_string());
                     break;
                 }
             };
+            if let Some(key) = guidance_key.take() {
+                self.guidance_sent = Some(key);
+            }
             add_usage(&mut out.usage, &step.usage);
             out.answer = step.text.trim().to_string();
             if step.stop == StopReason::Cancelled {
+                self.guidance_sent = None;
                 out.status = TaskStatus::Cancelled;
                 self.carry = step
                     .tool_calls
@@ -1027,9 +1040,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_append_does_not_suppress_project_notes() {
+    fn failed_append_does_not_suppress_project_guidance() {
         let directory = tempfile::tempdir().unwrap();
-        let notes = directory.path().join("NOSH.md");
+        let notes = directory.path().join("AGENTS.md");
         std::fs::write(&notes, "project instructions").unwrap();
         let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
             working_dir: Some(directory.path().to_path_buf()),
@@ -1046,7 +1059,7 @@ mod tests {
             &mut ui,
         );
         assert_eq!(first.status, TaskStatus::Failed);
-        assert!(!agent.notes_seen.contains(&notes));
+        assert!(agent.guidance_sent.is_none());
 
         let second = agent.run_task(
             &mut shell,
@@ -1055,7 +1068,7 @@ mod tests {
             &mut ui,
         );
         assert_eq!(second.status, TaskStatus::Completed);
-        assert!(agent.notes_seen.contains(&notes));
+        assert!(agent.guidance_sent.is_some());
     }
 
     #[test]
@@ -1138,10 +1151,10 @@ mod tests {
         let (mut agent, calls) = recovery_agent(None);
         agent.sid = Some(1);
         agent.carry.push(Message::Tool("already executed".into()));
-        agent.notes_seen.insert(PathBuf::from("NOSH.md"));
+        agent.guidance_sent = Some("AGENTS.md version".into());
         agent.reset_conversation();
         assert!(agent.carry.is_empty());
-        assert!(agent.notes_seen.is_empty());
+        assert!(agent.guidance_sent.is_none());
         assert_eq!(agent.sid, None);
         assert_eq!(*calls.lock().unwrap(), ["close"]);
     }
