@@ -496,12 +496,35 @@ fn directory_denies_cover_descendants_and_large_renames_need_no_byte_copy() {
 
 #[test]
 fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
-    let (dir, context) = fixture();
+    let (dir, mut context) = fixture();
+    let system_config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        system_config.path(),
+        "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tprocess = git-lfs filter-process\n",
+    )
+    .unwrap();
+    context.execution_variables.insert(
+        "GIT_CONFIG_SYSTEM".into(),
+        Some(system_config.path().to_string_lossy().into_owned()),
+    );
+    // Both fixture commands and policy probes must ignore host configuration.
+    for (name, value) in [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ] {
+        context
+            .execution_variables
+            .insert(name.into(), Some(value.into()));
+    }
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .current_dir(dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .envs(
+                context
+                    .execution_variables
+                    .iter()
+                    .filter_map(|(name, value)| value.as_ref().map(|value| (name, value))),
+            )
             .args(args)
             .output()
             .unwrap();
@@ -509,6 +532,15 @@ fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
             output.status.success(),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let assert_allowed = |command: &str| {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert_eq!(
+            result.decision,
+            Decision::Allow,
+            "{command}: {:?}",
+            result.source
         );
     };
     git(&["init", "--quiet"]);
@@ -525,41 +557,32 @@ fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
         "Fixture\n\nCo-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>",
     ]);
     std::fs::write(dir.path().join("file.txt"), "updated").unwrap();
-    assert_eq!(
-        policy("git add file.txt", Auto, &context, &UserRules::default()).decision,
-        Decision::Allow
+    let mut inherited_system_config = context.clone();
+    inherited_system_config
+        .execution_variables
+        .insert("GIT_CONFIG_NOSYSTEM".into(), Some("0".into()));
+    let result = policy(
+        "git add file.txt",
+        Auto,
+        &inherited_system_config,
+        &UserRules::default(),
     );
+    assert_eq!(
+        result.decision,
+        Decision::Ask { strong: false },
+        "{:?}",
+        result.source
+    );
+    assert!(
+        result.source.label().contains("filters"),
+        "{:?}",
+        result.source
+    );
+    assert_allowed("git add file.txt");
     git(&["add", "file.txt"]);
-    assert_eq!(
-        policy(
-            "git restore --staged file.txt",
-            Auto,
-            &context,
-            &UserRules::default()
-        )
-        .decision,
-        Decision::Allow
-    );
-    assert_eq!(
-        policy(
-            "git switch -c feature",
-            Auto,
-            &context,
-            &UserRules::default()
-        )
-        .decision,
-        Decision::Allow
-    );
-    assert_eq!(
-        policy(
-            "git commit -m message",
-            Auto,
-            &context,
-            &UserRules::default()
-        )
-        .decision,
-        Decision::Allow
-    );
+    assert_allowed("git restore --staged file.txt");
+    assert_allowed("git switch -c feature");
+    assert_allowed("git commit -m message");
     git(&["config", "core.hooksPath", "custom-hooks"]);
     assert!(matches!(
         policy("git add file.txt", Auto, &context, &UserRules::default()).decision,
