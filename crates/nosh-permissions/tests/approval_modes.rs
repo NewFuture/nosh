@@ -593,6 +593,66 @@ fn git_auto_admission_uses_real_index_objects_and_rejects_hooks() {
         policy("git add file.txt", Auto, &context, &UserRules::default()).decision,
         Decision::Ask { .. }
     ));
+    git(&["config", "--unset", "core.hooksPath"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/project.git",
+    ]);
+    assert_allowed("git fetch origin");
+    assert_allowed("git ls-remote origin");
+    for key in [
+        "credential.helper",
+        "credential.https://example.invalid.helper",
+        "core.askPass",
+    ] {
+        git(&["config", key, "!printf helper"]);
+        let result = policy("git fetch origin", Auto, &context, &UserRules::default());
+        assert!(
+            matches!(result.decision, Decision::Ask { .. }),
+            "{key}: {result:?}"
+        );
+        assert!(
+            result.source.label().contains("executable configuration"),
+            "{key}: {result:?}"
+        );
+        git(&["config", "--unset", key]);
+    }
+    git(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/heads/*",
+    ]);
+    let result = policy("git fetch origin", Auto, &context, &UserRules::default());
+    assert!(matches!(result.decision, Decision::Ask { .. }));
+    assert!(result.source.label().contains("refspec"), "{result:?}");
+    git(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+    git(&["tag", "v1"]);
+    let result = policy("git fetch origin", Auto, &context, &UserRules::default());
+    assert_eq!(result.decision, Decision::Allow, "{result:?}");
+    assert!(result.source.label().contains("refs/tags/v1"), "{result:?}");
+    for key in [
+        "fetch.prune",
+        "fetch.pruneTags",
+        "remote.origin.prune",
+        "remote.origin.pruneTags",
+        "remote.origin.mirror",
+    ] {
+        git(&["config", key, "true"]);
+        let result = policy("git fetch origin", Auto, &context, &UserRules::default());
+        assert!(
+            matches!(result.decision, Decision::Ask { .. }),
+            "{key}: {result:?}"
+        );
+        git(&["config", "--unset", key]);
+    }
+    git(&["config", "remote.origin.tagOpt", "--no-tags"]);
+    assert_allowed("git fetch origin");
     assert_eq!(
         std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
         "updated"
@@ -924,6 +984,18 @@ fn attached_path_options_keep_their_actual_targets() {
         ("cmake --build /etc", "cmake --build=/etc"),
         ("go build -o /etc/file", "go build -o/etc/file"),
         ("tsc --outDir /etc", "tsc --outDir=/etc"),
+        (
+            "tsc --project /etc/tsconfig.json",
+            "tsc --project=/etc/tsconfig.json",
+        ),
+        (
+            "touch -r /etc/reference dest",
+            "touch -r/etc/reference dest",
+        ),
+        (
+            "touch --reference /etc/reference dest",
+            "touch --reference=/etc/reference dest",
+        ),
     ] {
         let plain_report = assess_command(plain, &context);
         let attached_report = assess_command(attached, &context);
@@ -1049,5 +1121,42 @@ fn non_atomic_file_operations_need_authorization_even_when_target_is_missing() {
         std::fs::read_to_string(dir.path().join("source")).unwrap(),
         "keep"
     );
+    assert!(!dir.path().join("dest").exists());
+}
+
+#[test]
+fn touch_reference_is_an_independent_read_effect() {
+    let (dir, context) = fixture();
+    std::fs::write(dir.path().join("reference"), "fixture").unwrap();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("touch".into()),
+            read_paths: vec!["reference".into()],
+            ..RuleSpec::default()
+        },
+        "reference deny",
+    )
+    .unwrap();
+    for mode in [Confirm, Auto, Yolo] {
+        for command in [
+            "touch -r reference dest",
+            "touch -rreference dest",
+            "touch --reference=reference dest",
+        ] {
+            let result = policy(
+                command,
+                mode,
+                &context,
+                &UserRules {
+                    allow: vec![],
+                    deny: vec![rule.clone()],
+                },
+            );
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{command}: {result:?}"
+            );
+        }
+    }
     assert!(!dir.path().join("dest").exists());
 }

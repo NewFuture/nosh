@@ -137,6 +137,11 @@ fn short(p: &Path) -> Cow<'_, Path> {
 /// Compare a resolved target with both spellings of a scope root. Resolve
 /// the root, not the relative tail: an escaping child symlink stays outside.
 pub(crate) fn relative_path(path: &Path, root: &Path) -> Option<PathBuf> {
+    // Preserve literal ancestry before shortening aliases: /private/etc is
+    // below /private even though its shorthand /etc no longer is.
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
     let path = short(path);
     let root = short(root);
     path.strip_prefix(&root)
@@ -312,6 +317,14 @@ mod tests {
         assert_eq!(a("/private/etcetera"), None);
         assert_eq!(a("/private/xarts/f"), None);
         assert_eq!(a("/etc/hosts"), None);
+        assert_eq!(
+            relative_path(Path::new("/private/etc"), Path::new("/private")),
+            Some(PathBuf::from("etc"))
+        );
+        assert_eq!(
+            relative_path(Path::new("/private/var/log"), Path::new("/private")),
+            Some(PathBuf::from("var/log"))
+        );
     }
 
     #[test]

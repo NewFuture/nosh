@@ -789,9 +789,12 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         }
         "mkdir" => Verdict::mutating("creates directories")
             .writes(targets(operands_skipping(args, &["-m", "--mode"]))),
-        "touch" => Verdict::mutating("creates files or changes timestamps").writes(targets(
-            operands_skipping(args, &["-d", "--date", "-r", "--reference", "-t"]),
-        )),
+        "touch" => Verdict::mutating("creates files or changes timestamps")
+            .writes(targets(operands_skipping(
+                args,
+                &["-d", "--date", "-r", "--reference", "-t"],
+            )))
+            .reads(option_targets(args, Some('r'), &["reference"])),
         "mkfifo" | "mknod" | "mktemp" => {
             Verdict::mutating("creates files or directories").writes(targets(operands_skipping(
                 args,

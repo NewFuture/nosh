@@ -431,7 +431,7 @@ impl GitProbe<'_> {
             .run(&[
                 "config",
                 "--get-regexp",
-                r"^(core\.(hookspath|fsmonitor|sshcommand)|commit\.gpgsign|gpg\..*|filter\..*\.(clean|smudge|process))$",
+                r"^(core\.(hookspath|fsmonitor|sshcommand|askpass)|credential(\..*)?\.helper|commit\.gpgsign|gpg\..*|filter\..*\.(clean|smudge|process))$",
             ])?
             .is_some()
         {
@@ -681,7 +681,43 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
             {
                 return Err("custom remote/refspec options need authorization".into());
             }
+            if op.argv.len() > 3 {
+                return Err("additional remote/refspec arguments need authorization".into());
+            }
             let remote = op.argv.get(2).map(String::as_str).unwrap_or("origin");
+            if sub == "fetch" {
+                let refspec = probe
+                    .run(&["config", "--get-all", &format!("remote.{remote}.fetch")])?
+                    .ok_or("fetch has no configured destination scope")?;
+                if refspec.trim_start_matches('+')
+                    != format!("refs/heads/*:refs/remotes/{remote}/*")
+                {
+                    return Err(
+                        "configured fetch refspec is outside the supported tracking-ref scope"
+                            .into(),
+                    );
+                }
+                for key in [
+                    "fetch.prune".to_string(),
+                    "fetch.pruneTags".into(),
+                    format!("remote.{remote}.prune"),
+                    format!("remote.{remote}.pruneTags"),
+                    format!("remote.{remote}.mirror"),
+                ] {
+                    if probe.run(&["config", "--bool", "--get", &key])?.as_deref() == Some("true") {
+                        return Err(format!(
+                            "{key} enables destructive ref updates; authorization required"
+                        )
+                        .into());
+                    }
+                }
+                if probe
+                    .run(&["config", "--get", &format!("remote.{remote}.tagOpt")])?
+                    .is_some_and(|option| !matches!(option.as_str(), "--no-tags" | "--tags"))
+                {
+                    return Err("unrecognized configured tag behavior needs authorization".into());
+                }
+            }
             let url = probe
                 .run(&["remote", "get-url", remote])?
                 .ok_or("remote URL is not known")?;
@@ -696,10 +732,11 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
                     "for-each-ref",
                     "--format=%(refname) %(objectname)",
                     "refs/remotes",
+                    "refs/tags",
                 ])?
                 .ok_or("cannot capture remote-tracking refs")?;
             Ok(format!(
-                "remote query; original tracking refs: {}",
+                "remote query; original tracking refs and tags: {}",
                 if refs.is_empty() { "(none)" } else { &refs }
             ))
         }
