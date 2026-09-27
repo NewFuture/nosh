@@ -488,7 +488,7 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 
 ```text
 sid = 取得或新建对话（任务前按 §5.7 检查预算）
-append user(任务头 + 输入 [+ 附件])
+append user(标签化背景 + 项目文档 [+ 附件]), user(原始请求)
 for step in 1..=max_steps (默认 10):
     events = engine.step(sid, pending)            // 尽量复用公共前缀
     if ContextFull: 回退本次追加，压缩旧工具结果后重试一次；回退或压缩失败则结束任务并报错
@@ -511,7 +511,7 @@ for step in 1..=max_steps (默认 10):
 
 ### 5.4 Prompt
 
-system 在同一对话内保持稳定；动态事实与项目文档另行提供。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
+system 在同一对话内保持稳定，Available 分组、Rules 保留通用约束；标签化背景和原始请求分为两个 User 消息。只为当前任务补齐必要信息，结果有证据后结束，目标不明确时先澄清。风险评估、审批、超时和终端交接由 harness 执行，不依赖 prompt 放行。
 
 上下文格式、项目发现、AGENTS/README 加载、缓存与保护边界统一见 [Project context 设计](PROJECT-CONTEXT.md)。实际 system 文本以 [prompt.rs](../crates/nosh-core/src/prompt.rs) 为准，不在多处复制规则全文。
 
@@ -1005,7 +1005,7 @@ nosh connect user@host --push-model    把本地模型推送到主机
 - **协议**：JSON Lines，发送请求后以流的形式返回事件；调度规则见 §7.6。
 
 ```text
-→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[context] {\"cwd\":\"…\",\"lang\":\"zh\"}\n哪个进程占用了 8080？"}]}
+→ {"id":2,"op":"step","session":"a1b2","append":[{"role":"user","content":"[context]\ncwd: /work\nlang: zh"},{"role":"user","content":"哪个进程占用了 8080？"}]}
 ← {"id":2,"ev":"text","text":"我先看看端口占用情况。"}
 ← {"id":2,"ev":"tool_call","name":"run_command","args":{"command":"ss -ltnp 'sport = :8080'"}}
 ← {"id":2,"ev":"done","reason":"stop","usage":{"prompt":1236,"cached":1180,"completion":41,"tok_s":14.1}}
@@ -1305,12 +1305,20 @@ You are provided with function signatures within <tools></tools> XML tags:
 Tool usage guidelines: ...（官方模板中的固定文本）
 # Environment
 OS: Ubuntu 24.04 (x86_64) | Shell: nosh (bash-compatible) | User: u
-Available: git, docker, node, python3
+Available:
+  dev: git python3 node
+  containers: docker
 # Rules
 ...<|im_end|>
 <|im_start|>user
-[context] {"cwd":"/home/u/proj","project":{"type":"node","name":"proj","scripts":["build","test"]},"git":{"head":"main","dirty":true},"lang":"zh"}
+[context]
+cwd: /home/u/proj
+project: node; name=proj; scripts=build, test
+git: head=main; dirty=true
+lang: zh
 [recent] npm start → exit 1 (0.8s)
+<|im_end|>
+<|im_start|>user
 刚才为什么启动失败？<|im_end|>
 <|im_start|>assistant
 <think>

@@ -377,20 +377,18 @@ impl Agent {
         let guidance = self.guidance.load(&permission_context);
         let changed_guidance = self.guidance_sent.as_deref() != Some(guidance.key.as_str());
         let complete_guidance = guidance.complete;
-        let notes = if changed_guidance && !guidance.text.is_empty() {
-            Some(guidance.text)
-        } else if changed_guidance && self.engine.message_count(sid) > 0 {
-            Some("No AGENTS.md guidance or README reference applies here. Previous directory-scoped project documents no longer apply.".into())
-        } else {
-            None
-        };
+        let mut notes = guidance.text;
+        if changed_guidance && self.engine.message_count(sid) > 0 {
+            notes.insert_str(0, "[project documents cleared]\n");
+        }
+        let notes = (changed_guidance && !notes.is_empty()).then_some(notes);
         let mut guidance_key = (changed_guidance && complete_guidance).then_some(guidance.key);
-        pending.push(Message::User(prompt::task_message_with_context(
+        pending.extend(prompt::task_messages_with_context(
             shell,
             &input,
             notes.as_deref(),
             &permission_context,
-        )));
+        ));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
         loop {

@@ -1,7 +1,7 @@
 //! Suggestion mode (Ctrl+G, `nosh -s`): a short separate conversation with
 //! no tools; one shell program is returned and nothing is executed.
 
-use nosh_llm::{ChatEngine, LlmError, Message, SamplingParams, SessionSpec, StopReason};
+use nosh_llm::{ChatEngine, LlmError, SamplingParams, SessionSpec, StopReason};
 use nosh_shell::{EmbeddedShell, Trigger};
 
 use crate::prompt::{self, Environment, TaskInput};
@@ -59,10 +59,10 @@ pub fn suggest_with_context(
     }
     let sid = engine.open(spec)?;
     let notes = (!guidance.text.is_empty()).then_some(guidance.text.as_str());
-    let msg =
-        prompt::task_message_with_context(shell, &TaskInput::new(trigger, text), notes, context);
+    let messages =
+        prompt::task_messages_with_context(shell, &TaskInput::new(trigger, text), notes, context);
     engine.cancel_handle().reset();
-    let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
+    let res = engine.step(sid, messages, &mut |_| {});
     engine.close(sid);
     let out = res?;
     if out.stop != StopReason::EndOfTurn || !out.tool_calls.is_empty() || !out.errors.is_empty() {

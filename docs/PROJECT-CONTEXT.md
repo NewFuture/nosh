@@ -6,7 +6,7 @@
 
 system 与工具 schema 在对话内保持稳定。项目事实、文档和附件不提升为可信 system 内容；不能从背景推导额外任务。
 
-当前仍是**一个 User 消息**：紧凑 `[context]` JSON → 可选最近命令／项目文档／附件／真实失败说明 → 请求。不改写请求内容，沿用首尾空白裁剪并置于最后；内部 `Trigger` 只负责路由，不暴露给模型。
+agent、`-s` 和 Ctrl+G 统一发送**两个 User 消息**：背景（context、最近命令、项目文档、附件、真实失败事实），然后是原始请求。请求不改写、不拼接背景；内部 `Trigger` 只负责路由。只有失败后直接求助但没有请求文本时，生成默认的失败解释请求。
 
 ## 最小事实
 
@@ -17,11 +17,18 @@ system 与工具 schema 在对话内保持稳定。项目事实、文档和附�
 | Git、语言、venv、真实失败 | head 为分支或短 SHA；dirty 仅指已跟踪变化；失败保留命令与退出码 |
 | 缺失与告警 | 未识别 manifest、无 Git、未知、受保护、不可读分别表达；未识别不等于目录为空或输入不存在 |
 
-不输出空告警、重复 manifest 结构或默认时钟；时间敏感任务获取实际时间证据。字符串保持 JSON 转义，不用模糊省略换 token。
+模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
 
 ```text
-[context] {"cwd":"/work/app","project":{"type":"rust","name":"app","edition":"2021","workspace":true},"git":"none detected","lang":"zh"}
-编译
+<|im_start|>user
+[context]
+cwd: /work/app
+project: rust; name=app; edition=2021; workspace=true
+git: none detected
+lang: zh
+<|im_end|>
+<|im_start|>user
+编译<|im_end|>
 ```
 
 ## 发现与文档
@@ -34,9 +41,11 @@ system 与工具 schema 在对话内保持稳定。项目事实、文档和附�
 |---|---|
 | 存在适用 AGENTS.md | 根到子目录加载，标明来源；更具体的文件只管其子树，不能覆盖用户请求或安全规则；不加载 README |
 | AGENTS 过大、受保护或不可读 | 明示未加载来源，不截掉规则冒充完整，也不回退 README；agent 收到补读要求，建议模式在调用模型前报错 |
-| 确认没有 AGENTS | 最近 README 的精简原文简介与带行号章节索引，仅作参考；跳过代码围栏／徽章，不另用 LLM 摘要，不执行示例 |
+| 确认没有 AGENTS | 最近 README 的首段简介与带行号章节索引，仅作参考；不展开后续操作段落，不另用 LLM 摘要 |
 
-读取沿用保护及符号链接检查，不执行项目脚本。单文件上限 64 KiB；AGENTS 自动正文合计 4,000 字符，只纳入完整文件；README 摘录约 1,000 字符，可选参考不可用不阻断建议。字符上限不等于 token 数。
+文档只附类型、来源和必要异常，不反复解释 AGENTS/README 政策，也不无条件要求补读 README。AGENTS 原文不擅自精简；真正未加载时仍保留补读要求。旧文档作用域确实需要替换时才发送清除标记。
+
+读取沿用保护及符号链接检查，不执行项目脚本。单文件上限 64 KiB；AGENTS 自动正文合计 4,000 字符，只纳入完整文件；README 正文最多约 1,000 字符，裁切显式标注，可选参考不可用不阻断建议。字符上限不等于 token 数。
 
 ## 刷新与缓存
 
@@ -53,8 +62,7 @@ system 与工具 schema 在对话内保持稳定。项目事实、文档和附�
 
 - **先补刷新一致性**：已完成命令改变 cwd 后，下一模型步前更新文档作用域；不承诺在复合命令中途拦截或重写执行。
 - **先去重，再做复杂缓存**：状态照算，完整快照未变则不重发，变化则整份替换；请求、附件和真实失败事实不去重。
-- **分离意图与压缩格式分别比较**：背景和原始请求分消息；同一组事实分别用 JSON／短标签键值文本渲染。二者都不是当前实现，不预设更省 token 或更准确。
 
-比较应覆盖完整输入成本（含文档、schema、消息模板）及任务正确性；仅转换历史 context 头的 token 报告不能代表全部收益。
+标签格式、独立请求消息和文档精简已进入代码，行为效果尚未测量。后续比较应覆盖完整输入成本（含文档、schema、消息模板）及任务正确性；历史 JSON 渲染转换的 token 报告不代表当前收益。
 
 实现入口：[project.rs](../crates/nosh-core/src/project.rs)、[guidance.rs](../crates/nosh-core/src/guidance.rs)、[prompt.rs](../crates/nosh-core/src/prompt.rs)、[agent.rs](../crates/nosh-core/src/agent.rs)。

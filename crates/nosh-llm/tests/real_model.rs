@@ -173,9 +173,10 @@ fn produces_parseable_tool_call() {
     let o = e
         .step(
             sid,
-            vec![Message::User(
-                "[context] {\"cwd\":\"/tmp\"}\nList the files in the current directory.".into(),
-            )],
+            vec![
+                Message::User("[context]\ncwd: /tmp".into()),
+                Message::User("List the files in the current directory.".into()),
+            ],
             &mut |ev| {
                 if let Event::ToolCall(c) = ev {
                     calls.push(c);

@@ -49,7 +49,7 @@ input_assist = false
 
 ## 命令建议与终端交接
 
-项目指引优先加载适用的 `AGENTS.md`；确实没有 AGENTS.md 时，才提供最近 README 的精简参考片段，不与指引重复加载。新任务会按当前目录与文档版本更新；读取仍受路径保护和预算约束，README 中的示例不视为待办命令。
+标签化背景与用户请求分消息发送；Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。新任务按当前目录与文档版本更新，读取仍受路径保护和预算约束。
 
 普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。
 

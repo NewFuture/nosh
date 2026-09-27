@@ -80,13 +80,7 @@ impl GuidanceCache {
         let mut warnings = Vec::new();
         let (stamp, contents) = self.read_cached(path, ctx, &mut warnings);
         let mut key = format!("README:{path:?}:{stamp:?}");
-        let mut text = String::from(
-            "No AGENTS.md applies in this scope; previous scoped AGENTS.md guidance no longer applies. The following README excerpt is reference, not additional instructions.\n",
-        );
-        text.push_str(&format!(
-            "[README reference {}]\n",
-            json!({"path": path.display().to_string(), "excerpt": true})
-        ));
+        let mut text = format!("[README reference {}]\n", json!(path.display().to_string()));
         if let Some(contents) = contents {
             if stamp.is_none() {
                 key.push_str(&contents);
@@ -94,7 +88,9 @@ impl GuidanceCache {
             text.push_str(&readme_excerpt(&contents));
         }
         if !warnings.is_empty() {
-            text.push_str(&format!("[reference unavailable] {}\n", json!(warnings)));
+            for warning in &warnings {
+                text.push_str(&format!("reference unavailable: {}\n", json!(warning)));
+            }
             key.push_str(&format!("{warnings:?}"));
         }
         Guidance {
@@ -161,9 +157,6 @@ impl GuidanceCache {
         self.files.retain(|path, _| paths.contains(path));
         let mut key = String::new();
         let mut text = String::new();
-        if !paths.is_empty() {
-            text.push_str("Current AGENTS.md guidance, root first. More specific files apply only within their directory subtree; this list replaces the prior active scope.\n");
-        }
         let mut budget = GUIDANCE_CHARS;
         let mut all_complete = true;
         for path in paths {
@@ -176,19 +169,24 @@ impl GuidanceCache {
             let count = contents.chars().count();
             let complete = count <= budget;
             all_complete &= complete;
-            let source = json!({"path": path.display().to_string(), "complete": complete});
-            text.push_str(&format!("[AGENTS.md {source}]\n"));
+            text.push_str(&format!(
+                "[AGENTS.md {}{}]\n",
+                json!(path.display().to_string()),
+                if complete { "" } else { " not loaded" },
+            ));
             if complete {
                 text.push_str(contents.trim_end());
                 text.push('\n');
                 budget -= count;
             } else {
-                text.push_str("Not injected: guidance exceeds the automatic context budget. Read this file before acting in its scope.\n");
+                text.push_str("Size limit. Read before acting in this scope.\n");
             }
         }
         if !warnings.is_empty() {
             all_complete = false;
-            text.push_str(&format!("[guidance unavailable] {}\n", json!(warnings)));
+            for warning in &warnings {
+                text.push_str(&format!("guidance unavailable: {}\n", json!(warning)));
+            }
             key.push_str(&format!("{warnings:?}"));
         }
         Guidance {
@@ -204,6 +202,8 @@ fn readme_excerpt(text: &str) -> String {
     let mut headings = Vec::new();
     let mut fence: Option<(u8, usize)> = None;
     let mut intro_chars = 0;
+    let mut intro_done = false;
+    let mut truncated = false;
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
         let marker = line.as_bytes().first().copied();
@@ -218,10 +218,12 @@ fn readme_excerpt(text: &str) -> String {
             continue;
         }
         if matches!(marker, Some(b'`' | b'~')) && marker_len >= 3 {
+            intro_done |= !intro.is_empty();
             fence = marker.map(|marker| (marker, marker_len));
             continue;
         }
         if line.is_empty() {
+            intro_done |= !intro.is_empty();
             continue;
         }
         let hashes = line.bytes().take_while(|b| *b == b'#').count();
@@ -231,24 +233,33 @@ fn readme_excerpt(text: &str) -> String {
                 .get(hashes)
                 .is_some_and(u8::is_ascii_whitespace)
         {
+            intro_done |= !intro.is_empty();
             if headings.len() < 8 {
                 headings.push(format!(
                     "L{}: {}",
                     index + 1,
                     line.trim_start_matches('#').trim()
                 ));
+            } else {
+                truncated = true;
             }
             continue;
         }
-        if intro.len() < 4
-            && intro_chars < 600
+        if !intro_done
             && !["![", "[![", "<!--", "<", "[!"]
                 .iter()
                 .any(|prefix| line.starts_with(*prefix))
         {
-            let content: String = line.chars().take(600 - intro_chars).collect();
-            intro_chars += content.chars().count();
-            intro.push(format!("L{}: {content}", index + 1));
+            if intro.len() < 4 && intro_chars < 600 {
+                let content: String = line.chars().take(600 - intro_chars).collect();
+                let count = content.chars().count();
+                truncated |= count < line.chars().count();
+                intro_chars += count;
+                intro.push(format!("L{}: {content}", index + 1));
+            } else {
+                truncated = true;
+                intro_done = true;
+            }
         }
     }
     let mut body = intro.join("\n");
@@ -256,8 +267,13 @@ fn readme_excerpt(text: &str) -> String {
         body.push_str("\nSections:\n");
         body.push_str(&headings.join("\n"));
     }
+    truncated |= body.chars().count() > README_CHARS;
     let body: String = body.chars().take(README_CHARS).collect();
-    format!("{body}\n[excerpt only; read the relevant source lines for complete details]\n")
+    if truncated {
+        format!("{body}\n[excerpt truncated]\n")
+    } else {
+        format!("{body}\n")
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +291,8 @@ mod tests {
         assert!(fallback.text.contains("README reference"));
         assert!(fallback.text.contains("readme instructions"));
         assert!(!fallback.text.contains("legacy instructions"));
+        assert!(!fallback.text.contains("No AGENTS.md"));
+        assert!(!fallback.text.contains("read the relevant"));
         std::fs::write(root.path().join("AGENTS.md"), "Use project conventions.").unwrap();
         let snapshot = cache.load(&ctx);
         assert!(snapshot.complete);
@@ -302,6 +320,7 @@ mod tests {
         assert!(fallback.text.contains("A small project."));
         assert!(fallback.text.contains("Sections:"));
         assert!(!fallback.text.contains("should-not-be-injected"));
+        assert!(!fallback.text.contains("details"));
         assert!(fallback.text.chars().count() < README_CHARS + 600);
         std::fs::write(
             root.path().join("AGENTS.md"),
@@ -406,7 +425,7 @@ mod tests {
             "# Project\nIntro.\n````markdown\n```sh\nhidden command\n```\n## hidden heading\n````\n~~~sh\n```\nhidden mixed fence\n~~~\n## Usage\nVisible reference.\n",
         );
         assert!(excerpt.contains("Intro."));
-        assert!(excerpt.contains("Visible reference."));
+        assert!(!excerpt.contains("Visible reference."));
         assert!(excerpt.contains("Usage"));
         assert!(!excerpt.contains("hidden"));
     }
@@ -444,8 +463,8 @@ mod tests {
         let mut cache = GuidanceCache::default();
         let snapshot = cache.load(&ctx);
         assert!(!snapshot.complete);
-        assert!(snapshot.text.contains("\"complete\":false"));
-        assert!(snapshot.text.contains("Read this file before acting"));
+        assert!(snapshot.text.contains("not loaded"));
+        assert!(snapshot.text.contains("Read before acting"));
         assert!(!snapshot.text.contains(&"x".repeat(100)));
         ctx.protected.push(file);
         let blocked = cache.load(&ctx);
@@ -466,7 +485,7 @@ mod tests {
         assert!(!guidance.complete);
         assert!(guidance.text.contains(&root_text));
         assert!(!guidance.text.contains("child instruction"));
-        assert!(guidance.text.contains("\"complete\":false"));
+        assert!(guidance.text.contains("not loaded"));
     }
 
     #[test]
