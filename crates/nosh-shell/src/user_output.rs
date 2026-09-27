@@ -192,19 +192,25 @@ impl ControlState {
                 (Self::Ground, 0x1b) => Self::Escape,
                 (Self::Escape, b'[') => Self::Csi,
                 (Self::Escape, b']') => Self::Osc,
-                (Self::Escape, b'P' | b'_' | b'^') => Self::String,
+                (Self::Escape, b'P' | b'X' | b'_' | b'^') => Self::String,
+                (Self::Escape, 0x18 | 0x1a) => Self::Ground,
+                (Self::Escape, 0x1b) => Self::Escape,
+                (Self::Escape, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f) => Self::Escape,
                 (Self::Escape, 0x20..=0x2f) => Self::Escape,
-                (Self::Escape, _) => Self::Ground,
+                (Self::Escape, 0x30..=0x7e) => Self::Ground,
+                (Self::Escape, _) => Self::Escape,
                 (Self::Csi, 0x18 | 0x1a) => Self::Ground,
                 (Self::Csi, 0x1b) => Self::Escape,
                 (Self::Csi, 0x40..=0x7e) => Self::Ground,
                 (Self::Csi, _) => Self::Csi,
                 (Self::Osc, 0x07) => Self::Ground,
+                (Self::Osc, 0x18 | 0x1a) => Self::Ground,
                 (Self::Osc, 0x1b) => Self::OscEscape,
                 (Self::Osc, _) => Self::Osc,
                 (Self::OscEscape, b'\\') => Self::Ground,
                 (Self::OscEscape, 0x1b) => Self::OscEscape,
                 (Self::OscEscape, _) => Self::Osc,
+                (Self::String, 0x18 | 0x1a) => Self::Ground,
                 (Self::String, 0x1b) => Self::StringEscape,
                 (Self::String, _) => Self::String,
                 (Self::StringEscape, b'\\') => Self::Ground,
@@ -438,12 +444,15 @@ mod tests {
 
     #[test]
     fn unfinished_terminal_controls_are_incomplete_across_chunks() {
-        for input in [
-            b"text\x1b".as_slice(),
-            b"text\x1b[31".as_slice(),
-            b"text\x1b]title".as_slice(),
-            b"text\x1bPdata".as_slice(),
-            b"text\x1b_string\x1b".as_slice(),
+        for (input, expected) in [
+            (b"text\x1b".as_slice(), "text"),
+            (b"text\x1b\n".as_slice(), "text\n"),
+            (b"text\x1b\x1b".as_slice(), "text"),
+            (b"text\x1b[31".as_slice(), "text"),
+            (b"text\x1b]title".as_slice(), "text"),
+            (b"text\x1bPdata".as_slice(), "text"),
+            (b"text\x1bXdata".as_slice(), "text"),
+            (b"text\x1b_string\x1b".as_slice(), "text"),
         ] {
             for split in 0..=input.len() {
                 let mut collector = OutputCollector::default();
@@ -451,7 +460,7 @@ mod tests {
                 collector.push(&input[split..]);
                 let output = collector.finish();
                 assert!(output.incomplete, "{input:?} at {split}");
-                assert_eq!(output.text, "text", "{input:?} at {split}");
+                assert_eq!(output.text, expected, "{input:?} at {split}");
             }
         }
         for input in [b"text\x1b[31m".as_slice(), b"text\x1b]title\x07".as_slice()] {

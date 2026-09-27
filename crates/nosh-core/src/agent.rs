@@ -371,13 +371,13 @@ impl Agent {
         }
         let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
-        let notes = prompt::project_notes(&cwd0)
-            .filter(|(p, _)| self.notes_seen.insert(p.clone()))
-            .map(|(_, t)| t);
+        let notes =
+            prompt::project_notes(&cwd0).filter(|(path, _)| !self.notes_seen.contains(path));
+        let mut attached_notes = notes.as_ref().map(|(path, _)| path.clone());
         pending.push(Message::User(prompt::task_message(
             shell,
             &input,
-            notes.as_deref(),
+            notes.as_ref().map(|(_, text)| text.as_str()),
         )));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
@@ -392,6 +392,9 @@ impl Agent {
                 Ok(s) => {
                     if let Some(command_id) = attached_output.take() {
                         self.user_outputs_seen.insert(command_id);
+                    }
+                    if let Some(path) = attached_notes.take() {
+                        self.notes_seen.insert(path);
                     }
                     s
                 }
@@ -846,6 +849,7 @@ mod tests {
         fail: Option<&'static str>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         messages: usize,
+        append_failed: bool,
     }
 
     impl RecoveryEngine {
@@ -874,7 +878,19 @@ mod tests {
             self.record("step")?;
             self.messages += append.len();
             if self.fail == Some("append") {
+                self.fail = None;
+                self.append_failed = true;
                 return Err(LlmError::Config("append failed".into()));
+            }
+            if self.append_failed {
+                return Ok(StepOutcome {
+                    text: "done".into(),
+                    think: String::new(),
+                    tool_calls: Vec::new(),
+                    errors: Vec::new(),
+                    stop: StopReason::EndOfTurn,
+                    usage: Usage::default(),
+                });
             }
             Err(LlmError::ContextFull {
                 used: 100,
@@ -921,6 +937,7 @@ mod tests {
                 fail,
                 calls: Arc::clone(&calls),
                 messages: 1,
+                append_failed: false,
             }),
             AgentConfig::default(),
             Environment {
@@ -962,6 +979,38 @@ mod tests {
         assert_eq!(error.to_string(), "append failed");
         assert_eq!(agent.engine.message_count(1), 1);
         assert_eq!(*calls.lock().unwrap(), ["step", "rewind"]);
+    }
+
+    #[test]
+    fn failed_append_does_not_suppress_project_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("NOSH.md");
+        std::fs::write(&notes, "project instructions").unwrap();
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
+            working_dir: Some(directory.path().to_path_buf()),
+            ..nosh_shell::ShellOptions::default()
+        })
+        .unwrap();
+        let (mut agent, _) = recovery_agent(Some("append"));
+        let mut ui = crate::RecordUi::default();
+
+        let first = agent.run_task(
+            &mut shell,
+            TaskInput::new(nosh_shell::Trigger::Hash, "first"),
+            &mut crate::Scripted::new([]),
+            &mut ui,
+        );
+        assert_eq!(first.status, TaskStatus::Failed);
+        assert!(!agent.notes_seen.contains(&notes));
+
+        let second = agent.run_task(
+            &mut shell,
+            TaskInput::new(nosh_shell::Trigger::Hash, "second"),
+            &mut crate::Scripted::new([]),
+            &mut ui,
+        );
+        assert_eq!(second.status, TaskStatus::Completed);
+        assert!(agent.notes_seen.contains(&notes));
     }
 
     #[test]

@@ -300,6 +300,13 @@ class DatasetRevisionTests(ProjectWorkCase):
         with self.assertRaisesRegex(ValueError, "required facts"):
             suite.load_suite(self.write_suite(revised_dirty))
 
+        revision_four = copy.deepcopy(current)
+        revision_four["dataset_revision"] = 4
+        for scenario in revision_four["scenarios"]:
+            if scenario["check"] in suite.CAPTURE_CHECKS:
+                scenario["inputs"][-1] = "# 根据刚才的输出诊断"
+        self.assertEqual(suite.load_suite(self.write_suite(revision_four)), revision_four)
+
         for revision in (0, -1, True, 2.0, "2", None, []):
             invalid = dict(current, dataset_revision=revision)
             with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "dataset_revision"):

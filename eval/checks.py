@@ -691,7 +691,7 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
     if len(tasks) != 1 or "\n[user_output " not in tasks[0]:
         return reasons + ["the first model request lacks captured output evidence"], codes
     task = tasks[0]
-    if scenario["check"] in CAPTURE_CHECKS:
+    if scenario["check"] in CAPTURE_CHECKS and scenario["inputs"][-1].startswith("ai fix"):
         if not re.match(r"^\[task trigger=failed exit=17(?: |\])", task):
             reasons.append("captured diagnosis did not use trigger=failed with exit 17")
         question = scenario["inputs"][-1].removeprefix("ai fix").strip()

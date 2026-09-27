@@ -135,7 +135,7 @@ def load_suite(path: Path) -> dict:
                 if (scenario["check"] in {"build-failure", "test-failure", "port-failure", "captured-failure", *CAPTURE_CHECKS}
                         and completions[0]["kind"] != "shell"):
                     raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
-                if (scenario["check"] in CAPTURE_CHECKS
+                if (revision >= 5 and scenario["check"] in CAPTURE_CHECKS
                         and not re.fullmatch(r"ai fix(?: .+)?", inputs[-1])):
                     raise ValueError(f"captured diagnosis requires an explicit ai fix input: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):

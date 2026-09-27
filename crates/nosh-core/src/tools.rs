@@ -167,7 +167,8 @@ pub(crate) fn format_user_output(output: &UserOutput) -> String {
 ///
 /// This function is intentionally absent from [`BuiltinTool`] and every
 /// [`ToolSet`], so the model cannot call it until its policy is finalized.
-pub fn get_last_output(shell: &EmbeddedShell) -> String {
+#[allow(dead_code)]
+pub(crate) fn get_last_output(shell: &EmbeddedShell) -> String {
     match shell.last_user_output() {
         Some(output) => format_user_output(output),
         None => {

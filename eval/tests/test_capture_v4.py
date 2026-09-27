@@ -104,6 +104,15 @@ class DiagnosticContractTests(unittest.TestCase):
             )).details["facts"]["components"]["capture"]["passed"]
         )
 
+    def test_revision_four_hash_route_remains_gradable(self):
+        historical = copy.deepcopy(self.scenario)
+        historical["inputs"][-1] = "# 根据刚才的输出诊断"
+        verdict = self.grade(
+            scenario=historical,
+            evidence=observed_input(self.text, self.metadata),
+        )
+        self.assertTrue(verdict.details["facts"]["components"]["capture"]["passed"])
+
     def test_citing_an_id_does_not_excuse_known_unsupported_claims(self):
         for assertion in (
             "REGION 是 Kubernetes 集群的区域标识。",
