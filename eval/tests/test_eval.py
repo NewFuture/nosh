@@ -25,9 +25,9 @@ class ContractTests(unittest.TestCase):
 
     def test_default_suite_and_seeds(self):
         suite = run.load_suite(run.HERE / "scenarios.json")
-        self.assertEqual(len(suite["scenarios"]), 25)
+        self.assertEqual(len(suite["scenarios"]), 27)
         self.assertEqual(sum(s["group"] == "mvp" for s in suite["scenarios"]), 10)
-        self.assertEqual(sum(s["group"] == "expanded" for s in suite["scenarios"]), 15)
+        self.assertEqual(sum(s["group"] == "expanded" for s in suite["scenarios"]), 17)
         self.assertEqual(suite["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(run.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
         for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):
@@ -530,8 +530,11 @@ class CheckTests(unittest.TestCase):
         facts = fixtures.create(root, "history")
         answer = "\n\n".join(f"{i}. **Commit**\n   - Feature: {subject}\n   - Component: `{component}`"
                              for i, (component, _, subject) in enumerate(fixtures.HISTORY, 1))
-        self.assertTrue(checks.judge({"check": "history"}, answer, facts, root, facts["before"],
-                                    self.result, self.metrics).passed)
+        verdict = checks.judge({"check": "history"}, answer, facts, root, facts["before"],
+                               self.result, self.metrics)
+        self.assertTrue(verdict.passed)
+        self.assertNotIn("components", verdict.details["facts"],
+                         "history component names are not capture evaluation state")
         swapped = answer.replace("Component: `llm`", "Component: `hub`", 1)
         self.assertFalse(checks.judge({"check": "history"}, swapped, facts, root, facts["before"],
                                      self.result, self.metrics).passed)

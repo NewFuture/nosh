@@ -44,7 +44,7 @@ class ExpandedContractTests(unittest.TestCase):
         short = [s for s in SUITE["scenarios"] if s["group"] == "expanded" and len(s["inputs"]) == 1]
         self.assertEqual(len(short), 12)
         self.assertTrue(all(not s["inputs"][0].startswith("#") and s["mode"] == "repl" for s in short))
-        self.assertEqual(len(SCENARIOS), 25)
+        self.assertEqual(len(SCENARIOS), 27)
 
     def test_strict_experience_and_completion_contracts(self):
         cases = [
@@ -138,7 +138,7 @@ class ExpandedContractTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in rows))
             result = driver.Result(exit_code=-9, error="deadline", timeout_phase="agent", total_s=240)
             write(events)
-            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, deadline_timeout=True)
             self.assertEqual(observed["metrics"]["steps"], 2)
             self.assertEqual(observed["metrics"]["ttft_s"], 0.2)
             self.assertEqual(observed["metrics"]["task_status"], "timed_out")
@@ -148,17 +148,51 @@ class ExpandedContractTests(unittest.TestCase):
             for invalid in (events[:-1], events + [{"ev": "close", "sid": 1}], events + [events[-1]]):
                 write(invalid)
                 with self.assertRaises(ValueError):
-                    observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                    observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, deadline_timeout=True)
             write(events[:3])
-            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+            observed = observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, deadline_timeout=True)
             self.assertIsNone(observed["metrics"]["ttft_s"])
             result.timeout_phase = "initial_prompt"
             with self.assertRaises(ValueError):
-                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, deadline_timeout=True)
             result.timeout_phase = "agent"
             result.exit_code = 0
             with self.assertRaises(ValueError):
-                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, inflight_timeout=True)
+                observations.observe(result, SCENARIOS["zh-clean-build"], trace, False, 0, deadline_timeout=True)
+
+    def test_completed_final_generation_at_deadline_is_a_task_failure_with_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "engine.jsonl"
+            events = [
+                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
+                {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "task"}]},
+                {"ev": "step_end", "sid": 1, "text": "final answer", "tool_calls": [],
+                 "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.2}},
+            ]
+            trace.write_text("\n".join(
+                json.dumps(dict(event, schema_version=1, engine=1)) for event in events))
+            result = driver.Result(exit_code=-9, error="deadline", timeout_phase="agent", total_s=60)
+            observed = observations.observe(
+                result, SCENARIOS["zh-node-test"], trace, False, 0, deadline_timeout=True)
+            self.assertEqual(observed["deadline_state"], "after_generation")
+            self.assertEqual(observed["metrics"]["task_status"], "timed_out")
+            self.assertEqual(observed["answer"], "final answer")
+            self.assertTrue(any("before the REPL completion marker" in note
+                                for note in observed["metric_notes"]))
+            for change in (
+                {"stop": "max_tokens"},
+                {"tool_calls": [{"name": "run_command", "args": {"command": "true"}}]},
+                {"errors": ["bad call"]},
+            ):
+                broken = [dict(event) for event in events]
+                broken[-1].update(change)
+                trace.write_text("\n".join(
+                    json.dumps(dict(event, schema_version=1, engine=1)) for event in broken))
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    observations.observe(
+                        result, SCENARIOS["zh-node-test"], trace, False, 0,
+                        deadline_timeout=True)
 
     def test_legacy_failure_contract_is_normalized(self):
         scenario = {"inputs": ["python3 broken.py", "#"], "check": "failure"}
@@ -605,6 +639,39 @@ assert b"exit 0" in line()
                 self.assertEqual(row["answer"], "")
                 self.assertFalse((workspace.root / scenario["id"]).exists())
 
+    def test_trial_records_post_generation_deadline_as_failure(self):
+        scenario = SCENARIOS["zh-node-test"]
+        args = SimpleNamespace(threads=1, legacy=False)
+        meta = {"settings": {"timeout_s": 60}}
+
+        def child(argv, cwd, env, timeout, case, approve):
+            events = [
+                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
+                {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
+                {"ev": "step_end", "sid": 1, "text": "tests passed", "tool_calls": [],
+                 "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.2}},
+            ]
+            Path(env["NOSH_EVAL_TRACE"]).write_text("\n".join(
+                json.dumps(dict(event, schema_version=1, engine=1)) for event in events))
+            return driver.Result(exit_code=-9, total_s=60, error="deadline", timeout_phase="agent")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            output = base / "output"
+            output.mkdir()
+            with fixtures.Workspace(base / "work") as workspace, patch(
+                "eval.run.driver.run_repl", side_effect=child
+            ):
+                row = run.run_trial(
+                    args, meta, scenario, 0, 0, workspace, output,
+                    Path(sys.executable), base / "unused-model")
+                self.assertEqual(row["status"], "fail", row["reasons"])
+                self.assertEqual(row["deadline_state"], "after_generation")
+                self.assertIn("after final generation completed", row["reasons"][0])
+                self.assertEqual(row["answer"], "tests passed")
+                self.assertIsNone(row["grading"]["experience"])
+
 
 class ExpandedReportTests(unittest.TestCase):
     def data(self):
@@ -625,19 +692,19 @@ class ExpandedReportTests(unittest.TestCase):
             })
         return data
 
-    def test_250_trial_denominator_groups_and_weighted_means(self):
+    def test_270_trial_denominator_groups_and_weighted_means(self):
         data = self.data()
         rows = {r["group"]: r for r in report.groups(data)}
-        self.assertEqual(rows["all"]["planned"], 250)
-        self.assertEqual(rows["all"]["missing"], 247)
+        self.assertEqual(rows["all"]["planned"], 270)
+        self.assertEqual(rows["all"]["missing"], 267)
         self.assertEqual(rows["all"]["steps"], 2)
         self.assertEqual(rows["model"]["steps"], 3)
-        self.assertEqual(rows["model"]["planned"], 240)
+        self.assertEqual(rows["model"]["planned"], 260)
         self.assertEqual(rows["local"]["planned"], 10)
-        self.assertEqual(rows["expanded"]["planned"], 150)
+        self.assertEqual(rows["expanded"]["planned"], 170)
         self.assertEqual(rows["mvp"]["planned"], 100)
         data["metadata"]["repeat"] = 1
-        self.assertEqual(report.groups(data)[0]["planned"], 125)
+        self.assertEqual(report.groups(data)[0]["planned"], 135)
 
     def test_v2_round_trip_and_no_success_shaped_missing_grades(self):
         data = self.data()
@@ -647,7 +714,7 @@ class ExpandedReportTests(unittest.TestCase):
             loaded = json.loads((root / "report.json").read_text(encoding="utf-8"))
             report.validate(loaded)
             text = (root / "report.md").read_text(encoding="utf-8")
-            self.assertIn("3/250", text)
+            self.assertIn("3/270", text)
             self.assertIn("Declared experience budgets", text)
             self.assertIn("facts=pass", text)
         data["trials"][0]["grading"]["experience"] = None

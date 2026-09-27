@@ -42,6 +42,42 @@ def validate_campaign_budget(suite: dict, repeat: int, timeout_s: float, availab
     return worst_case
 
 
+def resolve_source_revision(source_ref: str = "main", revision: str = "", cwd: Path | None = None) -> str:
+    """Pin a commit reachable from one explicit origin branch, never a shell expression."""
+    if not source_ref or source_ref.startswith("-"):
+        raise ValueError("source_ref must be a branch name")
+    if revision and not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("source_revision must be a full lowercase commit SHA")
+    valid = subprocess.run(["git", "check-ref-format", "--branch", source_ref], cwd=cwd,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+    if valid.returncode:
+        raise ValueError("source_ref must be a valid branch name")
+    subprocess.run(["git", "fetch", "--no-tags", "origin", f"refs/heads/{source_ref}"],
+                   cwd=cwd, stdout=subprocess.DEVNULL, check=True)
+    tip = subprocess.check_output(["git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+                                  cwd=cwd, text=True).strip()
+    source = revision or tip
+    reachable = subprocess.run(["git", "merge-base", "--is-ancestor", source, tip],
+                               cwd=cwd, check=False)
+    if reachable.returncode == 1:
+        raise ValueError("source_revision must be reachable from source_ref")
+    reachable.check_returncode()
+    return source
+
+
+def campaign_complete(data: dict, declared: dict, repeat: int = 2) -> bool:
+    report.validate(data)
+    meta = data["metadata"]
+    expected = {(scenario["id"], seed, number) for scenario in declared["scenarios"]
+                for seed in declared["seeds"] for number in range(repeat)}
+    return (meta["scenarios"] == declared["scenarios"]
+            and meta["seeds"] == declared["seeds"] and meta["repeat"] == repeat
+            and meta.get("dataset_revision", 1) == declared.get("dataset_revision", 1)
+            and {report.trial_key(trial) for trial in data["trials"]} == expected
+            and not any(trial["status"] == "error" for trial in data["trials"])
+            and not data.get("error"))
+
+
 def required_tools(scenarios: list[dict]) -> set[str]:
     required = {"git", "bash", "python3", "tar", "ss"}
     if any(s["fixture"].startswith("rust") for s in scenarios):
@@ -80,7 +116,10 @@ def discover_tools(scenarios: list[dict]) -> dict:
     return tools
 
 
-def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None) -> dict[str, str]:
+def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None,
+                capture_output: str | None = None) -> dict[str, str]:
+    if capture_output not in (None, "off", "last"):
+        raise ValueError("capture_output must be off or last")
     env = fixtures.project_environment(home, tools)
     env.update({
         "NOSH_HOME": str(home / "nosh"),
@@ -91,8 +130,9 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
     })
     config = home / "nosh"
     config.mkdir(mode=0o700)
+    shell_config = f'[shell]\ncapture_output = "{capture_output}"\n' if capture_output is not None else ""
     (config / "config.toml").write_text(
-        '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
+        shell_config + '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
         '[model]\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
         encoding="utf-8",
     )
@@ -147,6 +187,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
         "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),
         "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
+                     "capture_output": "binary_default",
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",
                      "path": "<trial-home>/bin:/usr/bin:/bin", "tty_size": [40, 160], "process_per_trial": True,
@@ -170,9 +211,10 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
     logs = output / "logs" / f"{scenario['id']}-{seed}-{repeat}"
     logs.mkdir(parents=True)
     try:
-        root, home, facts = workspace.prepare(scenario)
+        root, home, facts = workspace.prepare(scenario, seed, repeat)
         trace = home.parent / "engine.jsonl"
-        env = environment(home, args.threads, None if args.legacy else trace, workspace.tools)
+        env = environment(home, args.threads, None if args.legacy else trace, workspace.tools,
+                          capture_output=scenario.get("capture_output"))
         if scenario["check"] in NATIVE_CHECKS:
             facts["tools"] = workspace.tools
         if scenario["check"] == "versions":
@@ -205,9 +247,12 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                    file_snapshot=after, final_state=checks.fixture_state(scenario, facts, root, after, result))
         if result.error:
             if not args.legacy and result.timeout_phase in ("agent", "cli") and trace.is_file():
-                observed = observe(result, scenario, trace, False, seed, inflight_timeout=True)
+                observed = observe(result, scenario, trace, False, seed, deadline_timeout=True)
                 row.update(observed)
-                reason = (f"agent exceeded the {timeout:g}s trial deadline during model generation "
+                stage = ("after final generation completed but before the completion marker"
+                         if observed["deadline_state"] == "after_generation"
+                         else "during model generation")
+                reason = (f"agent exceeded the {timeout:g}s trial deadline {stage} "
                           f"({row['metrics']['steps']} started steps)")
                 if scenario.get("expect") and row["metrics"]["steps"] > scenario["expect"]["max_steps"]:
                     reason += f"; step budget is {scenario['expect']['max_steps']}"

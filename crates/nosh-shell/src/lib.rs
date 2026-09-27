@@ -5,12 +5,14 @@ pub mod backend;
 pub mod guard;
 pub mod history;
 pub mod procs;
+pub mod pty;
 pub mod repl;
 pub mod spell;
 pub mod style;
 mod suggestion;
 pub mod term;
 pub mod trigger;
+pub mod user_output;
 mod yielding;
 
 pub use backend::{
@@ -19,6 +21,7 @@ pub use backend::{
 };
 pub use repl::{AiHandler, AiOutcome, AiRequest, Badge, OnFailure, ReplConfig};
 pub use trigger::{Trigger, TriggerConfig};
+pub use user_output::{CaptureOutput, OutputState, OutputUnavailable, UserOutput};
 
 /// The shell operations the harness relies on (design §3.4).
 pub trait ShellBackend {

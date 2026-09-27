@@ -122,6 +122,7 @@ impl AiHandler for ShellAi {
             trigger: req.trigger,
             text: req.text,
             failed: req.failed,
+            user_output: req.user_output,
             attachment: None,
         };
         let out = agent.run_task(shell, input, approval, &mut ui);
@@ -317,6 +318,7 @@ mod tests {
                         trigger: Trigger::Hash,
                         text: "fixture".into(),
                         failed: None,
+                        user_output: None,
                     },
                 );
                 assert_eq!(ai.mode(), mode);

@@ -302,6 +302,7 @@ impl AiHandler for RecordingAi {
             trigger: Trigger::Builtin,
             text: format!("builtin:{}", args.join(" ")),
             failed: None,
+            user_output: None,
         });
         AiOutcome::default()
     }

@@ -11,6 +11,8 @@ from . import fixtures
 from .approval import APPROVAL_CHECKS
 
 LEGACY_CHECKS = {"largest", "port", "lines", "rename", "python", "typos", "failure", "history", "archive", "cwd"}
+CAPTURE_CHECKS = {"captured-diagnosis": False, "captured-citation": True}
+CAPTURE_PARTS = ("capture", "diagnosis", "citation")
 
 
 CHECK_FIXTURES = {
@@ -22,6 +24,9 @@ CHECK_FIXTURES = {
     "git-diff": "dirty-git", "git-commit": "staged-git", "recent-history": "history",
     "versions": "python", "clarification": "python",
     "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
+    "captured-failure": "one-shot-failure",
+    "captured-diagnosis": "diagnostic-failure",
+    "captured-citation": "diagnostic-failure",
 }
 
 
@@ -62,9 +67,16 @@ def load_suite(path: Path) -> dict:
         fields = {"id", "title", "mode", "fixture", "inputs", "input",
                   "corrections", "stdin_command", "approval", "check"}
         if suite["schema_version"] == 2:
-            fields |= {"group", "expect", "completions"}
+            fields |= {"group", "expect", "completions", "capture_output"}
         if set(scenario) - fields:
             raise ValueError("unknown scenario fields")
+        capture = scenario.get("capture_output")
+        if "capture_output" in scenario and capture not in ("off", "last"):
+            raise ValueError("capture_output must be off or last")
+        if capture == "last" and scenario.get("mode") != "repl":
+            raise ValueError("user output capture requires REPL mode")
+        if scenario.get("check") in {"captured-failure", *CAPTURE_CHECKS} and capture != "last":
+            raise ValueError("captured failure diagnosis requires capture_output=last")
         sid = scenario.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid) or sid in ids:
             raise ValueError(f"invalid/duplicate scenario id: {sid}")
@@ -120,9 +132,12 @@ def load_suite(path: Path) -> dict:
                         raise ValueError(f"correction completion does not match inputs: {sid}")
                 if corrections is None and completions[-1]["kind"] != "agent":
                     raise ValueError(f"the final REPL input must ask the agent: {sid}")
-                if (scenario["check"] in ("build-failure", "test-failure", "port-failure")
+                if (scenario["check"] in {"build-failure", "test-failure", "port-failure", "captured-failure", *CAPTURE_CHECKS}
                         and completions[0]["kind"] != "shell"):
                     raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
+                if (revision >= 5 and scenario["check"] in CAPTURE_CHECKS
+                        and not re.fullmatch(r"ai fix(?: .+)?", inputs[-1])):
+                    raise ValueError(f"captured diagnosis requires an explicit ai fix input: {sid}")
         elif scenario.get("mode") in ("agent", "suggest"):
             if any(key in scenario for key in ("inputs", "corrections", "completions")):
                 raise ValueError(f"REPL fields in a CLI scenario: {sid}")

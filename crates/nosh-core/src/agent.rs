@@ -151,6 +151,7 @@ pub struct Agent {
     outputs: Vec<OutputRecord>,
     next_output: usize,
     notes_seen: HashSet<PathBuf>,
+    user_outputs_seen: HashSet<u64>,
     hooked: bool,
     /// Filters what the agent writes to disk (see [`tools::Redactor`]).
     redactor: Arc<dyn Redactor>,
@@ -178,6 +179,7 @@ impl Agent {
             outputs: Vec::new(),
             next_output: 1,
             notes_seen: HashSet::new(),
+            user_outputs_seen: HashSet::new(),
             hooked: false,
             redactor: Arc::new(NoRedact),
             command_runner: EmbeddedShell::run_agent_command,
@@ -206,6 +208,7 @@ impl Agent {
         }
         self.carry.clear();
         self.notes_seen.clear();
+        self.user_outputs_seen.clear();
     }
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
@@ -319,26 +322,62 @@ impl Agent {
         match self.engine.step(sid, msgs.clone(), &mut sink) {
             Err(LlmError::ContextFull { .. }) => {
                 // Drop the failed append, shorten old tool output and retry once.
-                self.engine.rewind(sid, keep)?;
-                if let Err(error) = self.engine.compact_tool_results(sid, 0) {
-                    // Rewind removed these results, but their tools have already run.
-                    self.carry = msgs
-                        .into_iter()
-                        .filter(|message| matches!(message, Message::Tool(_)))
-                        .collect();
+                if let Err(error) = self.engine.rewind(sid, keep) {
+                    self.reset_conversation();
+                    self.retain_tool_messages(&msgs);
                     return Err(error);
                 }
-                self.engine.step(sid, msgs, &mut sink)
+                if let Err(error) = self.engine.compact_tool_results(sid, 0) {
+                    // Rewind removed these results, but their tools have already run.
+                    self.retain_tool_messages(&msgs);
+                    return Err(error);
+                }
+                let retry_keep = self.engine.message_count(sid);
+                match self.engine.step(sid, msgs.clone(), &mut sink) {
+                    Ok(step) => Ok(step),
+                    Err(error) => {
+                        self.rollback_failed_step(sid, retry_keep, &msgs)?;
+                        Err(error)
+                    }
+                }
             }
-            r => r,
+            Err(error) => {
+                self.rollback_failed_step(sid, keep, &msgs)?;
+                Err(error)
+            }
+            Ok(step) => Ok(step),
         }
+    }
+
+    fn retain_tool_messages(&mut self, messages: &[Message]) {
+        self.carry.extend(
+            messages
+                .iter()
+                .filter(|message| matches!(message, Message::Tool(_)))
+                .cloned(),
+        );
+    }
+
+    fn rollback_failed_step(
+        &mut self,
+        sid: SessionId,
+        keep: usize,
+        messages: &[Message],
+    ) -> Result<(), LlmError> {
+        if let Err(error) = self.engine.rewind(sid, keep) {
+            self.reset_conversation();
+            self.retain_tool_messages(messages);
+            return Err(error);
+        }
+        self.retain_tool_messages(messages);
+        Ok(())
     }
 
     /// Runs one task to completion in the shared shell session.
     pub fn run_task(
         &mut self,
         shell: &mut EmbeddedShell,
-        input: TaskInput,
+        mut input: TaskInput,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> TaskOutcome {
@@ -373,14 +412,22 @@ impl Agent {
                 return out;
             }
         };
+        if input
+            .user_output
+            .as_ref()
+            .is_some_and(|output| self.user_outputs_seen.contains(&output.command_id))
+        {
+            input.user_output = None;
+        }
+        let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
-        let notes = prompt::project_notes(&cwd0)
-            .filter(|(p, _)| self.notes_seen.insert(p.clone()))
-            .map(|(_, t)| t);
+        let notes =
+            prompt::project_notes(&cwd0).filter(|(path, _)| !self.notes_seen.contains(path));
+        let mut attached_notes = notes.as_ref().map(|(path, _)| path.clone());
         pending.push(Message::User(prompt::task_message(
             shell,
             &input,
-            notes.as_deref(),
+            notes.as_ref().map(|(_, text)| text.as_str()),
         )));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
@@ -393,7 +440,15 @@ impl Agent {
             cancel.reset();
             out.steps += 1;
             let step = match self.step(sid, std::mem::take(&mut pending), ui) {
-                Ok(s) => s,
+                Ok(s) => {
+                    if let Some(command_id) = attached_output.take() {
+                        self.user_outputs_seen.insert(command_id);
+                    }
+                    if let Some(path) = attached_notes.take() {
+                        self.notes_seen.insert(path);
+                    }
+                    s
+                }
                 Err(e) => {
                     ui.error(&e.to_string());
                     out.status = TaskStatus::Failed;
@@ -918,6 +973,8 @@ mod tests {
     struct RecoveryEngine {
         fail: Option<&'static str>,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        messages: usize,
+        append_failed: bool,
     }
 
     impl RecoveryEngine {
@@ -940,18 +997,36 @@ mod tests {
         fn step(
             &mut self,
             _sid: SessionId,
-            _append: Vec<Message>,
+            append: Vec<Message>,
             _sink: &mut dyn FnMut(Event),
         ) -> Result<StepOutcome, LlmError> {
             self.record("step")?;
+            self.messages += append.len();
+            if self.fail == Some("append") {
+                self.fail = None;
+                self.append_failed = true;
+                return Err(LlmError::Config("append failed".into()));
+            }
+            if self.append_failed {
+                return Ok(StepOutcome {
+                    text: "done".into(),
+                    think: String::new(),
+                    tool_calls: Vec::new(),
+                    errors: Vec::new(),
+                    stop: StopReason::EndOfTurn,
+                    usage: Usage::default(),
+                });
+            }
             Err(LlmError::ContextFull {
                 used: 100,
                 max: 100,
             })
         }
 
-        fn rewind(&mut self, _sid: SessionId, _keep: usize) -> Result<(), LlmError> {
-            self.record("rewind")
+        fn rewind(&mut self, _sid: SessionId, keep: usize) -> Result<(), LlmError> {
+            self.record("rewind")?;
+            self.messages = keep;
+            Ok(())
         }
 
         fn compact_tool_results(
@@ -964,7 +1039,7 @@ mod tests {
         }
 
         fn message_count(&self, _sid: SessionId) -> usize {
-            1
+            self.messages
         }
 
         fn context_usage(&self, _sid: SessionId) -> (usize, usize) {
@@ -986,6 +1061,8 @@ mod tests {
             Box::new(RecoveryEngine {
                 fail,
                 calls: Arc::clone(&calls),
+                messages: 1,
+                append_failed: false,
             }),
             AgentConfig::default(),
             Environment {
@@ -1012,6 +1089,53 @@ mod tests {
             assert_eq!(error.to_string(), format!("{failure} failed"));
             assert_eq!(*calls.lock().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn non_context_error_rolls_back_the_appended_messages() {
+        let (mut agent, calls) = recovery_agent(Some("append"));
+        let error = agent
+            .step(
+                1,
+                vec![Message::User("evidence".into())],
+                &mut crate::RecordUi::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "append failed");
+        assert_eq!(agent.engine.message_count(1), 1);
+        assert_eq!(*calls.lock().unwrap(), ["step", "rewind"]);
+    }
+
+    #[test]
+    fn failed_append_does_not_suppress_project_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("NOSH.md");
+        std::fs::write(&notes, "project instructions").unwrap();
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
+            working_dir: Some(directory.path().to_path_buf()),
+            ..nosh_shell::ShellOptions::default()
+        })
+        .unwrap();
+        let (mut agent, _) = recovery_agent(Some("append"));
+        let mut ui = crate::RecordUi::default();
+
+        let first = agent.run_task(
+            &mut shell,
+            TaskInput::new(nosh_shell::Trigger::Hash, "first"),
+            &mut crate::Scripted::new([]),
+            &mut ui,
+        );
+        assert_eq!(first.status, TaskStatus::Failed);
+        assert!(!agent.notes_seen.contains(&notes));
+
+        let second = agent.run_task(
+            &mut shell,
+            TaskInput::new(nosh_shell::Trigger::Hash, "second"),
+            &mut crate::Scripted::new([]),
+            &mut ui,
+        );
+        assert_eq!(second.status, TaskStatus::Completed);
+        assert!(agent.notes_seen.contains(&notes));
     }
 
     #[test]
@@ -1045,7 +1169,7 @@ mod tests {
         ));
         assert_eq!(
             *calls.lock().unwrap(),
-            ["step", "rewind", "compact", "step"]
+            ["step", "rewind", "compact", "step", "rewind"]
         );
     }
 

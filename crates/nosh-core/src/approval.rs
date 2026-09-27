@@ -175,7 +175,11 @@ impl ApprovalChannel for TerminalApproval {
         if !term::available() {
             return NoTerminal.request(req);
         }
-        term::flush_input();
+        if let Err(error) = term::flush_input() {
+            let reason = format!("cannot discard terminal typeahead: {error}");
+            eprintln!("{}", style::red(&format!("nosh: {reason}")));
+            return ApprovalResponse::Unavailable { reason };
+        }
         self.card(req);
         let b = &self.bar;
         if req.strong {
