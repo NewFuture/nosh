@@ -46,10 +46,13 @@ impl PathPattern {
         if text.is_empty() {
             return Err("path patterns must not be empty".into());
         }
-        let pattern = text
+        let absolute = Path::new(text).is_absolute();
+        let mut pattern = text
             .strip_prefix("~/")
-            .unwrap_or(text)
-            .trim_start_matches("./");
+            .map_or(text, |tail| tail.trim_start_matches('/'));
+        while let Some(tail) = pattern.strip_prefix("./") {
+            pattern = tail.trim_start_matches('/');
+        }
         let pattern = if pattern == "." { "" } else { pattern };
         if Path::new(pattern)
             .components()
@@ -57,7 +60,7 @@ impl PathPattern {
         {
             return Err("path patterns cannot traverse '..'; use an absolute or ~/ pattern".into());
         }
-        let (absolute_root, pattern) = if Path::new(pattern).is_absolute() {
+        let (absolute_root, pattern) = if absolute {
             let cut = pattern.find(['*', '?', '[', '{']);
             let root_end = cut.map_or(pattern.len(), |cut| {
                 pattern[..cut].rfind('/').unwrap_or(0) + 1
@@ -611,6 +614,19 @@ mod tests {
         ] {
             let error = UserRule::compile(spec, "safety.allow[2]").unwrap_err();
             assert!(error.contains("safety.allow[2]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn path_normalization_preserves_the_original_root_kind() {
+        for text in [".//**", "././/**", "~//**", "~/.//**"] {
+            let pattern = PathPattern::new(text).unwrap();
+            assert!(pattern.absolute_root.is_none(), "{text}");
+            assert!(pattern.glob.is_match("file"), "{text}");
+        }
+        assert!(PathPattern::new("/**").unwrap().absolute_root.is_some());
+        for text in [".//../**", "~//../**"] {
+            assert!(PathPattern::new(text).is_err(), "{text}");
         }
     }
 }

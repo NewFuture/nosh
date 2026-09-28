@@ -139,6 +139,8 @@ cwd = "."
 
 配置里的命令选择器只解析字面量 shell 词，不执行变量展开、命令替换或文件名展开。路径 glob 不接受 `..` 穿越，应改用明确的绝对 / home 模式；命令字面量及实际 shell 路径的语法不受此配置限制。
 
+路径规范化保留原始范围类型：`.//**`、`././/**` 仍是工作区相对模式，不会变成绝对 `/**`；home 模式中的重复分隔符也不会改变 home 范围。
+
 条目内部条件按 AND 组合，deny 总是先于 allow；不靠条目顺序或用户填写的优先级数字改变这一点。资源范围无法证明、变量 / 命令参数不确定时，不能把部分匹配解释成完整授权。
 
 可读字符串、显式作用域和内部参数匹配参考了 [Claude Code](https://code.claude.com/docs/en/permissions)、[Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-best-practices#configure-allowed-tools)、[Codex](https://developers.openai.com/codex/rules) 与 [Gemini CLI](https://geminicli.com/docs/reference/policy-engine/) 的常见做法；这些工具没有统一的权限配置语法，nosh 不声称格式兼容。
@@ -157,7 +159,7 @@ GNU 工具的路径长选项缩写（如 `sort --out`）也保守记录为潜在
 
 `touch -r` / `--reference` 的时间戳来源也记录为读取效果，不能被普通目标文件的写入范围掩盖。
 
-已支持的短选项组合也保留取值边界，例如 `sort -roFILE`、`cp -vtDIR` 和 `curl -sSoFILE`；其他取值选项的参数不会被误当作该路径选项。导出的 `SSH_ASKPASS` 对联网 Git 操作按认证助手处理，不因此对普通本地 Git 操作增加审批。
+已支持的短选项组合也保留取值边界，例如 `sort -roFILE`、`cp -vtDIR`、`curl -sSoFILE` 和 `wget -qOFILE` / `-qPDIR`；其他取值选项的参数不会被误当作该路径选项。导出的 `SSH_ASKPASS` 对联网 Git 操作按认证助手处理，不因此对普通本地 Git 操作增加审批。
 
 `sudo -n` 改写及防卡住环境变量在匹配时按实际执行语义处理。仅归一化紧随 `sudo` 的非交互选项，不从其他参数或选项值中删除 `-n`。编辑、符号链接目标或相关会话 / 脚本状态变化后重新分析；仍完整匹配用户白名单时不再审批。隐藏字符可见地转义，不用它们伪造显示授权。
 

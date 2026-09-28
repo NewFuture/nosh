@@ -1829,10 +1829,19 @@ fn network_tool(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "wget" => {
-            v.writes
-                .extend(option_targets(args, Some('O'), &["output-document"]));
-            v.writes
-                .extend(option_targets(args, Some('P'), &["directory-prefix"]));
+            let value_flags = "eoaBitOTwQPUlARDIX";
+            v.writes.extend(option_targets_with_values(
+                args,
+                Some('O'),
+                &["output-document"],
+                value_flags,
+            ));
+            v.writes.extend(option_targets_with_values(
+                args,
+                Some('P'),
+                &["directory-prefix"],
+                value_flags,
+            ));
         }
         "scp" | "rsync" => {
             let ops = operands_skipping(

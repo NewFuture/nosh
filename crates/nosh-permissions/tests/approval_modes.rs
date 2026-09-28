@@ -1486,3 +1486,119 @@ fn routine_file_convenience_does_not_override_destructive_effects_or_denies() {
         assert!(matches!(result.source, DecisionSource::UserDeny(_)));
     }
 }
+
+#[test]
+fn wget_clusters_preserve_scoped_denies_in_every_mode() {
+    let (_dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("wget".into()),
+            write_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "system output deny",
+    )
+    .unwrap();
+    for command in [
+        "wget -qO/etc/out https://example.invalid",
+        "wget -qO /etc/out https://example.invalid",
+        "wget -qP/etc https://example.invalid",
+        "wget -qP /etc https://example.invalid",
+    ] {
+        let report = assess_command(command, &context);
+        assert!(
+            report
+                .operations
+                .iter()
+                .flat_map(|op| &op.paths)
+                .any(|path| {
+                    path.lexical
+                        .as_ref()
+                        .is_some_and(|path| path.starts_with("/etc"))
+                }),
+            "{command}: {:?}",
+            report.operations
+        );
+        for mode in [Confirm, Auto, Yolo] {
+            let result = policy(
+                command,
+                mode,
+                &context,
+                &UserRules {
+                    allow: vec![UserRule::prefix("wget").unwrap()],
+                    deny: vec![rule.clone()],
+                },
+            );
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{command}: {result:?}"
+            );
+        }
+    }
+    for command in [
+        "wget -qUagentO/etc/out https://example.invalid",
+        "wget -qU -O/etc/out https://example.invalid",
+    ] {
+        let report = assess_command(command, &context);
+        assert!(
+            report.operations.iter().all(|op| op.paths.is_empty()),
+            "{command}: {:?}",
+            report.operations
+        );
+    }
+}
+
+#[test]
+fn redundant_relative_separators_never_grant_absolute_scope() {
+    let (_dir, mut context) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("protected");
+    context.protected.push(outside.clone());
+    for pattern in [".//**", ".///**", "././/**"] {
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("read_file".into()),
+                path: Some(pattern.into()),
+                ..RuleSpec::default()
+            },
+            "workspace reads",
+        )
+        .unwrap();
+        for (path, inside) in [
+            (context.workspace.join("file"), true),
+            (outside.clone(), false),
+        ] {
+            let report = assess_read("read_file", &path, None, &context);
+            let result = evaluate(
+                &report,
+                Confirm,
+                &UserRules {
+                    allow: vec![rule.clone()],
+                    deny: vec![],
+                },
+                &SessionAllowList::default(),
+            );
+            assert_eq!(
+                matches!(result.source, DecisionSource::UserAllow(_)),
+                inside,
+                "{pattern}: {result:?}"
+            );
+            let result = evaluate(
+                &report,
+                Yolo,
+                &UserRules {
+                    allow: vec![],
+                    deny: vec![rule.clone()],
+                },
+                &SessionAllowList::default(),
+            );
+            assert_eq!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                inside,
+                "{pattern}: {result:?}"
+            );
+        }
+    }
+}
