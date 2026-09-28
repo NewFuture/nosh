@@ -805,16 +805,28 @@ impl Agent {
             classify_path_real(&path, &ctx, true).0,
             PathClass::Protected(_)
         );
+        let mut authorized = if root_protected {
+            vec![nosh_permissions::real_path(&path, true).unwrap_or_else(|| path.clone())]
+        } else {
+            Vec::new()
+        };
         let mut denied = None;
         let result = match tool {
             BuiltinTool::ReadFile => tools::read_file(call, &cwd),
             BuiltinTool::Grep => tools::grep(call, &cwd, |child| {
-                if !root_protected
-                    && child != path
-                    && let Err(error) = self.approve_read(child, &ctx, call, approval, ui)
-                {
-                    denied = Some(error);
-                    return Err("reading a protected grep path was denied".into());
+                let resolved =
+                    nosh_permissions::real_path(child, true).unwrap_or_else(|| child.to_path_buf());
+                if child != path && !authorized.iter().any(|root| resolved.starts_with(root)) {
+                    if let Err(error) = self.approve_read(child, &ctx, call, approval, ui) {
+                        denied = Some(error);
+                        return Err("reading a protected grep path was denied".into());
+                    }
+                    if matches!(
+                        classify_path_real(child, &ctx, true).0,
+                        PathClass::Protected(_)
+                    ) {
+                        authorized.push(resolved);
+                    }
                 }
                 Ok(())
             }),

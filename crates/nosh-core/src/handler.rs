@@ -240,7 +240,7 @@ impl AiHandler for ShellAi {
             eprintln!("{status}");
         }
         let context = agent.cfg.permission_context(shell);
-        let r = crate::suggest::suggest_with_context(
+        let r = crate::suggest::suggest(
             agent.engine_mut(),
             &env,
             shell,

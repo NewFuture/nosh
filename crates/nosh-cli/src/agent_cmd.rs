@@ -163,7 +163,7 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
     let env = Environment::detect(&shell);
     let config = agent_config(cfg, ApprovalMode::Confirm, seed);
     let context = config.permission_context(&shell);
-    let r = nosh_core::suggest::suggest_with_context(
+    let r = nosh_core::suggest::suggest(
         loaded.engine.as_mut(),
         &env,
         &shell,

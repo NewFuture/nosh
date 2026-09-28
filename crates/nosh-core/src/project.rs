@@ -344,10 +344,14 @@ fn git_info(root: Option<&Path>, ctx: &Context, warnings: &mut Vec<String>) -> V
         .collect::<Vec<_>>();
     let dirty = if git_paths.iter().any(|dir| {
         protected(dir, ctx)
-            || ctx
-                .protected
-                .iter()
-                .any(|p| p.starts_with(dir) || dir.starts_with(p))
+            || ctx.protected.iter().any(|path| {
+                let resolved = real_path(path, true);
+                let parent_resolved = real_path(path, false);
+                std::iter::once(path.as_path())
+                    .chain(resolved.as_deref())
+                    .chain(parent_resolved.as_deref())
+                    .any(|p| p.starts_with(dir) || dir.starts_with(p))
+            })
     }) || ctx
         .home_dir()
         .is_some_and(|home| protected(&home.join(".gitconfig"), ctx))
@@ -938,6 +942,20 @@ mod tests {
                 .to_string()
                 .contains("configuration is protected")
         );
+        #[cfg(unix)]
+        {
+            let alias = home.path().join("common-alias");
+            std::os::unix::fs::symlink(&common, &alias).unwrap();
+            let mut aliased = ctx.clone();
+            aliased.protected = vec![alias.join("config")];
+            let value = discover(&aliased);
+            assert!(value["git"]["dirty"].is_null());
+            assert!(
+                value["warnings"]
+                    .to_string()
+                    .contains("configuration is protected")
+            );
+        }
         ctx.exported.insert("GIT_DIR".into());
         ctx.variables.insert("GIT_DIR".into(), "/somewhere".into());
         assert_eq!(discover(&ctx)["git"]["status"], "unavailable");
@@ -945,18 +963,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn non_utf8_directory_names_do_not_panic_during_serialization() {
+    fn non_utf8_context_paths_do_not_panic_during_serialization() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         let home = tempfile::tempdir().unwrap();
         let dir = home
             .path()
             .join(OsString::from_vec(b"project-\xff".to_vec()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let value = discover(&context(home.path(), &dir));
-        assert_eq!(value["types"], json!(["rust"]));
-        assert!(value["root"].as_str().is_some());
+        // Some filesystems reject these names; context rendering must not require creating one.
+        let value = super::context(&context(home.path(), &dir));
+        assert_eq!(value["cwd"], dir.to_string_lossy().as_ref());
+        let rendered = render_context(&value);
+        assert!(rendered.contains("project-\u{fffd}"));
     }
 
     #[test]

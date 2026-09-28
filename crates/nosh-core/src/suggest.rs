@@ -13,28 +13,8 @@ pub struct Suggestion {
     pub explanation: Option<String>,
 }
 
-/// Asks for one command for `text`.
-pub fn suggest(
-    engine: &mut dyn ChatEngine,
-    env: &Environment,
-    shell: &EmbeddedShell,
-    text: &str,
-    trigger: Trigger,
-    sampling: SamplingParams,
-) -> Result<Option<Suggestion>, LlmError> {
-    suggest_with_context(
-        engine,
-        env,
-        shell,
-        text,
-        trigger,
-        sampling,
-        &crate::AgentConfig::default().permission_context(shell),
-    )
-}
-
 /// Suggests with the caller's configured protected paths.
-pub fn suggest_with_context(
+pub fn suggest(
     engine: &mut dyn ChatEngine,
     env: &Environment,
     shell: &EmbeddedShell,

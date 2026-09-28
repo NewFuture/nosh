@@ -747,6 +747,7 @@ fn suggest_and_ctrl_g_use_text_without_tools_or_execution() {
             "suggest",
             Trigger::Cli,
             nosh_llm::SamplingParams::default(),
+            &AgentConfig::default().permission_context(&sh),
         )
         .unwrap()
         .unwrap();
@@ -925,7 +926,7 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
 
     let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let received = engine.received();
-    let suggestion = nosh_core::suggest::suggest_with_context(
+    let suggestion = nosh_core::suggest::suggest(
         &mut engine,
         &env(),
         &sh,
@@ -1120,7 +1121,7 @@ fn suggestions_do_not_guess_when_agents_guidance_cannot_be_loaded() {
     sh.run_user_line(&format!("cd {}", root.display()));
     let mut engine = MockChatEngine::new(vec![vec![text("echo should-not-be-generated")]]);
     let specs = engine.specs();
-    let result = nosh_core::suggest::suggest_with_context(
+    let result = nosh_core::suggest::suggest(
         &mut engine,
         &env(),
         &sh,
@@ -1195,7 +1196,7 @@ fn readme_references_refresh_and_remain_optional_for_suggestions() {
         };
         let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
         let received = engine.received();
-        let result = nosh_core::suggest::suggest_with_context(
+        let result = nosh_core::suggest::suggest(
             &mut engine,
             &env(),
             &sh,
@@ -1332,6 +1333,82 @@ fn grep_checks_protected_roots_dotdot_symlinks_and_descendants() {
         "one approval covers the explicitly requested protected root"
     );
     assert!(tool_results(&received.lock().unwrap())[0].contains("secret:1:needle"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn grep_protects_ignore_metadata_and_bounds_directory_approval() {
+    let _g = setup();
+    let dir = tmpdir("grep-ignore-permissions");
+    let private = dir.join("private");
+    std::fs::create_dir(&private).unwrap();
+    std::fs::write(private.join("one"), "needle\n").unwrap();
+    std::fs::write(private.join("two"), "needle\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), "ignored\n").unwrap();
+    let external = dir.join("external-ignore");
+    std::fs::write(&external, "*\n").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    for (path, protected, answers, expected_approvals, denied) in [
+        (
+            ".",
+            vec![dir.join(".gitignore")],
+            vec![ApprovalResponse::Deny { reason: None }],
+            1,
+            true,
+        ),
+        (
+            ".",
+            vec![private.clone()],
+            vec![ApprovalResponse::Approve],
+            1,
+            false,
+        ),
+        (
+            "private",
+            vec![private.clone(), external.clone()],
+            vec![
+                ApprovalResponse::Approve,
+                ApprovalResponse::Deny { reason: None },
+            ],
+            2,
+            true,
+        ),
+    ] {
+        if path == "private" {
+            std::os::unix::fs::symlink(&external, private.join(".gitignore")).unwrap();
+        }
+        let engine = MockChatEngine::new(vec![
+            vec![call("grep", json!({"pattern": "needle", "path": path}))],
+            vec![text("done")],
+        ]);
+        let received = engine.received();
+        let mut agent = Agent::new(
+            Box::new(engine),
+            AgentConfig {
+                protected,
+                ..Default::default()
+            },
+            env(),
+            ToolSet::ReadOnly,
+        );
+        let mut approval = Scripted::new(answers);
+        let result = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Pipe, "find text"),
+            &mut approval,
+            &mut RecordUi::default(),
+        );
+        assert_eq!(approval.seen.len(), expected_approvals, "{path}");
+        assert_eq!(result.denied > 0, denied, "{path}");
+        let outputs = tool_results(&received.lock().unwrap());
+        if denied {
+            assert!(outputs[0].contains("[denied by user]"), "{outputs:?}");
+            assert!(!outputs[0].contains("needle"), "{outputs:?}");
+        } else {
+            assert!(outputs[0].contains("2 matching lines"), "{outputs:?}");
+        }
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
