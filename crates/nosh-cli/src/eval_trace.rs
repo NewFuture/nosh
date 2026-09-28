@@ -227,19 +227,18 @@ mod tests {
         let mut engine = TracedEngine::new(Box::new(mock), Cursor::new(Vec::new()));
         let sid = engine.open(spec()).unwrap();
         let mut events = vec![];
+        let append = vec![
+            Message::System("[context]\ncwd: /work".into()),
+            Message::User("input".into()),
+        ];
         let out = engine
-            .step(sid, vec![Message::User("input".into())], &mut |e| {
-                events.push(e)
-            })
+            .step(sid, append.clone(), &mut |e| events.push(e))
             .unwrap();
         assert_eq!(out.text, "hello");
         assert_eq!(events.len(), 2);
         assert_eq!(specs.lock().unwrap()[0].sampling.seed, Some(42));
-        assert_eq!(
-            received.lock().unwrap()[0],
-            vec![Message::User("input".into())]
-        );
-        assert_eq!(engine.message_count(sid), 2);
+        assert_eq!(received.lock().unwrap()[0], append);
+        assert_eq!(engine.message_count(sid), 3);
         assert_eq!(engine.context_usage(sid).0, out.usage.context_used);
         assert_eq!(engine.compact_tool_results(sid, 1).unwrap(), 0);
         engine.rewind(sid, 0).unwrap();
@@ -252,7 +251,10 @@ mod tests {
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
-        assert_eq!(rows[1]["messages"][0]["text"], "input");
+        assert_eq!(rows[1]["messages"][0]["role"], "system");
+        assert_eq!(rows[1]["messages"][0]["text"], "[context]\ncwd: /work");
+        assert_eq!(rows[1]["messages"][1]["role"], "user");
+        assert_eq!(rows[1]["messages"][1]["text"], "input");
         assert_eq!(
             rows[2]["usage"]["completion_tokens"],
             out.usage.completion_tokens

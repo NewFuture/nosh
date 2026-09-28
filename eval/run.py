@@ -89,6 +89,21 @@ def required_tools(scenarios: list[dict]) -> set[str]:
     return required
 
 
+def validate_workspace_ancestry(work: Path) -> None:
+    for parent in (work, *work.parents):
+        for name in (
+            ".git", "AGENTS.md", "README.md", "Readme.md", "readme.md", "README.rst", "README.txt", "README",
+        ):
+            path = parent / name
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            raise ValueError(
+                f"workspace must be outside existing repositories and AGENTS.md/README ancestry: {path}"
+            )
+
+
 def discover_tools(scenarios: list[dict]) -> dict:
     tools = {}
     inherited_path = os.environ.get("PATH", "")
@@ -345,9 +360,7 @@ def main(argv=None) -> int:
         for resource in (binary, weights, tokenizer, output, *(Path(t["path"]) for t in toolchain.values())):
             if resource.resolve().is_relative_to(work.resolve()):
                 raise ValueError("binary, models and reports must be outside the disposable workspace")
-        for parent in (work, *work.parents):
-            if (parent / ".git").exists() or (parent / "NOSH.md").exists():
-                raise ValueError("workspace must be outside existing repositories and NOSH.md ancestry")
+        validate_workspace_ancestry(work)
         meta["settings"]["work_dir"] = str(work)
         output.mkdir(mode=0o700, parents=True, exist_ok=False)
         data = {"schema_version": report.SCHEMA_VERSION, "metadata": meta, "trials": []}

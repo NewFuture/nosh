@@ -22,7 +22,7 @@ OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
     "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
 }
-FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "one-shot-failure", "diagnostic-failure", "history", "logs"} | PROJECT_FIXTURES
+FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "diagnostic-failure", "history", "logs"} | PROJECT_FIXTURES
 PROJECT = {
     "main.py": "from lib.maths import add\nvalues = [1, 2, 3]\nresult = add(values[0], values[1])\nprint(result)\nprint(len(values))\n",
     "lib/maths.py": "def add(a, b):\n    return a + b\ndef square(value):\n    return value * value\nprint(square(3))\n",
@@ -270,20 +270,6 @@ def create(root: Path, kind: str, env: dict | None = None,
         facts["renames"] = {n: n[:-4] + ".md" for n in snapshot(root) if n.endswith(".txt")}
     elif kind == "failure":
         write(root, "broken.py", "import json\nwith open('config.json') as stream:\n    settings = json.load(stream)\nprint(settings)\n")
-    elif kind == "one-shot-failure":
-        diagnostic_id = "CAPTURE-" + hashlib.sha256(
-            (trial_identity or kind).encode()).hexdigest()[:8]
-        write(root, "calls.count", "0")
-        write(root, "once.py",
-              "from pathlib import Path\nimport sys\n"
-              "counter = Path('calls.count')\n"
-              "count = int(counter.read_text()) + 1\ncounter.write_text(str(count))\n"
-              "if count == 1:\n"
-              f"    print('{diagnostic_id}: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
-              "else:\n"
-              "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
-              "raise SystemExit(17)\n")
-        facts["diagnostic_id"] = diagnostic_id
     elif kind == "diagnostic-failure":
         diagnostic_id = "CAPTURE-" + hashlib.sha256(
             (trial_identity or kind).encode()).hexdigest()[:8]

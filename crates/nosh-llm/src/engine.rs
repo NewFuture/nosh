@@ -51,8 +51,8 @@ impl ToolCall {
     }
 }
 
-/// Conversation messages. System text is trusted (special tokens allowed);
-/// user and tool content is untrusted and encoded as plain text.
+/// Conversation messages. Appended system context, user input and tool content
+/// are encoded as plain text; the initial [`SessionSpec::system`] is trusted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     System(String),
@@ -171,7 +171,7 @@ impl Default for SamplingParams {
 
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
-    /// Static system prompt; `<tool_def_sep>` marks where tool definitions go.
+    /// Trusted static system prompt; `<tool_def_sep>` marks where tool definitions go.
     pub system: String,
     pub tools: Vec<ToolSpec>,
     pub thinking: bool,
@@ -205,6 +205,7 @@ pub trait ChatEngine {
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError>;
 
     /// Appends `append` to the conversation and generates one assistant turn.
+    /// System messages append plain-text context; they do not replace the initial system prompt.
     fn step(
         &mut self,
         sid: SessionId,
@@ -212,10 +213,11 @@ pub trait ChatEngine {
         sink: &mut dyn FnMut(Event),
     ) -> Result<StepOutcome, LlmError>;
 
-    /// Keeps only the first `keep` non-system messages.
+    /// Keeps the first `keep` appended/generated messages, including system context.
+    /// The initial system prefix is never removed.
     fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError>;
 
-    /// Number of non-system messages (including generated assistant turns).
+    /// Number of appended/generated messages, excluding only the initial system prefix.
     fn message_count(&self, sid: SessionId) -> usize;
 
     /// Replaces the content of tool results older than the last `keep_recent`
