@@ -1337,7 +1337,7 @@ fn grep_checks_protected_roots_dotdot_symlinks_and_descendants() {
 }
 
 #[test]
-fn grep_protects_ignore_metadata_and_bounds_directory_approval() {
+fn grep_metadata_filtering_does_not_grant_content_access() {
     let _g = setup();
     let dir = tmpdir("grep-ignore-permissions");
     let private = dir.join("private");
@@ -1350,13 +1350,7 @@ fn grep_protects_ignore_metadata_and_bounds_directory_approval() {
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
     for (path, protected, answers, expected_approvals, denied) in [
-        (
-            ".",
-            vec![dir.join(".gitignore")],
-            vec![ApprovalResponse::Deny { reason: None }],
-            1,
-            true,
-        ),
+        (".", vec![dir.join(".gitignore")], vec![], 0, false),
         (
             ".",
             vec![private.clone()],
@@ -1365,17 +1359,21 @@ fn grep_protects_ignore_metadata_and_bounds_directory_approval() {
             false,
         ),
         (
-            "private",
+            ".gitignore",
+            vec![dir.join(".gitignore")],
+            vec![ApprovalResponse::Deny { reason: None }],
+            1,
+            true,
+        ),
+        (
+            "private/.gitignore",
             vec![private.clone(), external.clone()],
-            vec![
-                ApprovalResponse::Approve,
-                ApprovalResponse::Deny { reason: None },
-            ],
-            2,
+            vec![ApprovalResponse::Deny { reason: None }],
+            1,
             true,
         ),
     ] {
-        if path == "private" {
+        if path == "private/.gitignore" {
             std::os::unix::fs::symlink(&external, private.join(".gitignore")).unwrap();
         }
         let engine = MockChatEngine::new(vec![

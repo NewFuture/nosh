@@ -374,84 +374,7 @@ pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
     resolve(cwd, call.str_arg("path").unwrap_or("."))
 }
 
-fn authorize_ignore_file(
-    path: &Path,
-    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
-) -> Result<bool, String> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => {
-            authorize(path)?;
-            Ok(true)
-        }
-        Ok(_) => Err(format!(
-            "{}: ignore metadata is not a regular file",
-            path.display()
-        )),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(format!("{}: {error}", path.display())),
-    }
-}
-
-fn global_ignore_path(
-    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
-) -> Result<Option<PathBuf>, String> {
-    // Match ignore's home-directory lookup before letting it read Git configuration.
-    #[allow(deprecated)]
-    let home = std::env::home_dir();
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|path| path.join(".config")));
-    let system = std::env::var_os("GIT_CONFIG_SYSTEM")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/etc/gitconfig"));
-    for path in [
-        std::env::var_os("GIT_CONFIG_GLOBAL")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
-        home.map(|path| path.join(".gitconfig")),
-        xdg.map(|path| path.join("git/config")),
-        Some(system),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let path = std::path::absolute(path).map_err(|error| error.to_string())?;
-        authorize_ignore_file(&path, authorize)?;
-    }
-    ignore::gitignore::gitconfig_excludes_path()
-        .map(|path| std::path::absolute(path).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-fn authorize_directory_ignores(
-    directory: &Path,
-    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let canonical = directory
-        .canonicalize()
-        .map_err(|error| format!("{}: {error}", directory.display()))?;
-    // ignore loads canonical parents, then the directory as named by the walker.
-    for parent in canonical
-        .ancestors()
-        .chain((canonical != directory).then_some(directory))
-    {
-        for name in [".ignore", ".gitignore", ".git/info/exclude"] {
-            authorize_ignore_file(&parent.join(name), authorize)?;
-        }
-    }
-    Ok(())
-}
-
-/// Searches contents; directories, ignore metadata and matched files are authorized before reading.
+/// Searches contents; ignore-rule loading is metadata, directory/content reads are authorized.
 pub fn grep(
     call: &ToolCall,
     cwd: &Path,
@@ -500,19 +423,8 @@ pub fn grep(
         .transpose()?;
     let mut ignores = if meta.is_dir() {
         authorize(&root)?;
-        authorize_directory_ignores(&root, &mut authorize)?;
         let mut builder = ignore::WalkBuilder::new(&root);
-        builder
-            .hidden(true)
-            .follow_links(false)
-            .require_git(false)
-            .git_global(false);
-        if let Some(global) = global_ignore_path(&mut authorize)?
-            && authorize_ignore_file(&global, &mut authorize)?
-            && let Some(error) = builder.add_ignore(global)
-        {
-            return Err(format!("grep global ignore: {error}"));
-        }
+        builder.hidden(true).follow_links(false).require_git(false);
         Some(
             builder
                 .build_matchers()
@@ -593,7 +505,7 @@ pub fn grep(
                 continue;
             }
             if let Some(ignores) = &mut ignores {
-                // Matching an entry loads only its already-authorized ancestors' rules.
+                // Use the library's cached ignore metadata before deciding whether to descend.
                 let relative = path
                     .strip_prefix(&root)
                     .expect("grep descendants stay under root");
@@ -609,7 +521,6 @@ pub fn grep(
         if metadata.is_dir() {
             if path != root {
                 authorize(&path)?;
-                authorize_directory_ignores(&path, &mut authorize)?;
             }
             let mut children = std::fs::read_dir(&path)
                 .map_err(|error| format!("{}: {error}", path.display()))?
@@ -966,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_authorizes_directories_and_ignore_files_before_using_them() {
+    fn grep_authorizes_directory_descent_but_not_ignore_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let child = root.join("nested");
@@ -981,20 +892,19 @@ mod tests {
         }
         let root_ignore = root.join(".gitignore");
         let child_ignore = child.join(".ignore");
-        std::fs::write(&root_ignore, "a.rs\n").unwrap();
+        std::fs::write(&root_ignore, "b.rs\n").unwrap();
         std::fs::write(&child_ignore, "keep.rs\n").unwrap();
         let mut entered = false;
         let result = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
+            assert!(
+                path != root_ignore && path != child_ignore,
+                "ignore metadata is not a content read"
+            );
             if path == child {
                 entered = true;
-            } else if path == root_ignore {
-                std::fs::write(path, "b.rs\n").unwrap();
-            } else if path == child_ignore {
-                assert!(
-                    entered,
-                    "directory must be authorized before its ignore metadata"
-                );
-                std::fs::write(path, "skip.rs\n").unwrap();
+                std::fs::write(&child_ignore, "skip.rs\n").unwrap();
+            } else if path.starts_with(&child) {
+                assert!(entered);
             }
             Ok(())
         })
@@ -1006,17 +916,25 @@ mod tests {
             "{result}"
         );
 
-        for denied in [child, root_ignore] {
-            let error = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
-                if path == denied {
-                    Err("metadata denied".into())
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_err();
-            assert_eq!(error, "metadata denied");
-        }
+        let error = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
+            if path == child {
+                Err("directory denied".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, "directory denied");
+        let error = grep(
+            &call("grep", json!({"pattern": ".", "path": ".gitignore"})),
+            &root,
+            |path| {
+                assert_eq!(path, root_ignore);
+                Err("content denied".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "content denied");
     }
 
     #[test]
@@ -1043,9 +961,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(seen.contains(&root.join(".gitignore")));
-        assert!(seen.contains(&root.join(".ignore")));
-        assert!(seen.contains(&root.join(".git/info/exclude")));
+        assert!(!seen.contains(&root.join(".gitignore")));
+        assert!(!seen.contains(&root.join(".ignore")));
+        assert!(!seen.contains(&root.join(".git/info/exclude")));
         assert!(
             result.contains("keep.rs:1:needle") && result.contains("child.rs:1:needle"),
             "{result}"
@@ -1066,34 +984,24 @@ mod tests {
         let excludes = config.parent().unwrap().join("ignore");
         let mut seen = Vec::new();
         let result = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
-            if path == config {
-                // The resolver must observe the configuration written at authorization time.
-                std::fs::write(
-                    path,
-                    format!("[core]\nexcludesFile={}\n", excludes.display()),
-                )
-                .unwrap();
-            }
             seen.push(path.to_path_buf());
             Ok(())
         })
         .unwrap();
-        assert!(seen.contains(&config) && seen.contains(&excludes));
+        assert!(!seen.contains(&config) && !seen.contains(&excludes));
         assert!(result.contains("keep.txt:1:needle"));
         assert!(!result.contains("excluded.txt:"));
-        let error = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
-            if path == config || path == excludes {
-                Err("global metadata denied".into())
-            } else {
-                Ok(())
-            }
-        })
+        let error = grep(
+            &call("grep", json!({"pattern": ".", "path": config})),
+            &root,
+            |_| Err("content denied".into()),
+        )
         .unwrap_err();
-        assert_eq!(error, "global metadata denied");
+        assert_eq!(error, "content denied");
     }
 
     #[test]
-    fn grep_authorizes_global_configuration_and_ignore_rules() {
+    fn grep_uses_global_ignore_rules_without_metadata_approval() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("files");
         let home = temp.path().join("home");
@@ -1101,7 +1009,11 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         std::fs::write(root.join("keep.txt"), "needle\n").unwrap();
         std::fs::write(root.join("excluded.txt"), "needle\n").unwrap();
-        std::fs::write(home.join("config"), "[core]\n").unwrap();
+        std::fs::write(
+            home.join("config"),
+            format!("[core]\nexcludesFile={}\n", home.join("ignore").display()),
+        )
+        .unwrap();
         std::fs::write(home.join("ignore"), "excluded.txt\n").unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
