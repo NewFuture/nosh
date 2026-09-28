@@ -362,6 +362,7 @@ fn git_info(root: Option<&Path>, ctx: &Context, warnings: &mut Vec<String>) -> V
         );
         None
     } else {
+        // Git computes local status on the user's behalf; only dirty metadata is retained.
         let dirty = crate::prompt::git_dirty(root);
         if dirty.is_none() {
             warn(warnings, "Git working-tree status is unavailable.".into());
@@ -863,12 +864,16 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        fs::write(root.join("file.txt"), "content").unwrap();
+        let contents = "protected-tracked-content-marker";
+        fs::write(root.join("file.txt"), contents).unwrap();
         let ctx = context(home.path(), &root);
+        let mut protected_ctx = ctx.clone();
+        protected_ctx.protected.push(root.join("file.txt"));
         let value = discover(&ctx);
         assert_eq!(value["status"], "none_detected");
         assert_eq!(value["git"]["head"], "main");
         assert_eq!(value["git"]["dirty"], false);
+        assert_eq!(discover(&protected_ctx)["git"], value["git"]);
         assert!(
             Command::new("git")
                 .args(["add", "file.txt"])
@@ -877,7 +882,11 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert_eq!(discover(&ctx)["git"]["dirty"], true);
+        let value = discover(&ctx);
+        assert_eq!(value["git"]["dirty"], true);
+        let protected_value = discover(&protected_ctx);
+        assert_eq!(protected_value["git"], value["git"]);
+        assert!(!protected_value.to_string().contains(contents));
     }
 
     #[cfg(unix)]

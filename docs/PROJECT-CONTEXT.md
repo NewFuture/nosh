@@ -2,6 +2,8 @@
 
 原则：**用户请求决定任务，context 补充事实，harness 管执行边界。** 下文区分当前代码契约与待验证优化；实现不等于效果已获验证，结果见[实测](../eval/README.md)。
 
+shell 与本地 agent 都代表当前用户操作，不是彼此隔离的权限主体。实际文件／服务访问权限由操作系统和外部授权决定；context 不另建针对本地 LLM 的权限管理层。
+
 ## 消息契约
 
 初始 System 与工具 schema 在对话内保持稳定。动态背景使用独立 System 消息；只有角色边界采用特殊 token，正文按普通文本编码，不能注入角色或工具调用 token。消息角色不改变“参考资料不是任务”的规则或执行权限。
@@ -23,6 +25,8 @@ agent、`-s` 和 Ctrl+G 统一发送 **System 背景 + User 原始请求**。背
 | Git、语言、venv、真实失败 | head 为分支或短 SHA；dirty 仅指已跟踪变化；失败保留命令与退出码 |
 | 缺失与告警 | 未识别 manifest、无 Git、未知、受保护、不可读分别表达；未识别不等于目录为空或输入不存在 |
 
+固定的 `git status` 是普通的本地状态查询，Git 可在内部检查／哈希已跟踪文件，context 只保留 `dirty`，不携带正文。不会仅因工作区存在受保护文件而新增整仓库拦截；现有用户配置不变，查询失败则如实标为未知。
+
 模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
 
 ```text
@@ -39,7 +43,7 @@ lang: zh
 
 ## 发现与文档
 
-从 cwd 向上查找，到 Git/HOME 边界或 32 层停止。最近 manifest 确定项目；解析 Rust、Node、Python 的少量字段，也识别 Go、Maven、Gradle、CMake、Make，同层类型可并存。项目根不改变权限工作区。
+从 cwd 向上查找，到 Git/HOME 边界或 32 层停止。最近 manifest 确定项目；解析 Rust、Node、Python 的少量字段，也识别 Go、Maven、Gradle，同层主 manifest 类型可并存。CMake／Make 仅在同层未发现主 manifest 时作为兜底标记。项目根不改变权限工作区。
 
 **先检查整个作用域的 AGENTS.md，再决定是否使用 README；不加载 NOSH.md。**
 
