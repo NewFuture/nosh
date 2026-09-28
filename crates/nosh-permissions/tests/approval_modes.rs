@@ -158,6 +158,45 @@ fn common_builds_are_an_explicit_convenience_exception() {
 }
 
 #[test]
+fn pytest_basetemp_keeps_normal_tests_convenient_but_requires_strong_approval() {
+    let (_dir, context) = fixture();
+    let rules = UserRules::default();
+    for command in [
+        "pytest --basetemp=child",
+        "pytest --basetemp child",
+        "python -m pytest --basetemp=child",
+        "python3 -m pytest --basetemp child",
+    ] {
+        assert_eq!(
+            policy(command, Auto, &context, &rules).decision,
+            Decision::Ask { strong: true },
+            "{command}"
+        );
+    }
+    for command in [
+        "pytest --basetemp=/etc",
+        "pytest --basetemp /etc",
+        "python -m pytest --basetemp=/etc",
+        "python3 -m pytest --basetemp /etc",
+    ] {
+        assert!(
+            !matches!(
+                policy(command, Auto, &context, &rules).decision,
+                Decision::Allow
+            ),
+            "{command}"
+        );
+    }
+    for command in ["pytest --basetem=/etc", "python -m pytest --basetem=/etc"] {
+        assert_eq!(
+            policy(command, Auto, &context, &rules).decision,
+            Decision::Allow,
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn actual_effects_and_argument_boundaries_control_whitelists() {
     let (_dir, context) = fixture();
     let mut rules = UserRules {

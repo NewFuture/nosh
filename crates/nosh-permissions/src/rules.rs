@@ -304,6 +304,34 @@ fn option_targets_with_values(
     targets
 }
 
+fn pytest(args: &[Arg]) -> Verdict {
+    let mut targets = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg.value == "--" {
+            break;
+        }
+        if arg.value == "--basetemp" {
+            if let Some(value) = iter.next() {
+                targets.push(Target::of(value));
+            }
+        } else if arg.value.starts_with("--basetemp=") {
+            targets.push(Target::after(arg, "--basetemp="));
+        }
+    }
+    if !targets.is_empty() {
+        let mut verdict =
+            Verdict::dangerous("recursively clears the pytest base temp directory").writes(targets);
+        verdict.recursive = true;
+        verdict.deletes = true;
+        verdict
+    } else if asks_version_or_help(args) {
+        Verdict::safe("prints version or usage")
+    } else {
+        Verdict::mutating("runs project tests")
+    }
+}
+
 const SORT_VALUE_FLAGS: &str = "kSoTt";
 const SORT_VALUE_OPTIONS: &[&str] = &[
     "batch-size",
@@ -1289,10 +1317,19 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                     .writes(option_targets(args, Some('C'), &["directory", "build"]))
             }
         }
+        "pytest" | "pytest-3" => pytest(args),
         "python" | "python2" | "python3" | "node" | "deno" | "ruby" | "perl" | "php" | "lua"
         | "luajit" | "Rscript" | "java" | "dotnet" | "julia" | "ghc" | "runghc" | "tclsh"
         | "swift" | "kotlin" | "scala" | "elixir" | "erl" | "irb" | "ts-node" | "tsx" => {
-            if args.len() == 1
+            if matches!(name, "python" | "python2" | "python3")
+                && matches!(
+                    args,
+                    [module, test_runner, ..]
+                        if module.value == "-m" && test_runner.value == "pytest"
+                )
+            {
+                pytest(&args[2..])
+            } else if args.len() == 1
                 && matches!(
                     args[0].value.as_str(),
                     "--version" | "-V" | "-v" | "version" | "--help" | "-h"
@@ -1304,7 +1341,13 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         n if n.starts_with("python3.") || n.starts_with("python2.") => {
-            if args.len() == 1 && matches!(args[0].value.as_str(), "--version" | "-V") {
+            if matches!(
+                args,
+                [module, test_runner, ..]
+                    if module.value == "-m" && test_runner.value == "pytest"
+            ) {
+                pytest(&args[2..])
+            } else if args.len() == 1 && matches!(args[0].value.as_str(), "--version" | "-V") {
                 Verdict::safe("prints version")
             } else {
                 Verdict::mutating("runs a python program")
