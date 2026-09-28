@@ -105,7 +105,7 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    fn options(&self) -> brush_parser::ParserOptions {
+    pub(crate) fn options(&self) -> brush_parser::ParserOptions {
         brush_parser::ParserOptions {
             enable_extended_globbing: self.extglob,
             posix_mode: self.posix,

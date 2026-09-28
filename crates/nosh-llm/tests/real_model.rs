@@ -102,6 +102,39 @@ fn segment_encoding_matches_full_string_encoding() {
     assert_eq!(specials, 1, "only the template's own <|im_end|> is special");
 }
 
+#[test]
+#[ignore = "needs the real model"]
+fn named_tool_choice_returns_one_call_without_prose() {
+    let mut engine = LocalChatEngine::load(&resolved(), LocalEngineOptions::default()).unwrap();
+    let sid = engine
+        .open(spec(
+            "Respond with the requested shell command.",
+            vec![run_tool()],
+        ))
+        .unwrap();
+    assert!(
+        engine
+            .set_tool_choice(sid, nosh_llm::ToolChoice::Named("missing".into()))
+            .is_err()
+    );
+    engine
+        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("run_command".into()))
+        .unwrap();
+    let output = engine
+        .step(
+            sid,
+            vec![Message::User("Print hello using echo.".into())],
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(output.stop, StopReason::EndOfTurn);
+    assert!(output.text.is_empty());
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+    assert_eq!(output.tool_calls.len(), 1);
+    assert_eq!(output.tool_calls[0].name, "run_command");
+    engine.close(sid);
+}
+
 fn engine() -> LocalChatEngine {
     LocalChatEngine::load(
         &resolved(),
@@ -115,6 +148,7 @@ fn engine() -> LocalChatEngine {
 
 fn spec(system: &str, tools: Vec<ToolSpec>) -> SessionSpec {
     SessionSpec {
+        label: "test".into(),
         system: system.into(),
         tools,
         thinking: false,

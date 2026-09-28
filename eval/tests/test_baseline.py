@@ -26,7 +26,7 @@ class ExpandedBaselineTests(unittest.TestCase):
     def test_compact_counts_and_weighted_metrics(self):
         data = self.data
         self.assertEqual(data["kind"], "evaluation-baseline-summary")
-        scenarios = {s["id"]: s for s in run.load_suite(run.HERE / "scenarios.json")["scenarios"]}
+        scenarios = {s["id"]: s for s in run.load_suite(run.HERE / "suites" / "regression.json")["scenarios"]}
         baseline_ids = {row["scenario_id"] for row in data["scenarios"]}
         self.assertEqual(len(baseline_ids), 25)
         self.assertLessEqual(baseline_ids, set(scenarios))

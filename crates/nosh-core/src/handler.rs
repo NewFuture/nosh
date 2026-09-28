@@ -18,11 +18,21 @@ pub struct LoadedEngine {
     pub description: String,
 }
 
-/// Loads (and if needed downloads) the model; errors are user-facing text.
-pub type EngineLoader = Box<dyn FnMut() -> Result<LoadedEngine, String>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadMode {
+    Foreground,
+    /// Use installed models only, without terminal input or output.
+    Background,
+}
+
+/// Loads the model under the caller's interaction policy.
+pub type EngineLoader = Box<dyn FnMut(LoadMode) -> Result<LoadedEngine, String> + Send>;
 
 pub struct ShellAi {
-    loader: EngineLoader,
+    loader: Option<EngineLoader>,
+    background: Option<crate::assist_worker::Worker>,
+    display: nosh_shell::AssistDisplay,
+    engine_hooked: bool,
     cfg: AgentConfig,
     agent: Option<Agent>,
     description: Option<String>,
@@ -32,7 +42,10 @@ pub struct ShellAi {
 impl ShellAi {
     pub fn new(loader: EngineLoader, cfg: AgentConfig, approval: Box<dyn ApprovalChannel>) -> Self {
         Self {
-            loader,
+            loader: Some(loader),
+            background: None,
+            display: Default::default(),
+            engine_hooked: false,
             cfg,
             agent: None,
             description: None,
@@ -44,9 +57,28 @@ impl ShellAi {
         self.cfg.mode
     }
 
+    fn reclaim(&mut self) -> Result<(), String> {
+        self.display.invalidate();
+        if let Some(worker) = self.background.take() {
+            let state = worker.reclaim()?;
+            self.loader = Some(state.loader);
+            self.agent = state.agent;
+            self.description = state.description;
+        }
+        Ok(())
+    }
+
     fn agent(&mut self, shell: &EmbeddedShell) -> Option<&mut Agent> {
+        if let Err(error) = self.reclaim() {
+            eprintln!("nosh: {error}");
+            return None;
+        }
         if self.agent.is_none() {
-            match (self.loader)() {
+            let Some(loader) = self.loader.as_mut() else {
+                eprintln!("nosh: inference engine is unavailable");
+                return None;
+            };
+            match loader(LoadMode::Foreground) {
                 Ok(l) => {
                     self.description = Some(l.description);
                     self.agent = Some(Agent::new(
@@ -62,6 +94,13 @@ impl ShellAi {
                 }
             }
         }
+        if !self.engine_hooked
+            && let Some(agent) = &mut self.agent
+        {
+            let cancel = agent.engine_mut().cancel_handle();
+            shell.interrupts().on_interrupt(move || cancel.cancel());
+            self.engine_hooked = true;
+        }
         self.agent.as_mut()
     }
 
@@ -72,6 +111,89 @@ impl ShellAi {
         }
         if mode == ApprovalMode::Yolo {
             eprintln!("{}", style::red_bold(&yolo_warning()));
+        }
+    }
+
+    fn assist(
+        &mut self,
+        shell: &EmbeddedShell,
+        intent: crate::command_assist::Intent,
+        text: String,
+        command: Option<nosh_shell::UserCommand>,
+        output: Option<nosh_shell::UserOutput>,
+    ) -> AiOutcome {
+        use crate::command_assist::{AssistRequest, AssistResult};
+        use crate::ui::AgentUi;
+        let started = std::time::Instant::now();
+        let cfg = self.cfg.clone();
+        let request = match AssistRequest::capture(shell, &cfg, intent, text, command, output) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("nosh: {error}");
+                return AiOutcome {
+                    prefill: None,
+                    exit_code: 2,
+                };
+            }
+        };
+        let interrupts = shell.interrupts().count();
+        let Some(agent) = self.agent(shell) else {
+            return AiOutcome {
+                prefill: None,
+                exit_code: 2,
+            };
+        };
+        if shell.interrupts().count() != interrupts {
+            return AiOutcome {
+                prefill: None,
+                exit_code: 130,
+            };
+        }
+        let cancel = agent.engine_mut().cancel_handle();
+        cancel.reset();
+        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel) {
+            Ok(outcome) => {
+                let mut ui = TermUi::new(false);
+                let prefill = match outcome.result {
+                    AssistResult::Command(program) => Some(program),
+                    AssistResult::Clarify(question) => {
+                        ui.text(&question);
+                        None
+                    }
+                    AssistResult::NoSuggestion => None,
+                };
+                let u = outcome.usage;
+                ui.finish(&crate::ui::TaskSummary {
+                    status: "completed".into(),
+                    steps: outcome.steps,
+                    secs: started.elapsed().as_secs_f64(),
+                    prompt_tokens: u.prompt_tokens,
+                    cached_tokens: u.cached_tokens,
+                    completion_tokens: u.completion_tokens,
+                    ttft_secs: u.ttft_secs,
+                    context_used: u.context_used,
+                    context_max: u.context_max,
+                    prefill_tps: u.prefill_tps(),
+                    decode_tps: u.decode_tps(),
+                    note: None,
+                });
+                AiOutcome {
+                    prefill,
+                    exit_code: 0,
+                }
+            }
+            Err(error) => {
+                let exit_code = if matches!(error, crate::command_assist::AssistError::Cancelled) {
+                    130
+                } else {
+                    2
+                };
+                eprintln!("nosh: {error}");
+                AiOutcome {
+                    prefill: None,
+                    exit_code,
+                }
+            }
         }
     }
 }
@@ -90,6 +212,15 @@ fn say(msg: &str) {
 
 impl AiHandler for ShellAi {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome {
+        if matches!(req.trigger, Trigger::Failed { .. }) && req.text.trim().is_empty() {
+            return self.assist(
+                shell,
+                crate::command_assist::Intent::Fix,
+                req.text,
+                req.failed,
+                req.user_output,
+            );
+        }
         if let Some(error) = &self.cfg.rules_error {
             eprintln!("nosh: AI execution blocked by invalid safety configuration: {error}");
             return AiOutcome {
@@ -133,8 +264,29 @@ impl AiHandler for ShellAi {
     }
 
     fn builtin(&mut self, shell: &mut EmbeddedShell, args: &[String]) -> AiOutcome {
+        if let Err(error) = self.reclaim() {
+            eprintln!("nosh: {error}");
+            return AiOutcome {
+                prefill: None,
+                exit_code: 2,
+            };
+        }
         let sub = args.first().map(String::as_str).unwrap_or("");
         let arg = args.get(1).map(String::as_str);
+        if sub == "next" {
+            let command = shell
+                .recent_commands()
+                .last()
+                .filter(|command| command.exit == 0)
+                .cloned();
+            return self.assist(
+                shell,
+                crate::command_assist::Intent::Next,
+                arg.unwrap_or("").into(),
+                command,
+                None,
+            );
+        }
         match sub {
             "mode" => match arg.map(ApprovalMode::parse) {
                 Some(Some(m)) => {
@@ -220,62 +372,14 @@ impl AiHandler for ShellAi {
     }
 
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String> {
-        let sampling = self.cfg.sampling;
-        let ints = shell.interrupts().count();
-        let agent = self.agent(shell)?;
-        if shell.interrupts().count() > ints {
-            return None;
-        }
-        let env = agent.environment().clone();
-        let animated = style::stderr().ansi;
-        let status = format!(
-            "{} {}",
-            style::glyph("…", "..."),
-            tr!("生成命令中", "suggesting")
-        );
-        if animated {
-            let status = style::clip_line(
-                &status,
-                nosh_shell::term::stderr_columns()
-                    .unwrap_or(80)
-                    .saturating_sub(1),
-                0,
-                "",
-            );
-            eprint!("{}", style::dim(&status));
-        } else {
-            eprintln!("{status}");
-        }
-        let context = agent.cfg.permission_context(shell);
-        let r = crate::suggest::suggest(
-            agent.engine_mut(),
-            &env,
+        self.assist(
             shell,
-            line,
-            Trigger::Builtin,
-            sampling,
-            &context,
-        );
-        if animated {
-            eprint!("\r\x1b[K");
-        }
-        match r {
-            Ok(Some(s)) => Some(s.command),
-            Ok(None) => {
-                eprintln!(
-                    "{}",
-                    tr!(
-                        "nosh: 没有完整有效的命令建议",
-                        "nosh: no complete valid command suggestion"
-                    )
-                );
-                None
-            }
-            Err(e) => {
-                eprintln!("nosh: {e}");
-                None
-            }
-        }
+            crate::command_assist::Intent::Generate,
+            line.into(),
+            None,
+            None,
+        )
+        .prefill
     }
 
     fn badge(&self) -> Badge {
@@ -284,6 +388,67 @@ impl AiHandler for ShellAi {
             yolo: self.cfg.mode == ApprovalMode::Yolo,
             note: None,
         }
+    }
+
+    fn assistance(&self) -> Option<nosh_shell::AssistDisplay> {
+        Some(self.display.clone())
+    }
+
+    fn after_command(
+        &mut self,
+        shell: &EmbeddedShell,
+        command: nosh_shell::UserCommand,
+        output: Option<nosh_shell::UserOutput>,
+    ) {
+        use crate::command_assist::{AssistRequest, Intent};
+        let intent = if command.exit == 0 {
+            Intent::Next
+        } else {
+            Intent::Fix
+        };
+        let mut request = match AssistRequest::capture(
+            shell,
+            &self.cfg,
+            intent,
+            String::new(),
+            Some(command),
+            output,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                let version = self.display.invalidate();
+                self.display.publish(
+                    version,
+                    Some(nosh_shell::Assistance::Message(format!("nosh: {error}"))),
+                );
+                return;
+            }
+        };
+        request.background = true;
+        if self.background.is_none() {
+            let Some(loader) = self.loader.take() else {
+                let version = self.display.invalidate();
+                self.display.publish(
+                    version,
+                    Some(nosh_shell::Assistance::Message(
+                        "nosh: inference engine unavailable".into(),
+                    )),
+                );
+                return;
+            };
+            self.background = Some(crate::assist_worker::Worker::start(
+                crate::assist_worker::EngineState {
+                    loader,
+                    agent: self.agent.take(),
+                    description: self.description.take(),
+                },
+                self.display.clone(),
+            ));
+        }
+        self.background
+            .as_ref()
+            .expect("assistance worker")
+            .submit(request, self.cfg.clone());
     }
 }
 
@@ -295,7 +460,7 @@ mod tests {
     fn mode_selection_survives_loading_tasks_and_conversation_resets() {
         let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
         let mut ai = ShellAi::new(
-            Box::new(|| {
+            Box::new(|_| {
                 Ok(LoadedEngine {
                     engine: Box::new(nosh_llm::MockChatEngine::with_responder(|_| {
                         vec![nosh_llm::mock::text("done")]
@@ -328,5 +493,41 @@ mod tests {
                 ai.builtin(&mut shell, &["clear".into()]);
             }
         }
+    }
+
+    #[test]
+    fn automatic_loading_cannot_fall_back_to_the_foreground_policy() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        let modes = Arc::new(Mutex::new(Vec::new()));
+        let observed = modes.clone();
+        let mut ai = ShellAi::new(
+            Box::new(move |mode| {
+                observed.lock().unwrap().push(mode);
+                Err("model not installed".into())
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        shell.run_user_line("true");
+        ai.after_command(
+            &shell,
+            shell.recent_commands().last().unwrap().clone(),
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while ai.display.result().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(ai.display.result(), Some(nosh_shell::Assistance::Message(text)) if text.contains("model not installed"))
+        );
+        assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
+        assert!(ai.agent(&shell).is_none());
+        assert_eq!(
+            *modes.lock().unwrap(),
+            [LoadMode::Background, LoadMode::Foreground]
+        );
     }
 }

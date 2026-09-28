@@ -16,7 +16,7 @@ pub mod toolcall;
 
 pub use engine::{
     CallError, CallErrorKind, CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId,
-    SessionSpec, StepOutcome, StopReason, ToolCall, ToolSpec, Usage,
+    SessionSpec, StepOutcome, StopReason, ToolCall, ToolChoice, ToolSpec, Usage,
 };
 pub use local::{EngineInfo, LocalChatEngine, LocalEngineOptions, rss_mb};
 pub use mock::MockChatEngine;

@@ -9,6 +9,68 @@ import re
 
 from . import driver
 
+TOKEN_METRICS = ("prompt_tokens", "cached_tokens", "completion_tokens")
+
+
+def assistance_observations(events: list[dict]) -> list[dict]:
+    labels, executions, responses = {}, {}, {}
+    completed = set()
+    results = []
+    for event in events:
+        key = (event.get("engine"), event.get("sid"))
+        if event.get("ev") == "open":
+            labels[key] = event.get("label", "")
+        elif event.get("ev") == "step_start":
+            for message in event.get("messages", []):
+                if message.get("role") == "system":
+                    records = re.findall(r"(?m)^\[execution\]\n([^\n]+)", message.get("text", ""))
+                    if records:
+                        executions[key] = json.loads(records[-1])
+        elif event.get("ev") == "step_end":
+            responses[key] = event
+        if event.get("ev") != "observation":
+            continue
+        value = event.get("value")
+        if not isinstance(value, dict) or value.get("workflow") != "command_assist":
+            raise ValueError("unknown host observation")
+        expected = f"command_assist.{value.get('intent')}.{'background' if value.get('background') else 'foreground'}"
+        if (labels.get(key) != expected or key in completed
+                or value.get("intent") not in ("generate", "fix", "next")
+                or type(value.get("background")) is not bool
+                or value.get("status") not in ("completed", "cancelled", "failed")):
+            raise ValueError("invalid assistance provenance")
+        command_id = value.get("command_id")
+        if value["intent"] == "generate":
+            if command_id is not None:
+                raise ValueError("generate result cannot refer to an execution")
+        else:
+            execution = executions.get(key, {})
+            if (not isinstance(execution, dict)
+                    or type(command_id) is not int or command_id <= 0
+                    or execution.get("command_id") != command_id
+                    or type(execution.get("exit")) is not int
+                    or (execution["exit"] == 0) != (value["intent"] == "next")):
+                raise ValueError("assistance result does not match its execution")
+        if value["status"] == "completed":
+            kind, text = value.get("kind"), value.get("text")
+            if (kind not in ("command", "clarify", "none")
+                    or (kind == "none" and text is not None)
+                    or (kind != "none" and (not isinstance(text, str) or not text.strip()))):
+                raise ValueError("invalid accepted assistance result")
+            response = responses.get(key, {})
+            calls = response.get("tool_calls", [])
+            if (response.get("stop") != "end_of_turn" or response.get("errors") != []
+                    or response.get("text", "").strip() or len(calls) != 1
+                    or calls[0].get("name") != "finish"):
+                raise ValueError("accepted assistance has no matching finish")
+            args = calls[0].get("args", {})
+            if (args.get("kind") != kind or set(args) != ({"kind"} if kind == "none" else {"kind", "text"})
+                    or (kind != "none" and (not isinstance(args.get("text"), str) or args["text"].strip() != text))):
+                raise ValueError("accepted assistance differs from the generated finish")
+        completed.add(key)
+        results.append(value)
+    return results
+
 def legacy_answer(text: str) -> str:
     lines = []
     for line in driver.plain(text).splitlines():
@@ -61,6 +123,8 @@ def execution_evidence(events: list[dict]) -> list[dict]:
             for call in event["tool_calls"]:
                 if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
                     raise ValueError("invalid observed tool call")
+                if call["name"] == "finish":
+                    continue
                 execution = {"call": call, "result": None, "state": "unobserved", "exit_code": None}
                 executions.append(execution)
                 waiting.append(execution)
@@ -70,7 +134,7 @@ def execution_evidence(events: list[dict]) -> list[dict]:
 
 def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, seed: int,
             deadline_timeout: bool = False) -> dict:
-    if deadline_timeout and (legacy or result.timeout_phase not in ("agent", "cli")
+    if deadline_timeout and (legacy or result.timeout_phase not in ("agent", "cli", "assist")
                             or result.exit_code not in (-9, -15)):
         raise ValueError("task timeout recovery requires native in-flight agent observations")
     if re.search(r"(?m)^nosh: [^\n]*config\.toml:", driver.plain(result.stderr + result.transcript)):
@@ -115,6 +179,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
     generated = []
     executions = None
     deadline_state = None
+    assistance = []
     if not legacy and scenario["check"] != "typos":
         if not trace.is_file():
             raise ValueError("native engine trace is missing; use --legacy explicitly for an older binary")
@@ -155,7 +220,12 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
                 deadline_state = "during_generation"
             elif len(starts) == len(ends) and not pending:
                 last = ends[-1]
-                if (last.get("stop") != "end_of_turn" or last.get("tool_calls") != []
+                accepted_finish = any(
+                    e.get("ev") == "observation" and e.get("sid") == last.get("sid")
+                    and e.get("engine") == last.get("engine")
+                    and e.get("value", {}).get("status") == "completed" for e in events
+                )
+                if (last.get("stop") != "end_of_turn" or (last.get("tool_calls") != [] and not accepted_finish)
                         or last.get("errors") != []):
                     raise ValueError("timeout was not after a completed final generation")
                 deadline_state = "after_generation"
@@ -179,15 +249,31 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
                         or not math.isfinite(info["load_s"]) or info["load_s"] < 0):
                     raise ValueError("invalid engine load observation")
         executions = execution_evidence(events)
+        assistance = assistance_observations(events)
+        expected_assistance = scenario.get("assistance")
+        assist_session = any(isinstance(e.get("label"), str) and e["label"].startswith("command_assist.")
+                             for e in opens)
+        if (expected_assistance or assist_session) and not assistance and not deadline_timeout:
+            raise ValueError("command assistance has no host result observation")
+        if assistance and not expected_assistance and scenario["mode"] != "suggest":
+            raise ValueError("command assistance ran during isolated Agent evaluation")
         metrics["steps"] = len(starts)
         metrics["ttft_s"] = ends[0]["usage"]["ttft_s"] if ends else None
         metrics["load_s"] = sum(e["info"]["load_s"] for e in events if e["ev"] == "engine")
-        inputs = [e for e in events if e["ev"] in ("open", "step_start", "rewind", "compact")]
+        inputs = [e for e in events if e["ev"] in ("open", "step_start", "rewind", "compact", "tool_choice")]
         # Engine IDs are process-local bookkeeping, not model input.
         inputs = [{k: v for k, v in e.items() if k not in ("engine", "schema_version")} for e in inputs]
         tools = [call for e in ends for call in e["tool_calls"]]
         sampling = [e["sampling"] for e in opens]
         generated = [e["text"] for e in ends]
+        for metric in TOKEN_METRICS:
+            values = [e["usage"].get(metric) for e in ends]
+            if any(value is not None and (type(value) is not int or value < 0) for value in values):
+                raise ValueError("invalid token usage")
+            if values and all(type(value) is int and value >= 0 for value in values):
+                metrics[metric] = sum(values)
+            else:
+                metrics[metric] = None
         if deadline_state == "during_generation":
             metrics["task_status"] = "timed_out"
             answer = ""
@@ -196,12 +282,20 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
                          "TTFT is available only if the first step completed.")
         elif deadline_state == "after_generation":
             metrics["task_status"] = "timed_out"
-            answer = ends[-1]["text"].strip()
+            answer = (assistance[-1].get("text") or "") if assistance else ends[-1]["text"].strip()
             notes.append("The declared trial deadline expired after the final generation completed "
                          "but before the REPL completion marker. The observed answer is preserved as "
                          "evidence, but the trial remains a timeout failure.")
         elif scenario["mode"] != "suggest":
             answer = ends[-1]["text"].strip()
+        if assistance and not deadline_timeout:
+            last = assistance[-1]
+            metrics["task_status"] = last["status"]
+            answer = last.get("text") or ""
+            if scenario["mode"] == "suggest" and last["status"] == "completed":
+                expected_stdout = answer if last["kind"] == "command" else ""
+                if result.stdout.strip() != expected_stdout:
+                    raise ValueError("CLI stdout differs from the accepted assistance result")
     elif not legacy and trace.exists():
         raise ValueError("local correction unexpectedly loaded the inference engine")
     if legacy:
@@ -214,4 +308,4 @@ def observe(result: driver.Result, scenario: dict, trace: Path, legacy: bool, se
         raise ValueError("task completion/step measurement is missing")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
             "executions": executions, "sampling": sampling, "generated_answers": generated,
-            "deadline_state": deadline_state, "metric_notes": notes}
+            "assistance": assistance, "deadline_state": deadline_state, "metric_notes": notes}

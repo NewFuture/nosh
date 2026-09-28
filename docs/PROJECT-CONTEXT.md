@@ -8,9 +8,11 @@ shell 与本地 agent 都代表当前用户操作，不是彼此隔离的权限�
 
 初始 System 与工具 schema 在对话内保持稳定。动态背景使用独立 System 消息；只有角色边界采用特殊 token，正文按普通文本编码，不能注入角色或工具调用 token。消息角色不改变“参考资料不是任务”的规则或执行权限。
 
-agent、`-s` 和 Ctrl+G 统一发送 **System 背景 + User 原始请求**。背景包含 context、最近命令、项目文档、附件和真实失败事实；请求不改写、不拼接背景。内部 `Trigger` 只负责路由；只有失败后直接求助但没有请求文本时，生成默认的失败解释请求。
+Agent 发送 **System 背景 + User 原始请求**，包含 context、最近命令、项目文档、附件和真实失败事实；请求不改写、不拼接背景。内部 `Trigger` 只负责路由。
 
-构造入口只有 `task_messages`，必须传入调用方的权限 context；不提供拼回单条字符串或隐式默认权限的旧入口。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
+Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
+
+CommandAssist 共用项目／文档采集器，但使用独立的最小背景：Generate 附真实请求，Fix/Next 附明确的宿主执行事件，没有用户文本时不伪造请求。它不带入 Agent 全部历史或最近三条命令。Fix 复用匹配的终端证据；Next 不自动附成功输出。详见 [CommandAssist](COMMAND-ASSIST.md)。
 
 用户终端输出仅由失败诊断入口按命令 ID 配对后放入背景；普通请求不自动携带。`[user_output]` 保留独立的归属、完整性和 4,096 字节正文预算，同一对话去重；详见[输出采集设计](OUTPUT-CAPTURE.md)。其 JSON 元数据是证据协议，不替代标签化项目 context。
 

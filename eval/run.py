@@ -132,7 +132,7 @@ def discover_tools(scenarios: list[dict]) -> dict:
 
 
 def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None,
-                capture_output: str | None = None) -> dict[str, str]:
+                capture_output: str | None = None, command_assist: bool | None = False) -> dict[str, str]:
     if capture_output not in (None, "off", "last"):
         raise ValueError("capture_output must be off or last")
     env = fixtures.project_environment(home, tools)
@@ -145,7 +145,11 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
     })
     config = home / "nosh"
     config.mkdir(mode=0o700)
-    shell_config = f'[shell]\ncapture_output = "{capture_output}"\n' if capture_output is not None else ""
+    shell_config = "[shell]\n" if command_assist is not None or capture_output is not None else ""
+    if command_assist is not None:
+        shell_config += f'command_assist = {str(command_assist).lower()}\n'
+    if capture_output is not None:
+        shell_config += f'capture_output = "{capture_output}"\n'
     (config / "config.toml").write_text(
         shell_config + '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
         '[model]\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
@@ -177,6 +181,11 @@ def machine_info() -> dict:
             "cpu": model, "logical_cpus": os.cpu_count()}
 
 
+def harness_sources() -> list[Path]:
+    """Runtime sources only, including scorer modules but not tests or archived judges."""
+    return sorted([*HERE.glob("*.py"), *(HERE / "checks").rglob("*.py")])
+
+
 def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, toolchain: dict) -> dict:
     binary_hash = fixtures.file_hash(binary)
     build = {"source_revision": None, "source_clean": None, "binary_sha256": binary_hash,
@@ -188,6 +197,8 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
             raise ValueError("build info does not identify this exact binary and source revision")
         build["provenance"] = "recorded build; supplied binary hash verified"
     tools = {"python": platform.python_version(), **{name: info["version"] for name, info in toolchain.items()}}
+    sources = {p.relative_to(HERE).as_posix(): p for p in harness_sources()}
+    content_hashes = {name: fixtures.source_hash(path) for name, path in sources.items()}
     return {
         "run_id": args.label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"),
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -198,9 +209,9 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "suite_sha256": fixtures.digest(suite),
         "suite_schema_version": suite["schema_version"],
         "dataset_revision": suite.get("dataset_revision", 1),
-        "harness_sha256": fixtures.digest({p.name: fixtures.file_hash(p) for p in sorted(HERE.glob("*.py"))}),
-        "harness_content_sha256": fixtures.digest({p.name: fixtures.source_hash(p) for p in sorted(HERE.glob("*.py"))}),
-        "grading_content_sha256": fixtures.source_hash(HERE / "checks.py"),
+        "harness_sha256": fixtures.digest({name: fixtures.file_hash(path) for name, path in sources.items()}),
+        "harness_content_sha256": fixtures.digest(content_hashes),
+        "grading_content_sha256": fixtures.digest({name: value for name, value in content_hashes.items() if name.startswith("checks/")}),
         "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "capture_output": "binary_default",
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
@@ -229,7 +240,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         root, home, facts = workspace.prepare(scenario, seed, repeat)
         trace = home.parent / "engine.jsonl"
         env = environment(home, args.threads, None if args.legacy else trace, workspace.tools,
-                          capture_output=scenario.get("capture_output"))
+                          capture_output=scenario.get("capture_output"),
+                          command_assist=None if args.legacy else scenario.get("assistance", {}).get("automatic", False))
         if scenario["check"] in NATIVE_CHECKS:
             facts["tools"] = workspace.tools
         if scenario["check"] == "versions":
@@ -261,7 +273,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         row.update(fixture_sha256=fixtures.digest({k: v for k, v in facts.items() if k != "listener"}),
                    file_snapshot=after, final_state=checks.fixture_state(scenario, facts, root, after, result))
         if result.error:
-            if not args.legacy and result.timeout_phase in ("agent", "cli") and trace.is_file():
+            if not args.legacy and result.timeout_phase in ("agent", "cli", "assist") and trace.is_file():
                 observed = observe(result, scenario, trace, False, seed, deadline_timeout=True)
                 row.update(observed)
                 stage = ("after final generation completed but before the completion marker"
@@ -307,7 +319,7 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "target" / "release" / "nosh")
     parser.add_argument("--model-path", type=Path, required=True)
-    parser.add_argument("--suite", type=Path, default=HERE / "scenarios.json")
+    parser.add_argument("--suite", type=Path, default=HERE / "suites" / "regression.json")
     parser.add_argument("--scenario", action="append", help="select a scenario (repeatable)")
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--repeat", type=int, default=1)

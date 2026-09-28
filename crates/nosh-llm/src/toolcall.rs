@@ -518,6 +518,35 @@ mod tests {
     const TXT: u32 = 1000;
 
     #[test]
+    fn host_prefilled_tool_opening_is_parsed_with_generated_arguments() {
+        let prefix = crate::template::concat(&crate::template::tool_choice_prefix(
+            &crate::ToolChoice::Named("run_command".into()),
+        ));
+        assert_eq!(prefix, "<function name=\"run_command\">");
+        assert!(crate::template::tool_choice_prefix(&crate::ToolChoice::Auto).is_empty());
+        let mut parser = StreamParser::new(tools(), false);
+        assert!(parser.push_bytes(FUNCTION_OPEN, b"").is_empty());
+        assert!(
+            parser
+                .push_bytes(TXT, prefix.trim_start_matches("<function").as_bytes())
+                .is_empty()
+        );
+        assert!(parser.in_call());
+        let result = feed(
+            &mut parser,
+            &[
+                (PARAM_OPEN, ""),
+                (TXT, " name=\"command\">echo ok"),
+                (PARAM_CLOSE, ""),
+                (FUNCTION_CLOSE, ""),
+            ],
+        );
+        assert!(
+            matches!(result.as_slice(), [Parsed::Call(Ok(call))] if call.str_arg("command") == Some("echo ok"))
+        );
+    }
+
+    #[test]
     fn stream_state_machine() {
         let mut p = StreamParser::new(tools(), false);
         let out = feed(

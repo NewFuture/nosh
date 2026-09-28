@@ -101,11 +101,22 @@ fn message(m: &Message) -> Value {
     }
 }
 
-impl<W: Write> ChatEngine for TracedEngine<W> {
+impl<W: Write + Send> ChatEngine for TracedEngine<W> {
+    fn set_tool_choice(
+        &mut self,
+        sid: SessionId,
+        choice: nosh_llm::ToolChoice,
+    ) -> Result<(), LlmError> {
+        self.inner.set_tool_choice(sid, choice.clone())?;
+        self.record(json!({"ev": "tool_choice", "sid": sid, "choice": choice}))?;
+        Ok(())
+    }
+
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
         let p = spec.sampling;
         let mut event = json!({
             "ev": "open", "system": spec.system, "tools": spec.tools,
+            "label": spec.label,
             "thinking": spec.thinking, "max_new_tokens": spec.max_new_tokens,
             "sampling": {
                 "seed": p.seed, "temperature": p.temperature, "top_p": p.top_p,
@@ -195,6 +206,11 @@ impl<W: Write> ChatEngine for TracedEngine<W> {
         self.inner.close(sid);
         self.record_infallible(json!({"ev": "close", "sid": sid}));
     }
+
+    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), LlmError> {
+        self.record(json!({"ev": "observation", "sid": sid, "value": value}))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +221,7 @@ mod tests {
 
     fn spec() -> SessionSpec {
         SessionSpec {
+            label: "test".into(),
             system: "system".into(),
             tools: vec![],
             thinking: false,

@@ -153,6 +153,17 @@ pub fn generation_prompt(thinking: Option<bool>) -> Seg {
     })
 }
 
+/// Host-selected opening only. The parser still validates the generated call.
+pub fn tool_choice_prefix(choice: &crate::ToolChoice) -> Vec<Seg> {
+    match choice {
+        crate::ToolChoice::Auto => vec![],
+        crate::ToolChoice::Required => vec![Seg::t("<function name=\"")],
+        crate::ToolChoice::Named(name) => {
+            vec![Seg::t("<function name=\""), Seg::u(name), Seg::t("\">")]
+        }
+    }
+}
+
 /// Renders messages after the initial system prefix.
 pub fn render_messages(messages: &[Message]) -> Vec<Seg> {
     let mut out = Vec::new();

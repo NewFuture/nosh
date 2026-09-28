@@ -14,6 +14,7 @@ pub struct Config {
     pub on_failure: OnFailure,
     pub capture_output: CaptureOutput,
     pub input_assist: bool,
+    pub command_assist: bool,
     pub nl_guard: bool,
     pub builtin_name: String,
     pub approval: ApprovalMode,
@@ -44,6 +45,7 @@ impl Default for Config {
             on_failure: OnFailure::Hint,
             capture_output: CaptureOutput::Last,
             input_assist: true,
+            command_assist: true,
             nl_guard: true,
             builtin_name: "ai".into(),
             approval: ApprovalMode::default(),
@@ -77,6 +79,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "on_failure",
             "capture_output",
             "input_assist",
+            "command_assist",
             "nl_guard",
             "builtin_name",
             "suggest_key",
@@ -242,6 +245,9 @@ impl Config {
         }
         if let Some(v) = r.bool("shell", "input_assist") {
             c.input_assist = v;
+        }
+        if let Some(v) = r.bool("shell", "command_assist") {
+            c.command_assist = v;
         }
         if let Some(v) = r.str("shell", "on_failure") {
             match OnFailure::parse(&v) {

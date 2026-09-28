@@ -26,6 +26,7 @@ CHECK_FIXTURES = {
     "build-failure": "rust-broken", "test-failure": "python-broken", "port-failure": "port",
     "captured-diagnosis": "diagnostic-failure",
     "captured-citation": "diagnostic-failure",
+    "assist-archive": "logs", "assist-none": "logs", "assist-clarify": "logs",
 }
 
 
@@ -47,8 +48,34 @@ def load_suite(path: Path) -> dict:
     suite = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(suite, dict) or type(suite.get("schema_version")) is not int or suite["schema_version"] not in (1, 2):
         raise ValueError("unsupported scenario schema")
-    if set(suite) - {"schema_version", "dataset_revision", "seeds", "timeout_s", "scenarios"}:
+    if set(suite) - {"schema_version", "dataset_revision", "seeds", "timeout_s", "scenarios", "catalogs"}:
         raise ValueError("unknown suite fields")
+    if "catalogs" in suite:
+        catalogs, selected = suite["catalogs"], suite.get("scenarios")
+        if (suite["schema_version"] != 2 or not isinstance(catalogs, list) or not catalogs
+                or not all(isinstance(name, str) and name for name in catalogs)):
+            raise ValueError("catalogs must be explicit paths in a schema v2 suite")
+        if (not isinstance(selected, list) or not selected
+                or not all(isinstance(sid, str) and sid for sid in selected)):
+            raise ValueError("catalog suites must select a nonempty ordered list of scenario IDs")
+        definitions = {}
+        for name in catalogs:
+            catalog = path.parent / name
+            entries = json.loads(catalog.read_text(encoding="utf-8"))
+            if not isinstance(entries, list) or not entries:
+                raise ValueError(f"scenario catalog must be a nonempty array: {catalog}")
+            for entry in entries:
+                sid = entry.get("id") if isinstance(entry, dict) else None
+                if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", sid):
+                    raise ValueError(f"invalid scenario ID in catalog: {catalog}")
+                if sid in definitions:
+                    raise ValueError(f"duplicate catalog scenario: {sid}")
+                definitions[sid] = entry
+        missing = set(selected) - definitions.keys()
+        if missing:
+            raise ValueError(f"unknown scenario IDs: {', '.join(sorted(missing))}")
+        suite = {key: value for key, value in suite.items() if key != "catalogs"}
+        suite["scenarios"] = [definitions[sid] for sid in selected]
     revision = suite.get("dataset_revision", 1)
     if type(revision) is not int or revision < 1:
         raise ValueError("dataset_revision must be a positive integer")
@@ -66,9 +93,25 @@ def load_suite(path: Path) -> dict:
         fields = {"id", "title", "mode", "fixture", "inputs", "input",
                   "corrections", "stdin_command", "approval", "check"}
         if suite["schema_version"] == 2:
-            fields |= {"group", "expect", "completions", "capture_output"}
+            fields |= {"group", "expect", "completions", "capture_output", "assistance"}
         if set(scenario) - fields:
             raise ValueError("unknown scenario fields")
+        assistance = scenario.get("assistance")
+        if assistance is not None:
+            if (not isinstance(assistance, dict)
+                    or set(assistance) - {"intent", "result", "automatic", "require_query"}
+                    or not {"intent", "result", "automatic"} <= set(assistance)
+                    or assistance["intent"] not in ("generate", "fix", "next")
+                    or assistance["result"] not in ("command", "clarify", "none")
+                    or type(assistance["automatic"]) is not bool
+                    or ("require_query" in assistance and type(assistance["require_query"]) is not bool)):
+                raise ValueError("invalid command assistance contract")
+            if assistance["automatic"] != (scenario.get("mode") == "repl"):
+                raise ValueError("automatic assistance requires a REPL completion")
+            if (assistance["intent"] == "generate") != (scenario.get("mode") == "suggest"):
+                raise ValueError("generate requires suggest mode; fix/next require REPL mode")
+        if scenario.get("check", "").startswith("assist-") and assistance is None:
+            raise ValueError("assistance checks require an assistance contract")
         capture = scenario.get("capture_output")
         if "capture_output" in scenario and capture not in ("off", "last"):
             raise ValueError("capture_output must be off or last")
@@ -115,7 +158,7 @@ def load_suite(path: Path) -> dict:
                     if not isinstance(completion, dict):
                         raise ValueError(f"invalid completion contract: {sid}")
                     kind = completion.get("kind")
-                    if kind not in ("agent", "shell", "correction"):
+                    if kind not in ("agent", "shell", "correction", "assist"):
                         raise ValueError(f"unknown input completion: {sid}")
                     if kind == "shell":
                         code = completion.get("exit_code")
@@ -127,9 +170,11 @@ def load_suite(path: Path) -> dict:
                             raise ValueError(f"invalid failed-command completion: {sid}")
                     elif set(completion) != {"kind"}:
                         raise ValueError(f"unknown completion fields: {sid}")
+                    if kind == "assist" and (assistance is None or not assistance["automatic"]):
+                        raise ValueError("assist completion requires automatic assistance")
                     if (kind == "correction") != (corrections is not None):
                         raise ValueError(f"correction completion does not match inputs: {sid}")
-                if corrections is None and completions[-1]["kind"] != "agent":
+                if corrections is None and completions[-1]["kind"] not in ("agent", "assist"):
                     raise ValueError(f"the final REPL input must ask the agent: {sid}")
                 if (scenario["check"] in {"build-failure", "test-failure", "port-failure", *CAPTURE_CHECKS}
                         and completions[0]["kind"] != "shell"):
@@ -148,12 +193,12 @@ def load_suite(path: Path) -> dict:
                 raise ValueError(f"stdin attachments require agent mode: {sid}")
         else:
             raise ValueError(f"unknown mode: {sid}")
-        if scenario["check"] in NATIVE_CHECKS | {"typos", "failure", "cwd"} and scenario["mode"] != "repl":
+        if scenario["check"] in (NATIVE_CHECKS - {"assist-archive", "assist-none", "assist-clarify"}) | {"typos", "failure", "cwd"} and scenario["mode"] != "repl":
             raise ValueError(f"this check requires a shared interactive session: {sid}")
         if not all(isinstance(s, str) and s and "\0" not in s and "\r" not in s and "\n" not in s for s in inputs):
             raise ValueError(f"inputs must be nonempty single lines: {sid}")
         if suite["schema_version"] == 2:
-            if scenario.get("group") not in ("mvp", "expanded"):
+            if scenario.get("group") not in ("mvp", "expanded", "command-assist"):
                 raise ValueError(f"invalid scenario group: {sid}")
             expect = scenario.get("expect")
             if not isinstance(expect, dict) or set(expect) != {
@@ -162,7 +207,7 @@ def load_suite(path: Path) -> dict:
                 raise ValueError(f"all experience expectations must be declared: {sid}")
             if any(type(expect[k]) is not int or expect[k] < 0 for k in ("max_steps", "max_confirmations")):
                 raise ValueError(f"experience limits must be nonnegative integers: {sid}")
-            nonprose = scenario["check"] == "typos" or scenario["mode"] == "suggest"
+            nonprose = scenario["check"] == "typos" or scenario["mode"] == "suggest" or assistance is not None
             if (expect["response_language"] not in ("zh", "any", "not_applicable")
                     or (expect["response_language"] == "not_applicable") != nonprose):
                 raise ValueError(f"invalid response language expectation: {sid}")

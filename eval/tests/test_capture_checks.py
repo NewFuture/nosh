@@ -1,3 +1,5 @@
+"""Captured-output evidence, diagnosis and citation contracts."""
+
 import copy
 import json
 from pathlib import Path
@@ -15,7 +17,7 @@ class DiagnosticContractTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.data = suite.load_suite(run.HERE / "scenarios.json")
+        self.data = suite.load_suite(run.HERE / "suites" / "regression.json")
         self.scenarios = {s["check"]: s for s in self.data["scenarios"]
                           if s["check"] in suite.CAPTURE_CHECKS}
         self.scenario = self.scenarios["captured-diagnosis"]

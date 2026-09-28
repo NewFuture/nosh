@@ -266,11 +266,9 @@ impl Agent {
     }
 
     fn spec(&self) -> SessionSpec {
-        let system = match self.tools {
-            ToolSet::Suggest => prompt::suggest_system_prompt(&self.env),
-            _ => prompt::system_prompt(&self.env),
-        };
+        let system = prompt::system_prompt(&self.env);
         SessionSpec {
+            label: "agent".into(),
             system,
             tools: tools::specs(self.tools),
             thinking: self.cfg.thinking,

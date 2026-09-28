@@ -133,6 +133,7 @@ pub fn run(
                 vec![]
             };
             let sid = match engine.open(SessionSpec {
+                label: "debug".into(),
                 system,
                 tools: tool_specs,
                 thinking: think,

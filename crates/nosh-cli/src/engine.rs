@@ -162,12 +162,24 @@ fn first_download_needed(setup: &EngineSetup) -> Result<bool, HubError> {
 
 /// Loads the engine, downloading the model first if needed.
 pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
+    load_mode(setup, ask, false)
+}
+
+/// Automatic assistance must never download, prompt, or write over the editor.
+pub fn load_background(setup: &EngineSetup) -> Result<LoadedEngine, String> {
+    load_mode(setup, false, true)
+}
+
+fn load_mode(setup: &EngineSetup, ask: bool, background: bool) -> Result<LoadedEngine, String> {
     let resolved = match locate(setup).map_err(|e| e.to_string())? {
         Some(r) => r,
+        None if background => {
+            return Err("model unavailable for automatic assistance; run `nosh model pull`".into());
+        }
         None => download(setup, ask)?,
     };
     let terminal = style::stderr();
-    if terminal.tty {
+    if terminal.tty && !background {
         let status = format!(
             "{} {}",
             style::glyph("…", "..."),
@@ -196,7 +208,7 @@ pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
             ..LocalEngineOptions::default()
         },
     );
-    if terminal.ansi {
+    if terminal.ansi && !background {
         eprint!("\r\x1b[K");
     }
     let engine =

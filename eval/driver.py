@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 from dataclasses import dataclass, field
 import errno
+import json
 import os
 from pathlib import Path
 import re
@@ -30,6 +31,49 @@ def plain(text: str) -> str:
 
 class DriverError(RuntimeError):
     pass
+
+
+class AssistanceTrace:
+    """Read each appended JSONL record once, including split UTF-8 writes."""
+
+    def __init__(self, path: str | None):
+        self.path = Path(path) if path else None
+        self.offset = 0
+        self.pending = b""
+        self.results: list[dict] = []
+
+    def read(self) -> list[dict]:
+        if self.path is None:
+            return self.results
+        try:
+            with self.path.open("rb") as stream:
+                if os.fstat(stream.fileno()).st_size < self.offset:
+                    raise DriverError("engine trace was truncated while observing assistance")
+                stream.seek(self.offset)
+                appended = stream.read()
+        except FileNotFoundError:
+            if self.offset:
+                raise DriverError("engine trace disappeared while observing assistance")
+            return self.results
+        self.offset += len(appended)
+        self.pending += appended
+        complete, separator, pending = self.pending.rpartition(b"\n")
+        if separator:
+            self.pending = pending
+            for line in complete.splitlines():
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError) as error:
+                    raise DriverError(f"invalid engine trace record: {error}") from error
+                if not isinstance(event, dict):
+                    raise DriverError("engine trace record must be an object")
+                if event.get("ev") == "observation":
+                    value = event.get("value")
+                    if not isinstance(value, dict):
+                        raise DriverError("invalid host observation")
+                    if value.get("workflow") == "command_assist":
+                        self.results.append(value)
+        return self.results
 
 
 class Screen:
@@ -363,6 +407,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     approval_offset = 0
     denial_pending = False
     phase = "initial_prompt"
+    trace = AssistanceTrace(env.get("NOSH_EVAL_TRACE"))
 
     def prompt():
         return child.screen.line().startswith(PROMPT.rstrip())
@@ -411,11 +456,14 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             contract = contracts[i]
             phase = contract["kind"]
             start = len(result.transcript)
+            assist_before = len(trace.read()) if contract["kind"] == "assist" else 0
             child.send(b"\x15" + line.encode() + b"\r")
             correction = (scenario.get("corrections") or [])[i] if scenario.get("corrections") else None
 
             def completed():
                 text = plain(result.transcript[start:])
+                if contract["kind"] == "assist":
+                    return len(trace.read()) > assist_before and prompt()
                 if correction:
                     return "press Enter to run" in text and child.screen.line().startswith(PROMPT + correction)
                 returned = idle_prompt() and "\n" + PROMPT.rstrip() in text
@@ -428,6 +476,8 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             result.turns.append({"input": line, "output": output, "kind": contract["kind"],
                                  "exit_code": int(hint[1]) if hint else None,
                                  "edit_line": child.screen.line() if correction else None})
+            if contract["kind"] == "assist":
+                result.turns[-1]["assistance"] = trace.read()[-1]
             if contract["kind"] == "shell":
                 if not hint or int(hint[1]) != contract["exit_code"] or SUMMARY.search(output):
                     result.failure = f"input {i + 1}: expected shell exit {contract['exit_code']}, did not observe it"

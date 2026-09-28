@@ -171,12 +171,23 @@ impl Default for SamplingParams {
 
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
+    /// Host-side provenance for observations; never rendered into model tokens.
+    pub label: String,
     /// Trusted static system prompt; `<tool_def_sep>` marks where tool definitions go.
     pub system: String,
     pub tools: Vec<ToolSpec>,
     pub thinking: bool,
     pub sampling: SamplingParams,
     pub max_new_tokens: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "name", rename_all = "snake_case")]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+    Named(String),
 }
 
 pub type SessionId = u64;
@@ -201,8 +212,15 @@ impl CancelHandle {
 
 /// Messages in, events out (design §3.4). Implementations: in-process
 /// [`crate::LocalChatEngine`] and the scripted [`crate::MockChatEngine`].
-pub trait ChatEngine {
+pub trait ChatEngine: Send {
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError>;
+
+    /// One-step decoding policy; non-Auto choices return one tool call, not prose.
+    fn set_tool_choice(&mut self, _sid: SessionId, _choice: ToolChoice) -> Result<(), LlmError> {
+        Err(LlmError::Config(
+            "engine does not support tool choice".into(),
+        ))
+    }
 
     /// Appends `append` to the conversation and generates one assistant turn.
     /// System messages append plain-text context; they do not replace the initial system prompt.
@@ -237,6 +255,11 @@ pub trait ChatEngine {
 
     fn cancel(&self, _sid: SessionId) {
         self.cancel_handle().cancel();
+    }
+
+    /// Optional host observations, separate from model input and output.
+    fn record_observation(&mut self, _sid: SessionId, _value: Value) -> Result<(), LlmError> {
+        Ok(())
     }
 
     fn close(&mut self, sid: SessionId);

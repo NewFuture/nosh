@@ -1140,6 +1140,9 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             v
         }
         "tar" | "bsdtar" => {
+            if asks_version_or_help(args) {
+                return Verdict::safe("prints version or usage");
+            }
             let joined: String = args.iter().take(1).map(|a| a.value.clone()).collect();
             let list = has_flag(args, &['t'], &["list"])
                 || (!joined.starts_with('-')

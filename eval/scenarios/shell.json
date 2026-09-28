@@ -1,0 +1,33 @@
+[
+  {
+    "id": "typo-correction",
+    "title": "Correct typos without executing or loading the model",
+    "mode": "repl",
+    "fixture": "typo",
+    "inputs": [
+      "gti status",
+      "pyhton3 --version"
+    ],
+    "corrections": [
+      "git status",
+      "python3 --version"
+    ],
+    "completions": [
+      {
+        "kind": "correction"
+      },
+      {
+        "kind": "correction"
+      }
+    ],
+    "group": "mvp",
+    "expect": {
+      "max_steps": 0,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    },
+    "approval": "deny",
+    "check": "typos"
+  }
+]

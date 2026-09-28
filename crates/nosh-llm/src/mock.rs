@@ -98,6 +98,17 @@ fn approx_tokens(msgs: &[Message]) -> usize {
 }
 
 impl ChatEngine for MockChatEngine {
+    fn set_tool_choice(
+        &mut self,
+        sid: SessionId,
+        _choice: crate::ToolChoice,
+    ) -> Result<(), LlmError> {
+        if !self.sessions.contains_key(&sid) {
+            return Err(LlmError::UnknownSession(sid));
+        }
+        Ok(())
+    }
+
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -230,6 +241,7 @@ mod tests {
 
     fn spec() -> SessionSpec {
         SessionSpec {
+            label: "test".into(),
             system: "sys".into(),
             tools: vec![],
             thinking: false,
