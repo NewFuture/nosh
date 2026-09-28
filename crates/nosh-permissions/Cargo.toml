@@ -10,6 +10,11 @@ publish.workspace = true
 
 [dependencies]
 brush-parser.workspace = true
+globset.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
@@ -54,7 +54,7 @@ fn check(c: &Context, cases: &[(&str, bool)], failures: &mut Vec<String>) {
     let none = SessionAllowList::default();
     for (cmd, protected) in cases {
         let r = assess_command(cmd, c);
-        let auto = decide(&r, cmd, ApprovalMode::Auto, &rules, &none);
+        let auto = evaluate(&r, ApprovalMode::Auto, &rules, &none).decision;
         let ok = if *protected {
             // Like `cat ~/.ssh/id_rsa`: Mutating, and auto mode asks once.
             r.reads_protected
@@ -119,7 +119,7 @@ fn known_values_are_checked_like_literal_paths() {
 }
 
 #[test]
-fn unknown_values_keep_their_grading() {
+fn unknown_values_do_not_imply_safe_reads() {
     let (c, root) = fixture();
     let cases: &[(&str, bool)] = &[
         ("cat \"$UNKNOWN\"", false),
@@ -144,19 +144,18 @@ fn unknown_values_keep_their_grading() {
     let mut failures = Vec::new();
     check(&c, cases, &mut failures);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // Nothing else changes: an unknown read target is Safe and runs in auto
-    // mode without confirmation, as before.
+    // Missing context is not proof that a read avoids protected paths.
     let r = assess_command("cat \"$UNKNOWN\"", &c);
-    assert_eq!(r.risk(), Risk::Safe, "{:?}", r.findings);
+    assert_eq!(r.risk(), Risk::Mutating, "{:?}", r.findings);
     assert_eq!(
-        decide(
+        evaluate(
             &r,
-            "cat \"$UNKNOWN\"",
             ApprovalMode::Auto,
             &UserRules::default(),
             &SessionAllowList::default()
-        ),
-        Decision::Allow
+        )
+        .decision,
+        Decision::Ask { strong: false }
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -194,15 +193,15 @@ fn exported_session_variables_reach_scripts() {
 }
 
 #[test]
-fn write_targets_from_variables_stay_computed_at_runtime() {
+fn resolved_commands_and_uncertain_write_targets_are_distinct() {
     let (c, root) = fixture();
-    // A value can be stale after a branch or loop, so known values only add
-    // confirmations (protected reads); writes keep their grading.
+    // Known command names are classified normally. Uncertain writes still
+    // carry potential risk instead of being assumed workspace-safe.
     for (cmd, want) in [
         ("OUT=~/.bashrc; echo x > \"$OUT\"", Risk::Dangerous),
         ("OUT=build/x.txt; echo x > \"$OUT\"", Risk::Dangerous),
         ("DIR=build; rm -rf \"$DIR\"", Risk::Dangerous),
-        ("CMD=ls; $CMD", Risk::Dangerous),
+        ("CMD=ls; $CMD", Risk::Mutating),
     ] {
         let r = assess_command(cmd, &c);
         assert_eq!(r.risk(), want, "{cmd}: {:?}", r.findings);

@@ -17,10 +17,16 @@ pub fn resolve(p: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    let abs = if expanded.is_absolute() {
-        expanded
+    resolve_literal(&expanded.to_string_lossy(), cwd)
+}
+
+/// Shell words have already undergone tilde/parameter expansion.
+pub(crate) fn resolve_literal(p: &str, cwd: &Path) -> PathBuf {
+    let path = Path::new(p);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        cwd.join(expanded)
+        cwd.join(path)
     };
     let mut out = PathBuf::from("/");
     for c in abs.components() {
@@ -73,12 +79,12 @@ const NULL_PATHS: &[&str] = &[
     "/dev/zero",
 ];
 
-fn protected_list(ctx: &Context) -> Vec<(PathBuf, String)> {
+pub(crate) fn protected_list(ctx: &Context) -> Vec<(PathBuf, String)> {
     let mut v: Vec<(PathBuf, String)> = vec![
         (PathBuf::from("/etc"), "/etc".into()),
         (PathBuf::from("/boot"), "/boot".into()),
     ];
-    if let Some(h) = ctx.home_dir() {
+    for h in ctx.user_home.iter().chain(ctx.home.iter()) {
         for rel in [
             ".ssh",
             ".gnupg",
@@ -128,6 +134,31 @@ fn short(p: &Path) -> Cow<'_, Path> {
     Cow::Borrowed(p)
 }
 
+/// Compare a resolved target with both spellings of a scope root. Resolve
+/// the root, not the relative tail: an escaping child symlink stays outside.
+pub(crate) fn relative_path(path: &Path, root: &Path) -> Option<PathBuf> {
+    // Preserve literal ancestry before shortening aliases: /private/etc is
+    // below /private even though its shorthand /etc no longer is.
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let path = short(path);
+    let root = short(root);
+    path.strip_prefix(&root)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            real_path(&root, true)
+                .and_then(|real| path.strip_prefix(short(&real)).ok().map(Path::to_path_buf))
+        })
+}
+
+pub(crate) fn same_workspace_target(lexical: &Path, resolved: &Path, ctx: &Context) -> bool {
+    short(lexical) == short(resolved)
+        || relative_path(lexical, &ctx.workspace)
+            .is_some_and(|relative| Some(relative) == relative_path(resolved, &ctx.workspace))
+}
+
 /// `/` or a directory right under it, such as `/etc`; on macOS also the real
 /// `/private/etc` and `/private/var` behind the `/etc` and `/var` symlinks.
 pub(crate) fn is_top_level(p: &Path) -> bool {
@@ -141,7 +172,7 @@ pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
         return PathClass::Null;
     }
     for (base, label) in protected_list(ctx) {
-        if under(p, &short(&base)) {
+        if relative_path(p, &base).is_some() {
             return PathClass::Protected(label);
         }
     }
@@ -154,24 +185,29 @@ pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {
     if p == Path::new("/") {
         return PathClass::Root;
     }
-    let home = ctx.home_dir().map(short);
-    let workspace = short(&ctx.workspace);
-    if home.as_deref() == Some(p) && *workspace != *p {
+    if ctx
+        .home
+        .iter()
+        .chain(ctx.user_home.iter())
+        .any(|home| relative_path(p, home).is_some_and(|relative| relative.as_os_str().is_empty()))
+    {
         return PathClass::Home;
     }
-    if !workspace.as_os_str().is_empty() && under(p, &workspace) && *workspace != *Path::new("/") {
+    let workspace = short(&ctx.workspace);
+    if !workspace.as_os_str().is_empty()
+        && *workspace != *Path::new("/")
+        && relative_path(p, &workspace).is_some()
+        && real_path(&workspace, true).as_deref() != Some(Path::new("/"))
+    {
         return PathClass::Workspace;
     }
     let tmpdir = std::env::var("TMPDIR").ok();
     if TEMP_DIRS.iter().any(|t| under(p, Path::new(t)))
         || tmpdir
             .as_deref()
-            .is_some_and(|t| !t.is_empty() && under(p, &short(Path::new(t))))
+            .is_some_and(|t| !t.is_empty() && relative_path(p, Path::new(t)).is_some())
     {
         return PathClass::Temp;
-    }
-    if home.as_deref() == Some(p) {
-        return PathClass::Home;
     }
     let system = |dirs: &[&str]| dirs.iter().any(|d| under(p, Path::new(d)));
     if p == Path::new("/home")
@@ -281,6 +317,14 @@ mod tests {
         assert_eq!(a("/private/etcetera"), None);
         assert_eq!(a("/private/xarts/f"), None);
         assert_eq!(a("/etc/hosts"), None);
+        assert_eq!(
+            relative_path(Path::new("/private/etc"), Path::new("/private")),
+            Some(PathBuf::from("etc"))
+        );
+        assert_eq!(
+            relative_path(Path::new("/private/var/log"), Path::new("/private")),
+            Some(PathBuf::from("var/log"))
+        );
     }
 
     #[test]
@@ -292,6 +336,51 @@ mod tests {
         let macos = cfg!(target_os = "macos");
         assert_eq!(top("/private/etc"), macos);
         assert_eq!(top("/private/var"), macos);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scope_root_aliases_preserve_home_and_protected_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap().join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        let alias = dir.path().join("home-alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let mut ctx = Context::new(alias.join("proj"), alias.join("proj")).with_home(&alias);
+        ctx.protected.push(alias.join("private"));
+        assert_eq!(classify_path(&home, &ctx), PathClass::Home);
+        for path in [home.join(".ssh/key"), home.join("private/file")] {
+            assert!(
+                matches!(classify_path(&path, &ctx), PathClass::Protected(_)),
+                "{path:?}"
+            );
+            let read = crate::assess_read("grep", &path, None, &ctx);
+            assert!(read.reads_protected);
+        }
+        let root_alias = dir.path().join("root-alias");
+        std::os::unix::fs::symlink("/", &root_alias).unwrap();
+        let ctx = Context::new(&root_alias, &root_alias);
+        assert_ne!(
+            classify_path(Path::new("/opt/file"), &ctx),
+            PathClass::Workspace
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canonical_macos_home_targets_remain_workspace_paths() {
+        let ctx = ctx();
+        let lexical = ctx.workspace.join("new-file");
+        let canonical = real_path(&lexical, true).unwrap_or_else(|| lexical.clone());
+        assert_eq!(classify_path(&canonical, &ctx), PathClass::Workspace);
+        assert!(same_workspace_target(&lexical, &canonical, &ctx));
+        let home = ctx.home_dir().unwrap();
+        let canonical = real_path(home, true).unwrap_or_else(|| home.to_path_buf());
+        assert_eq!(classify_path(&canonical, &ctx), PathClass::Home);
+        assert!(matches!(
+            classify_path(&canonical.join(".ssh/key"), &ctx),
+            PathClass::Protected(_)
+        ));
     }
 
     /// `/etc`, `/tmp` and `/var` are symlinks into `/private` on macOS.
@@ -307,6 +396,14 @@ mod tests {
         assert_eq!(k("/Library/LaunchDaemons/x.plist"), PathClass::System);
         assert_eq!(k("/Users"), PathClass::System);
         assert_eq!(k("/Users/other/f"), PathClass::Outside);
+        let read = crate::assess_read("grep", Path::new("/private/etc"), None, &c);
+        assert!(read.reads_protected, "{:?}", read.findings);
+        assert!(
+            read.operations[0]
+                .paths
+                .iter()
+                .any(|path| { path.resolved.as_deref() == Some(Path::new("/private/etc")) })
+        );
         // A canonicalized workspace and home are compared in the short form.
         let t = "/private/var/folders/x/T";
         let c = Context::new(format!("{t}/proj"), format!("{t}/proj")).with_home(format!("{t}/h"));

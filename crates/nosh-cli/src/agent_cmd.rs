@@ -21,6 +21,7 @@ pub fn agent_config(cfg: &Config, mode: ApprovalMode, seed: Option<u64>) -> Agen
             allow: cfg.allow.clone(),
             deny: cfg.deny.clone(),
         },
+        rules_error: cfg.safety_error.clone(),
         protected: cfg.protected_paths.clone(),
         max_steps: cfg.max_steps,
         command_timeout: Duration::from_secs(cfg.command_timeout_sec),
@@ -65,6 +66,10 @@ pub fn run_agent(
     setup: &EngineSetup,
     seed: Option<u64>,
 ) -> i32 {
+    if let Some(error) = &cfg.safety_error {
+        eprintln!("nosh: AI execution blocked by invalid safety configuration: {error}");
+        return 2;
+    }
     let task = words.join(" ");
     let stdin = read_stdin();
     if task.trim().is_empty() && stdin.is_none() {

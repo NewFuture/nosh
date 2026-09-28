@@ -811,6 +811,43 @@ impl EmbeddedShell {
             .collect()
     }
 
+    pub fn variable_names(&self) -> HashSet<String> {
+        self.lock()
+            .env()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// The same overlay as run_agent_command, without changing the session.
+    pub fn agent_environment(&self) -> HashMap<String, Option<String>> {
+        let shell = self.lock();
+        let writable = |name: &str| {
+            shell
+                .env_var(name)
+                .is_none_or(|var| !var.attribute_flags(&shell).contains('r'))
+        };
+        let mut values: HashMap<_, _> = ANTI_HANG_ENV
+            .iter()
+            .filter(|(name, _)| writable(name))
+            .map(|(name, value)| (name.to_string(), Some(value.to_string())))
+            .collect();
+        if writable(procs::RUN_VAR) {
+            values.insert(procs::RUN_VAR.into(), None);
+        }
+        values
+    }
+
+    pub fn readonly_variable_names(&self) -> HashSet<String> {
+        let shell = self.lock();
+        shell
+            .env()
+            .iter()
+            .filter(|(_, var)| var.attribute_flags(&shell).contains('r'))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn snapshot(&self) -> SessionState {
         let sh = self.lock();
         let mut vars = BTreeMap::new();
@@ -850,6 +887,39 @@ impl EmbeddedShell {
 
     pub fn resolve(&self, name: &str) -> Resolution {
         self.resolve_with_path(name, None)
+    }
+
+    /// External lookup for permission analysis, using the same shell PATH and
+    /// hash state without executing commands or scanning the entire PATH.
+    pub fn resolve_program_at(
+        &self,
+        name: &str,
+        cwd: &Path,
+        path: Option<&str>,
+        use_cache: bool,
+    ) -> Option<PathBuf> {
+        let mut shell = self.lock();
+        if shell
+            .builtin_mut(name)
+            .is_some_and(|builtin| !builtin.disabled)
+        {
+            return None;
+        }
+        if cwd == shell.working_dir() && path == shell.env_str("PATH").as_deref() {
+            if use_cache
+                && shell.options().remember_command_locations
+                && let Some(cached) = shell.program_location_cache().get(name)
+                && (!shell.options().check_hashtable_before_command_exec
+                    || is_executable(&cwd.join(&cached)))
+            {
+                return Some(cwd.join(cached));
+            }
+            return shell.find_first_executable_in_path(name);
+        }
+        path?
+            .split(':')
+            .map(|directory| cwd.join(directory).join(name))
+            .find(|candidate| is_executable(candidate))
     }
 
     pub(crate) fn resolve_with_path(&self, name: &str, path: Option<&str>) -> Resolution {

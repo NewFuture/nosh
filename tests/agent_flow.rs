@@ -112,7 +112,7 @@ fn multi_step_task_uses_tool_results() {
     assert!(
         ui.events
             .iter()
-            .any(|e| e.starts_with("tool run_command [SAFE] SAFE · auto"))
+            .any(|e| e.starts_with("tool run_command [SAFE] SAFE · read-only"))
     );
 }
 
@@ -350,7 +350,13 @@ fn mutating_needs_approval_and_denial_reason_reaches_model() {
         vec![text("OK, I will not create it.")],
     ]);
     let received = engine.received();
-    let mut a = agent(engine, AgentConfig::default());
+    let mut a = agent(
+        engine,
+        AgentConfig {
+            mode: ApprovalMode::Confirm,
+            ..AgentConfig::default()
+        },
+    );
     let mut approval = Scripted::new([ApprovalResponse::Deny {
         reason: Some("not now".into()),
     }]);
@@ -374,7 +380,13 @@ fn mutating_needs_approval_and_denial_reason_reaches_model() {
         vec![call("run_command", json!({"command": "touch created.txt"}))],
         vec![text("Created.")],
     ]);
-    let mut a = agent(engine, AgentConfig::default());
+    let mut a = agent(
+        engine,
+        AgentConfig {
+            mode: ApprovalMode::Confirm,
+            ..AgentConfig::default()
+        },
+    );
     let out = a.run_task(
         &mut sh,
         TaskInput::new(Trigger::Hash, "create a file"),
@@ -604,7 +616,13 @@ fn no_terminal_denies_unless_auto_allows() {
             vec![text("done")],
         ]
     };
-    let mut a = agent(MockChatEngine::new(turns()), AgentConfig::default());
+    let mut a = agent(
+        MockChatEngine::new(turns()),
+        AgentConfig {
+            mode: ApprovalMode::Confirm,
+            ..AgentConfig::default()
+        },
+    );
     let out = a.run_task(
         &mut sh,
         TaskInput::new(Trigger::Cli, "make a dir"),
@@ -1249,16 +1267,16 @@ fn reads_through_dotdot_or_symlinks_still_ask() {
         &mut approval,
         &mut RecordUi::default(),
     );
-    assert_eq!(approval.seen.len(), 2, "both reads reach /etc");
+    assert_eq!(
+        approval.seen.len(),
+        3,
+        "both protected reads and the hidden-character command require approval"
+    );
     assert_eq!(approval.seen[0].command, "read_file /etc/hostname");
     let results = tool_results(&received.lock().unwrap());
     assert!(results[0].contains("[denied by user]"), "{}", results[0]);
     assert!(results[1].contains("[denied by user]"), "{}", results[1]);
-    assert!(
-        results[2].starts_with("error: the command contains"),
-        "{}",
-        results[2]
-    );
+    assert!(results[2].contains("[denied by user]"), "{}", results[2]);
     assert_eq!(out.proposed, None);
     let _ = std::fs::remove_dir_all(dir);
 }

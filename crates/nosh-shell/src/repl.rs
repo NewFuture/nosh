@@ -875,6 +875,14 @@ fn read_plain_prompt(
     validator: &LineValidator,
 ) -> std::io::Result<Signal> {
     use reedline::Validator;
+    use std::io::IsTerminal;
+    if !prompt.right.is_empty()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+    {
+        eprintln!("{}", style::visible_text(&style::strip_ansi(&prompt.right)));
+    }
     let mut full = String::new();
     let mut initial = initial;
     loop {

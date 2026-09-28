@@ -1,7 +1,8 @@
 //! End-to-end decisions (analysis + policy) for the rule and grant logic.
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, SessionAllowList, UserRule, UserRules, assess_command,
+    evaluate,
 };
 
 fn ctx() -> Context {
@@ -9,13 +10,13 @@ fn ctx() -> Context {
 }
 
 fn d(cmd: &str, mode: ApprovalMode, rules: &UserRules, grants: &SessionAllowList) -> Decision {
-    decide(&assess_command(cmd, &ctx()), cmd, mode, rules, grants)
+    evaluate(&assess_command(cmd, &ctx()), mode, rules, grants).decision
 }
 
 fn rules(allow: &[&str], deny: &[&str]) -> UserRules {
     UserRules {
-        allow: allow.iter().map(|s| s.to_string()).collect(),
-        deny: deny.iter().map(|s| s.to_string()).collect(),
+        allow: allow.iter().map(|s| UserRule::prefix(s).unwrap()).collect(),
+        deny: deny.iter().map(|s| UserRule::prefix(s).unwrap()).collect(),
     }
 }
 
@@ -23,7 +24,7 @@ fn rules(allow: &[&str], deny: &[&str]) -> UserRules {
 fn allow_rules_must_match_every_simple_command() {
     use ApprovalMode::Confirm;
     let none = SessionAllowList::default();
-    let status = rules(&["git status*"], &[]);
+    let status = rules(&["git status"], &[]);
     assert_eq!(d("git status -s", Confirm, &status, &none), Decision::Allow);
     for cmd in [
         "git status; rm -rf ~/Documents",
@@ -35,20 +36,16 @@ fn allow_rules_must_match_every_simple_command() {
             "{cmd}"
         );
     }
-    let add = rules(&["git add*"], &[]);
+    let add = rules(&["git add"], &[]);
     assert_eq!(d("git add a.txt", Confirm, &add, &none), Decision::Allow);
     assert!(matches!(
         d("git add a.txt && git push", Confirm, &add, &none),
         Decision::Ask { .. }
     ));
-    // Allow rules may approve Dangerous commands (DESIGN §6.2), never Forbidden
-    // ones, and not lines whose hidden characters could fool the glob.
-    let rm = rules(&["rm *", "ls*"], &[]);
+    // User rules precede built-in risk; command prefixes have word boundaries.
+    let rm = rules(&["rm", "ls"], &[]);
     assert_eq!(d("rm -rf build", Confirm, &rm, &none), Decision::Allow);
-    assert!(matches!(
-        d("rm -rf ~", Confirm, &rm, &none),
-        Decision::Deny { .. }
-    ));
+    assert_eq!(d("rm -rf ~", Confirm, &rm, &none), Decision::Allow);
     assert!(matches!(
         d("ls\u{200b}", Confirm, &rm, &none),
         Decision::Ask { strong: true }
@@ -59,7 +56,7 @@ fn allow_rules_must_match_every_simple_command() {
 fn deny_rules_match_inside_lists_and_wrappers() {
     use ApprovalMode::Yolo;
     let none = SessionAllowList::default();
-    let prune = rules(&[], &["docker system prune*"]);
+    let prune = rules(&[], &["docker system prune"]);
     for cmd in [
         "docker system prune -af",
         "cd /tmp && docker system prune -af",
@@ -98,9 +95,13 @@ fn grants_do_not_cover_protected_reads_or_new_capabilities() {
     let mut grants = SessionAllowList::default();
     grants.grant(&assess_command("mkdir build", &ctx()));
     assert_eq!(
-        d("mkdir dist", Confirm, &no_rules, &grants),
+        d("mkdir build", Confirm, &no_rules, &grants),
         Decision::Allow
     );
+    assert!(matches!(
+        d("mkdir dist", Confirm, &no_rules, &grants),
+        Decision::Ask { .. }
+    ));
     assert!(matches!(
         d("mkdir /home/u/elsewhere", Confirm, &no_rules, &grants),
         Decision::Ask { .. }

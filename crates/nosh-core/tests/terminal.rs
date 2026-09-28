@@ -409,6 +409,34 @@ fn terminal_probe() {
             ui.prefill(1, 1000);
             ui.pause();
         }
+        "approval-state" => {
+            let mut ui = TermUi::new(false);
+            for mode in [
+                nosh_permissions::ApprovalMode::Confirm,
+                nosh_permissions::ApprovalMode::Auto,
+                nosh_permissions::ApprovalMode::Yolo,
+            ] {
+                ui.state(mode, nosh_core::ui::Activity::Running);
+                ui.state(mode, nosh_core::ui::Activity::NeedsUser);
+            }
+        }
+        "approval-card" => {
+            let mut approval = nosh_core::TerminalApproval::default();
+            let answer = nosh_core::ApprovalChannel::request(
+                &mut approval,
+                &nosh_core::ApprovalRequest {
+                    tool: "run_command".into(),
+                    command: "fixture-prohibited-operation".into(),
+                    risk: Risk::Forbidden,
+                    reasons: vec!["built-in prohibition".into()],
+                    strong: true,
+                    can_grant: false,
+                    can_edit: true,
+                    mode: nosh_permissions::ApprovalMode::Confirm,
+                },
+            );
+            println!("{answer:?}");
+        }
         "proposal" => {
             let mut ui = TermUi::new(false);
             ui.proposed("printf hello", Some("Suggested explanation.\nMore detail."));
@@ -446,6 +474,10 @@ fn terminal_probe() {
         "available" => println!("{}", term::available()),
         "json" => {
             let mut ui = JsonUi;
+            ui.state(
+                nosh_permissions::ApprovalMode::Auto,
+                nosh_core::ui::Activity::Running,
+            );
             ui.text("\u{1f469}\u{200d}\u{1f4bb}");
             ui.output("\x1b[31mraw\r\n", true);
             for (risk, label) in TOOL_LABELS {
@@ -491,6 +523,50 @@ fn terminal_probe() {
     }
     println!("{END}");
     eprintln!("{END}");
+}
+
+#[test]
+fn approval_modes_and_activity_are_separate_and_do_not_decorate_pipes() {
+    for terminal in ["xterm-256color", "dumb"] {
+        let (_, err) = Probe {
+            mode: "approval-state",
+            terminal: Some(terminal),
+            stderr_tty: true,
+            ..Default::default()
+        }
+        .run();
+        for mode in ["Confirm", "Auto", "YOLO"] {
+            assert!(err.contains(&format!("Approval: {mode}")), "{err}");
+        }
+        assert!(err.contains("| Running"), "{err}");
+        assert!(err.contains("| Needs your attention"), "{err}");
+        if terminal == "dumb" {
+            assert!(!err.contains('\x1b'));
+        }
+    }
+    let (out, err) = Probe {
+        mode: "approval-state",
+        ..Default::default()
+    }
+    .run();
+    assert!(out.trim().is_empty());
+    assert!(err.trim().is_empty());
+}
+
+#[test]
+fn built_in_prohibition_requires_yes_and_never_offers_a_session_grant() {
+    let (out, err) = Probe {
+        mode: "approval-card",
+        stderr_tty: true,
+        keys: Some(b"yes\r"),
+        ..Default::default()
+    }
+    .run();
+    assert_eq!(out.trim(), "Approve");
+    assert!(err.contains("Approval: Confirm"));
+    assert!(err.contains("Awaiting approval"));
+    assert!(err.contains("type yes"));
+    assert!(!err.contains("[a]"));
 }
 
 #[test]

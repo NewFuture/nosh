@@ -378,6 +378,22 @@ pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
     resolve(cwd, call.str_arg("path").unwrap_or("."))
 }
 
+pub(crate) fn prepare_read(
+    call: &ToolCall,
+    ctx: &nosh_permissions::Context,
+) -> Result<ToolCall, String> {
+    let path = match call.args.get("path") {
+        Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
+        None if call.name == "grep" => ".",
+        _ => return Err("missing or invalid parameter 'path'".into()),
+    };
+    let mut prepared = call.clone();
+    prepared
+        .args
+        .insert("path".into(), json!(ctx.resolve(path).to_string_lossy()));
+    Ok(prepared)
+}
+
 struct GrepBudget<'a> {
     cancelled: &'a dyn Fn() -> bool,
     started: Instant,
@@ -1603,6 +1619,16 @@ mod tests {
             tool_path(&c, Path::new("/home/u/proj")),
             PathBuf::from("/home/u/etc/passwd")
         );
+    }
+
+    #[test]
+    fn prepared_reads_use_the_live_permission_context() {
+        let ctx =
+            nosh_permissions::Context::new("/workspace", "/workspace").with_home("/shell-home");
+        let read = prepare_read(&call("read_file", json!({"path": "~/file"})), &ctx).unwrap();
+        assert_eq!(read.str_arg("path"), Some("/shell-home/file"));
+        let grep = prepare_read(&call("grep", json!({"pattern": "needle"})), &ctx).unwrap();
+        assert_eq!(grep.str_arg("path"), Some("/workspace"));
     }
 
     #[test]

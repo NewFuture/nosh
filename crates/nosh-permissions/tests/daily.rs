@@ -1,11 +1,11 @@
 //! Daily development commands run in the workspace (design §6, §16 #14:
-//! convenience first). Queries never ask, not even in confirm mode, and auto
-//! mode asks for none of these commands. The share that confirm mode asks
-//! for is printed as the reference for later rule changes:
+//! convenience first). Queries do not ask; common builds/tests are explicitly
+//! admitted in auto. Other writes need environment evidence or authorization.
+//! The share that confirm mode asks for is printed as a reference:
 //! `cargo test -p nosh-permissions --test daily -- --nocapture`.
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, decide,
+    ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
 use Kind::*;
@@ -106,7 +106,7 @@ const DAILY: &[(&str, Kind, Risk)] = &[
     ("python3 -m pytest", Build, Mutating),
     ("go build ./...", Build, Mutating),
     ("go test ./...", Build, Mutating),
-    ("go vet ./...", Build, Safe),
+    ("go vet ./...", Build, Mutating),
     ("mvn test", Build, Mutating),
     ("tsc --noEmit", Build, Mutating),
     ("eslint .", Build, Mutating),
@@ -173,15 +173,29 @@ fn convenience_first_on_daily_commands() {
     let mut asked = Vec::new();
     for (cmd, kind, _) in DAILY {
         let r = assess_command(cmd, &c);
-        let confirm = decide(&r, cmd, ApprovalMode::Confirm, &rules, &grants);
-        let auto = decide(&r, cmd, ApprovalMode::Auto, &rules, &grants);
+        let confirm = evaluate(&r, ApprovalMode::Confirm, &rules, &grants).decision;
+        let auto = evaluate(&r, ApprovalMode::Auto, &rules, &grants).decision;
         if *kind == Query && confirm != Decision::Allow {
             failures.push(format!(
                 "{cmd:?}: a query asks in confirm mode ({confirm:?})"
             ));
         }
-        if auto != Decision::Allow {
-            failures.push(format!("{cmd:?}: asks in auto mode ({auto:?})"));
+        let common_build = *kind == Build
+            && !matches!(
+                *cmd,
+                "cargo run"
+                    | "cargo fmt"
+                    | "cargo run -- --help"
+                    | "RUST_LOG=debug cargo run"
+                    | "./target/debug/app --help"
+            );
+        if (*kind == Query || common_build) && auto != Decision::Allow {
+            failures.push(format!("{cmd:?}: expected automatic admission ({auto:?})"));
+        }
+        if *kind == Build && !common_build && !matches!(auto, Decision::Ask { .. }) {
+            failures.push(format!(
+                "{cmd:?}: unknown/non-build code was automatically admitted ({auto:?})"
+            ));
         }
         if confirm != Decision::Allow {
             asked.push(*kind);

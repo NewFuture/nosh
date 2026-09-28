@@ -28,6 +28,10 @@ cargo build --release                  # 需要 Rust ≥ 1.89
 
 常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
 
+AI 任务默认显示 **`审批: 自动`**；可用 `ai mode confirm|auto|yolo` 切换。用户 deny 始终优先，有效用户白名单三档免审批，并可覆盖内置禁止；未获白名单覆盖的内置禁止在询问模式须键入 `yes`，自动 / YOLO 直接拒绝。YOLO 对其他操作免逐次审批，不绕过工具范围或外部认证。
+
+自动模式以**便利优先、防御破坏**为目标：普通 `mv` / `cp` 默认执行，危险目标、破坏性效果与用户 deny 仍拦截；不要求原子不覆盖或备份证明。常见构建 / 测试 / 检查也默认执行，明确接受未知项目代码风险，不代表沙箱隔离或可恢复保证。规则采用 TOML 条目，例如 `deny = [{ command_prefix = "docker system prune" }]`，不再使用旧字符串 glob 数组。完整矩阵、作用域及限制见 [审批说明](docs/APPROVAL-MODES.md)。
+
 `ai auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc）。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
 
 ## 实时输入提示与语法高亮
