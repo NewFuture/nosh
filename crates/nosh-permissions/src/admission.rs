@@ -205,22 +205,18 @@ fn development(op: &Operation) -> bool {
             known(1) && sub.is_some_and(build_goal) && !args.iter().any(|arg| arg == "--clean")
         }
         "bazel" => known(1) && sub.is_some_and(build_goal),
-        "gradle" | "gradlew" | "mvn" | "sbt" => {
+        "gradle" | "gradlew" => {
+            op.known.iter().all(|known| *known)
+                && build_goals(&args[1..], &["-p", "--project-dir", "-f", "--file"])
+        }
+        "mvn" => {
             op.known.iter().all(|known| *known)
                 && build_goals(
                     &args[1..],
-                    &[
-                        "-p",
-                        "--project-dir",
-                        "-f",
-                        "--file",
-                        "-pl",
-                        "--projects",
-                        "-s",
-                        "--settings",
-                    ],
+                    &["-f", "--file", "-pl", "--projects", "-s", "--settings"],
                 )
         }
+        "sbt" => op.known.iter().all(|known| *known) && build_goals(&args[1..], &[]),
         _ => false,
     }
 }

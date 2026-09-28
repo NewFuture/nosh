@@ -1053,6 +1053,15 @@ fn attached_path_options_keep_their_actual_targets() {
             "mvn test --file=/etc/pom.xml",
         ),
         ("mvn test -f /etc/pom.xml", "mvn test -f/etc/pom.xml"),
+        (
+            "mvn --settings /etc/settings.xml test",
+            "mvn --settings=/etc/settings.xml test",
+        ),
+        (
+            "gradle --project-dir /etc build",
+            "gradle --project-dir=/etc build",
+        ),
+        ("gradle -p /etc build", "gradle -p/etc build"),
         ("cmake --build /etc", "cmake --build=/etc"),
         ("go build -o /etc/file", "go build -o/etc/file"),
         ("tsc --outDir /etc", "tsc --outDir=/etc"),
@@ -1090,6 +1099,33 @@ fn attached_path_options_keep_their_actual_targets() {
                 Decision::Ask { .. }
             ),
             "{attached}"
+        );
+    }
+    let protected_build_input = UserRule::compile(
+        RuleSpec {
+            tool: Some("run_command".into()),
+            read_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected build input",
+    )
+    .unwrap();
+    for command in [
+        "mvn --settings /etc/settings.xml test",
+        "gradle --project-dir /etc build",
+    ] {
+        let result = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![protected_build_input.clone()],
+            },
+        );
+        assert!(
+            matches!(result.source, DecisionSource::UserDeny(_)),
+            "{command}: {result:?}"
         );
     }
     let rules = UserRules {
@@ -1159,6 +1195,42 @@ fn routine_moves_and_copies_are_not_gated_on_atomic_execution() {
         "keep"
     );
     assert!(!dir.path().join("dest").exists());
+}
+
+#[test]
+fn recursive_copies_include_protected_descendant_reads() {
+    let (dir, context) = fixture();
+    std::fs::create_dir_all(dir.path().join("home/.ssh")).unwrap();
+    std::fs::write(dir.path().join("home/.ssh/key"), "secret").unwrap();
+    let command = "cp -r home backup";
+    let report = assess_command(command, &context);
+    assert!(report.reads_protected, "{report:?}");
+    assert!(matches!(
+        policy(command, Auto, &context, &UserRules::default()).decision,
+        Decision::Ask { .. }
+    ));
+    let deny = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("cp".into()),
+            read_paths: vec!["home/.ssh/**".into()],
+            ..RuleSpec::default()
+        },
+        "private recursive source",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![deny],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
 }
 
 #[test]

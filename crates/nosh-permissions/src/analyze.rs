@@ -1516,7 +1516,18 @@ impl Analyzer<'_> {
     }
 
     fn read_effect(&mut self, t: &Target) {
-        self.path_access(t, AccessKind::Read);
+        self.read_effect_with_scope(t, false);
+    }
+
+    fn read_effect_with_scope(&mut self, t: &Target, recursive: bool) {
+        self.path_access(
+            t,
+            if recursive {
+                AccessKind::List { depth: usize::MAX }
+            } else {
+                AccessKind::Read
+            },
+        );
         let path = match (&t.known, t.dynamic) {
             (_, false) => t.path.as_str(),
             (Some(k), true) => k.as_str(),
@@ -1536,6 +1547,23 @@ impl Analyzer<'_> {
         if let PathClass::Protected(l) = class {
             self.add(Risk::Mutating, format!("{PROTECTED_READ} {l}"));
             self.report.reads_protected = true;
+        } else if recursive {
+            let root = self.target_path(path, true);
+            if let Some((_, label)) =
+                crate::paths::protected_list(self.ctx)
+                    .into_iter()
+                    .find(|(protected, _)| {
+                        let protected =
+                            crate::real_path(protected, true).unwrap_or_else(|| protected.clone());
+                        crate::paths::relative_path(&protected, &root).is_some()
+                    })
+            {
+                self.add(
+                    Risk::Mutating,
+                    format!("recursively reads protected path {label}"),
+                );
+                self.report.reads_protected = true;
+            }
         }
     }
 
@@ -1564,7 +1592,7 @@ impl Analyzer<'_> {
             self.write_effect(w, &v);
         }
         for r in &v.reads {
-            self.read_effect(r);
+            self.read_effect_with_scope(r, v.recursive);
         }
     }
 

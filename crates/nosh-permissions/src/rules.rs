@@ -91,7 +91,8 @@ pub struct Verdict {
     pub reads: Vec<Target>,
     pub network: bool,
     pub session: bool,
-    /// Recursive delete/permission change: root/home/system targets become Forbidden/Dangerous.
+    /// Recursive path operation: reads cover descendants and destructive
+    /// root/home/system targets become Forbidden/Dangerous.
     pub recursive: bool,
     pub deletes: bool,
     /// Not in the rule table: what the command does is unknown.
@@ -888,9 +889,11 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             } else {
                 reads = targets(ops);
             }
-            Verdict::mutating(format!("{name}: writes files"))
+            let mut verdict = Verdict::mutating(format!("{name}: writes files"))
                 .writes(writes)
-                .reads(reads)
+                .reads(reads);
+            verdict.recursive = name == "cp" && has_flag(args, &['r', 'R'], &["recursive"]);
+            verdict
         }
         "mkdir" => Verdict::mutating("creates directories")
             .writes(targets(operands_skipping(args, &["-m", "--mode"]))),
@@ -1341,17 +1344,36 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         .writes(option_targets(args, Some('o'), &[])),
         "make" | "cmake" | "ninja" | "meson" | "gradle" | "gradlew" | "mvn" | "ant" | "bazel"
         | "sbt" | "just" | "task" | "rake" | "ctest" | "scons" => {
-            if has_flag(
+            let dry_run = has_flag(
                 args,
                 &['n', 'v'],
                 &["dry-run", "version", "help", "just-print"],
-            ) {
+            );
+            let mut verdict = if dry_run {
                 Verdict::safe("build tool (dry run / info)")
             } else {
                 Verdict::mutating("runs a build")
-                    .reads(option_targets(args, Some('f'), &["file"]))
-                    .writes(option_targets(args, Some('C'), &["directory", "build"]))
+            };
+            verdict
+                .reads
+                .extend(option_targets(args, Some('f'), &["file"]));
+            if matches!(name, "gradle" | "gradlew") {
+                let project = option_targets(args, Some('p'), &["project-dir"]);
+                verdict.reads.extend(project.clone());
+                if !dry_run {
+                    verdict.writes.extend(project);
+                }
+            } else if name == "mvn" {
+                verdict
+                    .reads
+                    .extend(option_targets(args, Some('s'), &["settings"]));
             }
+            if !dry_run {
+                verdict
+                    .writes
+                    .extend(option_targets(args, Some('C'), &["directory", "build"]));
+            }
+            verdict
         }
         "pytest" | "pytest-3" => pytest(args),
         "python" | "python2" | "python3" | "node" | "deno" | "ruby" | "perl" | "php" | "lua"
