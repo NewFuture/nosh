@@ -321,7 +321,7 @@ fn pytest(args: &[Arg]) -> Verdict {
     }
     if !targets.is_empty() {
         let mut verdict =
-            Verdict::dangerous("recursively clears the pytest base temp directory").writes(targets);
+            Verdict::mutating("recursively clears the pytest base temp directory").writes(targets);
         verdict.recursive = true;
         verdict.deletes = true;
         verdict

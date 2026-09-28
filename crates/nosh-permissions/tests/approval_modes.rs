@@ -158,9 +158,19 @@ fn common_builds_are_an_explicit_convenience_exception() {
 }
 
 #[test]
-fn pytest_basetemp_keeps_normal_tests_convenient_but_requires_strong_approval() {
+fn pytest_basetemp_allows_temp_paths_but_guards_other_directories() {
     let (_dir, context) = fixture();
     let rules = UserRules::default();
+    for command in [
+        "pytest --basetemp=/tmp/nosh-pytest-basetemp",
+        "python -m pytest --basetemp /tmp/nosh-pytest-basetemp",
+    ] {
+        assert_eq!(
+            policy(command, Auto, &context, &rules).decision,
+            Decision::Allow,
+            "{command}"
+        );
+    }
     for command in [
         "pytest --basetemp=child",
         "pytest --basetemp child",

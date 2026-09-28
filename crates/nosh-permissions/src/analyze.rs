@@ -1449,6 +1449,9 @@ impl Analyzer<'_> {
             _ => crate::classify_path(&resolved, self.ctx),
         };
         match class {
+            PathClass::Workspace if v.recursive && v.deletes => {
+                self.add(Risk::Dangerous, "recursively deletes workspace files");
+            }
             PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
             PathClass::Protected(l) => {
                 if v.recursive && v.deletes && is_top_level(&resolved) {
