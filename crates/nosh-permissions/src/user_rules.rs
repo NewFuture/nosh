@@ -102,10 +102,32 @@ impl PathPattern {
     }
 
     fn covers(&self, access: &PathAccess, ctx: &Context) -> bool {
-        access
+        if access
             .resolved
             .as_ref()
             .is_some_and(|path| self.matches(path, ctx))
+        {
+            return true;
+        }
+        if !matches!(access.kind, AccessKind::List { .. } | AccessKind::WriteTree) {
+            return false;
+        }
+        let prefix = if self.text == "**" {
+            "."
+        } else if let Some(prefix) = self.text.strip_suffix("/**") {
+            prefix
+        } else {
+            return false;
+        };
+        if prefix.contains(['*', '?', '[', '{']) {
+            return false;
+        }
+        let base = crate::paths::resolve(prefix, &ctx.workspace, self.home.as_deref());
+        let base = crate::real_path(&base, true).unwrap_or(base);
+        access
+            .resolved
+            .as_ref()
+            .is_some_and(|root| root.starts_with(base))
     }
 
     fn intersects(&self, access: &PathAccess, ctx: &Context) -> bool {
@@ -120,8 +142,10 @@ impl PathPattern {
         {
             return true;
         }
-        let AccessKind::List { depth } = access.kind else {
-            return false;
+        let depth = match access.kind {
+            AccessKind::List { depth } => depth,
+            AccessKind::WriteTree => usize::MAX,
+            _ => return false,
         };
         let cut = self
             .text
@@ -434,12 +458,11 @@ impl UserRule {
         }
         matches_any(&self.reads, |k| {
             matches!(k, AccessKind::Read | AccessKind::List { .. })
-        }) && matches_any(&self.writes, |k| {
-            matches!(k, AccessKind::Write | AccessKind::Delete)
-        }) && (self.spec.variables.is_empty()
-            || effects.iter().flat_map(|op| &op.variables).any(|(key, _)| {
-                self.spec.variables.contains(key) || ctx.unknown_variables.contains(key)
-            }))
+        }) && matches_any(&self.writes, AccessKind::is_write)
+            && (self.spec.variables.is_empty()
+                || effects.iter().flat_map(|op| &op.variables).any(|(key, _)| {
+                    self.spec.variables.contains(key) || ctx.unknown_variables.contains(key)
+                }))
             && (self.hosts.is_empty()
                 || effects
                     .iter()
@@ -512,7 +535,7 @@ impl UserRule {
         for access in &op.paths {
             let patterns = match access.kind {
                 AccessKind::Read | AccessKind::List { .. } => &self.reads,
-                AccessKind::Write | AccessKind::Delete => &self.writes,
+                AccessKind::Write | AccessKind::WriteTree | AccessKind::Delete => &self.writes,
             };
             if access.extra && patterns.is_empty() && self.argv.is_some() && !payload {
                 return false;

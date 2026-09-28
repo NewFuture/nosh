@@ -1116,14 +1116,18 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "unzip" => {
+            let archive = operands_skipping(args, &["-d", "-x", "-P", "-O", "-I"])
+                .into_iter()
+                .next()
+                .map(Target::of);
             if has_flag(args, &['l', 'v', 'Z'], &[]) {
-                Verdict::safe("lists an archive")
+                Verdict::safe("lists an archive").reads(archive)
             } else {
-                Verdict::mutating("extracts an archive").writes(option_targets(
-                    args,
-                    Some('d'),
-                    &[],
-                ))
+                let mut verdict = Verdict::mutating("extracts an archive")
+                    .reads(archive)
+                    .writes(option_targets(args, Some('d'), &[]));
+                verdict.unlisted = true;
+                verdict
             }
         }
         "zip" | "gzip" | "gunzip" | "bzip2" | "bunzip2" | "xz" | "unxz" | "zstd" | "unzstd"

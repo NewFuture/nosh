@@ -1381,6 +1381,8 @@ impl Analyzer<'_> {
             t,
             if v.deletes {
                 AccessKind::Delete
+            } else if v.recursive {
+                AccessKind::WriteTree
             } else {
                 AccessKind::Write
             },

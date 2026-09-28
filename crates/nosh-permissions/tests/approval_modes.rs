@@ -1232,6 +1232,51 @@ fn recursive_copies_include_protected_descendant_reads() {
             DecisionSource::UserDeny(_)
         ));
     }
+    let descendant_write = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("cp".into()),
+            write_paths: vec!["backup/private/**".into()],
+            ..RuleSpec::default()
+        },
+        "private recursive destination",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            "cp -r source backup",
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![descendant_write],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+    let scoped_allow = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("cp".into()),
+            read_paths: vec!["source/**".into()],
+            write_paths: vec!["backup/**".into()],
+            ..RuleSpec::default()
+        },
+        "workspace recursive copy",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            "cp -r source backup",
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![scoped_allow],
+                deny: vec![],
+            },
+        )
+        .source,
+        DecisionSource::UserAllow(_)
+    ));
 }
 
 #[test]
@@ -1998,6 +2043,58 @@ fn tar_effects_cover_creation_inputs_and_unknown_extraction_members() {
     assert!(matches!(
         policy(
             "tar -xf archive.tar",
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![extracted_member],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+}
+
+#[test]
+fn unzip_tracks_archive_reads_and_unknown_member_writes() {
+    let (_dir, context) = fixture();
+    let protected_read = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("unzip".into()),
+            read_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected archive input",
+    )
+    .unwrap();
+    let list = "unzip -l /etc/archive.zip";
+    assert!(assess_command(list, &context).reads_protected);
+    assert!(matches!(
+        policy(
+            list,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![protected_read],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+
+    let extracted_member = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("unzip".into()),
+            write_paths: vec!["private/**".into()],
+            ..RuleSpec::default()
+        },
+        "private extraction target",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            "unzip archive.zip",
             Yolo,
             &context,
             &UserRules {

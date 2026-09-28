@@ -150,8 +150,15 @@ pub struct Finding {
 pub enum AccessKind {
     Read,
     Write,
+    WriteTree,
     Delete,
     List { depth: usize },
+}
+
+impl AccessKind {
+    pub(crate) fn is_write(self) -> bool {
+        matches!(self, Self::Write | Self::WriteTree | Self::Delete)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

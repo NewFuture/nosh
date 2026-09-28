@@ -806,7 +806,7 @@ fn file_admission(op: &Operation, ctx: &Context) -> Result<String, String> {
         .paths
         .iter()
         .zip(&paths)
-        .filter(|(p, _)| matches!(p.kind, AccessKind::Write | AccessKind::Delete))
+        .filter(|(p, _)| p.kind.is_write())
         .collect();
     if writes.is_empty() {
         return Err("no bounded file effect was identified".into());
@@ -914,7 +914,7 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
         }
         for access in &op.paths {
             if let Some(path) = &access.resolved {
-                let writes = matches!(access.kind, AccessKind::Write | AccessKind::Delete);
+                let writes = access.kind.is_write();
                 if previous_paths.iter().any(|(previous, changed)| {
                     (writes || *changed)
                         && (path.starts_with(previous) || previous.starts_with(path))
@@ -924,12 +924,10 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
             }
         }
         previous_paths.extend(op.paths.iter().filter_map(|access| {
-            access.resolved.as_deref().map(|path| {
-                (
-                    path,
-                    matches!(access.kind, AccessKind::Write | AccessKind::Delete),
-                )
-            })
+            access
+                .resolved
+                .as_deref()
+                .map(|path| (path, access.kind.is_write()))
         }));
         if op.paths.iter().any(|path| path.extra) {
             result.reasons.push(file_admission(op, &report.context)?);
