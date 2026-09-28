@@ -1074,11 +1074,23 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                     && joined.contains('t')
                     && !joined.contains('x')
                     && !joined.contains('c'));
+            let extract = has_flag(args, &['x'], &["extract", "get"])
+                || (!joined.starts_with('-') && joined.contains('x') && !joined.contains('c'));
+            let archive = option_targets_with_values(args, Some('f'), &["file"], "C");
             if list {
-                Verdict::safe("lists an archive")
+                Verdict::safe("lists an archive").reads(archive)
+            } else if extract {
+                Verdict::mutating("extracts an archive")
+                    .reads(archive)
+                    .writes(option_targets_with_values(
+                        args,
+                        Some('C'),
+                        &["directory"],
+                        "f",
+                    ))
             } else {
-                let mut w = option_targets(args, Some('C'), &["directory"]);
-                w.extend(option_targets(args, Some('f'), &["file"]));
+                let mut w = option_targets_with_values(args, Some('C'), &["directory"], "f");
+                w.extend(archive);
                 Verdict::mutating("creates or extracts an archive").writes(w)
             }
         }

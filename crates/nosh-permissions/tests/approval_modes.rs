@@ -1866,6 +1866,41 @@ fn typescript_clean_and_initialization_have_distinct_effects() {
 }
 
 #[test]
+fn tar_extract_and_list_treat_the_archive_as_an_input() {
+    let (_dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("tar".into()),
+            read_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected archive input",
+    )
+    .unwrap();
+    for command in [
+        "tar -x -f /etc/archive.tar",
+        "tar --extract --file=/etc/archive.tar",
+        "tar -t -f /etc/archive.tar",
+    ] {
+        let report = assess_command(command, &context);
+        assert!(report.reads_protected, "{command}");
+        let result = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![rule.clone()],
+            },
+        );
+        assert!(
+            matches!(result.source, DecisionSource::UserDeny(_)),
+            "{command}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn an_exact_deny_cannot_be_escaped_with_disappearing_arguments() {
     let (_dir, context) = fixture();
     let rules = UserRules {
