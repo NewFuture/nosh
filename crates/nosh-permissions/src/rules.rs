@@ -81,6 +81,18 @@ impl Target {
                 .map(str::to_string),
         }
     }
+
+    pub(crate) fn into_arg(self) -> Arg {
+        Arg {
+            value: self.path,
+            quoted: false,
+            may_disappear: false,
+            dynamic: self.dynamic,
+            glob: self.glob,
+            bound: self.bound,
+            known: self.known,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +100,9 @@ pub struct Verdict {
     pub risk: Risk,
     pub reason: String,
     pub writes: Vec<Target>,
+    pub write_trees: Vec<Target>,
     pub reads: Vec<Target>,
+    pub read_trees: Vec<Target>,
     pub network: bool,
     pub session: bool,
     /// Recursive path operation: reads cover descendants and destructive
@@ -105,7 +119,9 @@ impl Verdict {
             risk,
             reason: reason.into(),
             writes: vec![],
+            write_trees: vec![],
             reads: vec![],
+            read_trees: vec![],
             network: false,
             session: false,
             recursive: false,
@@ -146,6 +162,11 @@ impl Verdict {
 
     fn reads(mut self, t: impl IntoIterator<Item = Target>) -> Self {
         self.reads.extend(t);
+        self
+    }
+
+    fn write_trees(mut self, t: impl IntoIterator<Item = Target>) -> Self {
+        self.write_trees.extend(t);
         self
     }
 }
@@ -254,7 +275,46 @@ fn option_targets(args: &[Arg], short: Option<char>, long: &[&str]) -> Vec<Targe
     option_targets_with_values(args, short, long, "")
 }
 
-fn option_targets_with_values(
+fn named_option_targets(args: &[Arg], names: &[&str]) -> Vec<Target> {
+    let mut targets = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg.value == "--" {
+            break;
+        }
+        let Some(option) = arg
+            .value
+            .strip_prefix("--")
+            .or_else(|| arg.value.strip_prefix('-'))
+        else {
+            continue;
+        };
+        let (name, value) = option
+            .split_once('=')
+            .map_or((option, None), |(name, value)| (name, Some(value)));
+        if !names.contains(&name) {
+            continue;
+        }
+        if let Some(value) = value {
+            targets.push(Target::after(
+                arg,
+                &arg.value[..arg.value.len() - value.len()],
+            ));
+        } else if let Some(value) = args.next() {
+            targets.push(Target::of(value));
+        }
+    }
+    targets
+}
+
+fn prefixed_targets(args: &[Arg], prefix: &str) -> Vec<Target> {
+    args.iter()
+        .filter(|arg| arg.value.starts_with(prefix))
+        .map(|arg| Target::after(arg, prefix))
+        .collect()
+}
+
+pub(crate) fn option_targets_with_values(
     args: &[Arg],
     short: Option<char>,
     long: &[&str],
@@ -333,7 +393,7 @@ fn pytest(args: &[Arg]) -> Verdict {
     }
 }
 
-const SORT_VALUE_FLAGS: &str = "kSoTt";
+pub(crate) const SORT_VALUE_FLAGS: &str = "kSoTt";
 const SORT_VALUE_OPTIONS: &[&str] = &[
     "batch-size",
     "buffer-size",
@@ -1007,10 +1067,18 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         }
         "sort" => {
             let out = option_targets_with_values(args, Some('o'), &["output"], SORT_VALUE_FLAGS);
-            let mut verdict = if out.is_empty() {
+            let temporary = option_targets_with_values(
+                args,
+                Some('T'),
+                &["temporary-directory"],
+                SORT_VALUE_FLAGS,
+            );
+            let mut verdict = if out.is_empty() && temporary.is_empty() {
                 Verdict::safe("sort")
             } else {
-                Verdict::mutating("sort writes an output file").writes(out)
+                Verdict::mutating("sort writes output or temporary files")
+                    .writes(out)
+                    .write_trees(temporary)
             };
             verdict.reads.extend(sort_inputs(args));
             verdict.reads.extend(option_targets(
@@ -1323,7 +1391,11 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 "generateCpuProfile",
             ],
         )),
-        "eslint" => Verdict::mutating("runs project lint code"),
+        "eslint" => Verdict::mutating("runs project lint code").writes(option_targets(
+            args,
+            Some('o'),
+            &["output-file"],
+        )),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"
         | "composer" => py_pm(args),
         "cargo" => (match first_word(args) {
@@ -1346,7 +1418,9 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             Some("get" | "install" | "mod") => Verdict::mutating("go (network)").net(),
             _ => Verdict::mutating("go builds or runs code"),
         })
-        .writes(option_targets(args, Some('o'), &[])),
+        .writes(option_targets(args, Some('o'), &[]).into_iter().chain(
+            named_option_targets(args, &["coverprofile", "cpuprofile", "memprofile", "trace"]),
+        )),
         "make" | "cmake" | "ninja" | "meson" | "gradle" | "gradlew" | "mvn" | "ant" | "bazel"
         | "sbt" | "just" | "task" | "rake" | "ctest" | "scons" => {
             let dry_run = has_flag(
@@ -1364,14 +1438,25 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                 .extend(option_targets(args, Some('f'), &["file"]));
             if matches!(name, "gradle" | "gradlew") {
                 let project = option_targets(args, Some('p'), &["project-dir"]);
-                verdict.reads.extend(project.clone());
+                let storage = option_targets(args, Some('g'), &["gradle-user-home"])
+                    .into_iter()
+                    .chain(option_targets(args, None, &["project-cache-dir"]))
+                    .collect::<Vec<_>>();
+                verdict.read_trees.extend(project.clone());
+                verdict.read_trees.extend(storage.clone());
                 if !dry_run {
-                    verdict.writes.extend(project);
+                    verdict.write_trees.extend(project);
+                    verdict.write_trees.extend(storage);
                 }
             } else if name == "mvn" {
                 verdict
                     .reads
                     .extend(option_targets(args, Some('s'), &["settings"]));
+                let repository = prefixed_targets(args, "-Dmaven.repo.local=");
+                verdict.read_trees.extend(repository.clone());
+                if !dry_run {
+                    verdict.write_trees.extend(repository);
+                }
             }
             if !dry_run {
                 verdict

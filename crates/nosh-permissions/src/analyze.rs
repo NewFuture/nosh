@@ -1289,7 +1289,7 @@ impl Analyzer<'_> {
                     match kind {
                         K::Write | K::Append | K::Clobber | K::ReadAndWrite => {
                             let v = Verdict::new(Risk::Mutating, "redirects output to a file");
-                            self.write_effect(&target_of(&t), &v);
+                            self.write_effect(&target_of(&t), &v, false);
                             let class = self.class_of(&t);
                             if !matches!(class, Some(PathClass::Null)) {
                                 self.add(Risk::Mutating, format!("writes {}", t.value));
@@ -1311,7 +1311,7 @@ impl Analyzer<'_> {
             ast::IoRedirect::OutputAndError(w, _) => {
                 let t = self.word(w);
                 let v = Verdict::new(Risk::Mutating, "redirects output to a file");
-                self.write_effect(&target_of(&t), &v);
+                self.write_effect(&target_of(&t), &v, false);
                 if !matches!(self.class_of(&t), Some(PathClass::Null)) {
                     self.add(Risk::Mutating, format!("writes {}", t.value));
                 }
@@ -1376,18 +1376,18 @@ impl Analyzer<'_> {
         self.positional = outer;
     }
 
-    fn write_effect(&mut self, t: &Target, v: &Verdict) {
+    fn write_effect(&mut self, t: &Target, v: &Verdict, recursive: bool) {
         self.path_access(
             t,
             if v.deletes {
                 AccessKind::Delete
-            } else if v.recursive {
+            } else if recursive {
                 AccessKind::WriteTree
             } else {
                 AccessKind::Write
             },
         );
-        if v.recursive
+        if recursive
             && v.deletes
             && !t.dynamic
             && !t.glob
@@ -1431,7 +1431,7 @@ impl Analyzer<'_> {
             };
         }
         let lexical = self.resolve(&p);
-        if v.recursive
+        if recursive
             && v.deletes
             && self
                 .vars
@@ -1451,12 +1451,12 @@ impl Analyzer<'_> {
             _ => crate::classify_path(&resolved, self.ctx),
         };
         match class {
-            PathClass::Workspace if v.recursive && v.deletes => {
+            PathClass::Workspace if recursive && v.deletes => {
                 self.add(Risk::Dangerous, "recursively deletes workspace files");
             }
             PathClass::Null | PathClass::Workspace | PathClass::Temp => {}
             PathClass::Protected(l) => {
-                if v.recursive && v.deletes && is_top_level(&resolved) {
+                if recursive && v.deletes && is_top_level(&resolved) {
                     self.add(
                         Risk::Forbidden,
                         format!("recursively deletes system directory {l}"),
@@ -1466,9 +1466,9 @@ impl Analyzer<'_> {
                 }
             }
             PathClass::Root => {
-                if v.recursive && v.deletes {
+                if recursive && v.deletes {
                     self.add(Risk::Forbidden, "recursively deletes the root filesystem");
-                } else if v.recursive {
+                } else if recursive {
                     self.add(Risk::Dangerous, "recursively changes the root filesystem");
                 } else {
                     self.add(Risk::Dangerous, format!("{changes} /"));
@@ -1476,7 +1476,7 @@ impl Analyzer<'_> {
                 self.report.writes_outside_workspace = true;
             }
             PathClass::Home => {
-                if v.recursive && v.deletes {
+                if recursive && v.deletes {
                     self.add(Risk::Forbidden, "recursively deletes the home directory");
                 } else {
                     self.add(
@@ -1488,7 +1488,7 @@ impl Analyzer<'_> {
             }
             PathClass::System => {
                 let top_level = is_top_level(&resolved);
-                if v.recursive && v.deletes && top_level {
+                if recursive && v.deletes && top_level {
                     self.add(
                         Risk::Forbidden,
                         format!(
@@ -1591,10 +1591,16 @@ impl Analyzer<'_> {
             }
         }
         for w in &v.writes {
-            self.write_effect(w, &v);
+            self.write_effect(w, &v, v.recursive);
+        }
+        for w in &v.write_trees {
+            self.write_effect(w, &v, true);
         }
         for r in &v.reads {
             self.read_effect_with_scope(r, v.recursive);
+        }
+        for r in &v.read_trees {
+            self.read_effect_with_scope(r, true);
         }
     }
 
@@ -2188,6 +2194,7 @@ impl Analyzer<'_> {
                     );
                 }
             }
+            "sort" => self.sort(&args),
             "xargs" | "parallel" => self.xargs(&args),
             "find" => self.find(&args),
             "eval" => {
@@ -2573,6 +2580,18 @@ impl Analyzer<'_> {
         self.exec(argv, None);
     }
 
+    fn sort(&mut self, args: &[Arg]) {
+        self.apply(rules::classify("sort", args));
+        for helper in rules::option_targets_with_values(
+            args,
+            None,
+            &["compress-program"],
+            rules::SORT_VALUE_FLAGS,
+        ) {
+            self.exec(vec![helper.into_arg()], None);
+        }
+    }
+
     fn find(&mut self, args: &[Arg]) {
         self.apply(rules::classify("find", args));
         // `find [-H|-L|-P|-D x|-Ox] [start…] [expression]`
@@ -2599,7 +2618,7 @@ impl Analyzer<'_> {
             v.deletes = true;
             self.add(v.risk, v.reason.clone());
             for t in &starts {
-                self.write_effect(t, &v);
+                self.write_effect(t, &v, true);
             }
         }
         // `{}` names files below the start directories: bound when those are

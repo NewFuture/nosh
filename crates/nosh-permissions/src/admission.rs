@@ -66,6 +66,28 @@ fn ordinary_move_or_copy(op: &Operation) -> bool {
             .all(|path| !path.extra && path.resolved.is_some())
 }
 
+fn ordinary_sort_temporary_files(op: &Operation, ctx: &Context) -> bool {
+    recognized_program(op)
+        && base(op) == "sort"
+        && op.risk < Risk::Dangerous
+        && !op.opaque
+        && !op.payload
+        && op.variables.is_empty()
+        && op.known.iter().all(|known| *known)
+        && op
+            .paths
+            .iter()
+            .any(|path| path.kind == AccessKind::WriteTree)
+        && op.paths.iter().all(|path| {
+            !path.extra
+                && path.resolved.as_deref().is_some_and(|resolved| {
+                    !path.kind.is_write()
+                        || path.kind == AccessKind::WriteTree
+                            && classify_path(resolved, ctx) == PathClass::Temp
+                })
+        })
+}
+
 fn build_goal(goal: &str) -> bool {
     matches!(
         goal,
@@ -207,7 +229,18 @@ fn development(op: &Operation) -> bool {
         "bazel" => known(1) && sub.is_some_and(build_goal),
         "gradle" | "gradlew" => {
             op.known.iter().all(|known| *known)
-                && build_goals(&args[1..], &["-p", "--project-dir", "-f", "--file"])
+                && build_goals(
+                    &args[1..],
+                    &[
+                        "-p",
+                        "--project-dir",
+                        "-f",
+                        "--file",
+                        "-g",
+                        "--gradle-user-home",
+                        "--project-cache-dir",
+                    ],
+                )
         }
         "mvn" => {
             op.known.iter().all(|known| *known)
@@ -902,6 +935,13 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
                 "ordinary {}: native file semantics, not an atomic recovery guarantee",
                 base(op)
             ));
+            continue;
+        }
+        if ordinary_sort_temporary_files(op, &report.context) {
+            result
+                .reasons
+                .push("sort uses only the temporary-file area for spill files".into());
+            prior_effects_unknown = true;
             continue;
         }
         if prior_effects_unknown {

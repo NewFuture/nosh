@@ -1062,8 +1062,25 @@ fn attached_path_options_keep_their_actual_targets() {
             "gradle --project-dir=/etc build",
         ),
         ("gradle -p /etc build", "gradle -p/etc build"),
+        (
+            "gradle --gradle-user-home /etc/gradle build",
+            "gradle --gradle-user-home=/etc/gradle build",
+        ),
+        (
+            "gradle --project-cache-dir /etc/cache build",
+            "gradle --project-cache-dir=/etc/cache build",
+        ),
+        ("gradle -g /etc/gradle build", "gradle -g/etc/gradle build"),
         ("cmake --build /etc", "cmake --build=/etc"),
         ("go build -o /etc/file", "go build -o/etc/file"),
+        (
+            "go test -coverprofile /etc/coverage.out",
+            "go test -coverprofile=/etc/coverage.out",
+        ),
+        (
+            "eslint . --output-file /etc/report",
+            "eslint . --output-file=/etc/report",
+        ),
         ("tsc --outDir /etc", "tsc --outDir=/etc"),
         (
             "tsc --project /etc/tsconfig.json",
@@ -1112,7 +1129,10 @@ fn attached_path_options_keep_their_actual_targets() {
     .unwrap();
     for command in [
         "mvn --settings /etc/settings.xml test",
+        "mvn test -Dmaven.repo.local=/etc/repo",
         "gradle --project-dir /etc build",
+        "gradle --gradle-user-home /etc/gradle build",
+        "gradle --project-cache-dir=/etc/cache build",
     ] {
         let result = policy(
             command,
@@ -1126,6 +1146,31 @@ fn attached_path_options_keep_their_actual_targets() {
         assert!(
             matches!(result.source, DecisionSource::UserDeny(_)),
             "{command}: {result:?}"
+        );
+    }
+    for option in ["coverprofile", "cpuprofile", "memprofile", "trace"] {
+        let command = format!("go test -{option}=/etc/{option}.out");
+        assert!(
+            matches!(
+                policy(&command, Auto, &context, &UserRules::default()).decision,
+                Decision::Ask { .. }
+            ),
+            "{command}"
+        );
+    }
+    for command in [
+        "sort -T /tmp/nosh-sort input",
+        "eslint . -o report.json",
+        "go test -coverprofile coverage.out",
+        "gradle -g .gradle build",
+        "mvn test -Dmaven.repo.local=.m2",
+    ] {
+        assert!(
+            matches!(
+                policy(command, Auto, &context, &UserRules::default()).decision,
+                Decision::Allow
+            ),
+            "{command}"
         );
     }
     let rules = UserRules {
@@ -1839,6 +1884,63 @@ fn sort_output_does_not_hide_input_reads_or_invent_option_input_files() {
             .count(),
         2
     );
+
+    let temporary_deny = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("sort".into()),
+            write_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected sort temporary directory",
+    )
+    .unwrap();
+    for command in [
+        "sort -T /etc input",
+        "sort -T/etc input",
+        "sort --temporary-directory /etc input",
+        "sort --temporary-directory=/etc input",
+    ] {
+        let temporary = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![temporary_deny.clone()],
+            },
+        );
+        assert!(
+            matches!(temporary.source, DecisionSource::UserDeny(_)),
+            "{command}: {temporary:?}"
+        );
+    }
+
+    let helper_deny = UserRule::compile(
+        RuleSpec {
+            command_exact: Some("/path/to/helper".into()),
+            ..RuleSpec::default()
+        },
+        "sort helper deny",
+    )
+    .unwrap();
+    for command in [
+        "sort --compress-program /path/to/helper input",
+        "sort --compress-program=/path/to/helper input",
+    ] {
+        let helper = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![helper_deny.clone()],
+            },
+        );
+        assert!(
+            matches!(helper.source, DecisionSource::UserDeny(_)),
+            "{command}: {helper:?}"
+        );
+    }
 }
 
 #[test]
