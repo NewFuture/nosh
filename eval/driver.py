@@ -29,6 +29,11 @@ def plain(text: str) -> str:
     return ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
 
 
+def prompt_matches(line: str, content: str = "") -> bool:
+    prefix = PROMPT + content if content else PROMPT.rstrip()
+    return line.startswith(prefix) and line[len(prefix):].strip() in ("", "confirm", "Approval: Confirm")
+
+
 class DriverError(RuntimeError):
     pass
 
@@ -413,8 +418,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
         return child.screen.line().startswith(PROMPT.rstrip())
 
     def idle_prompt():
-        line = child.screen.line()
-        return line.startswith(PROMPT.rstrip()) and line[len(PROMPT.rstrip()):].strip() in ("", "confirm")
+        return prompt_matches(child.screen.line())
 
     def approvals():
         nonlocal approval_offset, denial_pending

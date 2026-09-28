@@ -80,6 +80,14 @@ class DriverTests(unittest.TestCase):
         screen.feed("\r\x1b[K" + driver.PROMPT + "git status")
         self.assertEqual(screen.line(), driver.PROMPT + "git status")
 
+    def test_prompt_recognition_accepts_only_the_configured_approval_badge(self):
+        self.assertTrue(driver.prompt_matches(driver.PROMPT.rstrip()))
+        for content in ("", "git status"):
+            for badge in ("", "confirm", "Approval: Confirm"):
+                self.assertTrue(driver.prompt_matches(driver.PROMPT + content + "  " + badge, content))
+            for extra in ("unexpected", "Approval: Auto", "Approval: YOLO"):
+                self.assertFalse(driver.prompt_matches(driver.PROMPT + content + "  " + extra, content))
+
     def test_cli_drains_both_pipes_and_has_no_controlling_tty(self):
         script = (
             "import os,sys; data=sys.stdin.buffer.read(); print(len(data)); "
@@ -151,7 +159,8 @@ assert b"exit 0" in line()
             "┃": "|", "╭": "+", "╰": "+", "─": "-", "│": "|",
             "·": "|", "›": ">", "✔": "+",
         }))
-        for variant in (script, ascii_script):
+        badge_script = script.replace("__NOSH_EVAL_PROMPT__ ", r"__NOSH_EVAL_PROMPT__ \x1b7Approval: Confirm\x1b8")
+        for variant in (script, ascii_script, badge_script):
             with self.subTest(ascii=variant == ascii_script):
                 result = driver.run_repl([sys.executable, "-c", variant], Path.cwd(),
                                          {"PATH": "/usr/bin:/bin"}, 5, scenario,

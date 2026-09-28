@@ -3,7 +3,7 @@
 from __future__ import annotations
 from pathlib import Path
 import re
-from ..driver import PROMPT
+from ..driver import prompt_matches
 from .common import FILE_NAME, HISTORY_ALIASES, mentioned_files
 from .command_assist import check_archive
 
@@ -384,8 +384,7 @@ def agent_judgment(scenario, answer, facts, root, after, result, metrics):
     elif kind == "typos":
         expected = scenario["corrections"]
         if len(result.turns) != len(expected) or any(
-            not turn["edit_line"].startswith(PROMPT + corrected)
-            or turn["edit_line"][len(PROMPT + corrected):].strip() not in ("", "confirm")
+            not prompt_matches(turn["edit_line"], corrected)
             for turn, corrected in zip(result.turns, expected)
         ):
             reasons.append("corrected commands were not left in the editable input line")
