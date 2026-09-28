@@ -1,7 +1,7 @@
 //! Path resolution (lexical) and classification for write/read targets.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -165,6 +165,13 @@ impl PathResolver {
         }
     }
 
+    pub(crate) fn with_context(&self, ctx: &Context) -> Self {
+        Self {
+            real_paths: Rc::clone(&self.real_paths),
+            ..Self::new(ctx)
+        }
+    }
+
     pub(crate) fn real_path(&self, path: &Path, follow_last: bool) -> Option<PathBuf> {
         let key = (path.to_path_buf(), follow_last);
         if let Some(cached) = self.real_paths.borrow().get(&key) {
@@ -296,11 +303,14 @@ fn relative_path(path: &Path, root: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn same_workspace_target(lexical: &Path, resolved: &Path, ctx: &Context) -> bool {
-    let paths = PathResolver::new(ctx);
+    let real_workspace = OnceCell::new();
+    let relative = |path| {
+        relative_path_with(path, &ctx.workspace, |root| {
+            real_workspace.get_or_init(|| real_path(root, true)).clone()
+        })
+    };
     short(lexical) == short(resolved)
-        || paths
-            .relative_path(lexical, &ctx.workspace)
-            .is_some_and(|relative| Some(relative) == paths.relative_path(resolved, &ctx.workspace))
+        || relative(lexical).is_some_and(|lexical| Some(lexical) == relative(resolved))
 }
 
 /// `/` or a directory right under it, such as `/etc`; on macOS also the real
@@ -488,7 +498,7 @@ mod tests {
             PathClass::Workspace
         );
         let first_calls = real_path_calls();
-        assert!(first_calls > 1);
+        assert!(first_calls > 0);
 
         assert_eq!(
             paths.classify_real(&first_path, true).0,

@@ -1638,7 +1638,7 @@ impl Analyzer<'_> {
         let mut sub = Analyzer {
             ctx: &child_ctx,
             lookup: self.lookup,
-            paths: self.paths.clone(),
+            paths: self.paths.with_context(&child_ctx),
             report: RiskReport::default(),
             operation: None,
             redirecting: false,
