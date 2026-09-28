@@ -4,8 +4,10 @@ use std::collections::HashMap;
 
 use nosh_permissions::{Context, Risk, assess_command};
 
-fn ctx() -> Context {
-    let mut c = Context::new("/home/u/proj", "/home/u/proj").with_home("/home/u");
+mod common;
+
+fn ctx() -> (tempfile::TempDir, Context) {
+    let (dir, mut c) = common::workspace_context();
     c.aliases = HashMap::from([
         ("ll".to_string(), "ls -la".to_string()),
         ("rmrf".to_string(), "rm -rf".to_string()),
@@ -17,7 +19,7 @@ fn ctx() -> Context {
         ("deploy".to_string(), "scp app.tar prod:/srv".to_string()),
         ("safe_fn".to_string(), "ls -la; pwd".to_string()),
     ]);
-    c
+    (dir, c)
 }
 
 use Risk::*;
@@ -350,7 +352,7 @@ const CASES: &[(&str, Risk)] = &[
 #[test]
 fn table_driven_risk_levels() {
     assert!(CASES.len() >= 200, "{} cases", CASES.len());
-    let c = ctx();
+    let (_dir, c) = ctx();
     let mut failures = Vec::new();
     for (cmd, want) in CASES {
         let r = assess_command(cmd, &c);
@@ -375,7 +377,7 @@ fn table_driven_risk_levels() {
 
 #[test]
 fn dangerous_recall_is_total() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     let risky: Vec<_> = CASES.iter().filter(|(_, r)| *r >= Dangerous).collect();
     assert!(risky.len() >= 100);
     let missed: Vec<_> = risky
@@ -392,7 +394,7 @@ fn dangerous_recall_is_total() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_real_system_directories() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     for (cmd, want) in [
         ("rm -rf /private/etc", Forbidden),
         ("rm -rf /private/var", Forbidden),
@@ -411,7 +413,7 @@ fn macos_real_system_directories() {
 #[test]
 #[ignore = "diagnostic dump"]
 fn dump_reports() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     for (cmd, want) in CASES {
         let r = assess_command(cmd, &c);
         println!(
@@ -425,7 +427,7 @@ fn dump_reports() {
 
 #[test]
 fn sudo_is_rewritten_non_interactive() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     let r = assess_command("sudo apt update && sudo -u www ls", &c);
     assert_eq!(
         r.rewritten.as_deref(),
@@ -437,7 +439,7 @@ fn sudo_is_rewritten_non_interactive() {
 
 #[test]
 fn flags_are_reported() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     assert!(assess_command("curl https://x", &c).network);
     assert!(assess_command("cp a ../b", &c).writes_outside_workspace);
     assert!(assess_command("export PATH=/x", &c).changes_session);
@@ -451,7 +453,7 @@ fn flags_are_reported() {
 #[test]
 fn session_changing_builtin_forms() {
     use nosh_permissions::{ApprovalMode, Decision, SessionAllowList, UserRules, evaluate};
-    let c = ctx();
+    let (_dir, c) = ctx();
     let cases: &[(&str, Risk, bool)] = &[
         // Queries and ordinary variables: Safe.
         ("read -r line < notes.txt", Safe, false),

@@ -8,6 +8,8 @@ use nosh_permissions::{
     ApprovalMode, Context, Decision, Risk, SessionAllowList, UserRules, assess_command, evaluate,
 };
 
+mod common;
+
 use Kind::*;
 use Risk::*;
 
@@ -141,14 +143,14 @@ const DAILY: &[(&str, Kind, Risk)] = &[
 ];
 
 /// The workspace is the working directory.
-fn ctx() -> Context {
-    Context::new("/home/u/proj", "/home/u/proj").with_home("/home/u")
+fn ctx() -> (tempfile::TempDir, Context) {
+    common::workspace_context()
 }
 
 #[test]
 fn daily_commands_have_the_expected_levels() {
     assert!(DAILY.len() >= 100, "{} cases", DAILY.len());
-    let c = ctx();
+    let (_dir, c) = ctx();
     let failures: Vec<String> = DAILY
         .iter()
         .filter_map(|(cmd, _, want)| {
@@ -167,7 +169,7 @@ fn daily_commands_have_the_expected_levels() {
 
 #[test]
 fn convenience_first_on_daily_commands() {
-    let c = ctx();
+    let (_dir, c) = ctx();
     let (rules, grants) = (UserRules::default(), SessionAllowList::default());
     let mut failures = Vec::new();
     let mut asked = Vec::new();
