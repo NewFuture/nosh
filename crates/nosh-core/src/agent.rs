@@ -1786,4 +1786,47 @@ mod permission_tests {
             Decision::Allow
         );
     }
+
+    #[test]
+    fn expanded_commands_and_disappearing_arguments_keep_the_approval_boundary() {
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+        shell.run_user_line("alias cargo='unknown_project_runner'");
+        let mut agent = fake_agent(Auto, UserRules::default());
+        let mut approvals = Scripted::new([]);
+        let mut ui = RecordUi::default();
+        assert!(matches!(
+            agent.exec_call(&mut shell, &call("cargo test"), &mut approvals, &mut ui),
+            Exec::Denied(_)
+        ));
+        assert_eq!(approvals.seen.len(), 1);
+        assert_eq!(count(), 0);
+        shell.run_user_line("alias cargo='/usr/bin/cargo'");
+        assert!(matches!(
+            agent.exec_call(&mut shell, &call("cargo test"), &mut approvals, &mut ui),
+            Exec::CommandResult(_)
+        ));
+        assert_eq!(approvals.seen.len(), 1);
+        assert_eq!(count(), 1);
+
+        let mut agent = fake_agent(
+            Yolo,
+            UserRules {
+                allow: vec![UserRule::prefix("git").unwrap()],
+                deny: vec![UserRule::exact("git fetch").unwrap()],
+            },
+        );
+        let mut approvals = Scripted::new([]);
+        assert!(matches!(
+            agent.exec_call(
+                &mut shell,
+                &call("ARG=x; read ARG; git fetch $ARG"),
+                &mut approvals,
+                &mut ui
+            ),
+            Exec::Denied(_)
+        ));
+        assert!(approvals.seen.is_empty());
+        assert_eq!(count(), 0);
+        assert!(ui.events.iter().any(|event| event.contains("user deny")));
+    }
 }

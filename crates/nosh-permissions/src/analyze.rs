@@ -382,6 +382,9 @@ fn has_brace_expansion(s: &str) -> bool {
 
 /// Appends literal text (the same at runtime) to `arg`.
 fn push_lit(arg: &mut Arg, s: &str) {
+    if !s.is_empty() {
+        arg.may_disappear = false;
+    }
     arg.value.push_str(s);
     if let Some(k) = &mut arg.known {
         k.push_str(s);
@@ -503,6 +506,7 @@ impl Analyzer<'_> {
                             || (!self.report.incomplete && !self.child && !self.replaying))
                 })
                 .collect(),
+            may_disappear: argv.iter().map(|arg| arg.may_disappear).collect(),
             cwd: self.cwd.clone(),
             cwd_known: !self.cwd_unknown && !self.report.incomplete,
             opaque: (self.child || self.replaying) && argv.iter().any(|arg| arg.dynamic),
@@ -835,12 +839,14 @@ impl Analyzer<'_> {
                 let mut arg = Arg {
                     value: String::new(),
                     quoted: false,
+                    may_disappear: true,
                     dynamic: false,
                     glob: false,
                     bound: false,
                     known: Some(String::new()),
                 };
                 self.pieces(raw, &pieces, &mut arg, false);
+                arg.may_disappear &= arg.dynamic && !arg.quoted;
                 if !arg.dynamic {
                     arg.known = None;
                 }
@@ -853,6 +859,7 @@ impl Analyzer<'_> {
             Err(_) => Arg {
                 value: raw.to_string(),
                 quoted: false,
+                may_disappear: false,
                 dynamic: true,
                 glob: false,
                 bound: false,
@@ -999,23 +1006,27 @@ impl Analyzer<'_> {
                     arg.quoted = true;
                     self.pieces(raw, inner, arg, true);
                 }
-                WordPiece::TildeExpansion(t) => match t {
-                    TildeExpr::Home => {
-                        if let Some(home) = self.vars.get("HOME") {
-                            push_lit(arg, home);
-                        } else if self.unknown_values.contains("HOME") || self.report.incomplete {
-                            push_expansion(arg, "~", None);
-                        } else if let Some(home) =
-                            self.ctx.user_home.as_ref().or(self.ctx.home.as_ref())
-                        {
-                            push_lit(arg, &home.to_string_lossy());
-                        } else {
-                            push_expansion(arg, "~", None);
+                WordPiece::TildeExpansion(t) => {
+                    arg.may_disappear = false;
+                    match t {
+                        TildeExpr::Home => {
+                            if let Some(home) = self.vars.get("HOME") {
+                                push_lit(arg, home);
+                            } else if self.unknown_values.contains("HOME") || self.report.incomplete
+                            {
+                                push_expansion(arg, "~", None);
+                            } else if let Some(home) =
+                                self.ctx.user_home.as_ref().or(self.ctx.home.as_ref())
+                            {
+                                push_lit(arg, &home.to_string_lossy());
+                            } else {
+                                push_expansion(arg, "~", None);
+                            }
                         }
+                        TildeExpr::UserHome(u) => push_expansion(arg, &format!("~{u}"), None),
+                        _ => push_expansion(arg, "~+", None),
                     }
-                    TildeExpr::UserHome(u) => push_expansion(arg, &format!("~{u}"), None),
-                    _ => push_expansion(arg, "~+", None),
-                },
+                }
                 WordPiece::ParameterExpansion(_) => {
                     if src.contains("$(") || src.contains('`') {
                         self.add(
@@ -1058,6 +1069,7 @@ impl Analyzer<'_> {
                     push_lit(arg, s.strip_prefix('\\').unwrap_or(s));
                 }
                 WordPiece::ArithmeticExpression(e) => {
+                    arg.may_disappear = false;
                     push_expansion(arg, "$((…))", None);
                     self.text_substitutions(&e.value);
                 }
@@ -1147,6 +1159,7 @@ impl Analyzer<'_> {
                             });
                         if let Some((name, value)) = assignment {
                             let mut arg = self.word_text(value);
+                            arg.may_disappear = false;
                             arg.value = format!("{name}={}", arg.value);
                             arg.known = arg.known.map(|value| format!("{name}={value}"));
                             argv.push(arg);
@@ -1897,11 +1910,11 @@ impl Analyzer<'_> {
 
         if !name.contains('/') {
             if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
-                if let Some(i) = self.operation {
-                    self.report.operations[i].transparent = true;
-                }
                 let key = format!("alias:{name}");
                 if !self.expanding.contains(&key) {
+                    if let Some(i) = self.operation {
+                        self.report.operations[i].transparent = true;
+                    }
                     self.expanding.insert(key.clone());
                     self.expand_alias(&alias, args);
                     self.expanding.remove(&key);
@@ -2503,6 +2516,7 @@ impl Analyzer<'_> {
         argv.push(Arg {
             value: "<stdin items>".into(),
             quoted: false,
+            may_disappear: true,
             dynamic: true,
             glob: false,
             bound: false,
@@ -2565,6 +2579,7 @@ impl Analyzer<'_> {
                             Arg {
                                 value: a.value.clone(),
                                 quoted: a.quoted,
+                                may_disappear: false,
                                 dynamic: true,
                                 glob: false,
                                 bound: bound_starts

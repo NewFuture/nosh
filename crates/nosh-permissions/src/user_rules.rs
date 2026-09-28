@@ -242,7 +242,11 @@ fn command_matches(words: &[String], prefix: bool, op: &Operation, deny: bool) -
             return false;
         }
     }
-    prefix || actual.next().is_none()
+    prefix
+        || actual.all(|(index, _)| {
+            deny && op.known.get(index) == Some(&false)
+                && op.may_disappear.get(index) == Some(&true)
+        })
 }
 
 impl UserRule {

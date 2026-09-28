@@ -45,6 +45,7 @@ fn base(op: &Operation) -> &str {
 
 fn recognized_program(op: &Operation) -> bool {
     !op.local_program
+        && !op.transparent
         && op.argv.first().is_some_and(|name| {
             !name.contains('/')
                 || crate::analyze::in_system_bin_dir(name)
@@ -125,7 +126,7 @@ fn development(op: &Operation) -> bool {
                 }
         }
         "pytest" | "pytest-3" | "ctest" => true,
-        "tsc" => true,
+        "tsc" => !args.iter().any(|arg| arg.eq_ignore_ascii_case("--clean")),
         "eslint" => !args
             .iter()
             .any(|arg| matches!(arg.as_str(), "--fix" | "--init")),
@@ -196,7 +197,10 @@ fn development(op: &Operation) -> bool {
             }
             true
         }
-        "meson" | "bazel" => known(1) && sub.is_some_and(build_goal),
+        "meson" => {
+            known(1) && sub.is_some_and(build_goal) && !args.iter().any(|arg| arg == "--clean")
+        }
+        "bazel" => known(1) && sub.is_some_and(build_goal),
         "gradle" | "gradlew" | "mvn" | "sbt" => {
             op.known.iter().all(|known| *known)
                 && sub.is_some_and(build_goal)
@@ -873,7 +877,7 @@ pub(crate) fn automatic(report: &RiskReport) -> Result<AutoAdmission, AutoReject
         if covered {
             if !result.development {
                 result.reasons.push(
-                    "common build/test/check: project-code effects are not guaranteed recoverable"
+                    "common build/test/check or config initialization: project-code effects are not guaranteed recoverable"
                         .into(),
                 );
             }

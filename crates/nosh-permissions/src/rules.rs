@@ -9,6 +9,8 @@ use crate::Risk;
 pub struct Arg {
     pub value: String,
     pub quoted: bool,
+    /// An unquoted expansion with no fixed text can yield zero argv entries.
+    pub may_disappear: bool,
     /// Contains a parameter expansion / command substitution.
     pub dynamic: bool,
     /// Contains unquoted glob characters.
@@ -26,6 +28,7 @@ impl Arg {
         Self {
             value: s.to_string(),
             quoted: false,
+            may_disappear: false,
             dynamic: false,
             glob: false,
             bound: false,
@@ -1227,13 +1230,27 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         }
         "npx" | "pnpx" | "bunx" => Verdict::mutating("downloads and runs a package").net(),
         "tsc" | "eslint" if asks_version_or_help(args) => Verdict::safe("prints version or usage"),
-        "tsc" => Verdict::mutating("runs the project compiler")
-            .reads(option_targets(args, Some('p'), &["project"]))
-            .writes(option_targets(
-                args,
-                None,
-                &["outDir", "outFile", "declarationDir"],
-            )),
+        "tsc" => Verdict::mutating(
+            if args
+                .iter()
+                .any(|arg| arg.value.eq_ignore_ascii_case("--clean"))
+            {
+                "removes TypeScript build outputs"
+            } else if args
+                .iter()
+                .any(|arg| arg.value.eq_ignore_ascii_case("--init"))
+            {
+                "initializes TypeScript configuration"
+            } else {
+                "runs the project compiler"
+            },
+        )
+        .reads(option_targets(args, Some('p'), &["project"]))
+        .writes(option_targets(
+            args,
+            None,
+            &["outDir", "outFile", "declarationDir", "tsBuildInfoFile"],
+        )),
         "eslint" => Verdict::mutating("runs project lint code"),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"
         | "composer" => py_pm(args),

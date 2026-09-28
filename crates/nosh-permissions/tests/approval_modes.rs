@@ -1715,3 +1715,155 @@ fn sort_output_does_not_hide_input_reads_or_invent_option_input_files() {
         2
     );
 }
+
+#[test]
+fn convenience_categories_follow_aliases_and_functions_instead_of_their_names() {
+    let (_dir, mut context) = fixture();
+    context
+        .aliases
+        .insert("cargo".into(), "unknown_project_runner".into());
+    let result = policy("cargo test", Auto, &context, &UserRules::default());
+    assert!(
+        matches!(result.decision, Decision::Ask { .. }),
+        "{result:?}"
+    );
+    context.aliases.clear();
+    context
+        .functions
+        .insert("cargo".into(), "{ unknown_project_runner; }".into());
+    let result = policy("cargo test", Auto, &context, &UserRules::default());
+    assert!(
+        matches!(result.decision, Decision::Ask { .. }),
+        "{result:?}"
+    );
+    context.functions.clear();
+    context.aliases.insert("cargo".into(), "cargo".into());
+    assert_eq!(
+        policy("cargo test", Auto, &context, &UserRules::default()).decision,
+        Decision::Allow
+    );
+    context
+        .aliases
+        .insert("cargo".into(), "/usr/bin/cargo".into());
+    assert_eq!(
+        policy("cargo test", Auto, &context, &UserRules::default()).decision,
+        Decision::Allow
+    );
+    context.aliases.clear();
+    context
+        .functions
+        .insert("cargo".into(), "{ /usr/bin/cargo test; }".into());
+    assert_eq!(
+        policy("cargo test", Auto, &context, &UserRules::default()).decision,
+        Decision::Allow
+    );
+}
+
+#[test]
+fn typescript_clean_and_initialization_have_distinct_effects() {
+    let (_dir, context) = fixture();
+    for command in ["tsc", "tsc --build", "tsc --init", "tsc --noEmit"] {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert_eq!(result.decision, Decision::Allow, "{command}: {result:?}");
+    }
+    for command in [
+        "tsc --build --clean",
+        "tsc -b --clean",
+        "meson compile --clean build",
+    ] {
+        let result = policy(command, Auto, &context, &UserRules::default());
+        assert_eq!(
+            result.decision,
+            Decision::Ask { strong: false },
+            "{command}: {result:?}"
+        );
+        assert_eq!(
+            policy(command, Yolo, &context, &UserRules::default()).decision,
+            Decision::Allow
+        );
+    }
+    for command in [
+        "tsc --incremental --tsBuildInfoFile /etc/state.tsbuildinfo",
+        "tsc --incremental --tsBuildInfoFile=/etc/state.tsbuildinfo",
+    ] {
+        assert_eq!(
+            policy(command, Auto, &context, &UserRules::default()).decision,
+            Decision::Ask { strong: true },
+            "{command}"
+        );
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("run_command".into()),
+                write_paths: vec!["/etc/**".into()],
+                ..RuleSpec::default()
+            },
+            "system output deny",
+        )
+        .unwrap();
+        let result = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![rule],
+            },
+        );
+        assert!(
+            matches!(result.source, DecisionSource::UserDeny(_)),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn an_exact_deny_cannot_be_escaped_with_disappearing_arguments() {
+    let (_dir, context) = fixture();
+    let rules = UserRules {
+        allow: vec![UserRule::prefix("git").unwrap()],
+        deny: vec![UserRule::exact("git fetch").unwrap()],
+    };
+    for mode in [Confirm, Auto, Yolo] {
+        for command in [
+            "ARG=x; read ARG; git fetch $ARG",
+            "git fetch ${ARG}",
+            "git fetch $ARG $OTHER",
+        ] {
+            let result = policy(command, mode, &context, &rules);
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{command}: {result:?}"
+            );
+        }
+    }
+    for command in [
+        r#"git fetch "$ARG""#,
+        "git fetch fixed$ARG",
+        "git fetch $ARG/suffix",
+        r#"git fetch ''"#,
+        "git fetch $((ARG))",
+    ] {
+        let result = policy(command, Yolo, &context, &rules);
+        assert!(
+            !matches!(result.source, DecisionSource::UserDeny(_)),
+            "{command}: {result:?}"
+        );
+    }
+    let rules = UserRules {
+        allow: vec![UserRule::exact("git fetch").unwrap()],
+        deny: vec![],
+    };
+    let result = policy("git fetch $ARG", Confirm, &context, &rules);
+    assert!(
+        !matches!(result.source, DecisionSource::UserAllow(_)),
+        "{result:?}"
+    );
+    let rules = UserRules {
+        allow: vec![],
+        deny: vec![UserRule::exact("export").unwrap()],
+    };
+    assert!(!matches!(
+        policy("export ARG=$UNKNOWN", Yolo, &context, &rules).source,
+        DecisionSource::UserDeny(_)
+    ));
+}

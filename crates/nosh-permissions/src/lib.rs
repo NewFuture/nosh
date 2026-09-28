@@ -171,6 +171,7 @@ pub struct Operation {
     pub executable: Option<PathBuf>,
     pub local_program: bool,
     pub known: Vec<bool>,
+    pub may_disappear: Vec<bool>,
     pub cwd: PathBuf,
     pub paths: Vec<PathAccess>,
     pub cwd_known: bool,
