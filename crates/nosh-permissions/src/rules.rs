@@ -892,7 +892,8 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             let mut verdict = Verdict::mutating(format!("{name}: writes files"))
                 .writes(writes)
                 .reads(reads);
-            verdict.recursive = name == "cp" && has_flag(args, &['r', 'R'], &["recursive"]);
+            verdict.recursive =
+                name == "cp" && has_flag(args, &['r', 'R', 'a'], &["recursive", "archive"]);
             verdict
         }
         "mkdir" => Verdict::mutating("creates directories")

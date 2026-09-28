@@ -1202,13 +1202,6 @@ fn recursive_copies_include_protected_descendant_reads() {
     let (dir, context) = fixture();
     std::fs::create_dir_all(dir.path().join("home/.ssh")).unwrap();
     std::fs::write(dir.path().join("home/.ssh/key"), "secret").unwrap();
-    let command = "cp -r home backup";
-    let report = assess_command(command, &context);
-    assert!(report.reads_protected, "{report:?}");
-    assert!(matches!(
-        policy(command, Auto, &context, &UserRules::default()).decision,
-        Decision::Ask { .. }
-    ));
     let deny = UserRule::compile(
         RuleSpec {
             command_prefix: Some("cp".into()),
@@ -1218,19 +1211,27 @@ fn recursive_copies_include_protected_descendant_reads() {
         "private recursive source",
     )
     .unwrap();
-    assert!(matches!(
-        policy(
-            command,
-            Yolo,
-            &context,
-            &UserRules {
-                allow: vec![],
-                deny: vec![deny],
-            },
-        )
-        .source,
-        DecisionSource::UserDeny(_)
-    ));
+    for command in ["cp -r home backup", "cp --archive home backup"] {
+        let report = assess_command(command, &context);
+        assert!(report.reads_protected, "{command}: {report:?}");
+        assert!(matches!(
+            policy(command, Auto, &context, &UserRules::default()).decision,
+            Decision::Ask { .. }
+        ));
+        assert!(matches!(
+            policy(
+                command,
+                Yolo,
+                &context,
+                &UserRules {
+                    allow: vec![],
+                    deny: vec![deny.clone()],
+                },
+            )
+            .source,
+            DecisionSource::UserDeny(_)
+        ));
+    }
 }
 
 #[test]
