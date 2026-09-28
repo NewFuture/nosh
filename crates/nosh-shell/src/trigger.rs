@@ -5,6 +5,7 @@
 use brush_parser::ast;
 
 use crate::backend::{EmbeddedShell, Resolution};
+use crate::command_context::{self, Scope};
 use crate::{guard, spell};
 
 /// Why the AI was invoked (`trigger=` in the task header).
@@ -122,11 +123,15 @@ struct SimpleCmd {
     /// Character span of the command name in the line.
     span: Option<(usize, usize)>,
     argv: Vec<String>,
+    resolution: Option<Resolution>,
+    path: Option<String>,
+    correction_blocked: bool,
+    runtime_dependent: bool,
 }
 
 /// Only used for unresolved names: question words can otherwise look like
 /// typos (`can` -> `cat`, `is` -> `ls`, `why` -> `who`).
-fn looks_like_question(argv: &[String]) -> bool {
+pub(crate) fn looks_like_question(argv: &[String]) -> bool {
     let [first, second, third, ..] = argv else {
         return false;
     };
@@ -197,6 +202,13 @@ pub(crate) fn static_word_with_tilde(
 ) -> Option<String> {
     let opts = brush_parser::ParserOptions::default();
     let pieces = brush_parser::word::parse(&w.value, &opts).ok()?;
+    static_word_pieces(&pieces, expand_tilde)
+}
+
+pub(crate) fn static_word_pieces(
+    pieces: &[brush_parser::word::WordPieceWithSource],
+    expand_tilde: &impl Fn(&brush_parser::word::TildeExpr) -> Option<String>,
+) -> Option<String> {
     let mut s = String::new();
     fn walk(
         p: &[brush_parser::word::WordPieceWithSource],
@@ -224,90 +236,243 @@ pub(crate) fn static_word_with_tilde(
         }
         true
     }
-    walk(&pieces, &mut s, expand_tilde).then_some(s)
+    walk(pieces, &mut s, expand_tilde).then_some(s)
 }
 
-fn collect(prog: &ast::Program, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
-    fn list(cl: &ast::CompoundList, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
-        for ast::CompoundListItem(aol, _) in &cl.0 {
-            pipeline(&aol.first, out, defined);
+struct Collector<'a> {
+    shell: &'a EmbeddedShell,
+    options: brush_parser::ParserOptions,
+    commands: Vec<SimpleCmd>,
+    remaining: usize,
+}
+
+impl Collector<'_> {
+    fn literal(&self, word: &ast::Word) -> Option<String> {
+        command_context::literal(word, &self.options, &|expr| match expr {
+            brush_parser::word::TildeExpr::Home => self.shell.var("HOME"),
+            brush_parser::word::TildeExpr::WorkingDir => {
+                self.shell.cwd().to_str().map(str::to_owned)
+            }
+            brush_parser::word::TildeExpr::OldWorkingDir => self.shell.var("OLDPWD"),
+            _ => None,
+        })
+    }
+
+    fn list(&mut self, cl: &ast::CompoundList, scope: &mut Scope, depth: usize) {
+        if depth > 64 || self.remaining == 0 {
+            scope.dynamic = true;
+            return;
+        }
+        for ast::CompoundListItem(aol, separator) in &cl.0 {
+            let mut child = scope.clone();
+            self.pipeline(&aol.first, &mut child, depth + 1);
             for x in &aol.additional {
+                let mut branch = child.clone();
                 match x {
-                    ast::AndOr::And(p) | ast::AndOr::Or(p) => pipeline(p, out, defined),
+                    ast::AndOr::And(p) | ast::AndOr::Or(p) => {
+                        self.pipeline(p, &mut branch, depth + 1)
+                    }
                 }
+                child.merge_optional(&branch);
+            }
+            if matches!(separator, ast::SeparatorOperator::Async) {
+                scope.files_changed = true;
+            } else {
+                *scope = child;
             }
         }
     }
-    fn pipeline(p: &ast::Pipeline, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
-        for c in &p.seq {
-            command(c, out, defined);
+    fn pipeline(&mut self, p: &ast::Pipeline, scope: &mut Scope, depth: usize) {
+        if p.seq.len() == 1 {
+            self.command(&p.seq[0], scope, depth + 1);
+        } else {
+            for (index, c) in p.seq.iter().enumerate() {
+                let mut child = scope.clone();
+                child.files_changed = true;
+                self.command(c, &mut child, depth + 1);
+                if index + 1 == p.seq.len() {
+                    scope.merge_optional(&child);
+                }
+            }
+            scope.files_changed = true;
         }
     }
-    fn command(c: &ast::Command, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+    fn command(&mut self, c: &ast::Command, scope: &mut Scope, depth: usize) {
+        if depth > 64 || self.remaining == 0 {
+            scope.dynamic = true;
+            return;
+        }
+        self.remaining -= 1;
         match c {
             ast::Command::Simple(sc) => {
+                let mut local = scope.clone();
+                let mut parent_dynamic = false;
+                for item in command_context::items(sc) {
+                    match item {
+                        ast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, _) => {
+                            let value = match &assignment.value {
+                                ast::AssignmentValue::Scalar(word) => self.literal(word),
+                                _ => None,
+                            };
+                            parent_dynamic |= command_context::assignment_value_changes_resolution(
+                                &assignment.value,
+                            );
+                            local.assignment(assignment, value);
+                        }
+                        ast::CommandPrefixOrSuffixItem::IoRedirect(r) => {
+                            local.files_changed |= command_context::writes_files(r);
+                            local.correction_blocked |=
+                                command_context::redirect_blocks_correction(r);
+                            parent_dynamic |= command_context::redirect_changes_resolution(r);
+                            local.dynamic |= command_context::redirect_changes_resolution(r);
+                        }
+                        ast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {
+                            local.files_changed = true;
+                            local.correction_blocked = true;
+                        }
+                        _ => {}
+                    }
+                }
                 let Some(w) = &sc.word_or_name else {
+                    *scope = local;
                     return;
                 };
-                let Some(name) = static_word(w) else {
+                let Some(name) = self.literal(w) else {
+                    scope.dynamic = true;
                     return;
                 };
                 let mut argv = vec![name.clone()];
                 if let Some(suffix) = &sc.suffix {
                     for item in &suffix.0 {
                         if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
-                            argv.push(static_word(w).unwrap_or_else(|| w.value.clone()));
+                            let value = self.literal(w);
+                            local.files_changed |=
+                                value.is_none() && command_context::word_may_write(w);
+                            parent_dynamic |= command_context::word_changes_resolution(w);
+                            local.dynamic |= command_context::word_changes_resolution(w);
+                            argv.push(value.unwrap_or_else(|| w.value.clone()));
                         }
                     }
                 }
-                out.push(SimpleCmd {
+                let resolution = if local.dynamic {
+                    None
+                } else {
+                    Some(self.shell.resolve_scoped(
+                        &name,
+                        local.path.as_deref(),
+                        local.functions.contains(&name),
+                    ))
+                };
+                scope.files_changed |= local.files_changed;
+                scope.dynamic |= parent_dynamic;
+                if resolution != Some(Resolution::NotFound) {
+                    scope.after_command(
+                        &name,
+                        resolution == Some(Resolution::Builtin),
+                        matches!(
+                            resolution,
+                            Some(Resolution::Alias(_) | Resolution::Function)
+                        ),
+                        name == "printf" && argv.iter().any(|arg| arg == "-v"),
+                    );
+                }
+                self.commands.push(SimpleCmd {
                     name,
                     span: w.loc.as_ref().map(|l| (l.start.index, l.end.index)),
                     argv,
+                    resolution,
+                    path: local.path,
+                    correction_blocked: local.correction_blocked,
+                    runtime_dependent: local.files_changed,
                 });
             }
-            ast::Command::Compound(cc, _) => compound(cc, out, defined),
+            ast::Command::Compound(cc, redirects) => {
+                let writes = redirects
+                    .iter()
+                    .flat_map(|r| &r.0)
+                    .any(command_context::writes_files);
+                let blocks = redirects
+                    .iter()
+                    .flat_map(|r| &r.0)
+                    .any(command_context::redirect_blocks_correction);
+                scope.files_changed |= writes;
+                scope.correction_blocked |= blocks;
+                scope.dynamic |= blocks;
+                self.compound(cc, scope, depth + 1);
+            }
             ast::Command::Function(fd) => {
-                if let Some(n) = static_word(&fd.fname) {
-                    defined.push(n);
+                if let Some(n) = self.literal(&fd.fname) {
+                    scope.functions.insert(n);
                 }
             }
-            ast::Command::ExtendedTest(..) => {}
+            ast::Command::ExtendedTest(test, redirects) => {
+                scope.files_changed |= command_context::extended_test_may_write(&test.expr);
+                let writes = redirects
+                    .iter()
+                    .flat_map(|r| &r.0)
+                    .any(command_context::writes_files);
+                let blocks = redirects
+                    .iter()
+                    .flat_map(|r| &r.0)
+                    .any(command_context::redirect_blocks_correction);
+                scope.files_changed |= writes;
+                scope.correction_blocked |= blocks;
+                scope.dynamic |= blocks;
+            }
         }
     }
-    fn compound(cc: &ast::CompoundCommand, out: &mut Vec<SimpleCmd>, defined: &mut Vec<String>) {
+    fn optional(&mut self, list: &ast::CompoundList, scope: &mut Scope, depth: usize) {
+        let mut child = scope.clone();
+        self.list(list, &mut child, depth);
+        scope.merge_optional(&child);
+    }
+
+    fn compound(&mut self, cc: &ast::CompoundCommand, scope: &mut Scope, depth: usize) {
         use ast::CompoundCommand as C;
         match cc {
-            C::BraceGroup(b) => list(&b.list, out, defined),
-            C::Subshell(s) => list(&s.list, out, defined),
-            C::ForClause(f) => list(&f.body.list, out, defined),
-            C::ArithmeticForClause(f) => list(&f.body.list, out, defined),
+            C::BraceGroup(b) => self.list(&b.list, scope, depth),
+            C::Subshell(s) => {
+                let mut child = scope.clone();
+                self.list(&s.list, &mut child, depth);
+                scope.files_changed |= child.files_changed;
+                scope.correction_blocked |= child.correction_blocked;
+            }
+            C::ForClause(f) => {
+                scope.for_loop(f);
+                self.optional(&f.body.list, scope, depth);
+            }
+            C::ArithmeticForClause(f) => {
+                scope.dynamic = true;
+                self.optional(&f.body.list, scope, depth);
+            }
             C::CaseClause(c) => {
                 for item in &c.cases {
                     if let Some(cmd) = &item.cmd {
-                        list(cmd, out, defined);
+                        self.optional(cmd, scope, depth);
                     }
                 }
             }
             C::IfClause(i) => {
-                list(&i.condition, out, defined);
-                list(&i.then, out, defined);
+                self.list(&i.condition, scope, depth);
+                self.optional(&i.then, scope, depth);
                 for e in i.elses.iter().flatten() {
                     if let Some(c) = &e.condition {
-                        list(c, out, defined);
+                        self.optional(c, scope, depth);
                     }
-                    list(&e.body, out, defined);
+                    self.optional(&e.body, scope, depth);
                 }
             }
             C::WhileClause(w) | C::UntilClause(w) => {
-                list(&w.0, out, defined);
-                list(&w.1.list, out, defined);
+                self.list(&w.0, scope, depth);
+                self.optional(&w.1.list, scope, depth);
             }
-            C::Arithmetic(_) | C::Coprocess(_) => {}
+            C::Arithmetic(_) => scope.dynamic = true,
+            C::Coprocess(c) => {
+                self.command(&c.body, &mut scope.clone(), depth);
+                scope.files_changed = true;
+                scope.correction_blocked = true;
+            }
         }
-    }
-    for cl in &prog.complete_commands {
-        list(cl, out, defined);
     }
 }
 
@@ -367,25 +532,40 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
             return Action::Execute;
         }
     };
-    let mut cmds = Vec::new();
-    let mut defined = Vec::new();
-    collect(&prog, &mut cmds, &mut defined);
+    let mut collector = Collector {
+        shell,
+        options: shell.parser_options(),
+        commands: Vec::new(),
+        remaining: 16_384,
+    };
+    let mut scope = Scope {
+        dynamic: shell.has_command_traps(),
+        ..Scope::default()
+    };
+    for cl in &prog.complete_commands {
+        collector.list(cl, &mut scope, 0);
+    }
+    let cmds = collector.commands;
     let missing: Vec<&SimpleCmd> = cmds
         .iter()
-        .filter(|c| !defined.contains(&c.name) && shell.resolve(&c.name) == Resolution::NotFound)
+        .filter(|c| c.resolution == Some(Resolution::NotFound))
         .collect();
     if !missing.is_empty() {
         let names = shell.command_names();
         let mut edits = Vec::new();
         let mut first = None;
         for m in &missing {
+            if m.correction_blocked {
+                edits.clear();
+                break;
+            }
             if looks_like_question(&m.argv) {
                 edits.clear();
                 break;
             }
             let fix = spell::ranked_matches(&m.name, &names)
                 .into_iter()
-                .find(|c| shell.resolve(c) != Resolution::NotFound);
+                .find(|c| shell.resolve_with_path(c, m.path.as_deref()) != Resolution::NotFound);
             match (fix, m.span) {
                 (Some(fix), Some(span)) if !m.name.contains('/') => {
                     first.get_or_insert((m.name.clone(), fix.to_string()));
@@ -405,7 +585,10 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
                 to,
             };
         }
-        return if cfg.trigger_on_error {
+        return if cfg.trigger_on_error
+            && (!missing.iter().any(|m| m.runtime_dependent)
+                || missing.iter().any(|m| looks_like_question(&m.argv)))
+        {
             Action::Ai {
                 trigger: Trigger::NotFound,
                 text: t.to_string(),
@@ -446,6 +629,13 @@ pub fn failure_is_notable(line: &str, exit: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::backend::ShellOptions;
+    #[cfg(unix)]
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn apostrophes() {
@@ -478,5 +668,57 @@ mod tests {
         assert!(failure_is_notable("grep x y | sort", 1));
         assert!(!failure_is_notable("sleep 10", 130));
         assert!(failure_is_notable("grep x y", 2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn miss_after_filesystem_effect_is_not_routed_to_ai() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let touch = bin.join("touch");
+        fs::write(&touch, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&touch, fs::Permissions::from_mode(0o700)).unwrap();
+        let git = bin.join("git");
+        fs::write(&git, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut shell = EmbeddedShell::new(ShellOptions {
+            working_dir: Some(root.path().to_owned()),
+            ..ShellOptions::default()
+        })
+        .unwrap();
+        shell.run_user_line(&format!("PATH='{}'", bin.display()));
+
+        for line in [
+            "touch custom_command | custom_command",
+            "[[ $(touch custom_command) ]]; custom_command",
+        ] {
+            assert_eq!(
+                classify(line, &mut shell, &TriggerConfig::default()),
+                Action::Execute,
+                "{line}"
+            );
+        }
+
+        assert!(matches!(
+            classify("X=$Y; gti status", &mut shell, &TriggerConfig::default()),
+            Action::Correct { from, to, .. } if from == "gti" && to == "git"
+        ));
+        assert!(matches!(
+            classify(
+                "echo '${PATH:=/tmp}'; gti status",
+                &mut shell,
+                &TriggerConfig::default()
+            ),
+            Action::Correct { from, to, .. } if from == "gti" && to == "git"
+        ));
+        assert_eq!(
+            classify(
+                "true <<< \"${PATH:=/tmp}\"; gti status",
+                &mut shell,
+                &TriggerConfig::default()
+            ),
+            Action::Execute
+        );
     }
 }
