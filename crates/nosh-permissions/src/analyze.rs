@@ -25,8 +25,21 @@ const PROTECTED_READ: &str = "reads protected path";
 
 /// Analyzes an agent-issued command line.
 pub fn assess_command(cmd: &str, ctx: &Context) -> RiskReport {
+    assess_command_with_lookup(cmd, ctx, &|_, _, _, _| None)
+}
+
+/// Resolve external commands in the effective cwd/PATH, optionally using the
+/// parent shell's command cache. The callback must not execute the program.
+pub type ProgramLookup<'a> = dyn Fn(&str, &Path, Option<&str>, bool) -> Option<PathBuf> + 'a;
+
+pub fn assess_command_with_lookup(
+    cmd: &str,
+    ctx: &Context,
+    lookup: &ProgramLookup<'_>,
+) -> RiskReport {
     let mut a = Analyzer {
         ctx,
+        lookup,
         report: RiskReport {
             context: ctx.clone(),
             ..RiskReport::default()
@@ -131,6 +144,7 @@ fn insert_sudo_n(cmd: &str, char_positions: &[usize]) -> String {
 
 struct Analyzer<'a> {
     ctx: &'a Context,
+    lookup: &'a ProgramLookup<'a>,
     report: RiskReport,
     operation: Option<usize>,
     redirecting: bool,
@@ -1579,6 +1593,7 @@ impl Analyzer<'_> {
         };
         let mut sub = Analyzer {
             ctx: &child_ctx,
+            lookup: self.lookup,
             report: RiskReport::default(),
             operation: None,
             redirecting: false,
@@ -1915,6 +1930,41 @@ impl Analyzer<'_> {
         }
 
         let base = basename(&name).to_string();
+        if !name.contains('/') {
+            let executable = (self.lookup)(
+                &name,
+                &self.cwd,
+                self.vars.get("PATH").map(String::as_str),
+                !self.child,
+            );
+            if let Some(path) = executable {
+                let real = crate::real_path(&path, true).unwrap_or_else(|| path.clone());
+                let workspace = crate::real_path(&self.ctx.workspace, true)
+                    .unwrap_or_else(|| self.ctx.workspace.clone());
+                let venv = self
+                    .vars
+                    .get("VIRTUAL_ENV")
+                    .map(|root| self.target_path(root, true).join("bin"));
+                let local = real.starts_with(&workspace)
+                    && !in_system_bin_dir(&path.to_string_lossy())
+                    && venv
+                        .as_ref()
+                        .is_none_or(|bin| path.parent() != Some(bin.as_path()));
+                if let Some(i) = self.operation {
+                    self.report.operations[i].executable = Some(path.clone());
+                    self.report.operations[i].local_program = local;
+                }
+                if local {
+                    self.script(&path.to_string_lossy(), &path, false, &args);
+                    self.opaque();
+                    self.add(
+                        Risk::Mutating,
+                        format!("runs workspace program {}", path.display()),
+                    );
+                    return;
+                }
+            }
+        }
         if name.contains('/') && !in_system_bin_dir(&name) {
             // `./x.sh`, `/path/x.sh`, `~/bin/x.sh`: a shell script is analyzed.
             let path = self.target_path(&name, true);
@@ -2204,6 +2254,18 @@ impl Analyzer<'_> {
                     | "node"
                     | "java"
                     | "dotnet"
+                    | "tsc"
+                    | "eslint"
+                    | "pytest-3"
+                    | "gradlew"
+                    | "meson"
+                    | "bazel"
+                    | "sbt"
+                    | "just"
+                    | "task"
+                    | "rake"
+                    | "scons"
+                    | "ant"
             )
         {
             self.report.operations[i].opaque = true;

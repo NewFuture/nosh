@@ -44,11 +44,12 @@ fn base(op: &Operation) -> &str {
 }
 
 fn recognized_program(op: &Operation) -> bool {
-    op.argv.first().is_some_and(|name| {
-        !name.contains('/')
-            || crate::analyze::in_system_bin_dir(name)
-            || name == "./gradlew" && op.payload
-    })
+    !op.local_program
+        && op.argv.first().is_some_and(|name| {
+            !name.contains('/')
+                || crate::analyze::in_system_bin_dir(name)
+                || name == "./gradlew" && op.payload
+        })
 }
 
 fn ordinary_move_or_copy(op: &Operation) -> bool {
@@ -334,7 +335,7 @@ struct GitProbe<'a> {
 
 impl GitProbe<'_> {
     fn run(&self, args: &[&str]) -> Result<Option<String>, String> {
-        // Use a system Git for evidence, never execute a project-named program.
+        // Use the resolved Git for evidence, never a project-local lookalike.
         let git = if self.program.contains('/') {
             PathBuf::from(self.program)
         } else {
@@ -349,23 +350,13 @@ impl GitProbe<'_> {
                 .unwrap_or_else(|| PathBuf::from("/usr/bin/git"))
         };
         if !git.is_file() {
-            return Err("system Git is unavailable for recovery evidence".into());
+            return Err("resolved Git is unavailable for recovery evidence".into());
         }
-        let trusted = [
-            "/usr/bin",
-            "/bin",
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/home/linuxbrew/.linuxbrew/bin",
-        ];
-        if !git
-            .parent()
-            .is_some_and(|parent| trusted.iter().any(|dir| parent == Path::new(dir)))
-            || fs::canonicalize(&git)
-                .map_err(|e| format!("cannot resolve Git: {e}"))?
-                .starts_with(&self.ctx.workspace)
+        if fs::canonicalize(&git)
+            .map_err(|e| format!("cannot resolve Git: {e}"))?
+            .starts_with(&self.ctx.workspace)
         {
-            return Err("the session resolves Git outside trusted executable locations".into());
+            return Err("the session resolves Git to a workspace-local program".into());
         }
         if self.ctx.variables.keys().any(|k| k.starts_with("GIT_")) {
             return Err("custom GIT_* environment needs explicit authorization".into());
@@ -592,10 +583,11 @@ fn git_admission(op: &Operation, ctx: &Context) -> Result<String, AutoRejection>
     if !recognized_program(op) {
         return Err("path-qualified program is not a recognized Git executable".into());
     }
+    let executable = op.executable.as_ref().map(|path| path.to_string_lossy());
     let probe = GitProbe {
         cwd: &op.cwd,
         ctx,
-        program: &op.argv[0],
+        program: executable.as_deref().unwrap_or(&op.argv[0]),
     };
     probe.no_executable_config()?;
     let sub = op.argv.get(1).map(String::as_str).unwrap_or("");

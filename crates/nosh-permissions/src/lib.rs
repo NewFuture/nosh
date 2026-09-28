@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use admission::AutoAdmission;
-pub use analyze::assess_command;
+pub use analyze::{ProgramLookup, assess_command, assess_command_with_lookup};
 pub use paths::{PathClass, classify_path, classify_path_real, real_path};
 pub use policy::{
     ApprovalMode, Decision, DecisionSource, PolicyDecision, SessionAllowList, UserRules, evaluate,
@@ -168,6 +168,8 @@ pub struct Operation {
     pub tool: String,
     pub parent: Option<usize>,
     pub argv: Vec<String>,
+    pub executable: Option<PathBuf>,
+    pub local_program: bool,
     pub known: Vec<bool>,
     pub cwd: PathBuf,
     pub paths: Vec<PathAccess>,

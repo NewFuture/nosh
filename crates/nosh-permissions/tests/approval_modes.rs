@@ -1602,3 +1602,116 @@ fn redundant_relative_separators_never_grant_absolute_scope() {
         }
     }
 }
+
+#[test]
+fn config_driven_builds_remain_automatic_but_obey_resource_denies() {
+    let (_dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            tool: Some("run_command".into()),
+            write_paths: vec!["private/**".into()],
+            ..RuleSpec::default()
+        },
+        "private output deny",
+    )
+    .unwrap();
+    for command in [
+        "tsc",
+        "eslint .",
+        "meson compile build",
+        "bazel build //app:bin",
+        "sbt test",
+        "cargo test",
+    ] {
+        let report = assess_command(command, &context);
+        assert!(report.operations.iter().any(|op| op.opaque), "{command}");
+        assert_eq!(
+            evaluate(
+                &report,
+                Auto,
+                &UserRules::default(),
+                &SessionAllowList::default()
+            )
+            .decision,
+            Decision::Allow,
+            "{command}"
+        );
+        for mode in [Confirm, Auto, Yolo] {
+            let result = evaluate(
+                &report,
+                mode,
+                &UserRules {
+                    allow: vec![],
+                    deny: vec![rule.clone()],
+                },
+                &SessionAllowList::default(),
+            );
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{command}: {result:?}"
+            );
+        }
+    }
+    assert!(
+        !assess_command("tsc --version", &context)
+            .operations
+            .iter()
+            .any(|op| op.opaque)
+    );
+}
+
+#[test]
+fn sort_output_does_not_hide_input_reads_or_invent_option_input_files() {
+    let (_dir, context) = fixture();
+    let rule = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("sort".into()),
+            read_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected sort input",
+    )
+    .unwrap();
+    for command in [
+        "sort /etc/passwd -o out",
+        "sort -ro out /etc/passwd",
+        "sort --out=out --key 1,2 /etc/passwd",
+        "sort -k1,2 -T /tmp -t : --buffer-size 1M /etc/passwd -o out",
+    ] {
+        let report = assess_command(command, &context);
+        assert!(report.reads_protected, "{command}");
+        let reads: Vec<_> = report
+            .operations
+            .iter()
+            .flat_map(|op| &op.paths)
+            .filter(|path| path.kind == nosh_permissions::AccessKind::Read)
+            .map(|path| path.lexical.clone())
+            .collect();
+        assert_eq!(reads, [Some("/etc/passwd".into())], "{command}");
+        for mode in [Confirm, Auto, Yolo] {
+            let result = policy(
+                command,
+                mode,
+                &context,
+                &UserRules {
+                    allow: vec![UserRule::prefix("sort").unwrap()],
+                    deny: vec![rule.clone()],
+                },
+            );
+            assert!(
+                matches!(result.source, DecisionSource::UserDeny(_)),
+                "{command}: {result:?}"
+            );
+        }
+    }
+    let report = assess_command("sort input -o /etc/out -- --literal-input", &context);
+    assert!(!report.reads_protected);
+    assert_eq!(
+        report.operations[0]
+            .paths
+            .iter()
+            .filter(|path| path.kind == nosh_permissions::AccessKind::Read)
+            .count(),
+        2
+    );
+}

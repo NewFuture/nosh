@@ -889,6 +889,39 @@ impl EmbeddedShell {
         self.resolve_with_path(name, None)
     }
 
+    /// External lookup for permission analysis, using the same shell PATH and
+    /// hash state without executing commands or scanning the entire PATH.
+    pub fn resolve_program_at(
+        &self,
+        name: &str,
+        cwd: &Path,
+        path: Option<&str>,
+        use_cache: bool,
+    ) -> Option<PathBuf> {
+        let mut shell = self.lock();
+        if shell
+            .builtin_mut(name)
+            .is_some_and(|builtin| !builtin.disabled)
+        {
+            return None;
+        }
+        if cwd == shell.working_dir() && path == shell.env_str("PATH").as_deref() {
+            if use_cache
+                && shell.options().remember_command_locations
+                && let Some(cached) = shell.program_location_cache().get(name)
+                && (!shell.options().check_hashtable_before_command_exec
+                    || is_executable(&cwd.join(&cached)))
+            {
+                return Some(cwd.join(cached));
+            }
+            return shell.find_first_executable_in_path(name);
+        }
+        path?
+            .split(':')
+            .map(|directory| cwd.join(directory).join(name))
+            .find(|candidate| is_executable(candidate))
+    }
+
     pub(crate) fn resolve_with_path(&self, name: &str, path: Option<&str>) -> Resolution {
         self.resolve_scoped(name, path, false)
     }

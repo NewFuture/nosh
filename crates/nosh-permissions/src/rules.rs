@@ -301,6 +301,52 @@ fn option_targets_with_values(
     targets
 }
 
+const SORT_VALUE_FLAGS: &str = "kSoTt";
+const SORT_VALUE_OPTIONS: &[&str] = &[
+    "batch-size",
+    "buffer-size",
+    "compress-program",
+    "files0-from",
+    "key",
+    "output",
+    "parallel",
+    "random-source",
+    "sort",
+    "temporary-directory",
+    "field-separator",
+];
+
+fn sort_inputs(args: &[Arg]) -> Vec<Target> {
+    let mut inputs = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg.value == "--" {
+            inputs.extend(args.filter(|arg| arg.value != "-").map(Target::of));
+            break;
+        }
+        if let Some(option) = arg.value.strip_prefix("--") {
+            if !option.contains('=')
+                && SORT_VALUE_OPTIONS
+                    .iter()
+                    .any(|name| name.starts_with(option))
+            {
+                args.next();
+            }
+        } else if let Some(flags) = arg.value.strip_prefix('-') {
+            if let Some((index, flag)) = flags
+                .char_indices()
+                .find(|(_, flag)| SORT_VALUE_FLAGS.contains(*flag))
+                && index + flag.len_utf8() == flags.len()
+            {
+                args.next();
+            }
+        } else {
+            inputs.push(Target::of(arg));
+        }
+    }
+    inputs
+}
+
 /// Variables whose modification changes how the session or its children behave.
 pub const SENSITIVE_VARS: &[&str] = &[
     "PATH",
@@ -925,12 +971,19 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             }
         }
         "sort" => {
-            let out = option_targets_with_values(args, Some('o'), &["output"], "kSoTt");
-            if out.is_empty() {
-                Verdict::safe("sort").reads(targets(ops()))
+            let out = option_targets_with_values(args, Some('o'), &["output"], SORT_VALUE_FLAGS);
+            let mut verdict = if out.is_empty() {
+                Verdict::safe("sort")
             } else {
                 Verdict::mutating("sort writes an output file").writes(out)
-            }
+            };
+            verdict.reads.extend(sort_inputs(args));
+            verdict.reads.extend(option_targets(
+                args,
+                None,
+                &["files0-from", "random-source"],
+            ));
+            verdict
         }
         "uniq" => {
             let ops = ops();

@@ -13,8 +13,8 @@ use nosh_llm::{
     ToolCall, Usage,
 };
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, RiskReport, SessionAllowList, UserRules, assess_command,
-    assess_read, evaluate,
+    ApprovalMode, Context, Decision, Risk, RiskReport, SessionAllowList, UserRules,
+    assess_command_with_lookup, assess_read, evaluate,
 };
 use nosh_shell::{AgentExecOpts, EmbeddedShell};
 
@@ -737,7 +737,7 @@ impl Agent {
             }
             let mut ctx = self.perm_context(shell);
             ctx.timeout = timeout;
-            let report = prepared_command(&command, &ctx);
+            let report = prepared_command(&command, &ctx, shell);
             if let Some(error) = &report.syntax_error {
                 ui.error(&format!("invalid command syntax: {error}"));
                 return Exec::Result(format!("error: invalid command syntax: {error}"));
@@ -752,7 +752,7 @@ impl Agent {
                     if manual {
                         let mut fresh = self.perm_context(shell);
                         fresh.timeout = timeout;
-                        if prepared_command(&command, &fresh) != report {
+                        if prepared_command(&command, &fresh, shell) != report {
                             ui.notice("The operation or its scope changed while awaiting approval; reassessing.");
                             continue;
                         }
@@ -930,10 +930,13 @@ impl Agent {
     }
 }
 
-fn prepared_command(command: &str, ctx: &Context) -> RiskReport {
-    let report = assess_command(command, ctx);
+fn prepared_command(command: &str, ctx: &Context, shell: &EmbeddedShell) -> RiskReport {
+    let lookup = |name: &str, cwd: &Path, path: Option<&str>, use_cache| {
+        shell.resolve_program_at(name, cwd, path, use_cache)
+    };
+    let report = assess_command_with_lookup(command, ctx, &lookup);
     if let Some(rewritten) = report.rewritten {
-        let mut report = assess_command(&rewritten, ctx);
+        let mut report = assess_command_with_lookup(&rewritten, ctx, &lookup);
         report.rewritten = Some(rewritten);
         report
     } else {
@@ -1675,5 +1678,112 @@ mod permission_tests {
             assert!(ui.events.iter().any(|event| event.contains("user deny")));
         }
         assert!(!root.join("blocked").exists());
+    }
+
+    #[test]
+    fn path_and_hash_lookups_do_not_auto_admit_workspace_lookalikes() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for name in ["mv", "cp", "cargo", "ping", "sort"] {
+            let file = bin.join(name);
+            std::fs::write(&file, "#!/bin/sh\nprintf fixture\n").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
+            working_dir: Some(root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        shell.set_workspace(root.clone());
+        let path = shell.var("PATH").unwrap();
+        shell.run_user_line(&format!(
+            "export PATH='{}:{}'; hash -r",
+            bin.display(),
+            path
+        ));
+        let mut agent = fake_agent(Auto, UserRules::default());
+        let mut approvals = Scripted::new([]);
+        for command in ["mv a b", "cp a b", "cargo test", "ping host", "sort input"] {
+            assert!(
+                matches!(
+                    agent.exec_call(
+                        &mut shell,
+                        &call(command),
+                        &mut approvals,
+                        &mut RecordUi::default()
+                    ),
+                    Exec::Denied(_)
+                ),
+                "{command}"
+            );
+        }
+        assert_eq!(count(), 0);
+        assert_eq!(approvals.seen.len(), 5);
+        shell.run_user_line(&format!(
+            "export PATH='{path}'; hash -r; hash -p '{}' mv",
+            bin.join("mv").display()
+        ));
+        let report = prepared_command("mv a b", &agent.perm_context(&shell), &shell);
+        assert_eq!(
+            report.operations[0].executable.as_deref(),
+            Some(bin.join("mv").as_path())
+        );
+        assert!(report.operations[0].local_program);
+
+        let user_install = tempfile::tempdir().unwrap();
+        let file = user_install.path().join("cargo");
+        std::fs::write(&file, "#!/bin/sh\nprintf fixture\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shell.run_user_line(&format!(
+            "export PATH='{}:{path}'; hash -r",
+            user_install.path().display()
+        ));
+        let mut approvals = Scripted::new([]);
+        assert!(matches!(
+            agent.exec_call(
+                &mut shell,
+                &call("cargo test"),
+                &mut approvals,
+                &mut RecordUi::default()
+            ),
+            Exec::CommandResult(_)
+        ));
+        assert!(
+            approvals.seen.is_empty(),
+            "user-installed tools outside the project do not require a system-directory allowlist"
+        );
+        let temporary_path = format!("PATH='{}:{path}' cargo test", bin.display());
+        let report = prepared_command(&temporary_path, &agent.perm_context(&shell), &shell);
+        assert!(report.operations.iter().any(|op| op.local_program));
+        assert_eq!(
+            shell.var("PATH").unwrap(),
+            format!("{}:{path}", user_install.path().display())
+        );
+
+        let venv = root.join(".venv");
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        let python = venv.join("bin/python");
+        std::fs::write(&python, "#!/bin/sh\nprintf fixture\n").unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shell.run_user_line(&format!(
+            "export VIRTUAL_ENV='{}' PATH='{}:{path}'; hash -r",
+            venv.display(),
+            venv.join("bin").display()
+        ));
+        let report = prepared_command("python -m pytest", &agent.perm_context(&shell), &shell);
+        assert!(!report.operations[0].local_program);
+        assert_eq!(
+            evaluate(
+                &report,
+                Auto,
+                &UserRules::default(),
+                &SessionAllowList::default()
+            )
+            .decision,
+            Decision::Allow
+        );
     }
 }
