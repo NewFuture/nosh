@@ -1077,21 +1077,32 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
             let extract = has_flag(args, &['x'], &["extract", "get"])
                 || (!joined.starts_with('-') && joined.contains('x') && !joined.contains('c'));
             let archive = option_targets_with_values(args, Some('f'), &["file"], "C");
+            let directory = option_targets_with_values(args, Some('C'), &["directory"], "f");
             if list {
                 Verdict::safe("lists an archive").reads(archive)
             } else if extract {
-                Verdict::mutating("extracts an archive")
+                let mut verdict = Verdict::mutating("extracts an archive")
                     .reads(archive)
-                    .writes(option_targets_with_values(
-                        args,
-                        Some('C'),
-                        &["directory"],
-                        "f",
-                    ))
+                    .writes(directory);
+                // Member paths are not available without reading the archive.
+                verdict.unlisted = true;
+                verdict
             } else {
-                let mut w = option_targets_with_values(args, Some('C'), &["directory"], "f");
+                let inputs = operands(args)
+                    .into_iter()
+                    .filter(|arg| {
+                        !archive
+                            .iter()
+                            .chain(&directory)
+                            .any(|target| target.path == arg.value)
+                    })
+                    .map(Target::of)
+                    .collect::<Vec<_>>();
+                let mut w = directory;
                 w.extend(archive);
-                Verdict::mutating("creates or extracts an archive").writes(w)
+                Verdict::mutating("creates or extracts an archive")
+                    .reads(inputs)
+                    .writes(w)
             }
         }
         "unzip" => {
@@ -1289,7 +1300,14 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
         .writes(option_targets(
             args,
             None,
-            &["outDir", "outFile", "declarationDir", "tsBuildInfoFile"],
+            &[
+                "outDir",
+                "outFile",
+                "declarationDir",
+                "tsBuildInfoFile",
+                "generateTrace",
+                "generateCpuProfile",
+            ],
         )),
         "eslint" => Verdict::mutating("runs project lint code"),
         "pip" | "pip3" | "pipx" | "uv" | "poetry" | "conda" | "mamba" | "gem" | "bundle"

@@ -271,7 +271,7 @@ fn concrete_paths(op: &Operation, ctx: &Context) -> Result<Vec<PathBuf>, String>
 
 fn ordinary_variables(op: &Operation, ctx: &Context) -> bool {
     op.variables.iter().all(|(name, value)| {
-        if name == "PWD" {
+        if matches!(name.as_str(), "PWD" | "OLDPWD") {
             return matches!(base(op), "cd" | "pushd")
                 && value.as_deref().is_some_and(|p| Path::new(p).is_dir())
                 && ctx.variables.get("CDPATH").is_none_or(String::is_empty);

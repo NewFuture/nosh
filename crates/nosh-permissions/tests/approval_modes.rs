@@ -1792,6 +1792,8 @@ fn typescript_clean_and_initialization_have_distinct_effects() {
     for command in [
         "tsc --incremental --tsBuildInfoFile /etc/state.tsbuildinfo",
         "tsc --incremental --tsBuildInfoFile=/etc/state.tsbuildinfo",
+        "tsc --generateTrace /etc/trace",
+        "tsc --generateCpuProfile=/etc/profile.cpuprofile",
     ] {
         assert_eq!(
             policy(command, Auto, &context, &UserRules::default()).decision,
@@ -1856,6 +1858,101 @@ fn tar_extract_and_list_treat_the_archive_as_an_input() {
             "{command}: {result:?}"
         );
     }
+}
+
+#[test]
+fn tar_effects_cover_creation_inputs_and_unknown_extraction_members() {
+    let (_dir, context) = fixture();
+    let protected_read = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("tar".into()),
+            read_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected archive input",
+    )
+    .unwrap();
+    let create = "tar -cf out.tar /etc/passwd";
+    let report = assess_command(create, &context);
+    assert!(report.reads_protected, "{report:?}");
+    assert!(matches!(
+        policy(
+            create,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![protected_read],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+
+    let extracted_member = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("tar".into()),
+            write_paths: vec!["private/**".into()],
+            ..RuleSpec::default()
+        },
+        "private extraction target",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            "tar -xf archive.tar",
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![extracted_member],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+}
+
+#[test]
+fn directory_changes_scope_both_pwd_variables() {
+    let (_dir, context) = fixture();
+    let report = assess_command("cd .", &context);
+    let variables = &report.operations[0].variables;
+    assert!(variables.iter().any(|(name, _)| name == "PWD"));
+    assert!(variables.iter().any(|(name, _)| name == "OLDPWD"));
+
+    let rule = |variables| {
+        UserRule::compile(
+            RuleSpec {
+                command_prefix: Some("cd".into()),
+                variables,
+                ..RuleSpec::default()
+            },
+            "directory variables",
+        )
+        .unwrap()
+    };
+    let denied = policy(
+        "cd .",
+        Yolo,
+        &context,
+        &UserRules {
+            allow: vec![],
+            deny: vec![rule(vec!["OLDPWD".into()])],
+        },
+    );
+    assert!(matches!(denied.source, DecisionSource::UserDeny(_)));
+    let allowed = policy(
+        "cd .",
+        Auto,
+        &context,
+        &UserRules {
+            allow: vec![rule(vec!["PWD".into()])],
+            deny: vec![],
+        },
+    );
+    assert!(!matches!(allowed.source, DecisionSource::UserAllow(_)));
+    assert_eq!(allowed.decision, Decision::Allow);
 }
 
 #[test]

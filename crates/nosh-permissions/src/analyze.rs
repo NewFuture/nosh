@@ -2788,7 +2788,9 @@ impl Analyzer<'_> {
     fn cd(&mut self, args: &[Arg]) {
         self.add(Risk::Mutating, "changes directory");
         self.report.changes_session = true;
-        self.vars.remove("OLDPWD");
+        let old_pwd = (!self.cwd_unknown).then(|| self.cwd.to_string_lossy().into_owned());
+        self.set_var("OLDPWD", old_pwd.as_deref());
+        self.variable("OLDPWD", old_pwd);
         match rules::operands(args).first() {
             None => {
                 if let Some(home) = self
