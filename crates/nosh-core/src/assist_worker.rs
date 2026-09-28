@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use nosh_llm::CancelHandle;
 use nosh_shell::{AssistDisplay, Assistance};
 
-use crate::command_assist::{self, AssistError, AssistRequest, AssistResult};
+use crate::command_assist::{self, AssistError, AssistOutcome, AssistRequest, AssistResult};
 use crate::handler::{EngineLoader, LoadMode};
 use crate::{Agent, AgentConfig, Environment, ToolSet};
 
@@ -109,49 +109,69 @@ fn serve(
             }
             queued.job.take().expect("queued assistance")
         };
-        if job.cancel.is_cancelled() {
-            continue;
-        }
-        let result = (|| {
-            if state.agent.is_none() {
-                let loaded = (state.loader)(LoadMode::Background).map_err(AssistError::Protocol)?;
-                state.description = Some(loaded.description);
-                state.agent = Some(Agent::new(
-                    loaded.engine,
-                    job.cfg.clone(),
-                    Environment::from_snapshot(&job.request.commands, &job.request.context),
-                    ToolSet::Full,
-                ));
-            }
-            if job.cancel.is_cancelled() {
-                return Err(AssistError::Cancelled);
-            }
-            let agent = state.agent.as_mut().expect("loaded agent");
-            let engine_cancel = agent.engine_mut().cancel_handle();
-            engine_cancel.reset();
-            let request_cancel = job.cancel.clone();
-            display.on_cancel(
+        if let Err(error) = run_job(&mut state, &job, &display)
+            && !matches!(error, AssistError::Cancelled)
+        {
+            display.publish(
                 job.version,
-                Arc::new(move || {
-                    request_cancel.cancel();
-                    engine_cancel.cancel();
-                }),
+                Some(Assistance::Message(format!("nosh: {error}"))),
             );
-            command_assist::run(agent.engine_mut(), &job.request, &job.cfg, &job.cancel)
-        })();
-        let result = match result {
-            Ok(outcome) => match outcome.result {
-                AssistResult::Command(program) => Some(Assistance::Command {
-                    command_id: job.request.command.as_ref().expect("completion request").id,
-                    intent: job.request.intent.name().into(),
-                    program,
-                }),
-                AssistResult::Clarify(text) => Some(Assistance::Message(text)),
-                AssistResult::NoSuggestion => None,
+        }
+    }
+
+    fn run_job(
+        state: &mut EngineState,
+        job: &Job,
+        display: &AssistDisplay,
+    ) -> Result<AssistOutcome, AssistError> {
+        if job.cancel.is_cancelled() {
+            return Err(AssistError::Cancelled);
+        }
+        if state.agent.is_none() {
+            let loaded = (state.loader)(LoadMode::Background).map_err(AssistError::Protocol)?;
+            state.description = Some(loaded.description);
+            state.agent = Some(Agent::new(
+                loaded.engine,
+                job.cfg.clone(),
+                Environment::from_snapshot(&job.request.commands, &job.request.context),
+                ToolSet::Full,
+            ));
+        }
+        if job.cancel.is_cancelled() {
+            return Err(AssistError::Cancelled);
+        }
+        let agent = state.agent.as_mut().expect("loaded agent");
+        let engine_cancel = agent.engine_mut().cancel_handle();
+        engine_cancel.reset();
+        let request_cancel = job.cancel.clone();
+        display.on_cancel(
+            job.version,
+            Arc::new(move || {
+                request_cancel.cancel();
+                engine_cancel.cancel();
+            }),
+        );
+        let command_id = job.request.command.as_ref().expect("completion request").id;
+        command_assist::run(
+            agent.engine_mut(),
+            &job.request,
+            &job.cfg,
+            &job.cancel,
+            |result| {
+                let presentation = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|outcome| match &outcome.result {
+                        AssistResult::Command(program) => Some(Assistance::Command {
+                            command_id,
+                            intent: job.request.intent.name().into(),
+                            program: program.clone(),
+                        }),
+                        AssistResult::Clarify(text) => Some(Assistance::Message(text.clone())),
+                        AssistResult::NoSuggestion => None,
+                    });
+                display.publish(job.version, presentation)
             },
-            Err(AssistError::Cancelled) => continue,
-            Err(error) => Some(Assistance::Message(format!("nosh: {error}"))),
-        };
-        display.publish(job.version, result);
+        )
     }
 }

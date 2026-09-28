@@ -115,6 +115,20 @@ class CommandAssistTests(unittest.TestCase):
                                    {}, driver.Result(exit_code=0), observed["metrics"], observed)
             self.assertFalse(verdict.passed)
 
+    def test_superseded_finish_is_cancellation_not_an_accepted_command(self):
+        events = self.events(kind="command", text="echo stale", status="cancelled")
+        events[-2]["value"].pop("kind")
+        events[-2]["value"].pop("text")
+        events[-2]["value"]["error"] = "command assistance cancelled"
+        observed = self.observe(events)
+        self.assertEqual(observed["metrics"]["task_status"], "cancelled")
+        self.assertEqual(observed["answer"], "")
+        with tempfile.TemporaryDirectory() as temporary:
+            verdict = checks.judge(self.scenarios["next-no-goal"], "", {"before": {}},
+                                   Path(temporary), {}, driver.Result(exit_code=0),
+                                   observed["metrics"], observed)
+            self.assertFalse(verdict.passed)
+
     def test_no_suggestion_requires_no_side_effects_or_execution_calls(self):
         observed = self.observe(self.events())
         scenario = self.scenarios["next-no-goal"]

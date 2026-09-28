@@ -8,6 +8,7 @@ use nosh_shell::{AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, Trigger,
 
 use crate::agent::{Agent, AgentConfig};
 use crate::approval::ApprovalChannel;
+use crate::assist_worker::{EngineState, Worker};
 use crate::prompt::{Environment, TaskInput};
 use crate::tools::ToolSet;
 use crate::ui::{TermUi, approval_label};
@@ -29,26 +30,26 @@ pub enum LoadMode {
 pub type EngineLoader = Box<dyn FnMut(LoadMode) -> Result<LoadedEngine, String> + Send>;
 
 pub struct ShellAi {
-    loader: Option<EngineLoader>,
-    background: Option<crate::assist_worker::Worker>,
+    foreground: Option<EngineState>,
+    background: Option<Worker>,
     display: nosh_shell::AssistDisplay,
     engine_hooked: bool,
     cfg: AgentConfig,
-    agent: Option<Agent>,
-    description: Option<String>,
     approval: Box<dyn ApprovalChannel>,
 }
 
 impl ShellAi {
     pub fn new(loader: EngineLoader, cfg: AgentConfig, approval: Box<dyn ApprovalChannel>) -> Self {
         Self {
-            loader: Some(loader),
+            foreground: Some(EngineState {
+                loader,
+                agent: None,
+                description: None,
+            }),
             background: None,
             display: Default::default(),
             engine_hooked: false,
             cfg,
-            agent: None,
-            description: None,
             approval,
         }
     }
@@ -60,10 +61,7 @@ impl ShellAi {
     fn reclaim(&mut self) -> Result<(), String> {
         self.display.invalidate();
         if let Some(worker) = self.background.take() {
-            let state = worker.reclaim()?;
-            self.loader = Some(state.loader);
-            self.agent = state.agent;
-            self.description = state.description;
+            self.foreground = Some(worker.reclaim()?);
         }
         Ok(())
     }
@@ -73,15 +71,15 @@ impl ShellAi {
             eprintln!("nosh: {error}");
             return None;
         }
-        if self.agent.is_none() {
-            let Some(loader) = self.loader.as_mut() else {
-                eprintln!("nosh: inference engine is unavailable");
-                return None;
-            };
-            match loader(LoadMode::Foreground) {
+        let Some(state) = self.foreground.as_mut() else {
+            eprintln!("nosh: inference engine is unavailable");
+            return None;
+        };
+        if state.agent.is_none() {
+            match (state.loader)(LoadMode::Foreground) {
                 Ok(l) => {
-                    self.description = Some(l.description);
-                    self.agent = Some(Agent::new(
+                    state.description = Some(l.description);
+                    state.agent = Some(Agent::new(
                         l.engine,
                         self.cfg.clone(),
                         Environment::detect(shell),
@@ -95,18 +93,22 @@ impl ShellAi {
             }
         }
         if !self.engine_hooked
-            && let Some(agent) = &mut self.agent
+            && let Some(agent) = &mut state.agent
         {
             let cancel = agent.engine_mut().cancel_handle();
             shell.interrupts().on_interrupt(move || cancel.cancel());
             self.engine_hooked = true;
         }
-        self.agent.as_mut()
+        state.agent.as_mut()
     }
 
     fn set_mode(&mut self, mode: ApprovalMode) {
         self.cfg.mode = mode;
-        if let Some(a) = &mut self.agent {
+        if let Some(a) = self
+            .foreground
+            .as_mut()
+            .and_then(|state| state.agent.as_mut())
+        {
             a.cfg.mode = mode;
         }
         if mode == ApprovalMode::Yolo {
@@ -151,7 +153,7 @@ impl ShellAi {
         }
         let cancel = agent.engine_mut().cancel_handle();
         cancel.reset();
-        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel) {
+        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel, |_| true) {
             Ok(outcome) => {
                 let mut ui = TermUi::new(false);
                 let prefill = match outcome.result {
@@ -244,7 +246,12 @@ impl AiHandler for ShellAi {
                 exit_code: 130,
             };
         }
-        let (Some(agent), approval) = (self.agent.as_mut(), self.approval.as_mut()) else {
+        let (Some(agent), approval) = (
+            self.foreground
+                .as_mut()
+                .and_then(|state| state.agent.as_mut()),
+            self.approval.as_mut(),
+        ) else {
             return AiOutcome::default();
         };
         let mut ui = TermUi::new(false);
@@ -287,6 +294,8 @@ impl AiHandler for ShellAi {
                 None,
             );
         }
+        let state = self.foreground.as_ref();
+        let agent = state.and_then(|state| state.agent.as_ref());
         match sub {
             "mode" => match arg.map(ApprovalMode::parse) {
                 Some(Some(m)) => {
@@ -302,7 +311,10 @@ impl AiHandler for ShellAi {
                     Some("off") => self.cfg.thinking = false,
                     _ => {}
                 }
-                if let Some(a) = &mut self.agent
+                if let Some(a) = self
+                    .foreground
+                    .as_mut()
+                    .and_then(|state| state.agent.as_mut())
                     && a.cfg.thinking != self.cfg.thinking
                 {
                     a.cfg.thinking = self.cfg.thinking;
@@ -314,12 +326,16 @@ impl AiHandler for ShellAi {
                 ));
             }
             "clear" => {
-                if let Some(a) = &mut self.agent {
+                if let Some(a) = self
+                    .foreground
+                    .as_mut()
+                    .and_then(|state| state.agent.as_mut())
+                {
                     a.reset_conversation();
                 }
                 say(tr!("已开始新对话", "started a new conversation"));
             }
-            "ctx" => match self.agent.as_ref().and_then(Agent::context_usage) {
+            "ctx" => match agent.and_then(Agent::context_usage) {
                 Some((used, max)) => say(&format!(
                     "context: {used} / {max} tokens ({}%)",
                     used * 100 / max.max(1)
@@ -329,22 +345,24 @@ impl AiHandler for ShellAi {
             "status" => {
                 say(&format!(
                     "model: {}",
-                    self.description.as_deref().unwrap_or(tr!(
-                        "未加载（首次使用时加载）",
-                        "not loaded (loads on first use)"
-                    ))
+                    state
+                        .and_then(|state| state.description.as_deref())
+                        .unwrap_or(tr!(
+                            "未加载（首次使用时加载）",
+                            "not loaded (loads on first use)"
+                        ))
                 ));
                 say(&approval_label(self.cfg.mode));
                 say(&format!(
                     "think: {}",
                     if self.cfg.thinking { "on" } else { "off" }
                 ));
-                if let Some((used, max)) = self.agent.as_ref().and_then(Agent::context_usage) {
+                if let Some((used, max)) = agent.and_then(Agent::context_usage) {
                     say(&format!("context: {used} / {max} tokens"));
                 }
             }
             "out" => {
-                let Some(agent) = &self.agent else {
+                let Some(agent) = agent else {
                     say(tr!("还没有 agent 命令", "no agent commands yet"));
                     return AiOutcome::default();
                 };
@@ -426,7 +444,7 @@ impl AiHandler for ShellAi {
         };
         request.background = true;
         if self.background.is_none() {
-            let Some(loader) = self.loader.take() else {
+            let Some(state) = self.foreground.take() else {
                 let version = self.display.invalidate();
                 self.display.publish(
                     version,
@@ -436,14 +454,7 @@ impl AiHandler for ShellAi {
                 );
                 return;
             };
-            self.background = Some(crate::assist_worker::Worker::start(
-                crate::assist_worker::EngineState {
-                    loader,
-                    agent: self.agent.take(),
-                    description: self.description.take(),
-                },
-                self.display.clone(),
-            ));
+            self.background = Some(Worker::start(state, self.display.clone()));
         }
         self.background
             .as_ref()
@@ -489,7 +500,17 @@ mod tests {
                     },
                 );
                 assert_eq!(ai.mode(), mode);
-                assert_eq!(ai.agent.as_ref().unwrap().cfg.mode, mode);
+                assert_eq!(
+                    ai.foreground
+                        .as_ref()
+                        .unwrap()
+                        .agent
+                        .as_ref()
+                        .unwrap()
+                        .cfg
+                        .mode,
+                    mode
+                );
                 ai.builtin(&mut shell, &["clear".into()]);
             }
         }

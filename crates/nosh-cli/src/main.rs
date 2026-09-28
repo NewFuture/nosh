@@ -325,10 +325,7 @@ fn run_shell(
     }
     let loader_setup = setup.clone();
     let mut ai = nosh_core::ShellAi::new(
-        Box::new(move |mode| match mode {
-            nosh_core::LoadMode::Foreground => engine::load(&loader_setup, true),
-            nosh_core::LoadMode::Background => engine::load_background(&loader_setup),
-        }),
+        Box::new(move |mode| engine::load(&loader_setup, mode)),
         agent_cmd::agent_config(&cfg, mode, cli.global.seed),
         nosh_core::TerminalApproval::detect(),
     );

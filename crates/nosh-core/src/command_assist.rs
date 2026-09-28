@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::{AgentConfig, prompt, tools};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
+pub(crate) enum Intent {
     Generate,
     Fix,
     Next,
@@ -70,7 +70,7 @@ pub enum AssistError {
 }
 
 #[derive(Debug, Clone)]
-pub struct AssistRequest {
+pub(crate) struct AssistRequest {
     pub intent: Intent,
     pub text: String,
     pub command: Option<UserCommand>,
@@ -78,7 +78,6 @@ pub struct AssistRequest {
     pub commands: CommandSnapshot,
     pub context: Context,
     pub background: bool,
-    venv: Option<String>,
 }
 
 impl AssistRequest {
@@ -129,7 +128,6 @@ impl AssistRequest {
             output,
             commands: CommandSnapshot::capture(shell).map_err(AssistError::Protocol)?,
             context: cfg.permission_context(shell),
-            venv: shell.snapshot().venv(),
             background: false,
         })
     }
@@ -143,8 +141,13 @@ impl AssistRequest {
             )));
         }
         let mut facts = crate::project::context(&self.context);
-        if let Some(venv) = &self.venv {
-            facts["venv"] = json!(venv);
+        if let Some(venv) = self.context.variables.get("VIRTUAL_ENV") {
+            facts["venv"] = json!(
+                Path::new(venv)
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_else(|| venv.as_str().into())
+            );
         }
         let mut background = crate::project::render_context(&facts);
         if !guidance.text.is_empty() {
@@ -179,7 +182,7 @@ impl AssistRequest {
     }
 }
 
-pub fn system_prompt(intent: Intent) -> String {
+fn system_prompt(intent: Intent) -> String {
     format!(
         "You are nosh's command assistant on {} ({}), shell bash.\n<tool_def_sep>\n{}\n{}\nQuery only missing facts. Your final response must be one finish call, including clarification or none, without prose.",
         std::env::consts::OS,
@@ -189,7 +192,7 @@ pub fn system_prompt(intent: Intent) -> String {
     )
 }
 
-pub fn specs() -> Vec<ToolSpec> {
+fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "command_info".into(),
@@ -230,7 +233,7 @@ pub fn generate(
     let cancel = engine.cancel_handle();
     cancel.reset();
     let request = AssistRequest::capture(shell, cfg, Intent::Generate, text.into(), None, None)?;
-    run(engine, &request, cfg, &cancel)
+    run(engine, &request, cfg, &cancel, |_| true)
 }
 
 fn finish(call: &ToolCall, commands: &CommandSnapshot) -> Result<AssistResult, AssistError> {
@@ -266,11 +269,13 @@ fn finish(call: &ToolCall, commands: &CommandSnapshot) -> Result<AssistResult, A
 
 /// Cancellation belongs to this request, so superseded background jobs cannot
 /// reset the cancellation flag of a foreground task.
-pub fn run(
+/// `deliver` validates publication before the host records an accepted result.
+pub(crate) fn run(
     engine: &mut dyn ChatEngine,
     request: &AssistRequest,
     cfg: &AgentConfig,
     cancel: &CancelHandle,
+    deliver: impl FnOnce(&Result<AssistOutcome, AssistError>) -> bool,
 ) -> Result<AssistOutcome, AssistError> {
     if cancel.is_cancelled() {
         return Err(AssistError::Cancelled);
@@ -293,6 +298,11 @@ pub fn run(
         max_new_tokens: 512,
     })?;
     let result = run_session(engine, sid, request, cfg, cancel, messages);
+    let result = if deliver(&result) {
+        result
+    } else {
+        Err(AssistError::Cancelled)
+    };
     let observation = match &result {
         Ok(outcome) => {
             let (kind, text) = match &outcome.result {

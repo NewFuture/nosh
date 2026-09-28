@@ -82,7 +82,7 @@ Fix 只接受匹配 command ID、退出码与执行目录的证据，区分缺�
 
 默认 `[shell] command_assist = true`。每条用户命令完成后，成功排入 Next，值得诊断的失败排入 Fix；`on_failure = "off"` 关闭自动失败辅助，`ai auto off` 暂停自动辅助。`command_assist = false` 保留显式 Generate/Fix/Next；`--safe`／`NOSH_DISABLE_AI` 关闭 AI。
 
-一个后台 worker 临时持有既有 Agent 及其推理引擎，只有一个最新任务槽，不加载第二份模型。前台普通命令和编辑不等待推理；显式 AI 请求取消后台工作并取回同一引擎，因此可等待当前推理取消或模型加载完成。主 Agent 的对话日志不因辅助任务而清空，单份活动 KV 在切换对话后可能重新 prefill。
+一个后台 worker 临时持有既有 Agent 及其推理引擎，只有一个最新任务槽，不加载第二份模型。加载器、Agent 和模型描述作为同一个 EngineState 在前后台移动，不逐项交接独立状态。前台普通命令和编辑不等待推理；显式 AI 请求取消后台工作并取回同一引擎，因此可等待当前推理取消或模型加载完成。主 Agent 的对话日志不因辅助任务而清空，单份活动 KV 在切换对话后可能重新 prefill。
 
 前后台共用一个带 `LoadMode` 的加载入口，后台明确传入 Background，不回退到交互式加载。后台只使用已安装模型，不下载、不读终端、不打印加载进度；仅首次创建 Agent 时在 worker 中探测环境，不在每次命令结束的前台路径重复查询 PATH。错误作为辅助状态显示。输入编辑、新执行和退出使旧版本失效；结果、版本和取消句柄由同一个锁保护，取消回调在锁外执行。
 
@@ -93,5 +93,7 @@ Fix 只接受匹配 command ID、退出码与执行目录的证据，区分缺�
 Agent 回归与命令辅助分别使用 `eval/suites/regression.json` 和 `eval/suites/command-assist.json`，从 `eval/scenarios/` 引用唯一场景定义。`smoke.json` 仅选择既有场景的 seed 0 小集合，不替代正式基线。Agent 回归显式关闭自动辅助以隔离任务统计；CommandAssist 专项分别覆盖生成、帮助查询、澄清、自动失败修复和成功后无建议，自动场景保持真实完成事件。
 
 真实 trace 区分模型工具调用和宿主接受结果。只有与对应会话、command ID、执行状态和实际 finish 内容一致的 `observation` 才证明命令被接受；`finish` 不计为执行。CLI 还要核对实际 stdout，不能拿 trace 中的正确命令替代错误或缺失的输出。帮助查询要求实际成功退出。记录新 prompt、缓存和生成 token（含 schema／模板），以及步数、确认、延迟、结果类型、文件变化与重复结果一致性。协议稳定不等于任务正确；当前效果以实测报告为准，不宣称短 prompt 已提高准确率。
+
+后台结果先在显示状态的锁内核对版本并发布，再记录 completed；发布前已经过期的结果记录 cancelled，不带可评分的 kind/text。成功发布后用户继续输入可以正常清除候选；completed 只表示当时已发布，不代表用户接受或执行。
 
 实现入口：[command_assist.rs](../crates/nosh-core/src/command_assist.rs)、[command_info.rs](../crates/nosh-core/src/command_info.rs)、[assist_worker.rs](../crates/nosh-core/src/assist_worker.rs)、[assist_display.rs](../crates/nosh-shell/src/assist_display.rs)。评测入口见 [eval](../eval/README.md)。

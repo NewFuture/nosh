@@ -7,12 +7,9 @@ import subprocess
 from .. import driver, fixtures
 from ..approval import PROJECT_POLICIES, command_groups, project_actions, shell_parts
 from ..fixtures import artifact, protected_files
-from ..suite import NATIVE_CHECKS as PROJECT_CHECKS
+from ..suite import PROJECT_CHECKS
 from .common import HISTORY_ALIASES, mentioned_files, response_prose
 from .experience import clarification_request, history_prose
-
-
-PROJECT_CHECKS = PROJECT_CHECKS - {"assist-archive", "assist-none", "assist-clarify"}
 
 
 VERSION_FLAGS = {

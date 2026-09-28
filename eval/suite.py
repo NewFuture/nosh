@@ -34,6 +34,8 @@ CHECKS = set(CHECK_FIXTURES)
 
 
 NATIVE_CHECKS = CHECKS - LEGACY_CHECKS
+ASSIST_CHECKS = {"assist-archive", "assist-none", "assist-clarify"}
+PROJECT_CHECKS = NATIVE_CHECKS - ASSIST_CHECKS
 
 
 def seeds(value: list) -> list[int]:
@@ -193,7 +195,7 @@ def load_suite(path: Path) -> dict:
                 raise ValueError(f"stdin attachments require agent mode: {sid}")
         else:
             raise ValueError(f"unknown mode: {sid}")
-        if scenario["check"] in (NATIVE_CHECKS - {"assist-archive", "assist-none", "assist-clarify"}) | {"typos", "failure", "cwd"} and scenario["mode"] != "repl":
+        if scenario["check"] in PROJECT_CHECKS | {"typos", "failure", "cwd"} and scenario["mode"] != "repl":
             raise ValueError(f"this check requires a shared interactive session: {sid}")
         if not all(isinstance(s, str) and s and "\0" not in s and "\r" not in s and "\n" not in s for s in inputs):
             raise ValueError(f"inputs must be nonempty single lines: {sid}")

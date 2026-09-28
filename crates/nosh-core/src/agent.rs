@@ -239,10 +239,6 @@ impl Agent {
         self.engine.as_mut()
     }
 
-    pub fn environment(&self) -> &Environment {
-        &self.env
-    }
-
     /// Starts a new conversation (`ai clear`, idle timeout, config change).
     pub fn reset_conversation(&mut self) {
         if let Some(sid) = self.sid.take() {

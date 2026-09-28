@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use nosh_core::LoadedEngine;
+use nosh_core::{LoadMode, LoadedEngine};
 use nosh_hub::{
     BarProgress, HubError, ModelHub, PullOptions, ResolvedModel, SourceSelection, net, tr,
 };
@@ -160,23 +160,15 @@ fn first_download_needed(setup: &EngineSetup) -> Result<bool, HubError> {
     Ok(missing && !setup.no_download && !net::is_offline() && !declined_marker().exists())
 }
 
-/// Loads the engine, downloading the model first if needed.
-pub fn load(setup: &EngineSetup, ask: bool) -> Result<LoadedEngine, String> {
-    load_mode(setup, ask, false)
-}
-
-/// Automatic assistance must never download, prompt, or write over the editor.
-pub fn load_background(setup: &EngineSetup) -> Result<LoadedEngine, String> {
-    load_mode(setup, false, true)
-}
-
-fn load_mode(setup: &EngineSetup, ask: bool, background: bool) -> Result<LoadedEngine, String> {
+/// Background loading uses installed models only, without terminal interaction.
+pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String> {
+    let background = mode == LoadMode::Background;
     let resolved = match locate(setup).map_err(|e| e.to_string())? {
         Some(r) => r,
         None if background => {
             return Err("model unavailable for automatic assistance; run `nosh model pull`".into());
         }
-        None => download(setup, ask)?,
+        None => download(setup, true)?,
     };
     let terminal = style::stderr();
     if terminal.tty && !background {

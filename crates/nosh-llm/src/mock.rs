@@ -46,6 +46,7 @@ pub struct MockChatEngine {
     responder: Option<Responder>,
     received: Arc<Mutex<Vec<Vec<Message>>>>,
     specs: Arc<Mutex<Vec<SessionSpec>>>,
+    observations: Arc<Mutex<Vec<(SessionId, Value)>>>,
     sessions: HashMap<SessionId, Vec<Message>>,
     next_id: SessionId,
     cancel: CancelHandle,
@@ -60,6 +61,7 @@ impl MockChatEngine {
             responder: None,
             received: Arc::default(),
             specs: Arc::default(),
+            observations: Arc::default(),
             sessions: HashMap::new(),
             next_id: 1,
             cancel: CancelHandle::default(),
@@ -83,6 +85,10 @@ impl MockChatEngine {
         self.specs.clone()
     }
 
+    pub fn observations(&self) -> Arc<Mutex<Vec<(SessionId, Value)>>> {
+        self.observations.clone()
+    }
+
     pub fn set_context_max(&mut self, n: usize) {
         self.context_max = n;
     }
@@ -98,6 +104,14 @@ fn approx_tokens(msgs: &[Message]) -> usize {
 }
 
 impl ChatEngine for MockChatEngine {
+    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), LlmError> {
+        if !self.sessions.contains_key(&sid) {
+            return Err(LlmError::UnknownSession(sid));
+        }
+        self.observations.lock().unwrap().push((sid, value));
+        Ok(())
+    }
+
     fn set_tool_choice(
         &mut self,
         sid: SessionId,

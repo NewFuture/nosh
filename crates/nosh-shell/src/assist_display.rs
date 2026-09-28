@@ -53,11 +53,12 @@ impl AssistDisplay {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).repaint = Some(repaint);
     }
 
-    pub fn publish(&self, version: u64, result: Option<Assistance>) {
+    /// Returns whether this version was still current at publication.
+    pub fn publish(&self, version: u64, result: Option<Assistance>) -> bool {
         let repaint = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.version != version {
-                return;
+                return false;
             }
             state.result = result;
             state.cancel = None;
@@ -66,6 +67,7 @@ impl AssistDisplay {
         if let Some(repaint) = repaint {
             repaint();
         }
+        true
     }
 
     pub fn result(&self) -> Option<Assistance> {
@@ -122,9 +124,9 @@ mod tests {
         let display = AssistDisplay::default();
         let old = display.invalidate();
         let new = display.invalidate();
-        display.publish(old, Some(Assistance::Message("old".into())));
+        assert!(!display.publish(old, Some(Assistance::Message("old".into()))));
         assert!(display.result().is_none());
-        display.publish(new, Some(Assistance::Message("new".into())));
+        assert!(display.publish(new, Some(Assistance::Message("new".into()))));
         assert!(matches!(display.result(), Some(Assistance::Message(s)) if s == "new"));
         display.invalidate();
         assert!(display.result().is_none());
