@@ -3,7 +3,9 @@
 
 pub mod agent;
 pub mod approval;
+mod guidance;
 pub mod handler;
+mod project;
 pub mod prompt;
 pub mod suggest;
 pub mod tools;

@@ -13,8 +13,8 @@ use nosh_llm::{
     ToolCall, Usage,
 };
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, Risk, RiskReport, SessionAllowList, UserRules,
-    assess_command_with_lookup, assess_read, evaluate,
+    ApprovalMode, Context, Decision, PathClass, Risk, RiskReport, SessionAllowList, UserRules,
+    assess_command_with_lookup, assess_read, classify_path_real, evaluate,
 };
 use nosh_shell::{AgentExecOpts, EmbeddedShell};
 
@@ -55,6 +55,45 @@ impl Default for AgentConfig {
             sampling: SamplingParams::default(),
             max_new_tokens: 1024,
         }
+    }
+}
+
+impl AgentConfig {
+    /// Live paths and settings shared by command assessment and automatic context reads.
+    pub fn permission_context(&self, shell: &EmbeddedShell) -> Context {
+        let mut ctx = Context::new(shell.cwd(), shell.workspace());
+        ctx.home = shell.home().or_else(|| ctx.user_home.clone());
+        ctx.variables.clear();
+        ctx.variables_complete = true;
+        ctx.exported.clear();
+        ctx.aliases = shell.aliases();
+        ctx.functions = shell.functions();
+        for (name, value, exported) in shell.scalar_vars() {
+            if exported {
+                ctx.exported.insert(name.clone());
+            }
+            ctx.variables.insert(name, value);
+        }
+        if let Some(pwd) = shell.var("PWD") {
+            ctx.variables.insert("PWD".into(), pwd);
+        }
+        ctx.readonly_variables = shell.readonly_variable_names();
+        ctx.unknown_variables = shell
+            .variable_names()
+            .into_iter()
+            .filter(|name| !ctx.variables.contains_key(name))
+            .collect();
+        ctx.execution_variables = shell.agent_environment();
+        ctx.protected = self
+            .protected
+            .iter()
+            .map(|path| ctx.resolve_workspace(&path.to_string_lossy()))
+            .collect();
+        for path in [nosh_hub::paths::config_dir(), nosh_hub::paths::state_dir()] {
+            ctx.protected
+                .push(std::path::absolute(&path).unwrap_or(path));
+        }
+        ctx
     }
 }
 
@@ -119,6 +158,7 @@ enum Exec {
     Denied(String),
     Handoff(String, String),
     Aborted(String),
+    Cancelled(String),
 }
 
 enum Authorization {
@@ -150,15 +190,16 @@ pub struct Agent {
     carry: Vec<Message>,
     outputs: Vec<OutputRecord>,
     next_output: usize,
-    notes_seen: HashSet<PathBuf>,
     user_outputs_seen: HashSet<u64>,
+    guidance: crate::guidance::GuidanceCache,
+    guidance_sent: Option<String>,
     hooked: bool,
     /// Filters what the agent writes to disk (see [`tools::Redactor`]).
     redactor: Arc<dyn Redactor>,
     command_runner: CommandRunner,
 }
 
-const SUMMARIZE: &str = "[system] Step limit reached. Do not call any more tools. Summarize what you found in the user's language and suggest the next step.";
+const SUMMARIZE: &str = "Step limit reached for the preceding user request only. Finish it without tools, with supported results and the next step in its language. Later user requests may use tools normally.";
 
 impl Agent {
     pub fn new(
@@ -178,8 +219,9 @@ impl Agent {
             carry: Vec::new(),
             outputs: Vec::new(),
             next_output: 1,
-            notes_seen: HashSet::new(),
             user_outputs_seen: HashSet::new(),
+            guidance: crate::guidance::GuidanceCache::default(),
+            guidance_sent: None,
             hooked: false,
             redactor: Arc::new(NoRedact),
             command_runner: EmbeddedShell::run_agent_command,
@@ -207,8 +249,8 @@ impl Agent {
             self.engine.close(sid);
         }
         self.carry.clear();
-        self.notes_seen.clear();
         self.user_outputs_seen.clear();
+        self.guidance_sent = None;
     }
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
@@ -264,46 +306,6 @@ impl Agent {
                 Ok(sid)
             }
         }
-    }
-
-    fn perm_context(&self, shell: &EmbeddedShell) -> Context {
-        let mut ctx = Context::new(shell.cwd(), shell.workspace());
-        ctx.home = shell.home().or_else(|| ctx.user_home.clone());
-        ctx.variables.clear();
-        ctx.variables_complete = true;
-        ctx.exported.clear();
-        ctx.aliases = shell.aliases();
-        ctx.functions = shell.functions();
-        for (name, value, exported) in shell.scalar_vars() {
-            if exported {
-                ctx.exported.insert(name.clone());
-            }
-            ctx.variables.insert(name, value);
-        }
-        if let Some(pwd) = shell.var("PWD") {
-            ctx.variables.insert("PWD".into(), pwd);
-        }
-        ctx.readonly_variables = shell.readonly_variable_names();
-        ctx.unknown_variables = shell
-            .variable_names()
-            .into_iter()
-            .filter(|name| !ctx.variables.contains_key(name))
-            .collect();
-        ctx.execution_variables = shell.agent_environment();
-        ctx.protected = self
-            .cfg
-            .protected
-            .iter()
-            .map(|path| ctx.resolve_workspace(&path.to_string_lossy()))
-            .collect();
-        // nosh's own settings and state wherever they are (macOS keeps them
-        // under ~/Library/Application Support; NOSH_HOME, XDG_CONFIG_HOME),
-        // besides the XDG defaults the analysis always protects.
-        for path in [nosh_hub::paths::config_dir(), nosh_hub::paths::state_dir()] {
-            ctx.protected
-                .push(std::path::absolute(&path).unwrap_or(path));
-        }
-        ctx
     }
 
     fn step(
@@ -373,6 +375,27 @@ impl Agent {
         Ok(())
     }
 
+    fn project_documents(
+        &mut self,
+        context: &Context,
+        sid: SessionId,
+    ) -> (Option<String>, Option<String>) {
+        let guidance = self.guidance.load(context);
+        if self.guidance_sent.as_deref() == Some(guidance.key.as_str()) {
+            return (None, None);
+        }
+        // Even an incomplete replacement clears the previously delivered scope.
+        self.guidance_sent = None;
+        let mut text = guidance.text;
+        if self.engine.message_count(sid) > 0 {
+            text.insert_str(0, "[project documents cleared]\n");
+        }
+        (
+            (!text.is_empty()).then_some(text),
+            guidance.complete.then_some(guidance.key),
+        )
+    }
+
     /// Runs one task to completion in the shared shell session.
     pub fn run_task(
         &mut self,
@@ -421,21 +444,21 @@ impl Agent {
         }
         let mut attached_output = input.user_output.as_ref().map(|output| output.command_id);
         let cwd0 = shell.cwd();
-        let notes =
-            prompt::project_notes(&cwd0).filter(|(path, _)| !self.notes_seen.contains(path));
-        let mut attached_notes = notes.as_ref().map(|(path, _)| path.clone());
-        pending.push(Message::User(prompt::task_message(
+        let permission_context = self.cfg.permission_context(shell);
+        let (notes, mut guidance_key) = self.project_documents(&permission_context, sid);
+        pending.extend(prompt::task_messages(
             shell,
             &input,
-            notes.as_ref().map(|(_, text)| text.as_str()),
-        )));
+            notes.as_deref(),
+            &permission_context,
+        ));
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
         loop {
             ui.state(self.cfg.mode, Activity::Thinking);
             if out.steps >= self.cfg.max_steps && !summarizing {
                 summarizing = true;
-                pending.push(Message::User(SUMMARIZE.into()));
+                pending.push(Message::System(SUMMARIZE.into()));
             }
             cancel.reset();
             out.steps += 1;
@@ -444,21 +467,23 @@ impl Agent {
                     if let Some(command_id) = attached_output.take() {
                         self.user_outputs_seen.insert(command_id);
                     }
-                    if let Some(path) = attached_notes.take() {
-                        self.notes_seen.insert(path);
-                    }
                     s
                 }
                 Err(e) => {
+                    self.guidance_sent = None;
                     ui.error(&e.to_string());
                     out.status = TaskStatus::Failed;
                     out.error = Some(e.to_string());
                     break;
                 }
             };
+            if let Some(key) = guidance_key.take() {
+                self.guidance_sent = Some(key);
+            }
             add_usage(&mut out.usage, &step.usage);
             out.answer = step.text.trim().to_string();
             if step.stop == StopReason::Cancelled {
+                self.guidance_sent = None;
                 out.status = TaskStatus::Cancelled;
                 self.carry = step
                     .tool_calls
@@ -487,6 +512,7 @@ impl Agent {
             let mut denied = false;
             let mut aborted = false;
             let mut handed_off = false;
+            let calls_cwd = shell.cwd();
             for call in &step.tool_calls {
                 if denied || aborted || handed_off {
                     pending.push(Message::Tool(
@@ -519,6 +545,10 @@ impl Agent {
                         out.commands_run += 1;
                         pending.push(Message::Tool(t));
                     }
+                    Exec::Cancelled(t) => {
+                        aborted = true;
+                        pending.push(Message::Tool(t));
+                    }
                 }
             }
             let mut fatal = None;
@@ -534,6 +564,7 @@ impl Agent {
                 )));
             }
             if aborted {
+                self.guidance_sent = None;
                 out.status = TaskStatus::Cancelled;
                 self.carry = pending;
                 break;
@@ -550,6 +581,17 @@ impl Agent {
                 out.status = TaskStatus::Completed;
                 self.carry = pending;
                 break;
+            }
+            if shell.cwd() != calls_cwd {
+                let context = self.cfg.permission_context(shell);
+                let (notes, key) = self.project_documents(&context, sid);
+                let mut text = crate::project::describe(&context);
+                if let Some(notes) = notes {
+                    text.push('\n');
+                    text.push_str(notes.trim_end());
+                }
+                guidance_key = key;
+                pending.push(Message::System(text));
             }
         }
         if out.status == TaskStatus::Completed && out.denied > 0 && out.commands_run == 0 {
@@ -625,8 +667,9 @@ impl Agent {
         };
         match tool {
             BuiltinTool::RunCommand => self.run_command(shell, call, approval, ui),
-            BuiltinTool::ReadFile => self.read_tool(shell, call, approval, ui, tools::read_file),
-            BuiltinTool::ListDir => self.read_tool(shell, call, approval, ui, tools::list_dir),
+            BuiltinTool::ReadFile | BuiltinTool::Grep => {
+                self.read_tool(shell, call, approval, ui, tool)
+            }
         }
     }
 
@@ -735,7 +778,7 @@ impl Agent {
                 ui.error("invalid empty command or NUL byte");
                 return Exec::Result("error: invalid command".into());
             }
-            let mut ctx = self.perm_context(shell);
+            let mut ctx = self.cfg.permission_context(shell);
             ctx.timeout = timeout;
             let report = prepared_command(&command, &ctx, shell);
             if let Some(error) = &report.syntax_error {
@@ -750,7 +793,7 @@ impl Agent {
                     grant,
                 } => {
                     if manual {
-                        let mut fresh = self.perm_context(shell);
+                        let mut fresh = self.cfg.permission_context(shell);
                         fresh.timeout = timeout;
                         if prepared_command(&command, &fresh, shell) != report {
                             ui.notice("The operation or its scope changed while awaiting approval; reassessing.");
@@ -876,57 +919,110 @@ impl Agent {
         call: &ToolCall,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
-        read: fn(&ToolCall, &Path) -> Result<String, String>,
+        tool: BuiltinTool,
     ) -> Exec {
-        for _ in 0..4 {
-            let ctx = self.perm_context(shell);
-            let prepared = match tools::prepare_read(call, &ctx) {
-                Ok(call) => call,
-                Err(error) => {
-                    ui.error(&error);
-                    return Exec::Result(format!("error: {error}"));
-                }
-            };
-            let path = tools::tool_path(&prepared, &ctx.cwd);
-            let depth = prepared.int_arg("depth").map(|d| d as usize);
-            let report = assess_read(&call.name, &path, depth, &ctx);
-            let detail = format!("{} {}", call.name, path.display());
-            let label = match self.authorize(&call.name, &detail, &report, approval, ui) {
-                Authorization::Allowed { label, manual, .. } => {
-                    if manual {
-                        let fresh = self.perm_context(shell);
-                        if fresh != ctx || assess_read(&call.name, &path, depth, &fresh) != report {
-                            ui.notice(
-                                "The read scope changed while awaiting approval; reassessing.",
-                            );
-                            continue;
+        let ctx = self.cfg.permission_context(shell);
+        let prepared = match tools::prepare_read(call, &ctx) {
+            Ok(call) => call,
+            Err(error) => {
+                ui.error(&error);
+                return Exec::Result(format!("error: {error}"));
+            }
+        };
+        let path = tools::tool_path(&prepared, &ctx.cwd);
+        let (risk, label, manual) = match self.approve_read(&path, &ctx, &prepared, approval, ui) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        ui.tool_start(&call.name, &path.display().to_string(), Some(risk), &label);
+        let root_protected = matches!(
+            classify_path_real(&path, &ctx, true).0,
+            PathClass::Protected(_)
+        );
+        let mut authorized = if root_protected && manual {
+            vec![nosh_permissions::real_path(&path, true).unwrap_or_else(|| path.clone())]
+        } else {
+            Vec::new()
+        };
+        let mut denied = None;
+        let cancel = self.engine.cancel_handle();
+        let result = match tool {
+            BuiltinTool::ReadFile => tools::read_file(&prepared, &ctx.cwd),
+            BuiltinTool::Grep => tools::grep(
+                &prepared,
+                &ctx.cwd,
+                self.cfg.command_timeout,
+                &|| cancel.is_cancelled(),
+                |child| {
+                    let resolved = nosh_permissions::real_path(child, true)
+                        .unwrap_or_else(|| child.to_path_buf());
+                    if child != path {
+                        if authorized.iter().any(|root| resolved.starts_with(root)) {
+                            let report = assess_read(&call.name, child, None, &ctx);
+                            if !matches!(
+                                evaluate(&report, self.cfg.mode, &self.cfg.rules, &self.allow)
+                                    .decision,
+                                Decision::Deny { .. }
+                            ) {
+                                return Ok(());
+                            }
+                        }
+                        let manual = match self.approve_read(child, &ctx, &prepared, approval, ui) {
+                            Ok((_, _, manual)) => manual,
+                            Err(error) => {
+                                denied = Some(error);
+                                return Err("reading a protected grep path was denied".into());
+                            }
+                        };
+                        if manual
+                            && matches!(
+                                classify_path_real(child, &ctx, true).0,
+                                PathClass::Protected(_)
+                            )
+                        {
+                            authorized.push(resolved);
                         }
                     }
-                    label
-                }
-                Authorization::Denied(reason) => return Exec::Denied(reason),
-                Authorization::Edit(_) => unreachable!("read approvals cannot edit calls"),
-            };
-            ui.state(self.cfg.mode, Activity::Running);
-            ui.tool_start(
-                &call.name,
-                &path.display().to_string(),
-                Some(report.risk()),
-                &label,
-            );
-            return match read(&prepared, &ctx.cwd) {
-                Ok(text) => {
-                    ui.tool_end(&format!("{} lines", text.lines().count().saturating_sub(1)));
-                    Exec::Result(text)
-                }
-                Err(error) => {
-                    ui.tool_end(&format!("error: {error}"));
-                    Exec::Result(format!("error: {error}"))
-                }
-            };
+                    Ok(())
+                },
+            ),
+            BuiltinTool::RunCommand => unreachable!("commands are dispatched separately"),
+        };
+        if tool == BuiltinTool::Grep && cancel.is_cancelled() {
+            ui.tool_end("cancelled");
+            return Exec::Cancelled("[cancelled by the user]".into());
         }
-        ui.error("read scope did not remain stable; the pending call was not executed");
-        Exec::Denied("[denied] unstable read scope".into())
+        if let Some(error) = denied {
+            ui.tool_end("protected grep path denied");
+            return error;
+        }
+        match result {
+            Ok(text) => {
+                ui.tool_end(&format!("{} lines", text.lines().count().saturating_sub(1)));
+                Exec::Result(text)
+            }
+            Err(error) => {
+                ui.tool_end(&format!("error: {error}"));
+                Exec::Result(format!("error: {error}"))
+            }
+        }
+    }
+
+    fn approve_read(
+        &mut self,
+        path: &Path,
+        ctx: &Context,
+        call: &ToolCall,
+        approval: &mut dyn ApprovalChannel,
+        ui: &mut dyn AgentUi,
+    ) -> Result<(Risk, String, bool), Exec> {
+        let report = assess_read(&call.name, path, None, ctx);
+        let detail = format!("{} {}", call.name, path.display());
+        match self.authorize(&call.name, &detail, &report, approval, ui) {
+            Authorization::Allowed { label, manual, .. } => Ok((report.risk(), label, manual)),
+            Authorization::Denied(reason) => Err(Exec::Denied(reason)),
+            Authorization::Edit(_) => unreachable!("read approvals cannot edit calls"),
+        }
     }
 }
 
@@ -1110,9 +1206,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_append_does_not_suppress_project_notes() {
+    fn failed_append_does_not_suppress_project_guidance() {
         let directory = tempfile::tempdir().unwrap();
-        let notes = directory.path().join("NOSH.md");
+        let notes = directory.path().join("AGENTS.md");
         std::fs::write(&notes, "project instructions").unwrap();
         let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
             working_dir: Some(directory.path().to_path_buf()),
@@ -1129,7 +1225,7 @@ mod tests {
             &mut ui,
         );
         assert_eq!(first.status, TaskStatus::Failed);
-        assert!(!agent.notes_seen.contains(&notes));
+        assert!(agent.guidance_sent.is_none());
 
         let second = agent.run_task(
             &mut shell,
@@ -1138,7 +1234,7 @@ mod tests {
             &mut ui,
         );
         assert_eq!(second.status, TaskStatus::Completed);
-        assert!(agent.notes_seen.contains(&notes));
+        assert!(agent.guidance_sent.is_some());
     }
 
     #[test]
@@ -1153,7 +1249,7 @@ mod tests {
                     first.clone(),
                     Message::User("failed task".into()),
                     second.clone(),
-                    Message::User(SUMMARIZE.into()),
+                    Message::System(SUMMARIZE.into()),
                 ],
                 &mut crate::RecordUi::default(),
             )
@@ -1221,10 +1317,10 @@ mod tests {
         let (mut agent, calls) = recovery_agent(None);
         agent.sid = Some(1);
         agent.carry.push(Message::Tool("already executed".into()));
-        agent.notes_seen.insert(PathBuf::from("NOSH.md"));
+        agent.guidance_sent = Some("AGENTS.md version".into());
         agent.reset_conversation();
         assert!(agent.carry.is_empty());
-        assert!(agent.notes_seen.is_empty());
+        assert!(agent.guidance_sent.is_none());
         assert_eq!(agent.sid, None);
         assert_eq!(*calls.lock().unwrap(), ["close"]);
     }
@@ -1623,11 +1719,13 @@ mod permission_tests {
     }
 
     #[test]
-    fn scoped_script_and_deep_read_denies_never_ask_or_execute() {
+    fn scoped_script_and_deep_read_denies_never_execute() {
         use nosh_permissions::RuleSpec;
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         std::fs::write(root.join("trusted.sh"), "bash -c 'printf new > blocked'\n").unwrap();
+        std::fs::create_dir(root.join("private")).unwrap();
+        std::fs::write(root.join("private/secret"), "needle").unwrap();
         let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
         shell.run_user_line(&format!("cd '{}'", root.display()));
         shell.set_workspace(root.clone());
@@ -1643,12 +1741,11 @@ mod permission_tests {
             .unwrap();
             let read_rule = UserRule::compile(
                 RuleSpec {
-                    tool: Some("list_dir".into()),
-                    path: Some("**".into()),
-                    max_depth: Some(1),
+                    tool: Some("grep".into()),
+                    path: Some("private/secret".into()),
                     ..RuleSpec::default()
                 },
-                "directory deny",
+                "grep deny",
             )
             .unwrap();
             let mut agent = fake_agent(
@@ -1658,11 +1755,12 @@ mod permission_tests {
                     deny: vec![rule, read_rule],
                 },
             );
-            let mut approvals = Scripted::new([]);
+            agent.cfg.protected.push("private".into());
+            let mut approvals = Scripted::new([ApprovalResponse::Approve]);
             let mut ui = RecordUi::default();
             let read = ToolCall {
-                name: "list_dir".into(),
-                args: serde_json::json!({"path": ".", "depth": 3})
+                name: "grep".into(),
+                args: serde_json::json!({"path": "private", "pattern": "needle"})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -1673,7 +1771,11 @@ mod permission_tests {
                     Exec::Denied(_)
                 ));
             }
-            assert!(approvals.seen.is_empty());
+            assert_eq!(
+                approvals.seen.len(),
+                usize::from(mode != Yolo),
+                "unexpected approval count in {mode:?}"
+            );
             assert_eq!(count(), 0);
             assert!(ui.events.iter().any(|event| event.contains("user deny")));
         }
@@ -1726,7 +1828,7 @@ mod permission_tests {
             "export PATH='{path}'; hash -r; hash -p '{}' mv",
             bin.join("mv").display()
         ));
-        let report = prepared_command("mv a b", &agent.perm_context(&shell), &shell);
+        let report = prepared_command("mv a b", &agent.cfg.permission_context(&shell), &shell);
         assert_eq!(
             report.operations[0].executable.as_deref(),
             Some(bin.join("mv").as_path())
@@ -1756,7 +1858,11 @@ mod permission_tests {
             "user-installed tools outside the project do not require a system-directory allowlist"
         );
         let temporary_path = format!("PATH='{}:{path}' cargo test", bin.display());
-        let report = prepared_command(&temporary_path, &agent.perm_context(&shell), &shell);
+        let report = prepared_command(
+            &temporary_path,
+            &agent.cfg.permission_context(&shell),
+            &shell,
+        );
         assert!(report.operations.iter().any(|op| op.local_program));
         assert_eq!(
             shell.var("PATH").unwrap(),
@@ -1773,7 +1879,11 @@ mod permission_tests {
             venv.display(),
             venv.join("bin").display()
         ));
-        let report = prepared_command("python -m pytest", &agent.perm_context(&shell), &shell);
+        let report = prepared_command(
+            "python -m pytest",
+            &agent.cfg.permission_context(&shell),
+            &shell,
+        );
         assert!(!report.operations[0].local_program);
         assert_eq!(
             evaluate(

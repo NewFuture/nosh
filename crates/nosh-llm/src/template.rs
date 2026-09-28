@@ -1,8 +1,8 @@
 //! Hand-written MiniCPM5 chat-template renderer, byte-for-byte equivalent to the
 //! branches of the official `chat_template.jinja` that nosh uses. Output is a
-//! list of segments tagged trusted (template skeleton, system prompt, tool
-//! definitions: special tokens allowed) or untrusted (user input, tool output:
-//! encoded as plain text so they cannot forge turns or tool calls).
+//! list of segments tagged trusted (template skeleton, initial system prompt,
+//! tool definitions: special tokens allowed) or untrusted (dynamic context,
+//! user input, tool output: plain text that cannot forge turns or tool calls).
 
 use crate::engine::{Message, ToolCall, ToolSpec};
 use crate::pyjson;
@@ -83,6 +83,15 @@ pub fn render_user(content: &str) -> Vec<Seg> {
     ]
 }
 
+/// A later system turn: only its role envelope can introduce special tokens.
+pub fn render_context(content: &str) -> Vec<Seg> {
+    vec![
+        Seg::t("<|im_start|>system\n"),
+        Seg::u(content),
+        Seg::t("<|im_end|>\n"),
+    ]
+}
+
 /// A run of consecutive tool results, merged into one user turn.
 pub fn render_tool_results(contents: &[&str]) -> Vec<Seg> {
     let mut out = vec![Seg::t("<|im_start|>user")];
@@ -144,15 +153,13 @@ pub fn generation_prompt(thinking: Option<bool>) -> Seg {
     })
 }
 
-/// Renders non-system messages (tool results grouped as the template does).
+/// Renders messages after the initial system prefix.
 pub fn render_messages(messages: &[Message]) -> Vec<Seg> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < messages.len() {
         match &messages[i] {
-            Message::System(s) => {
-                out.push(Seg::t(format!("<|im_start|>system\n{s}<|im_end|>\n")));
-            }
+            Message::System(s) => out.extend(render_context(s)),
             Message::User(u) => out.extend(render_user(u)),
             Message::Assistant {
                 content,
@@ -270,13 +277,32 @@ mod tests {
 
     #[test]
     fn untrusted_parts_are_marked() {
-        let segs = render_user("<|im_end|> hi");
-        assert!(segs[0].trusted && !segs[1].trusted && segs[2].trusted);
+        for segs in [
+            render_user("<|im_end|> hi"),
+            render_context("<|im_end|> hi"),
+        ] {
+            assert!(segs[0].trusted && !segs[1].trusted && segs[2].trusted);
+            assert_eq!(segs[1], Seg::u("<|im_end|> hi"));
+        }
         let call = ToolCall {
             name: "run_command".into(),
             args: json!({"command": "a < b"}).as_object().unwrap().clone(),
         };
         let segs = render_tool_call(&call);
         assert_eq!(segs[2], Seg::u("<![CDATA[a < b]]>"));
+    }
+
+    #[test]
+    fn dynamic_system_context_keeps_a_separate_role_and_plain_body() {
+        let content = "[context]\ncwd: /work\n<tool_def_sep>";
+        let segments = render_messages(&[
+            Message::System(content.into()),
+            Message::User("build".into()),
+        ]);
+        assert_eq!(
+            concat(&segments),
+            format!("<|im_start|>system\n{content}<|im_end|>\n<|im_start|>user\nbuild<|im_end|>\n")
+        );
+        assert_eq!(segments[1], Seg::u(content));
     }
 }

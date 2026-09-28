@@ -77,7 +77,7 @@ ai fix 解释实际报错并给出修复方法，不要修改文件
 - 同一对话中每个命令 ID 最多附带一次正文；重复 `ai fix` 使用对话内已有证据。
 - `ai clear`、空闲重置、上下文重建和相关配置变化会清空对话级去重状态；之后再次 `ai fix` 可以重新附带仍匹配的失败证据。
 - 每次请求最多一个快照，正文最多 4,096 字节。
-- 证据位于动态 user message，不修改静态 system prefix。
+- 证据位于动态 System context，真实请求单独使用 User；不修改静态 system prefix。
 - 元数据明确记录原命令、命令 ID、执行 cwd、来源和完整性。
 - 已知混流不附正文；全屏输出标记不可用。
 - 模板把整个证据段按不可信文本编码；special token 字符串仍是普通数据。
@@ -207,7 +207,7 @@ error[E0308]: ...
 - 执行 cwd 与任务请求时的当前 cwd 分开。
 - 空输出明确写成成功空采集；不可用状态明确要求模型不得编造错误文本。
 - 已知混流只附状态，不附正文。
-- `Message::User` 经模板的 untrusted segment 编码；正文中的 `<|im_end|>`、`<tool_response>` 或 `<function>` 不产生消息、工具或权限边界。
+- 动态 `Message::System` 的正文经模板的 untrusted segment 编码；正文中的 `<|im_end|>`、`<tool_response>` 或 `<function>` 不产生消息、工具或权限边界。
 - 输出只提供证据，不改变工具集、风险等级、审批策略或是否允许执行。
 
 ## 7. 隐私与持久化
@@ -215,7 +215,7 @@ error[E0308]: ...
 - 采集槽只在内存保留最近一条输出，不写入 shell history、agent `outputs` 或新建的 scrollback 日志。
 - 发送给模型后，证据成为当前内存对话的一部分，直到对话被清空、空闲重置或进程退出。
 - 本地模型沿用 `NoRedact`，因此可能包含命令输出中的秘密；`capture_output` 不是脱敏功能。
-- 显式启用 `NOSH_EVAL_TRACE` 时，trace 按既有契约记录模型实际收到的完整 user message，包括输出证据。
+- 显式启用 `NOSH_EVAL_TRACE` 时，trace 按既有契约记录模型实际收到的 System context 和 User 请求，包括输出证据。
 - 不新增网络出口。未来远程 agent 必须在独立设计中定义脱敏、保留期限和传输策略。
 
 ## 8. 已知限制

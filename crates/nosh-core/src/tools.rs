@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
-use std::io::{BufRead, Read};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use nosh_llm::{ToolCall, ToolSpec};
 use nosh_shell::{CommandResult, EmbeddedShell, OutputState, UserOutput};
@@ -12,13 +13,16 @@ use serde_json::json;
 /// Characters of tool output fed back per call (~1.5K tokens).
 pub const OUTPUT_CHARS: usize = 6000;
 pub const READ_FILE_LINES: usize = 400;
-pub const LIST_DIR_ENTRIES: usize = 300;
+pub const GREP_MATCHES: usize = 200;
+const GREP_ENTRIES: usize = 10_000;
+const GREP_BYTES: usize = 64 * 1024 * 1024;
+const GREP_READ_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
-    /// run_command, read_file, list_dir.
+    /// run_command, read_file, grep.
     Full,
-    /// Piped attachments: read_file and list_dir only.
+    /// Piped attachments: read_file and grep only.
     ReadOnly,
     /// Suggestions: no tools, just a shell program.
     Suggest,
@@ -28,7 +32,7 @@ pub enum ToolSet {
 pub(crate) enum BuiltinTool {
     RunCommand,
     ReadFile,
-    ListDir,
+    Grep,
 }
 
 impl BuiltinTool {
@@ -36,7 +40,7 @@ impl BuiltinTool {
         match self {
             Self::RunCommand => "run_command",
             Self::ReadFile => "read_file",
-            Self::ListDir => "list_dir",
+            Self::Grep => "grep",
         }
     }
 
@@ -44,7 +48,7 @@ impl BuiltinTool {
         match self {
             Self::RunCommand => run_command_spec(),
             Self::ReadFile => read_file_spec(),
-            Self::ListDir => list_dir_spec(),
+            Self::Grep => grep_spec(),
         }
     }
 }
@@ -55,9 +59,9 @@ impl ToolSet {
             Self::Full => &[
                 BuiltinTool::RunCommand,
                 BuiltinTool::ReadFile,
-                BuiltinTool::ListDir,
+                BuiltinTool::Grep,
             ],
-            Self::ReadOnly => &[BuiltinTool::ReadFile, BuiltinTool::ListDir],
+            Self::ReadOnly => &[BuiltinTool::ReadFile, BuiltinTool::Grep],
             Self::Suggest => &[],
         }
     }
@@ -70,7 +74,9 @@ impl ToolSet {
 pub fn run_command_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::RunCommand.name().into(),
-        description: "Run a bash command in the user's shell session and return its output.".into(),
+        description:
+            "Run a bash command in the current directory; shell state persists. Returns its output."
+                .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -99,17 +105,18 @@ pub fn read_file_spec() -> ToolSpec {
     }
 }
 
-pub fn list_dir_spec() -> ToolSpec {
+pub fn grep_spec() -> ToolSpec {
     ToolSpec {
-        name: BuiltinTool::ListDir.name().into(),
-        description: "List file names and sizes in a directory (respects .gitignore). For counting lines or searching, use run_command.".into(),
+        name: BuiltinTool::Grep.name().into(),
+        description: "Search file contents recursively using ripgrep regex. Does not search file names. Returns relative paths, line numbers and matching lines. Respects .gitignore; skips hidden/binary files and descendant symlinks. At most 200 matching lines; bounded scans report truncation.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory (default: cwd)"},
-                "depth": {"type": "integer", "description": "1-3 (default 1)"}
+                "pattern": {"type": "string", "description": "Regular expression"},
+                "path": {"type": "string", "description": "File or directory (default: cwd)"},
+                "glob": {"type": "string", "description": "File glob filter, e.g. *.rs"}
             },
-            "required": []
+            "required": ["pattern"]
         }),
     }
 }
@@ -377,38 +384,340 @@ pub(crate) fn prepare_read(
 ) -> Result<ToolCall, String> {
     let path = match call.args.get("path") {
         Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
-        None if call.name == "list_dir" => ".",
+        None if call.name == "grep" => ".",
         _ => return Err("missing or invalid parameter 'path'".into()),
     };
     let mut prepared = call.clone();
     prepared
         .args
         .insert("path".into(), json!(ctx.resolve(path).to_string_lossy()));
-    let integer = |name: &str, default: i64| -> Result<i64, String> {
-        match call.args.get(name) {
-            None => Ok(default),
-            Some(value) => value
-                .as_i64()
-                .ok_or_else(|| format!("invalid integer parameter '{name}'")),
+    Ok(prepared)
+}
+
+struct GrepBudget<'a> {
+    cancelled: &'a dyn Fn() -> bool,
+    started: Instant,
+    timeout: Duration,
+    entries_left: usize,
+    bytes_left: usize,
+    truncated: Option<&'static str>,
+}
+
+impl<'a> GrepBudget<'a> {
+    fn new(timeout: Duration, cancelled: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            cancelled,
+            started: Instant::now(),
+            timeout,
+            entries_left: GREP_ENTRIES,
+            bytes_left: GREP_BYTES,
+            truncated: None,
         }
-    };
-    if call.name == "list_dir" {
-        prepared
-            .args
-            .insert("depth".into(), json!(integer("depth", 1)?.clamp(1, 3)));
+    }
+
+    fn check(&mut self) -> Result<bool, String> {
+        if (self.cancelled)() {
+            return Err("grep cancelled by the user".into());
+        }
+        if self.truncated.is_none() && self.started.elapsed() >= self.timeout {
+            self.truncated = Some("time limit reached");
+        }
+        Ok(self.truncated.is_none())
+    }
+}
+
+struct GrepReader<'a, 'b, R> {
+    inner: R,
+    budget: &'a mut GrepBudget<'b>,
+}
+
+impl<R: Read> Read for GrepReader<'_, '_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.budget.check().map_err(io::Error::other)?;
+        if self.budget.bytes_left == 0 {
+            self.budget.truncated.get_or_insert("byte limit reached");
+        }
+        if let Some(reason) = self.budget.truncated {
+            // A limit is not EOF: a cut-off line must not become a match.
+            return Err(io::Error::other(reason));
+        }
+        let len = buf.len().min(self.budget.bytes_left).min(GREP_READ_CHUNK);
+        let read = self.inner.read(&mut buf[..len])?;
+        self.budget.bytes_left -= read;
+        Ok(read)
+    }
+}
+
+/// Searches contents; ignore-rule loading is metadata, directory/content reads are authorized.
+pub fn grep(
+    call: &ToolCall,
+    cwd: &Path,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+    authorize: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<String, String> {
+    grep_with_budget(
+        call,
+        cwd,
+        &mut GrepBudget::new(timeout, cancelled),
+        authorize,
+    )
+}
+
+fn grep_with_budget(
+    call: &ToolCall,
+    cwd: &Path,
+    scan: &mut GrepBudget<'_>,
+    mut authorize: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<String, String> {
+    use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkMatch};
+
+    if !scan.check()? {
+        return Ok(format_grep_result(0, "", scan.truncated));
+    }
+    let pattern = call
+        .str_arg("pattern")
+        .ok_or("missing required parameter 'pattern'")?;
+    let matcher =
+        grep_regex::RegexMatcher::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+    let root = tool_path(call, cwd);
+    let meta = std::fs::metadata(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    if !meta.is_file() && !meta.is_dir() {
+        return Err(format!(
+            "{}: not a regular file or directory",
+            root.display()
+        ));
+    }
+    if meta.is_dir()
+        && std::fs::symlink_metadata(&root)
+            .map_err(|e| e.to_string())?
+            .is_symlink()
+    {
+        return Err(format!(
+            "{}: directory symlinks are not followed",
+            root.display()
+        ));
+    }
+    let base = if meta.is_dir() {
+        root.as_path()
     } else {
-        let start = integer("start_line", 1)?.max(1);
-        let end = integer("end_line", start.saturating_add(READ_FILE_LINES as i64 - 1))?.max(1);
-        if end < start {
-            return Err(format!("end_line {end} is before start_line {start}"));
+        root.parent().unwrap_or(cwd)
+    };
+    // Filtering separately keeps positive globs from overriding ignore/hidden rules.
+    let glob = call
+        .str_arg("glob")
+        .map(|glob| {
+            let mut builder = ignore::overrides::OverrideBuilder::new(base);
+            builder
+                .add(glob)
+                .map_err(|e| format!("invalid glob: {e}"))?;
+            builder.build().map_err(|e| format!("invalid glob: {e}"))
+        })
+        .transpose()?;
+    let mut ignores = if meta.is_dir() {
+        authorize(&root)?;
+        if !scan.check()? {
+            return Ok(format_grep_result(0, "", scan.truncated));
         }
-        prepared.args.insert("start_line".into(), json!(start));
-        prepared.args.insert(
-            "end_line".into(),
-            json!(end.min(start.saturating_add(READ_FILE_LINES as i64 - 1))),
+        let mut builder = ignore::WalkBuilder::new(&root);
+        builder.hidden(true).follow_links(false).require_git(false);
+        Some(
+            builder
+                .build_matchers()
+                .pop()
+                .expect("one configured grep root"),
+        )
+    } else {
+        None
+    };
+
+    struct Matches<'a> {
+        path: &'a Path,
+        text: String,
+        count: usize,
+        remaining: usize,
+        budget: usize,
+        truncated: bool,
+    }
+    impl Sink for Matches<'_> {
+        type Error = std::io::Error;
+
+        fn matched(
+            &mut self,
+            _: &grep_searcher::Searcher,
+            m: &SinkMatch<'_>,
+        ) -> Result<bool, Self::Error> {
+            if self.count >= self.remaining {
+                self.truncated = true;
+                return Ok(false);
+            }
+            let line_number = m
+                .line_number()
+                .ok_or_else(|| std::io::Error::other("grep line number is unavailable"))?;
+            let line = String::from_utf8_lossy(m.bytes());
+            let prefix = format!("{}:{line_number}:", self.path.display());
+            let available = self.budget.saturating_sub(self.text.chars().count());
+            let mut rendered = prefix
+                .chars()
+                .chain(line.trim_end_matches(['\r', '\n']).chars())
+                .peekable();
+            self.text
+                .extend(rendered.by_ref().take(available.saturating_sub(1)));
+            self.text.push('\n');
+            self.count += 1;
+            if rendered.peek().is_some() {
+                self.truncated = true;
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        fn binary_data(
+            &mut self,
+            _: &grep_searcher::Searcher,
+            _: u64,
+        ) -> Result<bool, Self::Error> {
+            self.text.clear();
+            self.count = 0;
+            self.truncated = false;
+            Ok(false)
+        }
+    }
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(0))
+        .heap_limit(Some(8 * 1024 * 1024))
+        .build();
+    let mut output = String::new();
+    let mut count = 0;
+    let budget = OUTPUT_CHARS - 120;
+    let mut pending = vec![root.clone()];
+    'scan: while let Some(path) = pending.pop() {
+        if !scan.check()? {
+            break;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if path != root {
+            if !metadata.is_dir() && !metadata.is_file() {
+                continue;
+            }
+            if let Some(ignores) = &mut ignores {
+                // Use the library's cached ignore metadata before deciding whether to descend.
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("grep descendants stay under root");
+                let (matched, error) = ignores.matched_with_errors(relative, metadata.is_dir());
+                if let Some(error) = error {
+                    return Err(format!("grep ignore metadata: {error}"));
+                }
+                if matched.is_ignore() {
+                    continue;
+                }
+            }
+        }
+        if metadata.is_dir() {
+            if path != root {
+                authorize(&path)?;
+            }
+            if !scan.check()? {
+                break;
+            }
+            let mut entries =
+                std::fs::read_dir(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            let mut children = Vec::new();
+            loop {
+                if !scan.check()? {
+                    break 'scan;
+                }
+                if scan.entries_left == 0 {
+                    scan.truncated = Some("entry limit reached");
+                    break 'scan;
+                }
+                let Some(entry) = entries.next() else {
+                    break;
+                };
+                let entry = entry.map_err(|error| format!("{}: {error}", path.display()))?;
+                scan.entries_left -= 1;
+                children.push(entry.path());
+            }
+            children.sort();
+            pending.extend(children.into_iter().rev());
+            continue;
+        }
+        if !metadata.is_file() && !(path == root && meta.is_file()) {
+            continue;
+        }
+        if glob
+            .as_ref()
+            .is_some_and(|g| g.matched(&path, false).is_ignore())
+        {
+            continue;
+        }
+        authorize(&path)?;
+        if !scan.check()? {
+            break;
+        }
+        let mut matches = Matches {
+            path: path.strip_prefix(base).unwrap_or(&path),
+            text: String::new(),
+            count: 0,
+            remaining: GREP_MATCHES - count,
+            budget: budget.saturating_sub(output.chars().count()),
+            truncated: false,
+        };
+        let file =
+            std::fs::File::open(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let result = searcher.search_reader(
+            &matcher,
+            GrepReader {
+                inner: file,
+                budget: scan,
+            },
+            &mut matches,
+        );
+        if let Err(error) = result
+            && scan.truncated.is_none()
+        {
+            return Err(format!("{}: {error}", path.display()));
+        }
+        output.push_str(&matches.text);
+        count += matches.count;
+        if matches.truncated {
+            scan.truncated.get_or_insert("match/output limit reached");
+        }
+        if !scan.check()? {
+            break;
+        }
+    }
+    scan.check()?;
+    Ok(format_grep_result(count, &output, scan.truncated))
+}
+
+fn format_grep_result(count: usize, output: &str, truncated: Option<&str>) -> String {
+    let mut result = format!(
+        "[{count} matching lines; truncated={}]\n",
+        if truncated.is_some() { "yes" } else { "no" }
+    );
+    if count == 0 {
+        result.push_str(if truncated.is_some() {
+            "(no matches in the scanned portion; search incomplete)"
+        } else {
+            "(no matches)"
+        });
+    } else {
+        result.push_str(output.trim_end());
+    }
+    if let Some(reason) = truncated {
+        let _ = write!(
+            result,
+            "\n[truncated: {reason}; refine pattern, path or glob]"
         );
     }
-    Ok(prepared)
+    result
 }
 
 /// `read_file`: numbered lines, binary files refused.
@@ -429,7 +738,10 @@ fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<Stri
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
     let meta = std::fs::metadata(&path).map_err(err)?;
     if meta.is_dir() {
-        return Err(format!("{} is a directory; use list_dir", path.display()));
+        return Err(format!(
+            "{} is a directory; read_file requires a text file. Use ls via run_command if command execution is available.",
+            path.display()
+        ));
     }
     let start = call.int_arg("start_line").unwrap_or(1).max(1) as usize;
     let end_req = call
@@ -552,89 +864,11 @@ fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<Stri
     Ok(out.trim_end().to_string())
 }
 
-const SIZE_UNITS: &[&str] = &["bytes", "KB", "MB", "GB", "TB"];
-
-fn size_unit(n: u64) -> usize {
-    let mut v = n;
-    let mut i = 0;
-    while v >= 1024 && i < SIZE_UNITS.len() - 1 {
-        v /= 1024;
-        i += 1;
-    }
-    i
-}
-
-/// `n` expressed in `SIZE_UNITS[unit]`. One unit per listing lets a small model
-/// compare sizes directly (it ranked "781.2 KB" above "11.4 MB").
-fn size_in(n: u64, unit: usize) -> String {
-    if unit == 0 || n == 0 {
-        return format!("{n} bytes");
-    }
-    let v = n as f64 / 1024f64.powi(unit as i32);
-    if v < 0.05 {
-        format!("<0.1 {}", SIZE_UNITS[unit])
-    } else {
-        format!("{v:.1} {}", SIZE_UNITS[unit])
-    }
-}
-
-/// `list_dir`: tree listing honouring .gitignore, depth ≤ 3.
-pub fn list_dir(call: &ToolCall, cwd: &Path) -> Result<String, String> {
-    let root = tool_path(call, cwd);
-    if !root.is_dir() {
-        return Err(format!("{} is not a directory", root.display()));
-    }
-    let depth = call.int_arg("depth").unwrap_or(1).clamp(1, 3) as usize;
-    let walker = ignore::WalkBuilder::new(&root)
-        .max_depth(Some(depth))
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .filter_entry(|e| e.file_name() != ".git")
-        .sort_by_file_path(|a, b| a.cmp(b))
-        .build();
-    let mut out = format!("[{}]\n", root.display());
-    let mut entries: Vec<(usize, String, Option<u64>)> = Vec::new();
-    let mut more = 0usize;
-    for entry in walker.flatten() {
-        if entry.depth() == 0 {
-            continue;
-        }
-        if entries.len() >= LIST_DIR_ENTRIES {
-            more += 1;
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-        let size = (!is_dir).then(|| entry.metadata().map(|m| m.len()).unwrap_or(0));
-        entries.push((entry.depth(), name, size));
-    }
-    let unit = size_unit(entries.iter().filter_map(|e| e.2).max().unwrap_or(0));
-    for (depth, name, size) in &entries {
-        let indent = "  ".repeat(depth - 1);
-        match size {
-            None => {
-                let _ = writeln!(out, "{indent}{name}/");
-            }
-            Some(n) => {
-                let _ = writeln!(out, "{indent}{name}  ({})", size_in(*n, unit));
-            }
-        }
-    }
-    if entries.is_empty() {
-        out.push_str("(empty)\n");
-    }
-    if more > 0 {
-        let _ = writeln!(out, "[… {more} more entries]");
-    }
-    Ok(out.trim_end().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::cell::Cell;
 
     fn call(name: &str, args: Value) -> ToolCall {
         ToolCall {
@@ -643,11 +877,22 @@ mod tests {
         }
     }
 
+    fn grep(
+        call: &ToolCall,
+        cwd: &Path,
+        authorize: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<String, String> {
+        super::grep(call, cwd, Duration::from_secs(60), &|| false, authorize)
+    }
+
     #[test]
     fn tool_catalog_matches_the_advertised_schema_and_order() {
+        let command = run_command_spec();
+        assert!(command.description.contains("current directory"));
+        assert!(command.description.contains("shell state persists"));
         for (set, names) in [
-            (ToolSet::Full, vec!["run_command", "read_file", "list_dir"]),
-            (ToolSet::ReadOnly, vec!["read_file", "list_dir"]),
+            (ToolSet::Full, vec!["run_command", "read_file", "grep"]),
+            (ToolSet::ReadOnly, vec!["read_file", "grep"]),
             (ToolSet::Suggest, vec![]),
         ] {
             let advertised = specs(set);
@@ -665,8 +910,11 @@ mod tests {
             for name in [
                 "run_command",
                 "read_file",
+                "grep",
                 "list_dir",
                 "get_last_output",
+                "search",
+                "search_text",
                 "propose_command",
                 "READ_FILE",
                 "",
@@ -720,6 +968,516 @@ mod tests {
         assert!(captured.contains("actual error"));
         output.mixed = true;
         assert!(!format_user_output(&output).contains("actual error"));
+    }
+
+    #[test]
+    fn grep_returns_numbered_content_matches_with_ignore_and_glob_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        for (path, contents) in [
+            ("a.rs", "not here\nneedle one\n"),
+            ("src/b.rs", "needle two\n"),
+            ("c.txt", "needle three\n"),
+            (".hidden.rs", "needle\n"),
+            ("ignored.rs", "needle\n"),
+            ("binary.rs", "needle\0binary\n"),
+            (".gitignore", "ignored.rs\n"),
+            ("needle-filename.rs", "different contents\n"),
+        ] {
+            std::fs::write(root.join(path), contents).unwrap();
+        }
+        let result = grep(
+            &call("grep", json!({"pattern": "needle", "glob": "*.rs"})),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            result.starts_with("[2 matching lines; truncated=no]"),
+            "{result}"
+        );
+        assert!(result.contains("a.rs:2:needle one"), "{result}");
+        assert!(
+            result.contains(&format!(
+                "{}:1:needle two",
+                Path::new("src").join("b.rs").display()
+            )),
+            "{result}"
+        );
+        for excluded in ["c.txt", ".hidden", "ignored", "binary", "needle-filename"] {
+            assert!(!result.contains(excluded), "{result}");
+        }
+        let all = grep(
+            &call("grep", json!({"pattern": "needle"})),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(all.starts_with("[3 matching lines;"), "{all}");
+        let single = grep(
+            &call("grep", json!({"pattern": "needle", "path": "src/../a.rs"})),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(single.contains("a.rs:2:needle one"), "{single}");
+        let zero = grep(
+            &call("grep", json!({"pattern": "absent"})),
+            root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(zero.contains("(no matches)"), "{zero}");
+    }
+
+    #[test]
+    fn grep_authorizes_directory_descent_but_not_ignore_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let child = root.join("nested");
+        std::fs::create_dir(&child).unwrap();
+        for path in [
+            root.join("a.rs"),
+            root.join("b.rs"),
+            child.join("keep.rs"),
+            child.join("skip.rs"),
+        ] {
+            std::fs::write(path, "needle\n").unwrap();
+        }
+        let root_ignore = root.join(".gitignore");
+        let child_ignore = child.join(".ignore");
+        std::fs::write(&root_ignore, "b.rs\n").unwrap();
+        std::fs::write(&child_ignore, "keep.rs\n").unwrap();
+        let mut entered = false;
+        let result = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
+            assert!(
+                path != root_ignore && path != child_ignore,
+                "ignore metadata is not a content read"
+            );
+            if path == child {
+                entered = true;
+                std::fs::write(&child_ignore, "skip.rs\n").unwrap();
+            } else if path.starts_with(&child) {
+                assert!(entered);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(result.contains("a.rs:1:needle"), "{result}");
+        assert!(result.contains("keep.rs:1:needle"), "{result}");
+        assert!(
+            !result.contains("b.rs:") && !result.contains("skip.rs:"),
+            "{result}"
+        );
+
+        let error = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
+            if path == child {
+                Err("directory denied".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, "directory denied");
+        let error = grep(
+            &call("grep", json!({"pattern": ".", "path": ".gitignore"})),
+            &root,
+            |path| {
+                assert_eq!(path, root_ignore);
+                Err("content denied".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "content denied");
+    }
+
+    #[test]
+    fn grep_keeps_parent_ignore_precedence_and_repository_excludes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let child = root.join("src");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.rs\n").unwrap();
+        std::fs::write(root.join(".ignore"), "!keep.rs\n").unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "excluded.txt\n").unwrap();
+        std::fs::write(child.join(".gitignore"), "!child.rs\n").unwrap();
+        for name in ["keep.rs", "child.rs", "ignored.rs", "excluded.txt"] {
+            std::fs::write(child.join(name), "needle\n").unwrap();
+        }
+        let mut seen = Vec::new();
+        let result = grep(
+            &call("grep", json!({"pattern": "needle"})),
+            &child,
+            |path| {
+                seen.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!seen.contains(&root.join(".gitignore")));
+        assert!(!seen.contains(&root.join(".ignore")));
+        assert!(!seen.contains(&root.join(".git/info/exclude")));
+        assert!(
+            result.contains("keep.rs:1:needle") && result.contains("child.rs:1:needle"),
+            "{result}"
+        );
+        assert!(
+            !result.contains("ignored.rs:") && !result.contains("excluded.txt:"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn grep_global_ignore_probe() {
+        let Some(root) = std::env::var_os("NOSH_GREP_GLOBAL_PROBE") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let config = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").unwrap());
+        let excludes = config.parent().unwrap().join("ignore");
+        let mut seen = Vec::new();
+        let result = grep(&call("grep", json!({"pattern": "needle"})), &root, |path| {
+            seen.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert!(!seen.contains(&config) && !seen.contains(&excludes));
+        assert!(result.contains("keep.txt:1:needle"));
+        assert!(!result.contains("excluded.txt:"));
+        let error = grep(
+            &call("grep", json!({"pattern": ".", "path": config})),
+            &root,
+            |_| Err("content denied".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "content denied");
+    }
+
+    #[test]
+    fn grep_uses_global_ignore_rules_without_metadata_approval() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("files");
+        let home = temp.path().join("home");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(root.join("keep.txt"), "needle\n").unwrap();
+        std::fs::write(root.join("excluded.txt"), "needle\n").unwrap();
+        std::fs::write(
+            home.join("config"),
+            format!("[core]\nexcludesFile={}\n", home.join("ignore").display()),
+        )
+        .unwrap();
+        std::fs::write(home.join("ignore"), "excluded.txt\n").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::tests::grep_global_ignore_probe",
+                "--nocapture",
+            ])
+            .env("NOSH_GREP_GLOBAL_PROBE", &root)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_GLOBAL", home.join("config"))
+            .env("GIT_CONFIG_SYSTEM", home.join("missing-system-config"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn grep_reports_invalid_inputs_read_errors_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            json!({}),
+            json!({"pattern": "["}),
+            json!({"pattern": ".", "path": "missing"}),
+            json!({"pattern": ".", "glob": "["}),
+        ] {
+            assert!(grep(&call("grep", args), dir.path(), |_| Ok(())).is_err());
+        }
+        std::fs::write(dir.path().join("a"), "x\n".repeat(GREP_MATCHES + 1)).unwrap();
+        let result = grep(&call("grep", json!({"pattern": "x"})), dir.path(), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            result.contains("200 matching lines; truncated=yes"),
+            "{result}"
+        );
+        assert!(
+            result.contains("a:200:x") && !result.contains("a:201:x"),
+            "{result}"
+        );
+        std::fs::write(dir.path().join("a"), "x".repeat(20_000)).unwrap();
+        let result = grep(&call("grep", json!({"pattern": "x"})), dir.path(), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(result.contains("truncated=yes") && result.chars().count() <= OUTPUT_CHARS);
+        let error = grep(&call("grep", json!({"pattern": "x"})), dir.path(), |_| {
+            Err("protected".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "protected");
+        let error = grep(&call("grep", json!({"pattern": "x"})), dir.path(), |path| {
+            if path == dir.path().join("a") {
+                std::fs::remove_file(path).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("a:"), "{error}");
+    }
+
+    #[test]
+    fn grep_bounds_wide_directory_collection_even_with_no_eligible_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..40 {
+            std::fs::write(dir.path().join(format!("{n:02}.txt")), "not here\n").unwrap();
+        }
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.entries_left = 8;
+        let mut authorized = Vec::new();
+        let result = grep_with_budget(
+            &call("grep", json!({"pattern": "absent", "glob": "*.rs"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                authorized.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.entries_left, 0);
+        assert_eq!(scan.bytes_left, GREP_BYTES);
+        assert_eq!(authorized, [dir.path()]);
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("entry limit reached"), "{result}");
+        assert!(
+            result.contains("scanned portion; search incomplete"),
+            "{result}"
+        );
+        assert!(!result.contains("(no matches)"), "{result}");
+    }
+
+    #[test]
+    fn grep_shares_the_entry_budget_across_nonmatching_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..10 {
+            let child = dir.path().join(format!("{n:02}"));
+            std::fs::create_dir(&child).unwrap();
+            for file in 0..5 {
+                std::fs::write(child.join(format!("{file}.txt")), "not here\n").unwrap();
+            }
+        }
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.entries_left = 23;
+        let mut files = 0;
+        let result = grep_with_budget(
+            &call("grep", json!({"pattern": "absent"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                files += usize::from(path.is_file());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.entries_left, 0);
+        assert_eq!(files, 10);
+        assert_eq!(GREP_BYTES - scan.bytes_left, files * "not here\n".len());
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("entry limit reached"), "{result}");
+    }
+
+    #[test]
+    fn grep_bounds_large_nonmatching_content_and_preserves_earlier_matches() {
+        for shared in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = if shared {
+                std::fs::write(
+                    dir.path().join("a.txt"),
+                    format!("needle\n{}", "other\n".repeat(8192)),
+                )
+                .unwrap();
+                std::fs::write(dir.path().join("b.txt"), "other\n".repeat(8192)).unwrap();
+                GREP_READ_CHUNK
+            } else {
+                std::fs::write(dir.path().join("a.txt"), "other\n".repeat(128 * 1024)).unwrap();
+                2 * GREP_READ_CHUNK
+            };
+            let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+            scan.bytes_left = bytes;
+            let result = grep_with_budget(
+                &call("grep", json!({"pattern": "needle"})),
+                dir.path(),
+                &mut scan,
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(scan.bytes_left, 0);
+            assert!(result.contains("truncated=yes"), "{result}");
+            assert!(result.contains("byte limit reached"), "{result}");
+            if shared {
+                assert!(result.contains("1 matching lines"), "{result}");
+                assert!(result.contains("a.txt:1:needle"), "{result}");
+            } else {
+                assert!(result.contains("0 matching lines"), "{result}");
+                assert!(result.contains("search incomplete"), "{result}");
+            }
+            assert!(result.chars().count() <= OUTPUT_CHARS);
+        }
+    }
+
+    #[test]
+    fn grep_does_not_treat_the_byte_limit_as_end_of_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "needle suffix\n").unwrap();
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.bytes_left = "needle".len();
+        let query = call("grep", json!({"pattern": "needle$", "path": "a"}));
+        let result = grep_with_budget(&query, dir.path(), &mut scan, |_| Ok(())).unwrap();
+        assert_eq!(scan.bytes_left, 0);
+        assert!(
+            result.starts_with("[0 matching lines; truncated=yes]"),
+            "{result}"
+        );
+        assert!(!result.contains("a:1:"), "{result}");
+
+        std::fs::write(dir.path().join("a"), "needle").unwrap();
+        let complete = grep(&query, dir.path(), |_| Ok(())).unwrap();
+        assert!(
+            complete.starts_with("[1 matching lines; truncated=no]"),
+            "{complete}"
+        );
+    }
+
+    #[test]
+    fn grep_reader_bounds_each_read_and_checks_deadlines_between_reads() {
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        let mut reader = GrepReader {
+            inner: io::repeat(b'x'),
+            budget: &mut scan,
+        };
+        let mut buffer = vec![0; GREP_READ_CHUNK * 2];
+        assert_eq!(reader.read(&mut buffer).unwrap(), GREP_READ_CHUNK);
+        assert_eq!(reader.budget.bytes_left, GREP_BYTES - GREP_READ_CHUNK);
+        reader.budget.started -= Duration::from_secs(60);
+        let error = reader.read(&mut buffer).unwrap_err();
+        assert_eq!(error.to_string(), "time limit reached");
+        assert_eq!(reader.budget.bytes_left, GREP_BYTES - GREP_READ_CHUNK);
+    }
+
+    #[test]
+    fn grep_cancels_during_directory_enumeration() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..64 {
+            std::fs::write(dir.path().join(format!("{n:02}.txt")), "not here\n").unwrap();
+        }
+        let checks = Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 20
+        };
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &cancelled);
+        let mut authorized = Vec::new();
+        let error = grep_with_budget(
+            &call("grep", json!({"pattern": "absent"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                authorized.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled by the user"), "{error}");
+        assert!((GREP_ENTRIES - 64..GREP_ENTRIES).contains(&scan.entries_left));
+        assert_eq!(scan.bytes_left, GREP_BYTES);
+        assert_eq!(authorized, [dir.path()]);
+    }
+
+    #[test]
+    fn grep_cancels_during_nonmatching_content_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = "other\n".repeat(128 * 1024);
+        std::fs::write(dir.path().join("a"), &contents).unwrap();
+        let reading = Cell::new(false);
+        let checks = Cell::new(0);
+        let cancelled = || {
+            if reading.get() {
+                checks.set(checks.get() + 1);
+            }
+            checks.get() >= 4
+        };
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &cancelled);
+        let error = grep_with_budget(
+            &call("grep", json!({"pattern": "absent", "path": "a"})),
+            dir.path(),
+            &mut scan,
+            |_| {
+                reading.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled by the user"), "{error}");
+        assert!((1..contents.len()).contains(&(GREP_BYTES - scan.bytes_left)));
+        assert_eq!(scan.truncated, None, "cancellation is not truncation");
+    }
+
+    #[test]
+    fn grep_reports_timeout_but_prioritizes_user_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let query = call("grep", json!({"pattern": "absent"}));
+        let result = super::grep(&query, dir.path(), Duration::ZERO, &|| false, |_| {
+            panic!("expired scan must not authorize any reads")
+        })
+        .unwrap();
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("time limit reached"), "{result}");
+        assert!(result.contains("search incomplete"), "{result}");
+        let error = super::grep(&query, dir.path(), Duration::ZERO, &|| true, |_| {
+            panic!("cancelled scan must not authorize any reads")
+        })
+        .unwrap_err();
+        assert_eq!(error, "grep cancelled by the user");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_does_not_follow_descendant_symlinks_or_linked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "needle").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            dir.path().join("linked-file"),
+        )
+        .unwrap();
+        let result = grep(
+            &call("grep", json!({"pattern": "needle"})),
+            dir.path(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(result.contains("(no matches)"), "{result}");
+        assert!(
+            grep(
+                &call("grep", json!({"pattern": "needle", "path": "linked-dir"})),
+                dir.path(),
+                |_| Ok(()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -864,7 +1622,17 @@ mod tests {
     }
 
     #[test]
-    fn read_and_list() {
+    fn prepared_reads_use_the_live_permission_context() {
+        let ctx =
+            nosh_permissions::Context::new("/workspace", "/workspace").with_home("/shell-home");
+        let read = prepare_read(&call("read_file", json!({"path": "~/file"})), &ctx).unwrap();
+        assert_eq!(read.str_arg("path"), Some("/shell-home/file"));
+        let grep = prepare_read(&call("grep", json!({"pattern": "needle"})), &ctx).unwrap();
+        assert_eq!(grep.str_arg("path"), Some("/workspace"));
+    }
+
+    #[test]
+    fn read_text_and_binary_files() {
         let dir = std::env::temp_dir().join(format!("nosh-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -906,11 +1674,9 @@ mod tests {
         assert!(one.contains("    2  two\n[showing lines 2-2;"), "{one}");
         assert!(!one.contains("three"), "{one}");
 
-        let l = list_dir(&call("list_dir", json!({"depth": 2})), &dir).unwrap();
-        assert!(l.contains("src/\n  main.rs"), "{l}");
-        assert!(l.contains("a.txt"));
-        assert!(!l.contains("ignored.log"), "{l}");
-        assert!(!l.contains(".git/"), "{l}");
+        let error = read_file(&call("read_file", json!({"path": "."})), &dir).unwrap_err();
+        assert!(error.contains("is a directory"));
+        assert!(!error.contains("list_dir"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1003,29 +1769,6 @@ mod tests {
                 assert!(r.ends_with("(empty file)"), "{r}");
             }
         }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    #[test]
-    fn list_dir_sizes_share_one_unit() {
-        let dir = std::env::temp_dir().join(format!("nosh-sizes-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, len) in [
-            ("big", 21_000_000),
-            ("mid", 800_000),
-            ("tiny", 9),
-            ("empty", 0),
-        ] {
-            std::fs::write(dir.join(name), vec![b'x'; len]).unwrap();
-        }
-        let l = list_dir(&call("list_dir", json!({})), &dir).unwrap();
-        assert!(l.contains("big  (20.0 MB)"), "{l}");
-        assert!(l.contains("mid  (0.8 MB)"), "{l}");
-        assert!(l.contains("tiny  (<0.1 MB)"), "{l}");
-        assert!(l.contains("empty  (0 bytes)"), "{l}");
-        std::fs::remove_file(dir.join("big")).unwrap();
-        std::fs::remove_file(dir.join("mid")).unwrap();
-        let l = list_dir(&call("list_dir", json!({})), &dir).unwrap();
-        assert!(l.contains("tiny  (9 bytes)"), "{l}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

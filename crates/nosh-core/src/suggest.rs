@@ -1,7 +1,7 @@
 //! Suggestion mode (Ctrl+G, `nosh -s`): a short separate conversation with
 //! no tools; one shell program is returned and nothing is executed.
 
-use nosh_llm::{ChatEngine, LlmError, Message, SamplingParams, SessionSpec, StopReason};
+use nosh_llm::{ChatEngine, LlmError, SamplingParams, SessionSpec, StopReason};
 use nosh_shell::{EmbeddedShell, Trigger};
 
 use crate::prompt::{self, Environment, TaskInput};
@@ -13,7 +13,7 @@ pub struct Suggestion {
     pub explanation: Option<String>,
 }
 
-/// Asks for one command for `text`.
+/// Suggests with the caller's configured protected paths.
 pub fn suggest(
     engine: &mut dyn ChatEngine,
     env: &Environment,
@@ -21,6 +21,7 @@ pub fn suggest(
     text: &str,
     trigger: Trigger,
     sampling: SamplingParams,
+    context: &nosh_permissions::Context,
 ) -> Result<Option<Suggestion>, LlmError> {
     let spec = SessionSpec {
         system: prompt::suggest_system_prompt(env),
@@ -29,10 +30,18 @@ pub fn suggest(
         sampling,
         max_new_tokens: 256,
     };
+    let guidance = crate::guidance::GuidanceCache::default().load(context);
+    if !guidance.complete {
+        return Err(LlmError::Config(format!(
+            "AGENTS.md guidance is incomplete; review it before requesting a command suggestion.\n{}",
+            guidance.text
+        )));
+    }
     let sid = engine.open(spec)?;
-    let msg = prompt::task_message(shell, &TaskInput::new(trigger, text), None);
+    let notes = (!guidance.text.is_empty()).then_some(guidance.text.as_str());
+    let messages = prompt::task_messages(shell, &TaskInput::new(trigger, text), notes, context);
     engine.cancel_handle().reset();
-    let res = engine.step(sid, vec![Message::User(msg)], &mut |_| {});
+    let res = engine.step(sid, messages, &mut |_| {});
     engine.close(sid);
     let out = res?;
     if out.stop != StopReason::EndOfTurn || !out.tool_calls.is_empty() || !out.errors.is_empty() {

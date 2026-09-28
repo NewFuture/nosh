@@ -354,9 +354,9 @@ mod tests {
                 matches!(classify_path(&path, &ctx), PathClass::Protected(_)),
                 "{path:?}"
             );
+            let read = crate::assess_read("grep", &path, None, &ctx);
+            assert!(read.reads_protected);
         }
-        let read = crate::assess_read("list_dir", &home, Some(2), &ctx);
-        assert!(read.reads_protected);
         let root_alias = dir.path().join("root-alias");
         std::os::unix::fs::symlink("/", &root_alias).unwrap();
         let ctx = Context::new(&root_alias, &root_alias);
@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(k("/Library/LaunchDaemons/x.plist"), PathClass::System);
         assert_eq!(k("/Users"), PathClass::System);
         assert_eq!(k("/Users/other/f"), PathClass::Outside);
-        let read = crate::assess_read("list_dir", Path::new("/private"), Some(2), &c);
+        let read = crate::assess_read("grep", Path::new("/private/etc"), None, &c);
         assert!(read.reads_protected, "{:?}", read.findings);
         assert!(
             read.operations[0]

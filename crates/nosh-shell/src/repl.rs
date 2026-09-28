@@ -24,7 +24,7 @@ use crate::{input_assist, style, term};
 pub struct AiRequest {
     pub trigger: Trigger,
     pub text: String,
-    /// The failed command, for `trigger=failed`.
+    /// The failed command, for [`Trigger::Failed`].
     pub failed: Option<UserCommand>,
     pub user_output: Option<UserOutput>,
 }

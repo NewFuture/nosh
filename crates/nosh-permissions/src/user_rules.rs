@@ -26,7 +26,6 @@ pub struct RuleSpec {
     pub variables: Vec<String>,
     #[serde(default)]
     pub hosts: Vec<String>,
-    pub max_depth: Option<usize>,
     /// Explicitly trust the implementation of a matching invocation, not
     /// additional shell commands or effects outside its declared scopes.
     #[serde(default)]
@@ -254,8 +253,8 @@ impl UserRule {
         let source = source.into();
         let fail = |why: &str| format!("{source}: {why}");
         let tool = spec.tool.as_deref().unwrap_or("run_command");
-        if !matches!(tool, "run_command" | "read_file" | "list_dir") {
-            return Err(fail("tool must be run_command, read_file or list_dir"));
+        if !matches!(tool, "run_command" | "read_file" | "grep") {
+            return Err(fail("tool must be run_command, read_file or grep"));
         }
         if spec.command_prefix.is_some() && spec.command_exact.is_some() {
             return Err(fail(
@@ -270,12 +269,6 @@ impl UserRule {
             return Err(fail(
                 "use read_paths/write_paths for command effects, not path",
             ));
-        }
-        if spec.max_depth.is_some() && tool != "list_dir" {
-            return Err(fail("max_depth applies only to list_dir"));
-        }
-        if spec.max_depth.is_some_and(|d| !(1..=3).contains(&d)) {
-            return Err(fail("max_depth must be between 1 and 3"));
         }
         if tool != "run_command"
             && (!spec.variables.is_empty()
@@ -388,15 +381,6 @@ impl UserRule {
         }
         if let Some((words, prefix)) = &self.argv
             && !command_matches(words, *prefix, op, deny)
-        {
-            return false;
-        }
-        if !deny
-            && let Some(max) = self.spec.max_depth
-            && op
-                .paths
-                .iter()
-                .any(|p| matches!(p.kind, AccessKind::List { depth } if depth > max))
         {
             return false;
         }
@@ -611,7 +595,7 @@ mod tests {
                 ..RuleSpec::default()
             },
             RuleSpec {
-                tool: Some("list_dir".into()),
+                tool: Some("grep".into()),
                 write_paths: vec!["**".into()],
                 ..RuleSpec::default()
             },

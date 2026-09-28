@@ -8,7 +8,7 @@ use crate::backend::{EmbeddedShell, Resolution};
 use crate::command_context::{self, Scope};
 use crate::{guard, spell};
 
-/// Why the AI was invoked (`trigger=` in the task header).
+/// Internal reason the AI was invoked; not exposed in the model's task header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     Hash,

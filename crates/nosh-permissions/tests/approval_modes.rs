@@ -108,9 +108,12 @@ fn common_builds_are_an_explicit_convenience_exception() {
         "pytest -q",
         "python3 -m pytest",
         "mvn test",
+        "mvn -q test",
         "mvn test verify -pl app",
         "gradle build",
+        "gradle --no-daemon test",
         "gradle build test -p app",
+        "sbt -batch test",
         "bazel build //app:binary",
     ] {
         let decision = policy(command, Auto, &context, &rules);
@@ -140,6 +143,7 @@ fn common_builds_are_an_explicit_convenience_exception() {
         "python3 unknown.py",
         "some-unknown-program",
         "npx arbitrary-package",
+        "mvn -q",
         "cargo test && some-unknown-program",
         "cargo test > unknown.log",
     ] {
@@ -505,18 +509,18 @@ fn project_code_uncertainty_is_not_confused_with_explicit_high_risk() {
 }
 
 #[test]
-fn directory_denies_cover_descendants_and_ordinary_renames_are_automatic() {
+fn read_denies_cover_descendants_and_ordinary_renames_are_automatic() {
     let (dir, context) = fixture();
     let rule = UserRule::compile(
         RuleSpec {
-            tool: Some("list_dir".into()),
+            tool: Some("grep".into()),
             path: Some("private/**".into()),
             ..RuleSpec::default()
         },
         "private metadata",
     )
     .unwrap();
-    let report = assess_read("list_dir", &context.cwd, Some(3), &context);
+    let report = assess_read("grep", &context.cwd.join("private/file"), None, &context);
     let result = evaluate(
         &report,
         Yolo,
@@ -1106,52 +1110,6 @@ fn attached_path_options_keep_their_actual_targets() {
         policy("mv -t/etc file", Yolo, &context, &rules).source,
         DecisionSource::UserAllow(_)
     ));
-}
-
-#[test]
-fn increasing_list_depth_cannot_escape_a_deny() {
-    let (_dir, context) = fixture();
-    let rule = UserRule::compile(
-        RuleSpec {
-            tool: Some("list_dir".into()),
-            path: Some("**".into()),
-            max_depth: Some(1),
-            ..RuleSpec::default()
-        },
-        "deny shallow metadata",
-    )
-    .unwrap();
-    for depth in [1, 2, 3] {
-        let report = assess_read("list_dir", &context.cwd, Some(depth), &context);
-        for mode in [Confirm, Auto, Yolo] {
-            let result = evaluate(
-                &report,
-                mode,
-                &UserRules {
-                    allow: vec![rule.clone()],
-                    deny: vec![rule.clone()],
-                },
-                &SessionAllowList::default(),
-            );
-            assert!(
-                matches!(result.source, DecisionSource::UserDeny(_)),
-                "{result:?}"
-            );
-        }
-        let result = evaluate(
-            &report,
-            Confirm,
-            &UserRules {
-                allow: vec![rule.clone()],
-                deny: vec![],
-            },
-            &SessionAllowList::default(),
-        );
-        assert_eq!(
-            matches!(result.source, DecisionSource::UserAllow(_)),
-            depth == 1
-        );
-    }
 }
 
 #[test]

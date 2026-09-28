@@ -246,6 +246,7 @@ impl AiHandler for ShellAi {
         } else {
             eprintln!("{status}");
         }
+        let context = agent.cfg.permission_context(shell);
         let r = crate::suggest::suggest(
             agent.engine_mut(),
             &env,
@@ -253,6 +254,7 @@ impl AiHandler for ShellAi {
             line,
             Trigger::Builtin,
             sampling,
+            &context,
         );
         if animated {
             eprint!("\r\x1b[K");

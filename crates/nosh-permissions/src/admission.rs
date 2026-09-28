@@ -75,16 +75,20 @@ fn build_goal(goal: &str) -> bool {
 
 fn build_goals(args: &[String], valued_options: &[&str]) -> bool {
     let mut args = args.iter();
+    let mut has_goal = false;
     while let Some(arg) = args.next() {
         if valued_options.contains(&arg.as_str()) {
             if args.next().is_none() {
                 return false;
             }
-        } else if !arg.starts_with('-') && !build_goal(arg) {
-            return false;
+        } else if !arg.starts_with('-') {
+            if !build_goal(arg) {
+                return false;
+            }
+            has_goal = true;
         }
     }
-    true
+    has_goal
 }
 
 /// Deliberately accepted project-code risk, separate from recovery evidence.
@@ -203,7 +207,6 @@ fn development(op: &Operation) -> bool {
         "bazel" => known(1) && sub.is_some_and(build_goal),
         "gradle" | "gradlew" | "mvn" | "sbt" => {
             op.known.iter().all(|known| *known)
-                && sub.is_some_and(build_goal)
                 && build_goals(
                     &args[1..],
                     &[
