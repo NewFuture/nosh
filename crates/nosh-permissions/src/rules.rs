@@ -1076,7 +1076,13 @@ pub fn classify(name: &str, args: &[Arg]) -> Verdict {
                     && !joined.contains('c'));
             let extract = has_flag(args, &['x'], &["extract", "get"])
                 || (!joined.starts_with('-') && joined.contains('x') && !joined.contains('c'));
-            let archive = option_targets_with_values(args, Some('f'), &["file"], "C");
+            let mut archive = option_targets_with_values(args, Some('f'), &["file"], "C");
+            if !joined.starts_with('-')
+                && joined.contains('f')
+                && let Some(path) = args.get(1)
+            {
+                archive.push(Target::of(path));
+            }
             let directory = option_targets_with_values(args, Some('C'), &["directory"], "f");
             if list {
                 Verdict::safe("lists an archive").reads(archive)

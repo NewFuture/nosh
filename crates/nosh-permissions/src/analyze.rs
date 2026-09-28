@@ -2440,6 +2440,21 @@ impl Analyzer<'_> {
                     }
                     i += 2;
                 }
+                x if x.starts_with("-C") || x.starts_with("--chdir=") => {
+                    self.opaque();
+                    self.add(Risk::Mutating, "changes the child process directory");
+                    if let Some(path) = args[i].resolved().and_then(|value| {
+                        value
+                            .strip_prefix("-C")
+                            .or_else(|| value.strip_prefix("--chdir="))
+                    }) && !path.is_empty()
+                    {
+                        self.cwd = self.resolve(path);
+                    } else {
+                        self.cwd_unknown = true;
+                    }
+                    i += 1;
+                }
                 "-S" | "--split-string" => {
                     if let Some(s) = args.get(i + 1) {
                         if let Some(s) = s.resolved().filter(|_| !self.report.incomplete) {

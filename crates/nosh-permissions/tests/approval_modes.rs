@@ -1841,6 +1841,7 @@ fn tar_extract_and_list_treat_the_archive_as_an_input() {
         "tar -x -f /etc/archive.tar",
         "tar --extract --file=/etc/archive.tar",
         "tar -t -f /etc/archive.tar",
+        "tar tf /etc/archive.tar",
     ] {
         let report = assess_command(command, &context);
         assert!(report.reads_protected, "{command}");
@@ -1883,6 +1884,29 @@ fn tar_effects_cover_creation_inputs_and_unknown_extraction_members() {
             &UserRules {
                 allow: vec![],
                 deny: vec![protected_read],
+            },
+        )
+        .source,
+        DecisionSource::UserDeny(_)
+    ));
+
+    let protected_write = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("tar".into()),
+            write_paths: vec!["/etc/**".into()],
+            ..RuleSpec::default()
+        },
+        "protected archive output",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(
+            "tar cf /etc/out.tar input",
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![protected_write],
             },
         )
         .source,
@@ -1953,6 +1977,35 @@ fn directory_changes_scope_both_pwd_variables() {
     );
     assert!(!matches!(allowed.source, DecisionSource::UserAllow(_)));
     assert_eq!(allowed.decision, Decision::Allow);
+}
+
+#[test]
+fn env_attached_chdir_scopes_the_child_operation() {
+    let (_dir, context) = fixture();
+    let deny = UserRule::compile(
+        RuleSpec {
+            command_prefix: Some("cargo test".into()),
+            cwd: Some("/etc".into()),
+            ..RuleSpec::default()
+        },
+        "system directory build",
+    )
+    .unwrap();
+    for command in ["env -C/etc cargo test", "env --chdir=/etc cargo test"] {
+        let result = policy(
+            command,
+            Yolo,
+            &context,
+            &UserRules {
+                allow: vec![],
+                deny: vec![deny.clone()],
+            },
+        );
+        assert!(
+            matches!(result.source, DecisionSource::UserDeny(_)),
+            "{command}: {result:?}"
+        );
+    }
 }
 
 #[test]
