@@ -1264,6 +1264,120 @@ fn reads_through_dotdot_or_symlinks_still_ask() {
 }
 
 #[test]
+fn grep_cancellation_stops_the_task_without_counting_a_command() {
+    struct InterruptApproval(std::sync::Arc<nosh_shell::Interrupts>);
+    impl nosh_core::ApprovalChannel for InterruptApproval {
+        fn request(&mut self, request: &nosh_core::ApprovalRequest) -> ApprovalResponse {
+            assert_eq!(request.tool, "grep");
+            self.0.fire();
+            ApprovalResponse::Approve
+        }
+    }
+
+    let _g = setup();
+    let root = tmpdir("grep-cancelled");
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "scoped instruction after cancelled grep",
+    )
+    .unwrap();
+    std::fs::write(root.join("secret.txt"), "needle\n").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let engine = MockChatEngine::new(vec![
+        vec![
+            call("grep", json!({"pattern": "needle"})),
+            call("run_command", json!({"command": "touch should-not-exist"})),
+        ],
+        vec![text("done")],
+    ]);
+    let received = engine.received();
+    let mut a = agent(
+        engine,
+        AgentConfig {
+            protected: vec![root.join("secret.txt")],
+            ..Default::default()
+        },
+    );
+    let mut approval = InterruptApproval(sh.interrupts());
+    let mut ui = RecordUi::default();
+    let outcome = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "find text"),
+        &mut approval,
+        &mut ui,
+    );
+    assert_eq!(outcome.status, TaskStatus::Cancelled);
+    assert_eq!(outcome.status.exit_code(), 130);
+    assert_eq!(outcome.commands_run, 0);
+    assert_eq!(outcome.denied, 0);
+    assert_eq!(
+        outcome.steps, 1,
+        "cancellation must not reach another model step"
+    );
+    assert!(!root.join("should-not-exist").exists());
+
+    let next = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "describe"),
+        &mut Scripted::new([]),
+        &mut ui,
+    );
+    assert_eq!(next.status, TaskStatus::Completed);
+    let records = received.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    let results = tool_results(&records);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], "[cancelled by the user]");
+    assert!(results[1].starts_with("[skipped]"), "{results:?}");
+    assert!(records[1].iter().any(|message| matches!(
+        message,
+        Message::System(text) if text.contains("scoped instruction after cancelled grep")
+    )));
+    drop(records);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn grep_uses_the_existing_timeout_without_cancelling_the_task() {
+    let _g = setup();
+    let root = tmpdir("grep-timeout");
+    std::fs::write(root.join("a"), "needle\n").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    let engine = MockChatEngine::new(vec![
+        vec![call("grep", json!({"pattern": "needle"}))],
+        vec![text("Search incomplete.")],
+    ]);
+    let received = engine.received();
+    let mut a = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            command_timeout: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+        env(),
+        ToolSet::ReadOnly,
+    );
+    let outcome = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Pipe, "find text"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(outcome.status, TaskStatus::Completed);
+    assert_eq!(outcome.commands_run, 0);
+    assert_eq!(outcome.steps, 2);
+    let results = tool_results(&received.lock().unwrap());
+    assert_eq!(results.len(), 1);
+    assert!(results[0].starts_with("[0 matching lines; truncated=yes]"));
+    assert!(results[0].contains("time limit reached"), "{results:?}");
+    assert!(results[0].contains("search incomplete"), "{results:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn grep_checks_protected_roots_dotdot_symlinks_and_descendants() {
     let _g = setup();
     let dir = tmpdir("grep-protected");

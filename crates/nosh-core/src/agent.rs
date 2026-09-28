@@ -138,6 +138,7 @@ enum Exec {
     Denied(String),
     Handoff(String, String),
     Aborted(String),
+    Cancelled(String),
 }
 
 pub struct Agent {
@@ -494,6 +495,10 @@ impl Agent {
                         out.commands_run += 1;
                         pending.push(Message::Tool(t));
                     }
+                    Exec::Cancelled(t) => {
+                        aborted = true;
+                        pending.push(Message::Tool(t));
+                    }
                 }
             }
             let mut fatal = None;
@@ -509,6 +514,7 @@ impl Agent {
                 )));
             }
             if aborted {
+                self.guidance_sent = None;
                 out.status = TaskStatus::Cancelled;
                 self.carry = pending;
                 break;
@@ -811,27 +817,38 @@ impl Agent {
             Vec::new()
         };
         let mut denied = None;
+        let cancel = self.engine.cancel_handle();
         let result = match tool {
             BuiltinTool::ReadFile => tools::read_file(call, &cwd),
-            BuiltinTool::Grep => tools::grep(call, &cwd, |child| {
-                let resolved =
-                    nosh_permissions::real_path(child, true).unwrap_or_else(|| child.to_path_buf());
-                if child != path && !authorized.iter().any(|root| resolved.starts_with(root)) {
-                    if let Err(error) = self.approve_read(child, &ctx, call, approval, ui) {
-                        denied = Some(error);
-                        return Err("reading a protected grep path was denied".into());
+            BuiltinTool::Grep => tools::grep(
+                call,
+                &cwd,
+                self.cfg.command_timeout,
+                &|| cancel.is_cancelled(),
+                |child| {
+                    let resolved = nosh_permissions::real_path(child, true)
+                        .unwrap_or_else(|| child.to_path_buf());
+                    if child != path && !authorized.iter().any(|root| resolved.starts_with(root)) {
+                        if let Err(error) = self.approve_read(child, &ctx, call, approval, ui) {
+                            denied = Some(error);
+                            return Err("reading a protected grep path was denied".into());
+                        }
+                        if matches!(
+                            classify_path_real(child, &ctx, true).0,
+                            PathClass::Protected(_)
+                        ) {
+                            authorized.push(resolved);
+                        }
                     }
-                    if matches!(
-                        classify_path_real(child, &ctx, true).0,
-                        PathClass::Protected(_)
-                    ) {
-                        authorized.push(resolved);
-                    }
-                }
-                Ok(())
-            }),
+                    Ok(())
+                },
+            ),
             BuiltinTool::RunCommand => unreachable!("commands are dispatched separately"),
         };
+        if tool == BuiltinTool::Grep && cancel.is_cancelled() {
+            ui.tool_end("cancelled");
+            return Exec::Cancelled("[cancelled by the user]".into());
+        }
         if let Some(error) = denied {
             ui.tool_end("protected grep path denied");
             return error;

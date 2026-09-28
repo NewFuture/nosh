@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
-use std::io::{BufRead, Read};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use nosh_llm::{ToolCall, ToolSpec};
 use nosh_shell::{CommandResult, EmbeddedShell, OutputState, UserOutput};
@@ -13,6 +14,9 @@ use serde_json::json;
 pub const OUTPUT_CHARS: usize = 6000;
 pub const READ_FILE_LINES: usize = 400;
 pub const GREP_MATCHES: usize = 200;
+const GREP_ENTRIES: usize = 10_000;
+const GREP_BYTES: usize = 64 * 1024 * 1024;
+const GREP_READ_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
@@ -104,7 +108,7 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn grep_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::Grep.name().into(),
-        description: "Search file contents recursively using ripgrep regex. Does not search file names. Returns relative paths, line numbers and matching lines. Respects .gitignore; skips hidden/binary files and descendant symlinks. At most 200 matching lines.".into(),
+        description: "Search file contents recursively using ripgrep regex. Does not search file names. Returns relative paths, line numbers and matching lines. Respects .gitignore; skips hidden/binary files and descendant symlinks. At most 200 matching lines; bounded scans report truncation.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -374,14 +378,90 @@ pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {
     resolve(cwd, call.str_arg("path").unwrap_or("."))
 }
 
+struct GrepBudget<'a> {
+    cancelled: &'a dyn Fn() -> bool,
+    started: Instant,
+    timeout: Duration,
+    entries_left: usize,
+    bytes_left: usize,
+    truncated: Option<&'static str>,
+}
+
+impl<'a> GrepBudget<'a> {
+    fn new(timeout: Duration, cancelled: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            cancelled,
+            started: Instant::now(),
+            timeout,
+            entries_left: GREP_ENTRIES,
+            bytes_left: GREP_BYTES,
+            truncated: None,
+        }
+    }
+
+    fn check(&mut self) -> Result<bool, String> {
+        if (self.cancelled)() {
+            return Err("grep cancelled by the user".into());
+        }
+        if self.truncated.is_none() && self.started.elapsed() >= self.timeout {
+            self.truncated = Some("time limit reached");
+        }
+        Ok(self.truncated.is_none())
+    }
+}
+
+struct GrepReader<'a, 'b, R> {
+    inner: R,
+    budget: &'a mut GrepBudget<'b>,
+}
+
+impl<R: Read> Read for GrepReader<'_, '_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.budget.check().map_err(io::Error::other)?;
+        if self.budget.bytes_left == 0 {
+            self.budget.truncated.get_or_insert("byte limit reached");
+        }
+        if let Some(reason) = self.budget.truncated {
+            // A limit is not EOF: a cut-off line must not become a match.
+            return Err(io::Error::other(reason));
+        }
+        let len = buf.len().min(self.budget.bytes_left).min(GREP_READ_CHUNK);
+        let read = self.inner.read(&mut buf[..len])?;
+        self.budget.bytes_left -= read;
+        Ok(read)
+    }
+}
+
 /// Searches contents; ignore-rule loading is metadata, directory/content reads are authorized.
 pub fn grep(
     call: &ToolCall,
     cwd: &Path,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+    authorize: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<String, String> {
+    grep_with_budget(
+        call,
+        cwd,
+        &mut GrepBudget::new(timeout, cancelled),
+        authorize,
+    )
+}
+
+fn grep_with_budget(
+    call: &ToolCall,
+    cwd: &Path,
+    scan: &mut GrepBudget<'_>,
     mut authorize: impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<String, String> {
     use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkMatch};
 
+    if !scan.check()? {
+        return Ok(format_grep_result(0, "", scan.truncated));
+    }
     let pattern = call
         .str_arg("pattern")
         .ok_or("missing required parameter 'pattern'")?;
@@ -423,6 +503,9 @@ pub fn grep(
         .transpose()?;
     let mut ignores = if meta.is_dir() {
         authorize(&root)?;
+        if !scan.check()? {
+            return Ok(format_grep_result(0, "", scan.truncated));
+        }
         let mut builder = ignore::WalkBuilder::new(&root);
         builder.hidden(true).follow_links(false).require_git(false);
         Some(
@@ -494,10 +577,12 @@ pub fn grep(
         .build();
     let mut output = String::new();
     let mut count = 0;
-    let mut truncated = false;
     let budget = OUTPUT_CHARS - 120;
     let mut pending = vec![root.clone()];
-    while let Some(path) = pending.pop() {
+    'scan: while let Some(path) = pending.pop() {
+        if !scan.check()? {
+            break;
+        }
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         if path != root {
@@ -522,11 +607,27 @@ pub fn grep(
             if path != root {
                 authorize(&path)?;
             }
-            let mut children = std::fs::read_dir(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<std::io::Result<Vec<_>>>()
-                .map_err(|error| format!("{}: {error}", path.display()))?;
+            if !scan.check()? {
+                break;
+            }
+            let mut entries =
+                std::fs::read_dir(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            let mut children = Vec::new();
+            loop {
+                if !scan.check()? {
+                    break 'scan;
+                }
+                if scan.entries_left == 0 {
+                    scan.truncated = Some("entry limit reached");
+                    break 'scan;
+                }
+                let Some(entry) = entries.next() else {
+                    break;
+                };
+                let entry = entry.map_err(|error| format!("{}: {error}", path.display()))?;
+                scan.entries_left -= 1;
+                children.push(entry.path());
+            }
             children.sort();
             pending.extend(children.into_iter().rev());
             continue;
@@ -541,6 +642,9 @@ pub fn grep(
             continue;
         }
         authorize(&path)?;
+        if !scan.check()? {
+            break;
+        }
         let mut matches = Matches {
             path: path.strip_prefix(base).unwrap_or(&path),
             text: String::new(),
@@ -549,29 +653,55 @@ pub fn grep(
             budget: budget.saturating_sub(output.chars().count()),
             truncated: false,
         };
-        searcher
-            .search_path(&matcher, &path, &mut matches)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let file =
+            std::fs::File::open(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let result = searcher.search_reader(
+            &matcher,
+            GrepReader {
+                inner: file,
+                budget: scan,
+            },
+            &mut matches,
+        );
+        if let Err(error) = result
+            && scan.truncated.is_none()
+        {
+            return Err(format!("{}: {error}", path.display()));
+        }
         output.push_str(&matches.text);
         count += matches.count;
         if matches.truncated {
-            truncated = true;
+            scan.truncated.get_or_insert("match/output limit reached");
+        }
+        if !scan.check()? {
             break;
         }
     }
+    scan.check()?;
+    Ok(format_grep_result(count, &output, scan.truncated))
+}
+
+fn format_grep_result(count: usize, output: &str, truncated: Option<&str>) -> String {
     let mut result = format!(
         "[{count} matching lines; truncated={}]\n",
-        if truncated { "yes" } else { "no" }
+        if truncated.is_some() { "yes" } else { "no" }
     );
     if count == 0 {
-        result.push_str("(no matches)");
+        result.push_str(if truncated.is_some() {
+            "(no matches in the scanned portion; search incomplete)"
+        } else {
+            "(no matches)"
+        });
     } else {
         result.push_str(output.trim_end());
     }
-    if truncated {
-        result.push_str("\n[truncated: refine pattern, path or glob]");
+    if let Some(reason) = truncated {
+        let _ = write!(
+            result,
+            "\n[truncated: {reason}; refine pattern, path or glob]"
+        );
     }
-    Ok(result)
+    result
 }
 
 /// `read_file`: numbered lines, binary files refused.
@@ -722,12 +852,21 @@ fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<Stri
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::cell::Cell;
 
     fn call(name: &str, args: Value) -> ToolCall {
         ToolCall {
             name: name.into(),
             args: args.as_object().cloned().unwrap(),
         }
+    }
+
+    fn grep(
+        call: &ToolCall,
+        cwd: &Path,
+        authorize: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<String, String> {
+        super::grep(call, cwd, Duration::from_secs(60), &|| false, authorize)
     }
 
     #[test]
@@ -1079,6 +1218,221 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("a:"), "{error}");
+    }
+
+    #[test]
+    fn grep_bounds_wide_directory_collection_even_with_no_eligible_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..40 {
+            std::fs::write(dir.path().join(format!("{n:02}.txt")), "not here\n").unwrap();
+        }
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.entries_left = 8;
+        let mut authorized = Vec::new();
+        let result = grep_with_budget(
+            &call("grep", json!({"pattern": "absent", "glob": "*.rs"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                authorized.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.entries_left, 0);
+        assert_eq!(scan.bytes_left, GREP_BYTES);
+        assert_eq!(authorized, [dir.path()]);
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("entry limit reached"), "{result}");
+        assert!(
+            result.contains("scanned portion; search incomplete"),
+            "{result}"
+        );
+        assert!(!result.contains("(no matches)"), "{result}");
+    }
+
+    #[test]
+    fn grep_shares_the_entry_budget_across_nonmatching_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..10 {
+            let child = dir.path().join(format!("{n:02}"));
+            std::fs::create_dir(&child).unwrap();
+            for file in 0..5 {
+                std::fs::write(child.join(format!("{file}.txt")), "not here\n").unwrap();
+            }
+        }
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.entries_left = 23;
+        let mut files = 0;
+        let result = grep_with_budget(
+            &call("grep", json!({"pattern": "absent"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                files += usize::from(path.is_file());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.entries_left, 0);
+        assert_eq!(files, 10);
+        assert_eq!(GREP_BYTES - scan.bytes_left, files * "not here\n".len());
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("entry limit reached"), "{result}");
+    }
+
+    #[test]
+    fn grep_bounds_large_nonmatching_content_and_preserves_earlier_matches() {
+        for shared in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = if shared {
+                std::fs::write(
+                    dir.path().join("a.txt"),
+                    format!("needle\n{}", "other\n".repeat(8192)),
+                )
+                .unwrap();
+                std::fs::write(dir.path().join("b.txt"), "other\n".repeat(8192)).unwrap();
+                GREP_READ_CHUNK
+            } else {
+                std::fs::write(dir.path().join("a.txt"), "other\n".repeat(128 * 1024)).unwrap();
+                2 * GREP_READ_CHUNK
+            };
+            let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+            scan.bytes_left = bytes;
+            let result = grep_with_budget(
+                &call("grep", json!({"pattern": "needle"})),
+                dir.path(),
+                &mut scan,
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(scan.bytes_left, 0);
+            assert!(result.contains("truncated=yes"), "{result}");
+            assert!(result.contains("byte limit reached"), "{result}");
+            if shared {
+                assert!(result.contains("1 matching lines"), "{result}");
+                assert!(result.contains("a.txt:1:needle"), "{result}");
+            } else {
+                assert!(result.contains("0 matching lines"), "{result}");
+                assert!(result.contains("search incomplete"), "{result}");
+            }
+            assert!(result.chars().count() <= OUTPUT_CHARS);
+        }
+    }
+
+    #[test]
+    fn grep_does_not_treat_the_byte_limit_as_end_of_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "needle suffix\n").unwrap();
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        scan.bytes_left = "needle".len();
+        let query = call("grep", json!({"pattern": "needle$", "path": "a"}));
+        let result = grep_with_budget(&query, dir.path(), &mut scan, |_| Ok(())).unwrap();
+        assert_eq!(scan.bytes_left, 0);
+        assert!(
+            result.starts_with("[0 matching lines; truncated=yes]"),
+            "{result}"
+        );
+        assert!(!result.contains("a:1:"), "{result}");
+
+        std::fs::write(dir.path().join("a"), "needle").unwrap();
+        let complete = grep(&query, dir.path(), |_| Ok(())).unwrap();
+        assert!(
+            complete.starts_with("[1 matching lines; truncated=no]"),
+            "{complete}"
+        );
+    }
+
+    #[test]
+    fn grep_reader_bounds_each_read_and_checks_deadlines_between_reads() {
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &|| false);
+        let mut reader = GrepReader {
+            inner: io::repeat(b'x'),
+            budget: &mut scan,
+        };
+        let mut buffer = vec![0; GREP_READ_CHUNK * 2];
+        assert_eq!(reader.read(&mut buffer).unwrap(), GREP_READ_CHUNK);
+        assert_eq!(reader.budget.bytes_left, GREP_BYTES - GREP_READ_CHUNK);
+        reader.budget.started -= Duration::from_secs(60);
+        let error = reader.read(&mut buffer).unwrap_err();
+        assert_eq!(error.to_string(), "time limit reached");
+        assert_eq!(reader.budget.bytes_left, GREP_BYTES - GREP_READ_CHUNK);
+    }
+
+    #[test]
+    fn grep_cancels_during_directory_enumeration() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..64 {
+            std::fs::write(dir.path().join(format!("{n:02}.txt")), "not here\n").unwrap();
+        }
+        let checks = Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 20
+        };
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &cancelled);
+        let mut authorized = Vec::new();
+        let error = grep_with_budget(
+            &call("grep", json!({"pattern": "absent"})),
+            dir.path(),
+            &mut scan,
+            |path| {
+                authorized.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled by the user"), "{error}");
+        assert!((GREP_ENTRIES - 64..GREP_ENTRIES).contains(&scan.entries_left));
+        assert_eq!(scan.bytes_left, GREP_BYTES);
+        assert_eq!(authorized, [dir.path()]);
+    }
+
+    #[test]
+    fn grep_cancels_during_nonmatching_content_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = "other\n".repeat(128 * 1024);
+        std::fs::write(dir.path().join("a"), &contents).unwrap();
+        let reading = Cell::new(false);
+        let checks = Cell::new(0);
+        let cancelled = || {
+            if reading.get() {
+                checks.set(checks.get() + 1);
+            }
+            checks.get() >= 4
+        };
+        let mut scan = GrepBudget::new(Duration::from_secs(60), &cancelled);
+        let error = grep_with_budget(
+            &call("grep", json!({"pattern": "absent", "path": "a"})),
+            dir.path(),
+            &mut scan,
+            |_| {
+                reading.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled by the user"), "{error}");
+        assert!((1..contents.len()).contains(&(GREP_BYTES - scan.bytes_left)));
+        assert_eq!(scan.truncated, None, "cancellation is not truncation");
+    }
+
+    #[test]
+    fn grep_reports_timeout_but_prioritizes_user_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let query = call("grep", json!({"pattern": "absent"}));
+        let result = super::grep(&query, dir.path(), Duration::ZERO, &|| false, |_| {
+            panic!("expired scan must not authorize any reads")
+        })
+        .unwrap();
+        assert!(result.starts_with("[0 matching lines; truncated=yes]"));
+        assert!(result.contains("time limit reached"), "{result}");
+        assert!(result.contains("search incomplete"), "{result}");
+        let error = super::grep(&query, dir.path(), Duration::ZERO, &|| true, |_| {
+            panic!("cancelled scan must not authorize any reads")
+        })
+        .unwrap_err();
+        assert_eq!(error, "grep cancelled by the user");
     }
 
     #[cfg(unix)]
