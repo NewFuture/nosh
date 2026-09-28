@@ -993,18 +993,32 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
     starts = [event for event in (evidence or {}).get("inputs") or []
               if event.get("ev") == "step_start"]
     messages = starts[0].get("messages", []) if starts else []
-    tasks = [message["text"] for message in messages
-             if message.get("role") == "user" and message.get("text", "").startswith("[task ")]
-    if len(tasks) != 1 or "\n[user_output " not in tasks[0]:
+    contexts = [message for message in messages if
+                (message.get("role") == "system" and message.get("text", "").startswith("[context]\n"))
+                or (message.get("role") == "user" and message.get("text", "").startswith("[task "))]
+    if len(contexts) != 1 or "\n[user_output " not in contexts[0]["text"]:
         return reasons + ["the first model request lacks captured output evidence"], codes
-    task = tasks[0]
+    context = contexts[0]
+    task = context["text"]
     if scenario["check"] in CAPTURE_CHECKS and scenario["inputs"][-1].startswith("ai fix"):
-        if not re.match(r"^\[task trigger=failed exit=17(?: |\])", task):
-            reasons.append("captured diagnosis did not use trigger=failed with exit 17")
         question = scenario["inputs"][-1].removeprefix("ai fix").strip()
-        tail = task.split("\n[/user_output]", 1)
-        if len(tail) != 2 or not tail[1].strip().splitlines() or tail[1].strip().splitlines()[-1] != question:
-            reasons.append("the ai fix question is missing or changed in the first model request")
+        if context["role"] == "system":
+            fields = task.split("\n[", 1)[0].splitlines()[1:]
+            commands = [line.removeprefix("failed_command: ") for line in fields
+                        if line.startswith("failed_command: ")]
+            expected = scenario["inputs"][0]
+            if (fields.count("exit: 17") != 1 or len(commands) != 1
+                    or commands[0] not in (expected, json.dumps(expected, ensure_ascii=False))):
+                reasons.append("captured diagnosis context does not identify the failed command and exit 17")
+            requests = [message for message in messages if message.get("role") == "user"]
+            if len(requests) != 1 or requests[0]["text"] != question or messages[-1] != requests[0]:
+                reasons.append("the ai fix question is missing or changed in the first model request")
+        else:
+            if not re.match(r"^\[task trigger=failed exit=17(?: |\])", task):
+                reasons.append("captured diagnosis did not use trigger=failed with exit 17")
+            tail = task.split("\n[/user_output]", 1)
+            if len(tail) != 2 or not tail[1].strip().splitlines() or tail[1].strip().splitlines()[-1] != question:
+                reasons.append("the ai fix question is missing or changed in the first model request")
     header, separator, body = task.split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None

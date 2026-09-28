@@ -123,6 +123,28 @@ class DiagnosticContractTests(unittest.TestCase):
         )
         self.assertTrue(verdict.details["facts"]["components"]["capture"]["passed"])
 
+    def test_system_context_preserves_capture_and_the_separate_request(self):
+        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        evidence = observed_input(self.text, self.metadata, "failed", question, system_context=True)
+        self.assertTrue(self.grade(evidence=evidence).passed)
+        for role in ("tool", "assistant", "user"):
+            changed = copy.deepcopy(evidence)
+            changed["inputs"][0]["messages"][0]["role"] = role
+            with self.subTest(role=role):
+                self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
+        for before, after in (("exit: 17", "exit: 0"), ("failed_command: python3 once.py", "failed_command: other")):
+            changed = copy.deepcopy(evidence)
+            changed["inputs"][0]["messages"][0]["text"] = changed["inputs"][0]["messages"][0]["text"].replace(before, after)
+            with self.subTest(after=after):
+                self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
+        for changed_question in ("different question", ""):
+            changed = observed_input(self.text, self.metadata, "failed", changed_question, system_context=True)
+            with self.subTest(question=changed_question):
+                self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
+        changed = copy.deepcopy(evidence)
+        changed["inputs"][0]["messages"].reverse()
+        self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
+
     def test_citing_an_id_does_not_excuse_known_unsupported_claims(self):
         for assertion in (
             "REGION 是 Kubernetes 集群的区域标识。",

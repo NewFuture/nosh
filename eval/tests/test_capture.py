@@ -35,13 +35,22 @@ def capture_trial(base, scenario):
     return root, facts, original.stderr, metadata, result, answer, metrics
 
 
-def observed_input(text, metadata, trigger="hash", question=""):
+def observed_input(text, metadata, trigger="hash", question="", *, system_context=False):
+    block = f"[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
+    if system_context:
+        header = f"[context]\ncwd: {metadata['execution_cwd']}"
+        if trigger == "failed":
+            header += f"\nexit: 17\nfailed_command: {metadata['command']}"
+        return {"inputs": [{"ev": "step_start", "messages": [
+            {"role": "system", "text": f"{header}\n{block}"},
+            {"role": "user", "text": question},
+        ]}]}
     header = (
         "[task trigger=failed exit=17 cwd=/fixture]"
         if trigger == "failed"
         else f"[task trigger={trigger}]"
     )
-    message = f"{header}\n[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
+    message = f"{header}\n{block}"
     if question:
         message += f"\nThe command failed. Explain the likely cause and how to fix it.\n{question}"
     return {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": message}]}]}

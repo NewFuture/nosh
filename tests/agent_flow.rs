@@ -146,12 +146,18 @@ fn user_output_is_attached_once_per_conversation() {
 
     let received = received.lock().unwrap();
     let task = |index: usize| match &received[index][0] {
-        Message::User(text) => text,
-        other => panic!("expected user message, got {other:?}"),
+        Message::System(text) => text,
+        other => panic!("expected system context, got {other:?}"),
     };
     assert!(task(0).contains("[user_output "));
     assert!(!task(1).contains("[user_output "));
     assert!(task(2).contains("[user_output "));
+    for messages in received.iter() {
+        let [Message::System(_), Message::User(request)] = messages.as_slice() else {
+            panic!("captured output must remain separate from the real request");
+        };
+        assert_eq!(request, "Explain why the command failed and how to fix it.");
+    }
 }
 
 #[test]
