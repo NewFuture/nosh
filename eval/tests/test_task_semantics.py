@@ -272,7 +272,7 @@ class DatasetRevisionTests(ProjectWorkCase):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 8)
+        self.assertEqual(data["dataset_revision"], 9)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
@@ -305,7 +305,8 @@ class DatasetRevisionTests(ProjectWorkCase):
         for scenario in revision_four["scenarios"]:
             if scenario["check"] in suite.CAPTURE_CHECKS:
                 scenario["inputs"][-1] = "# 根据刚才的输出诊断"
-        self.assertEqual(suite.load_suite(self.write_suite(revision_four)), revision_four)
+        with self.assertRaisesRegex(ValueError, "explicit ai fix"):
+            suite.load_suite(self.write_suite(revision_four))
 
         for revision in (0, -1, True, 2.0, "2", None, []):
             invalid = dict(current, dataset_revision=revision)

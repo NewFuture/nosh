@@ -396,7 +396,7 @@ impl Agent {
         let cwd0 = shell.cwd();
         let permission_context = self.cfg.permission_context(shell);
         let (notes, mut guidance_key) = self.project_documents(&permission_context, sid);
-        pending.extend(prompt::task_messages_with_context(
+        pending.extend(prompt::task_messages(
             shell,
             &input,
             notes.as_deref(),

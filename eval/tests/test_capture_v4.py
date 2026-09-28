@@ -28,7 +28,7 @@ class DiagnosticContractTests(unittest.TestCase):
         return checks.judge(
             scenario, self.answer if answer is None else answer, self.facts,
             self.root, fixtures.snapshot(self.root), self.result, self.metrics,
-            observed_input(self.text, self.metadata, "failed", question)
+            observed_input(self.text, self.metadata, question)
             if evidence is None else evidence,
         )
 
@@ -92,40 +92,41 @@ class DiagnosticContractTests(unittest.TestCase):
             with self.subTest(change=change):
                 question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
                 verdict = self.grade(evidence=observed_input(
-                    self.text, dict(self.metadata, **change), "failed", question))
+                    self.text, dict(self.metadata, **change), question))
                 self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
         second = subprocess.run([sys.executable, "once.py"], cwd=self.root, capture_output=True,
                                 text=True, check=False)
         self.assertNotIn("CAPTURE-", second.stderr)
         self.assertFalse(self.grade().details["facts"]["components"]["capture"]["passed"])
 
-    def test_revision_five_requires_failed_route_and_preserves_fix_question(self):
+    def test_failed_context_and_fix_question_are_required(self):
         question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        missing_failure = observed_input(self.text, self.metadata, question)
+        missing_failure["inputs"][0]["messages"][0]["text"] = (
+            missing_failure["inputs"][0]["messages"][0]["text"].replace("\nexit: 17", "")
+        )
         for evidence in (
-            observed_input(self.text, self.metadata),
-            observed_input(self.text, self.metadata, "failed", "different question"),
+            missing_failure,
+            observed_input(self.text, self.metadata, "different question"),
         ):
             with self.subTest(evidence=evidence):
                 verdict = self.grade(evidence=evidence)
                 self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
         self.assertTrue(
             self.grade(evidence=observed_input(
-                self.text, self.metadata, "failed", question
+                self.text, self.metadata, question
             )).details["facts"]["components"]["capture"]["passed"]
         )
 
-    def test_revision_four_hash_route_remains_gradable(self):
-        historical = copy.deepcopy(self.scenario)
-        historical["inputs"][-1] = "# 根据刚才的输出诊断"
-        verdict = self.grade(
-            scenario=historical,
-            evidence=observed_input(self.text, self.metadata),
-        )
-        self.assertTrue(verdict.details["facts"]["components"]["capture"]["passed"])
+    def test_merged_user_task_headers_are_not_capture_context(self):
+        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        text = f"[task trigger=failed exit=17]\n[user_output {json.dumps(self.metadata)}]\n{self.text}\n[/user_output]\n{question}"
+        evidence = {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": text}]}]}
+        self.assertFalse(self.grade(evidence=evidence).details["facts"]["components"]["capture"]["passed"])
 
     def test_system_context_preserves_capture_and_the_separate_request(self):
         question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
-        evidence = observed_input(self.text, self.metadata, "failed", question, system_context=True)
+        evidence = observed_input(self.text, self.metadata, question)
         self.assertTrue(self.grade(evidence=evidence).passed)
         for role in ("tool", "assistant", "user"):
             changed = copy.deepcopy(evidence)
@@ -138,7 +139,7 @@ class DiagnosticContractTests(unittest.TestCase):
             with self.subTest(after=after):
                 self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
         for changed_question in ("different question", ""):
-            changed = observed_input(self.text, self.metadata, "failed", changed_question, system_context=True)
+            changed = observed_input(self.text, self.metadata, changed_question)
             with self.subTest(question=changed_question):
                 self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
         changed = copy.deepcopy(evidence)

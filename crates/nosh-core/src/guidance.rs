@@ -10,6 +10,7 @@ use serde_json::json;
 const GUIDANCE_CHARS: usize = 4000;
 const MAX_ANCESTORS: usize = 32;
 const README_CHARS: usize = 1000;
+const UNTRUSTED_END: &str = "\n</untrusted_text>\n";
 const READMES: &[&str] = &[
     "README.md",
     "Readme.md",
@@ -89,11 +90,13 @@ impl GuidanceCache {
             if stamp.is_none() {
                 key.push_str(&contents);
             }
-            let mut body = untrusted_document(&readme_excerpt(&contents));
-            if body.chars().count() > README_CHARS {
-                let ending = "\n[excerpt truncated]\n</untrusted_text>\n";
+            let (excerpt, truncated) = readme_excerpt(&contents);
+            let mut body = untrusted_document(&excerpt);
+            if truncated || body.chars().count() > README_CHARS {
+                body.truncate(body.len() - UNTRUSTED_END.len());
+                let ending = format!("\n[excerpt truncated]{UNTRUSTED_END}");
                 body = body.chars().take(README_CHARS - ending.len()).collect();
-                body.push_str(ending);
+                body.push_str(&ending);
             }
             text.push_str(&body);
         }
@@ -227,10 +230,10 @@ fn untrusted_document(text: &str) -> String {
         .trim_end()
         .replace("<untrusted_text>", "&lt;untrusted_text&gt;")
         .replace("</untrusted_text>", "&lt;/untrusted_text&gt;");
-    format!("<untrusted_text>\n{body}\n</untrusted_text>\n")
+    format!("<untrusted_text>\n{body}{UNTRUSTED_END}")
 }
 
-fn readme_excerpt(text: &str) -> String {
+fn readme_excerpt(text: &str) -> (String, bool) {
     let mut intro = Vec::new();
     let mut headings = Vec::new();
     let mut fence: Option<(u8, usize)> = None;
@@ -300,13 +303,7 @@ fn readme_excerpt(text: &str) -> String {
         body.push_str("\nSections:\n");
         body.push_str(&headings.join("\n"));
     }
-    truncated |= body.chars().count() > README_CHARS;
-    let body: String = body.chars().take(README_CHARS).collect();
-    if truncated {
-        format!("{body}\n[excerpt truncated]\n")
-    } else {
-        format!("{body}\n")
-    }
+    (body, truncated)
 }
 
 #[cfg(test)]
@@ -411,8 +408,25 @@ mod tests {
         assert!(body.chars().count() <= README_CHARS);
         assert!(body.starts_with("<untrusted_text>\n"));
         assert!(body.ends_with("\n[excerpt truncated]\n</untrusted_text>\n"));
+        assert_eq!(body.matches("[excerpt truncated]").count(), 1);
         assert_eq!(body.matches("<untrusted_text>").count(), 1);
         assert_eq!(body.matches("</untrusted_text>").count(), 1);
+    }
+
+    #[test]
+    fn omitted_headings_mark_a_short_excerpt_once() {
+        let root = tempfile::tempdir().unwrap();
+        let contents = (0..10)
+            .map(|index| format!("## Section {index}\n"))
+            .collect::<String>();
+        std::fs::write(root.path().join("README.md"), contents).unwrap();
+        let ctx = Context::new(root.path(), root.path()).with_home(root.path());
+        let reference = GuidanceCache::default().load(&ctx);
+        let body = reference.text.split_once('\n').unwrap().1;
+        assert!(body.chars().count() < README_CHARS);
+        assert_eq!(body.matches("[excerpt truncated]").count(), 1);
+        assert_eq!(body.matches("</untrusted_text>").count(), 1);
+        assert!(body.ends_with(UNTRUSTED_END));
     }
 
     #[test]
@@ -575,7 +589,7 @@ mod tests {
 
     #[test]
     fn readme_fences_close_only_with_matching_delimiters() {
-        let excerpt = readme_excerpt(
+        let (excerpt, _) = readme_excerpt(
             "# Project\nIntro.\n````markdown\n```sh\nhidden command\n```\n## hidden heading\n````\n~~~sh\n```\nhidden mixed fence\n~~~\n## Usage\nVisible reference.\n",
         );
         assert!(excerpt.contains("Intro."));

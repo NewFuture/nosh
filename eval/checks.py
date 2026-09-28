@@ -993,33 +993,23 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
     starts = [event for event in (evidence or {}).get("inputs") or []
               if event.get("ev") == "step_start"]
     messages = starts[0].get("messages", []) if starts else []
-    contexts = [message for message in messages if
-                (message.get("role") == "system" and message.get("text", "").startswith("[context]\n"))
-                or (message.get("role") == "user" and message.get("text", "").startswith("[task "))]
-    if len(contexts) != 1 or "\n[user_output " not in contexts[0]["text"]:
+    contexts = [message["text"] for message in messages
+                if message.get("role") == "system" and message.get("text", "").startswith("[context]\n")]
+    if len(contexts) != 1 or "\n[user_output " not in contexts[0]:
         return reasons + ["the first model request lacks captured output evidence"], codes
     context = contexts[0]
-    task = context["text"]
-    if scenario["check"] in CAPTURE_CHECKS and scenario["inputs"][-1].startswith("ai fix"):
-        question = scenario["inputs"][-1].removeprefix("ai fix").strip()
-        if context["role"] == "system":
-            fields = task.split("\n[", 1)[0].splitlines()[1:]
-            commands = [line.removeprefix("failed_command: ") for line in fields
-                        if line.startswith("failed_command: ")]
-            expected = scenario["inputs"][0]
-            if (fields.count("exit: 17") != 1 or len(commands) != 1
-                    or commands[0] not in (expected, json.dumps(expected, ensure_ascii=False))):
-                reasons.append("captured diagnosis context does not identify the failed command and exit 17")
-            requests = [message for message in messages if message.get("role") == "user"]
-            if len(requests) != 1 or requests[0]["text"] != question or messages[-1] != requests[0]:
-                reasons.append("the ai fix question is missing or changed in the first model request")
-        else:
-            if not re.match(r"^\[task trigger=failed exit=17(?: |\])", task):
-                reasons.append("captured diagnosis did not use trigger=failed with exit 17")
-            tail = task.split("\n[/user_output]", 1)
-            if len(tail) != 2 or not tail[1].strip().splitlines() or tail[1].strip().splitlines()[-1] != question:
-                reasons.append("the ai fix question is missing or changed in the first model request")
-    header, separator, body = task.split("\n[user_output ", 1)[1].partition("\n")
+    fields = context.split("\n[", 1)[0].splitlines()[1:]
+    commands = [line.removeprefix("failed_command: ") for line in fields
+                if line.startswith("failed_command: ")]
+    expected = scenario["inputs"][0]
+    if (fields.count("exit: 17") != 1 or len(commands) != 1
+            or commands[0] not in (expected, json.dumps(expected, ensure_ascii=False))):
+        reasons.append("captured diagnosis context does not identify the failed command and exit 17")
+    question = scenario["inputs"][-1].removeprefix("ai fix").strip()
+    requests = [message for message in messages if message.get("role") == "user"]
+    if len(requests) != 1 or requests[0]["text"] != question or messages[-1] != requests[0]:
+        reasons.append("the ai fix question is missing or changed in the first model request")
+    header, separator, body = context.split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None
     except json.JSONDecodeError:
@@ -1043,8 +1033,7 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
             reasons.append("captured byte count does not match the output block")
         if not any(code in captured for code in codes) or "REGION is unset" not in captured:
             reasons.append("the first model request does not contain the actual diagnostic")
-        if scenario["check"] in CAPTURE_CHECKS and (
-                "diagnostic_id: " not in captured or "error_code: REGION_UNSET" not in captured
+        if ("diagnostic_id: " not in captured or "error_code: REGION_UNSET" not in captured
                 or "exit_code: 17" not in captured):
             reasons.append("the distinct diagnostic_id, error_code and exit_code fields were not captured")
     return reasons, codes
@@ -1057,15 +1046,6 @@ def region_diagnosis(answer: str) -> list[str]:
     if not re.search(r"\bexport\b|configur|set\b|设置|配置", answer, re.I):
         reasons.append("answer provides no remedy for REGION")
     return reasons
-
-
-def captured_failure(scenario: dict, answer: str, facts: dict, root: Path,
-                     after: dict, result, evidence: dict | None) -> list[str]:
-    """Keep the revision-3 combined citation contract available for old cases."""
-    reasons, codes = captured_evidence(scenario, facts, root, after, result, evidence)
-    if len(codes) != 1 or not any(code in answer for code in codes):
-        reasons.append("answer does not cite the actual one-shot error identifier")
-    return reasons + region_diagnosis(answer)
 
 
 def unsupported_diagnostic_claims(answer: str) -> list[str]:
@@ -1120,8 +1100,6 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
         capture_verdicts = captured_components(scenario, answer, facts, root, after, result, evidence)
         reasons.extend(f"{name}: {reason}" for name, item in capture_verdicts.items()
                        for reason in item["reasons"])
-    elif kind == "captured-failure":
-        reasons.extend(captured_failure(scenario, answer, facts, root, after, result, evidence))
     elif kind in PROJECT_CHECKS:
         if evidence is None:
             raise ValueError("project checks require native execution and final-state evidence")

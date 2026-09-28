@@ -59,8 +59,7 @@ pub fn suggest_with_context(
     }
     let sid = engine.open(spec)?;
     let notes = (!guidance.text.is_empty()).then_some(guidance.text.as_str());
-    let messages =
-        prompt::task_messages_with_context(shell, &TaskInput::new(trigger, text), notes, context);
+    let messages = prompt::task_messages(shell, &TaskInput::new(trigger, text), notes, context);
     engine.cancel_handle().reset();
     let res = engine.step(sid, messages, &mut |_| {});
     engine.close(sid);

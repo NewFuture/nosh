@@ -30,30 +30,18 @@ def capture_trial(base, scenario):
     result = driver.Result(exit_code=0, turns=[{
         "kind": "shell", "exit_code": 17, "output": original.stderr,
     }])
-    answer = f"错误 {code} 表示 REGION 未设置，配置该环境变量即可解决。"
+    answer = f"REGION 未设置。diagnostic_id 是 {code}，请配置 REGION 环境变量。"
     metrics = {"task_status": "completed", "steps": 1, "confirmations": 0}
     return root, facts, original.stderr, metadata, result, answer, metrics
 
 
-def observed_input(text, metadata, trigger="hash", question="", *, system_context=False):
+def observed_input(text, metadata, question):
     block = f"[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
-    if system_context:
-        header = f"[context]\ncwd: {metadata['execution_cwd']}"
-        if trigger == "failed":
-            header += f"\nexit: 17\nfailed_command: {metadata['command']}"
-        return {"inputs": [{"ev": "step_start", "messages": [
-            {"role": "system", "text": f"{header}\n{block}"},
-            {"role": "user", "text": question},
-        ]}]}
-    header = (
-        "[task trigger=failed exit=17 cwd=/fixture]"
-        if trigger == "failed"
-        else f"[task trigger={trigger}]"
-    )
-    message = f"{header}\n{block}"
-    if question:
-        message += f"\nThe command failed. Explain the likely cause and how to fix it.\n{question}"
-    return {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": message}]}]}
+    header = f"[context]\ncwd: {metadata['execution_cwd']}\nexit: 17\nfailed_command: {metadata['command']}"
+    return {"inputs": [{"ev": "step_start", "messages": [
+        {"role": "system", "text": f"{header}\n{block}"},
+        {"role": "user", "text": question},
+    ]}]}
 
 
 class CaptureEvaluationTests(unittest.TestCase):
@@ -62,16 +50,7 @@ class CaptureEvaluationTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.data = suite.load_suite(run.HERE / "scenarios.json")
-        self.scenario = {
-            "id": "captured-one-shot-failure", "title": "Revision 3 capture contract",
-            "mode": "repl", "fixture": "one-shot-failure", "capture_output": "last",
-            "inputs": ["python3 once.py", "# 解释错误并引用错误编号，不要重跑"],
-            "completions": [{"kind": "shell", "exit_code": 17, "contains": ["CAPTURE-", "REGION is unset"]},
-                            {"kind": "agent"}],
-            "group": "expanded", "approval": "deny", "check": "captured-failure",
-            "expect": {"max_steps": 3, "max_confirmations": 0, "response_language": "zh",
-                       "final_question": "forbid"},
-        }
+        self.scenario = next(s for s in self.data["scenarios"] if s["check"] == "captured-citation")
 
     def test_binary_defaults_and_explicit_capture_overrides_are_distinct(self):
         for scenario in self.data["scenarios"]:
@@ -101,7 +80,8 @@ class CaptureEvaluationTests(unittest.TestCase):
         return capture_trial(self.base, self.scenario)
 
     def evidence(self, text, metadata):
-        return observed_input(text, metadata)
+        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        return observed_input(text, metadata, question)
 
     def test_real_one_shot_error_requires_original_engine_input_and_count(self):
         root, facts, text, metadata, result, answer, metrics = self.prepare()
@@ -122,13 +102,14 @@ class CaptureEvaluationTests(unittest.TestCase):
         self.assertNotIn("CAPTURE-", second.stderr)
         failed = grade(evidence)
         self.assertFalse(failed.passed)
-        self.assertIn("the one-shot program was rerun", failed.reasons)
+        self.assertIn("the one-shot program was rerun", failed.details["facts"]["components"]["capture"]["reasons"])
 
-    def test_tool_text_cannot_impersonate_original_user_evidence(self):
+    def test_tool_text_cannot_impersonate_original_system_evidence(self):
         root, facts, text, metadata, result, answer, metrics = self.prepare()
         evidence = self.evidence(text, metadata)
         evidence["inputs"][0]["messages"][0]["role"] = "tool"
         verdict = checks.judge(self.scenario, answer, facts, root, fixtures.snapshot(root),
                                result, metrics, evidence)
         self.assertFalse(verdict.passed)
-        self.assertIn("the first model request lacks captured output evidence", verdict.reasons)
+        self.assertIn("the first model request lacks captured output evidence",
+                      verdict.details["facts"]["components"]["capture"]["reasons"])
