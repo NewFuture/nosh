@@ -136,8 +136,9 @@ pub fn evaluate(
     session: &SessionAllowList,
 ) -> PolicyDecision {
     let result = |decision, source| PolicyDecision { decision, source };
+    let paths = crate::paths::PathResolver::new(&report.context);
     for rule in &rules.deny {
-        if (0..report.operations.len()).any(|index| rule.denies_operation(report, index)) {
+        if (0..report.operations.len()).any(|index| rule.denies_operation(report, index, &paths)) {
             let mut reason = rule.explanation();
             if report.operations.iter().any(|op| {
                 op.opaque
@@ -163,7 +164,7 @@ pub fn evaluate(
             if let Some(rule) = rules
                 .allow
                 .iter()
-                .find(|rule| rule.covers_operation(report, index))
+                .find(|rule| rule.covers_operation(report, index, &paths))
             {
                 let label = rule.explanation();
                 if !matched.contains(&label) {

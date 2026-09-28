@@ -9,7 +9,7 @@ use brush_parser::ParserOptions;
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 
-use crate::paths::{PathClass, classify_path_real, is_top_level};
+use crate::paths::{PathClass, PathResolver, is_top_level};
 use crate::rules::{self, Arg, Target, Verdict, has_flag, opt_value};
 use crate::{AccessKind, Context, Operation, PathAccess, Risk, RiskReport};
 
@@ -40,6 +40,7 @@ pub fn assess_command_with_lookup(
     let mut a = Analyzer {
         ctx,
         lookup,
+        paths: PathResolver::new(ctx),
         report: RiskReport {
             context: ctx.clone(),
             ..RiskReport::default()
@@ -145,6 +146,7 @@ fn insert_sudo_n(cmd: &str, char_positions: &[usize]) -> String {
 struct Analyzer<'a> {
     ctx: &'a Context,
     lookup: &'a ProgramLookup<'a>,
+    paths: PathResolver,
     report: RiskReport,
     operation: Option<usize>,
     redirecting: bool,
@@ -922,7 +924,7 @@ impl Analyzer<'_> {
                 },
                 None => s.clone(),
             };
-            let (class, _) = classify_path_real(&self.resolve(&dir), self.ctx, true);
+            let (class, _) = self.paths.classify_real(&self.resolve(&dir), true);
             if class != PathClass::Workspace {
                 return None;
             }
@@ -931,7 +933,7 @@ impl Analyzer<'_> {
     }
 
     fn cwd_in_workspace(&self) -> bool {
-        !self.cwd_unknown && classify_path_real(&self.cwd, self.ctx, true).0 == PathClass::Workspace
+        !self.cwd_unknown && self.paths.classify_real(&self.cwd, true).0 == PathClass::Workspace
     }
 
     /// Assignments end a loop variable's binding (`f=/x`, `read f`, `let f=1`);
@@ -1324,7 +1326,7 @@ impl Analyzer<'_> {
         if a.dynamic {
             return None;
         }
-        Some(classify_path_real(&self.resolve(&a.value), self.ctx, true).0)
+        Some(self.paths.classify_real(&self.resolve(&a.value), true).0)
     }
 
     fn resolve(&self, p: &str) -> PathBuf {
@@ -1338,7 +1340,7 @@ impl Analyzer<'_> {
         } else {
             self.cwd.join(path)
         };
-        let real = crate::real_path(&path, follow_last).unwrap_or(path);
+        let real = self.paths.resolved_path(&path, follow_last);
         crate::paths::resolve_literal(&real.to_string_lossy(), Path::new("/"))
     }
 
@@ -1392,7 +1394,7 @@ impl Analyzer<'_> {
             && !t.dynamic
             && !t.glob
             && matches!(
-                crate::classify_path(&self.resolve(&t.path), self.ctx),
+                self.paths.classify(&self.resolve(&t.path)),
                 PathClass::Root | PathClass::Home
             )
         {
@@ -1446,10 +1448,7 @@ impl Analyzer<'_> {
         let changes = if v.deletes { "deletes" } else { "modifies" };
         // `rm` removes a symlink itself; writes go through it.
         let resolved = self.target_path(&p, !v.deletes);
-        let class = match classify_path_real(&lexical, self.ctx, !v.deletes).0 {
-            protected @ PathClass::Protected(_) => protected,
-            _ => crate::classify_path(&resolved, self.ctx),
-        };
+        let class = self.paths.classify_target(&lexical, &resolved, !v.deletes);
         match class {
             PathClass::Workspace if recursive && v.deletes => {
                 self.add(Risk::Dangerous, "recursively deletes workspace files");
@@ -1542,30 +1541,23 @@ impl Analyzer<'_> {
         if path.is_empty() {
             return;
         }
-        let class = match classify_path_real(&self.resolve(path), self.ctx, true).0 {
-            protected @ PathClass::Protected(_) => protected,
-            _ => crate::classify_path(&self.target_path(path, true), self.ctx),
-        };
+        let lexical = self.resolve(path);
+        let resolved = self.target_path(path, true);
+        let class = self.paths.classify_target(&lexical, &resolved, true);
         if let PathClass::Protected(l) = class {
             self.add(Risk::Mutating, format!("{PROTECTED_READ} {l}"));
             self.report.reads_protected = true;
-        } else if recursive {
-            let root = self.target_path(path, true);
-            if let Some((_, label)) =
-                crate::paths::protected_list(self.ctx)
-                    .into_iter()
-                    .find(|(protected, _)| {
-                        let protected =
-                            crate::real_path(protected, true).unwrap_or_else(|| protected.clone());
-                        crate::paths::relative_path(&protected, &root).is_some()
-                    })
-            {
-                self.add(
-                    Risk::Mutating,
-                    format!("recursively reads protected path {label}"),
-                );
-                self.report.reads_protected = true;
-            }
+        } else if recursive
+            && let Some((_, label)) = self.paths.protected().iter().find(|(protected, _)| {
+                let protected = self.paths.resolved_path(protected, true);
+                self.paths.relative_path(&protected, &resolved).is_some()
+            })
+        {
+            self.add(
+                Risk::Mutating,
+                format!("recursively reads protected path {label}"),
+            );
+            self.report.reads_protected = true;
         }
     }
 
@@ -1646,6 +1638,7 @@ impl Analyzer<'_> {
         let mut sub = Analyzer {
             ctx: &child_ctx,
             lookup: self.lookup,
+            paths: self.paths.clone(),
             report: RiskReport::default(),
             operation: None,
             redirecting: false,
@@ -1990,9 +1983,8 @@ impl Analyzer<'_> {
                 !self.child,
             );
             if let Some(path) = executable {
-                let real = crate::real_path(&path, true).unwrap_or_else(|| path.clone());
-                let workspace = crate::real_path(&self.ctx.workspace, true)
-                    .unwrap_or_else(|| self.ctx.workspace.clone());
+                let real = self.paths.resolved_path(&path, true);
+                let workspace = self.paths.resolved_path(&self.ctx.workspace, true);
                 let venv = self
                     .vars
                     .get("VIRTUAL_ENV")
@@ -2631,7 +2623,7 @@ impl Analyzer<'_> {
             && starts.iter().all(|t| {
                 !t.dynamic
                     && !t.glob
-                    && classify_path_real(&self.resolve(&t.path), self.ctx, true).0
+                    && self.paths.classify_real(&self.resolve(&t.path), true).0
                         == PathClass::Workspace
             });
         let mut i = 0;
@@ -3094,5 +3086,26 @@ mod tests {
     fn sudo_rewrite_positions() {
         assert_eq!(insert_sudo_n("sudo ls", &[4]), "sudo -n ls");
         assert_eq!(insert_sudo_n("中 && sudo ls", &[9]), "中 && sudo -n ls");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_path_shim_to_external_program_is_not_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let external = dir.path().join("external-tool");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(&external, "").unwrap();
+        let shim = workspace.join("tool");
+        std::os::unix::fs::symlink(&external, &shim).unwrap();
+        let ctx = Context::new(&workspace, &workspace);
+
+        let report = assess_command_with_lookup("tool", &ctx, &|_, _, _, _| Some(shim.clone()));
+
+        assert_eq!(
+            report.operations[0].executable.as_deref(),
+            Some(shim.as_path())
+        );
+        assert!(!report.operations[0].local_program);
     }
 }
