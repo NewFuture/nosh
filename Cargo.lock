@@ -273,6 +273,7 @@ dependencies = [
  "normalize-path",
  "rand 0.10.3",
  "rpds",
+ "serde",
  "strum",
  "strum_macros",
  "terminfo",
@@ -296,6 +297,7 @@ dependencies = [
  "indenter",
  "insta",
  "peg",
+ "serde",
  "thiserror 2.0.20",
  "tracing",
  "utf8-chars",
@@ -2544,6 +2546,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc"
 dependencies = [
  "archery",
+ "serde",
  "smallvec",
 ]
 

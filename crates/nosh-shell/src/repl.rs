@@ -17,7 +17,7 @@ use reedline::{
 use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
-use crate::{style, term};
+use crate::{input_assist, style, term};
 
 /// A request for the AI, produced by the pipeline.
 #[derive(Debug, Clone)]
@@ -110,6 +110,8 @@ impl OnFailure {
 pub struct ReplConfig {
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
+    pub input_assist: input_assist::Config,
+    pub input_abbreviations: input_assist::Abbreviations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,6 +476,7 @@ struct ReplPrompt {
     right: String,
     right_color: Color,
     continuation: String,
+    input_assist: Option<input_assist::InputAssist>,
 }
 
 impl ReplPrompt {
@@ -513,17 +516,25 @@ impl ReplPrompt {
                 Color::DarkGray
             },
             continuation: shell.continuation_prompt(),
+            input_assist: None,
         }
     }
 }
 
 impl Prompt for ReplPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        if self.left.starts_with('\n') {
+        let left: Cow<'_, str> = if self.left.starts_with('\n') {
             format!(" {}", self.left).into()
         } else {
             self.left.as_str().into()
+        };
+        if let Some(assist) = &self.input_assist {
+            let status = assist.status();
+            if !status.is_empty() {
+                return format!("{}\n{left}", style::stdout().paint("2", &status)).into();
+            }
         }
+        left
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
@@ -599,6 +610,7 @@ pub fn git_branch(cwd: &Path) -> Option<String> {
 struct ShellCompleter {
     rt: Arc<tokio::runtime::Runtime>,
     shell: Arc<Mutex<BrushShell>>,
+    input_assist: Option<input_assist::InputAssist>,
 }
 
 impl ShellCompleter {
@@ -612,10 +624,14 @@ impl reedline::Completer for ShellCompleter {
         let rt = self.rt.clone();
         let mut sh = self.lock();
         let wd = sh.working_dir().to_path_buf();
-        let Ok(c) = rt.block_on(sh.complete(line, pos)) else {
+        let completion = rt.block_on(sh.complete(line, pos));
+        drop(sh);
+        if let Some(assist) = &self.input_assist {
+            assist.after_completion(&self.shell);
+        }
+        let Ok(c) = completion else {
             return CompletionResult::fresh(Vec::new());
         };
-        drop(sh);
         let quote = open_quote(line, pos);
         let at_end = pos == line.len();
         let mut seen = HashSet::new();
@@ -757,7 +773,10 @@ impl reedline::Validator for LineValidator {
     }
 }
 
-fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
+fn build_editor(
+    shell: &EmbeddedShell,
+    cfg: &ReplConfig,
+) -> (Reedline, Option<input_assist::InputAssist>) {
     let (rt, sh) = shell.shared();
     let mut kb = reedline::default_emacs_keybindings();
     kb.add_binding(
@@ -797,22 +816,40 @@ fn build_editor(shell: &EmbeddedShell, cfg: &ReplConfig) -> Reedline {
     if colors {
         hinter = hinter.with_style(Style::new().italic().fg(Color::DarkGray));
     }
-    Reedline::create()
+    let mut editor = Reedline::create()
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
-        .with_completer(Box::new(ShellCompleter {
-            rt,
-            shell: sh.clone(),
-        }))
         .with_quick_completions(true)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
         .with_validator(Box::new(LineValidator {
-            shell: sh,
+            shell: sh.clone(),
             prefix: cfg.trigger.ai_prefix.clone(),
         }))
         .with_hinter(Box::new(hinter))
-        .with_highlighter(Box::new(NoHighlight))
-        .with_edit_mode(Box::new(Emacs::new(kb)))
+        .with_highlighter(Box::new(NoHighlight));
+    let assist = cfg.input_assist.enabled.then(|| {
+        let repaint = editor.repaint_signal();
+        let columns = crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
+        input_assist::InputAssist::new(
+            cfg.input_assist.worker.clone(),
+            shell.input_index(),
+            Arc::new(move || repaint.request_repaint()),
+            columns,
+        )
+    });
+    editor = editor.with_completer(Box::new(ShellCompleter {
+        rt,
+        shell: sh,
+        input_assist: assist.clone(),
+    }));
+    editor = if let Some(assist) = &assist {
+        editor
+            .with_highlighter(assist.highlighter())
+            .with_edit_mode(assist.edit_mode(Emacs::new(kb)))
+    } else {
+        editor.with_edit_mode(Box::new(Emacs::new(kb)))
+    };
+    (editor, assist)
 }
 
 struct NoHighlight;
@@ -874,9 +911,15 @@ fn read_plain_prompt(
 pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -> i32 {
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
-    shell.warm_command_names();
-    let mut editor =
-        (style::stdout().ansi && std::io::stdin().is_terminal()).then(|| build_editor(shell, &cfg));
+    let (mut editor, input_assist) = if style::stdout().ansi && std::io::stdin().is_terminal() {
+        let (editor, assist) = build_editor(shell, &cfg);
+        (Some(editor), assist)
+    } else {
+        (None, None)
+    };
+    if input_assist.is_none() || (cfg.input_assist.enabled && cfg.input_assist.worker.is_none()) {
+        shell.warm_command_names();
+    }
     let validator = LineValidator {
         shell: shell.shared().1,
         prefix: cfg.trigger.ai_prefix.clone(),
@@ -886,7 +929,13 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let mut prefill: Option<String> = None;
     let code = loop {
         shell.pre_prompt();
-        let prompt = ReplPrompt::build(shell, &ai.badge());
+        let mut prompt = ReplPrompt::build(shell, &ai.badge());
+        if let Some(assist) = &input_assist {
+            assist.prepare(
+                shell.input_context(&pipeline.trigger_cfg(), &pipeline.cfg.input_abbreviations),
+            );
+            prompt.input_assist = Some(assist.clone());
+        }
         let initial = prefill.take().unwrap_or_default();
         let signal = if let Some(ed) = editor.as_mut() {
             if !initial.is_empty() {
@@ -896,6 +945,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         } else {
             read_plain_prompt(&prompt, &initial, &validator)
         };
+        if let Some(assist) = &input_assist {
+            assist.suspend();
+        }
         match signal {
             Ok(Signal::Success(line)) => {
                 if !line.trim().is_empty() {

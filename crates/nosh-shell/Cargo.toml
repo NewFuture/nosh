@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 brush-builtins.workspace = true
-brush-core.workspace = true
+brush-core = { workspace = true, features = ["serde"] }
 brush-parser.workspace = true
 crossterm.workspace = true
 filedescriptor.workspace = true
@@ -19,6 +19,8 @@ nosh-hub.workspace = true
 nu-ansi-term.workspace = true
 reedline.workspace = true
 signal-hook.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-segmentation.workspace = true
@@ -30,8 +32,6 @@ vte.workspace = true
 crossterm = { workspace = true, features = ["use-dev-tty"] }
 
 [dev-dependencies]
-serde.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]
