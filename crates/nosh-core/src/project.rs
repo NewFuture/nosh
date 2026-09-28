@@ -62,7 +62,7 @@ pub(crate) fn read_metadata(
 ) -> Option<String> {
     let lexical = classify_path(path, ctx);
     let resolved = real_path(path, true).unwrap_or_else(|| path.to_path_buf());
-    let class = classify_path_real(&resolved, ctx, true).0;
+    let class = classify_path(&resolved, ctx);
     if matches!(lexical, PathClass::Protected(_) | PathClass::Null)
         || matches!(class, PathClass::Protected(_) | PathClass::Null)
     {

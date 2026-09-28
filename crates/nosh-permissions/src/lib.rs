@@ -268,7 +268,8 @@ impl RiskReport {
 
 /// The read tools authorize their real path and traversal scope before reading.
 pub fn assess_read(tool: &str, path: &Path, depth: Option<usize>, ctx: &Context) -> RiskReport {
-    let real = real_path(path, true).unwrap_or_else(|| path.to_path_buf());
+    let paths = paths::PathResolver::new(ctx);
+    let real = paths.resolved_path(path, true);
     let kind = depth.map_or(AccessKind::Read, |depth| AccessKind::List { depth });
     let mut op = Operation {
         tool: tool.into(),
@@ -291,18 +292,16 @@ pub fn assess_read(tool: &str, path: &Path, depth: Option<usize>, ctx: &Context)
         context: ctx.clone(),
         ..RiskReport::default()
     };
-    let class = match classify_path(path, ctx) {
-        protected @ PathClass::Protected(_) => protected,
-        _ => classify_path(&real, ctx),
-    };
+    let class = paths.classify_target(path, &real, true);
     if let PathClass::Protected(what) = class {
         report.add(Risk::Mutating, format!("reads protected path {what}"));
         report.reads_protected = true;
     }
     if let Some(depth) = depth {
-        for (protected, what) in paths::protected_list(ctx) {
-            let resolved = real_path(&protected, true).unwrap_or_else(|| protected.clone());
-            if paths::relative_path(&resolved, &real)
+        for (protected, what) in paths.protected() {
+            let resolved = paths.resolved_path(protected, true);
+            if paths
+                .relative_path(&resolved, &real)
                 .is_some_and(|relative| relative.components().count() < depth)
             {
                 report.add(

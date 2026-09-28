@@ -6,6 +6,7 @@ use brush_parser::word::{self, WordPiece};
 use globset::{GlobBuilder, GlobMatcher};
 use serde::Deserialize;
 
+use crate::paths::PathResolver;
 use crate::{AccessKind, Context, Operation, PathAccess};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -89,7 +90,7 @@ impl PathPattern {
         })
     }
 
-    fn matches(&self, path: &Path, ctx: &Context) -> bool {
+    fn matches(&self, path: &Path, ctx: &Context, paths: &PathResolver) -> bool {
         let base = if self.text.starts_with("~/") {
             self.home.as_deref()
         } else if let Some(root) = &self.absolute_root {
@@ -97,15 +98,15 @@ impl PathPattern {
         } else {
             Some(ctx.workspace.as_path())
         };
-        base.and_then(|base| crate::paths::relative_path(path, base))
+        base.and_then(|base| paths.relative_path(path, base))
             .is_some_and(|relative| self.glob.is_match(relative))
     }
 
-    fn covers(&self, access: &PathAccess, ctx: &Context) -> bool {
+    fn covers(&self, access: &PathAccess, ctx: &Context, paths: &PathResolver) -> bool {
         if access
             .resolved
             .as_ref()
-            .is_some_and(|path| self.matches(path, ctx))
+            .is_some_and(|path| self.matches(path, ctx, paths))
         {
             return true;
         }
@@ -123,14 +124,14 @@ impl PathPattern {
             return false;
         }
         let base = crate::paths::resolve(prefix, &ctx.workspace, self.home.as_deref());
-        let base = crate::real_path(&base, true).unwrap_or(base);
+        let base = paths.resolved_path(&base, true);
         access
             .resolved
             .as_ref()
             .is_some_and(|root| root.starts_with(base))
     }
 
-    fn intersects(&self, access: &PathAccess, ctx: &Context) -> bool {
+    fn intersects(&self, access: &PathAccess, ctx: &Context, paths: &PathResolver) -> bool {
         if access.resolved.is_none() {
             return true;
         }
@@ -138,7 +139,7 @@ impl PathPattern {
             .lexical
             .iter()
             .chain(access.resolved.iter())
-            .any(|path| self.matches(path, ctx))
+            .any(|path| self.matches(path, ctx, paths))
         {
             return true;
         }
@@ -160,7 +161,7 @@ impl PathPattern {
                 .unwrap_or("")
         };
         let base = crate::paths::resolve(prefix, &ctx.workspace, self.home.as_deref());
-        let base = crate::real_path(&base, true).unwrap_or(base);
+        let base = paths.resolved_path(&base, true);
         access.resolved.as_ref().is_some_and(|root| {
             root.starts_with(&base)
                 || base
@@ -388,7 +389,13 @@ impl UserRule {
         }
     }
 
-    fn selector_matches(&self, op: &Operation, ctx: &Context, deny: bool) -> bool {
+    fn selector_matches(
+        &self,
+        op: &Operation,
+        ctx: &Context,
+        deny: bool,
+        paths: &PathResolver,
+    ) -> bool {
         if op.tool != self.spec.tool.as_deref().unwrap_or("run_command") {
             return false;
         }
@@ -397,8 +404,8 @@ impl UserRule {
                 return false;
             }
             let root = crate::paths::resolve(cwd, &ctx.workspace, self.home.as_deref());
-            let root = crate::real_path(&root, true).unwrap_or(root);
-            let actual = crate::real_path(&op.cwd, true).unwrap_or_else(|| op.cwd.clone());
+            let root = paths.resolved_path(&root, true);
+            let actual = paths.resolved_path(&op.cwd, true);
             if op.cwd_known && !actual.starts_with(root) {
                 return false;
             }
@@ -411,10 +418,15 @@ impl UserRule {
         true
     }
 
-    pub(crate) fn denies_operation(&self, report: &crate::RiskReport, index: usize) -> bool {
+    pub(crate) fn denies_operation(
+        &self,
+        report: &crate::RiskReport,
+        index: usize,
+        paths: &PathResolver,
+    ) -> bool {
         let op = &report.operations[index];
         let ctx = &report.context;
-        if !self.selector_matches(op, ctx, true) {
+        if !self.selector_matches(op, ctx, true, paths) {
             return false;
         }
         // A selector binds the whole script/wrapper invocation, including its
@@ -446,13 +458,17 @@ impl UserRule {
                     .iter()
                     .flat_map(|op| &op.paths)
                     .filter(|p| kinds(p.kind))
-                    .any(|p| patterns.iter().any(|pattern| pattern.intersects(p, ctx)))
+                    .any(|p| {
+                        patterns
+                            .iter()
+                            .any(|pattern| pattern.intersects(p, ctx, paths))
+                    })
         };
         if let Some(pattern) = &self.path
             && !effects
                 .iter()
                 .flat_map(|op| &op.paths)
-                .any(|p| pattern.intersects(p, ctx))
+                .any(|p| pattern.intersects(p, ctx, paths))
         {
             return false;
         }
@@ -473,16 +489,23 @@ impl UserRule {
                     .any(|host| self.hosts.iter().any(|g| g.is_match(host))))
     }
 
-    fn allows(&self, op: &Operation, ctx: &Context) -> bool {
-        if !self.selector_matches(op, ctx, false) {
+    fn allows(&self, op: &Operation, ctx: &Context, paths: &PathResolver) -> bool {
+        if !self.selector_matches(op, ctx, false, paths) {
             return false;
         }
-        self.effect_scope(op, ctx, false)
+        self.effect_scope(op, ctx, false, paths)
     }
 
-    pub(crate) fn covers_operation(&self, report: &crate::RiskReport, index: usize) -> bool {
+    pub(crate) fn covers_operation(
+        &self,
+        report: &crate::RiskReport,
+        index: usize,
+        paths: &PathResolver,
+    ) -> bool {
         let op = &report.operations[index];
-        if (!report.incomplete || self.allows_incomplete(op)) && self.allows(op, &report.context) {
+        if (!report.incomplete || self.allows_incomplete(op))
+            && self.allows(op, &report.context, paths)
+        {
             return true;
         }
         let mut current = index;
@@ -493,8 +516,8 @@ impl UserRule {
             let ancestor = &report.operations[parent];
             if ancestor.payload
                 && (!report.incomplete || self.allows_incomplete(ancestor))
-                && self.allows(ancestor, &report.context)
-                && self.allows_payload(op, &report.context)
+                && self.allows(ancestor, &report.context, paths)
+                && self.allows_payload(op, &report.context, paths)
             {
                 return true;
             }
@@ -503,9 +526,9 @@ impl UserRule {
         false
     }
 
-    fn allows_payload(&self, op: &Operation, ctx: &Context) -> bool {
+    fn allows_payload(&self, op: &Operation, ctx: &Context, paths: &PathResolver) -> bool {
         op.tool == self.spec.tool.as_deref().unwrap_or("run_command")
-            && self.effect_scope(op, ctx, true)
+            && self.effect_scope(op, ctx, true, paths)
     }
 
     fn allows_incomplete(&self, op: &Operation) -> bool {
@@ -518,7 +541,13 @@ impl UserRule {
                 && self.spec.variables.is_empty()
     }
 
-    fn effect_scope(&self, op: &Operation, ctx: &Context, payload: bool) -> bool {
+    fn effect_scope(
+        &self,
+        op: &Operation,
+        ctx: &Context,
+        payload: bool,
+        paths: &PathResolver,
+    ) -> bool {
         if op.opaque
             && (!self.reads.is_empty()
                 || !self.writes.is_empty()
@@ -528,7 +557,7 @@ impl UserRule {
             return false;
         }
         if let Some(pattern) = &self.path
-            && (op.paths.is_empty() || !op.paths.iter().all(|p| pattern.covers(p, ctx)))
+            && (op.paths.is_empty() || !op.paths.iter().all(|p| pattern.covers(p, ctx, paths)))
         {
             return false;
         }
@@ -540,7 +569,7 @@ impl UserRule {
             if access.extra && patterns.is_empty() && self.argv.is_some() && !payload {
                 return false;
             }
-            if !patterns.is_empty() && !patterns.iter().any(|p| p.covers(access, ctx)) {
+            if !patterns.is_empty() && !patterns.iter().any(|p| p.covers(access, ctx, paths)) {
                 return false;
             }
         }
