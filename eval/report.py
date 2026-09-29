@@ -318,6 +318,9 @@ def _markdown(report: dict, tables: dict) -> str:
         "",
         f"Harness source: `{meta.get('harness_revision') or meta.get('harness_content_sha256') or 'unverified'}`.",
         "",
+        f"Inference device: `{meta.get('settings', {}).get('device', 'cpu')}`. "
+        "Peak RSS measures host memory only, not GPU memory.",
+        "",
         f"Seeds: `{meta['seeds']}`; repeats: {meta['repeat']}. "
         + f"Dataset revision: {meta['dataset_revision']}. "
         + "Each scenario/seed starts a new process. The typo scenario does not load a model.",

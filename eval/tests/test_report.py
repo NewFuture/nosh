@@ -35,6 +35,14 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((row["pass"], row["planned"], row["error"]), (1, 2, 1))
         self.assertIn("1/2 (50%)", report.markdown(data))
 
+    def test_device_is_visible_and_cpu_gpu_comparisons_are_not_controlled(self):
+        cpu = self.sample()
+        cpu["metadata"]["settings"] = {"device": "cpu"}
+        gpu = copy.deepcopy(cpu)
+        gpu["metadata"]["settings"]["device"] = "cuda:0"
+        self.assertIn("Inference device: `cuda:0`", report.markdown(gpu))
+        self.assertTrue(any("settings differs" in warning for warning in report.compare(gpu, cpu)["warnings"]))
+
     def test_paired_comparison_and_incompatibility(self):
         before = self.sample()
         after = copy.deepcopy(before)

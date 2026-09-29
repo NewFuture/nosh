@@ -12,9 +12,10 @@
 //!    blocks: Q4K on x86, Q4K/Q6K (also output) on ARM with dotprod (design §2.3,
 //!    vendored candle patch); upstream keeps both.
 //!
-//! Attention (causal GQA, no repeated K/V) and RoPE run on raw rows on candle's
-//! barrier pool; see [`super::attn`]. Only the last position's logits are
-//! computed, and the caller drives chunked prefill.
+//! CPU attention and RoPE run on raw rows on candle's barrier pool; see
+//! [`super::attn`]. CUDA keeps weights, RoPE, activations and KV on device and
+//! uses Candle tensor GQA. Only the last position's logits are computed, and
+//! the caller drives chunked prefill.
 
 use std::fs::File;
 use std::path::Path;
@@ -23,6 +24,7 @@ use candle_core::quantized::{GgmlDType, QMatMul, QTensor, gguf_file};
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
 
 use super::attn::{AttnScratch, KvDtype, KvStore, attention, rope_interleaved};
+use super::tensor_attn::TensorKv;
 
 /// Hyper-parameters read from GGUF metadata.
 #[derive(Debug, Clone)]
@@ -60,6 +62,17 @@ impl Default for LoadOptions {
     }
 }
 
+impl LoadOptions {
+    pub(crate) fn validate_cuda(self) -> Result<()> {
+        if self.kv_dtype != KvDtype::F16 {
+            candle_core::bail!(
+                "CUDA currently supports only f16 KV; f32 KV has not passed numerical validation (use --kv f16 or --device cpu)"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// What prepacking did while loading.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PrepackStats {
@@ -90,7 +103,43 @@ struct Layer {
     w_up: QMatMul,
     w_down: QMatMul,
     ffn_norm: RmsNorm,
-    kv: KvStore,
+    kv: LayerKv,
+}
+
+enum LayerKv {
+    Cpu(KvStore),
+    Cuda(TensorKv),
+}
+
+impl LayerKv {
+    fn new(n_kv: usize, hd: usize, dtype: KvDtype, device: &Device) -> Self {
+        if device.is_cuda() {
+            Self::Cuda(TensorKv::new(dtype))
+        } else {
+            Self::Cpu(KvStore::new(n_kv, hd, dtype))
+        }
+    }
+
+    fn dtype(&self) -> KvDtype {
+        match self {
+            Self::Cpu(kv) => kv.dtype(),
+            Self::Cuda(kv) => kv.dtype(),
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        match self {
+            Self::Cpu(kv) => kv.truncate(len),
+            Self::Cuda(kv) => kv.truncate(len),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Cpu(kv) => kv.bytes(),
+            Self::Cuda(kv) => kv.bytes(),
+        }
+    }
 }
 
 /// RoPE cos/sin tables `[position][head_dim / 2]`.
@@ -100,6 +149,7 @@ struct Rope {
     len: usize,
     theta: f32,
     head_dim: usize,
+    tensors: Option<(Tensor, Tensor)>,
 }
 
 impl Rope {
@@ -111,6 +161,7 @@ impl Rope {
             len,
             theta,
             head_dim,
+            tensors: None,
         }
     }
 
@@ -121,7 +172,20 @@ impl Rope {
             self.cos = cos;
             self.sin = sin;
             self.len = new_len;
+            self.tensors = None;
         }
+    }
+
+    fn tensors(&mut self, pos: usize, len: usize, device: &Device) -> Result<(Tensor, Tensor)> {
+        if self.tensors.is_none() {
+            let shape = (self.len, self.head_dim / 2);
+            self.tensors = Some((
+                Tensor::from_slice(&self.cos, shape, device)?,
+                Tensor::from_slice(&self.sin, shape, device)?,
+            ));
+        }
+        let (cos, sin) = self.tensors.as_ref().unwrap();
+        Ok((cos.narrow(0, pos, len)?, sin.narrow(0, pos, len)?))
     }
 }
 
@@ -267,6 +331,12 @@ impl Llama {
         opts: LoadOptions,
         device: &Device,
     ) -> Result<Self> {
+        if !device.is_cpu() && !device.is_cuda() {
+            candle_core::bail!("llama inference supports CPU or CUDA devices only");
+        }
+        if device.is_cuda() {
+            opts.validate_cuda()?;
+        }
         let mut file = File::open(path)?;
         let ct = gguf_file::Content::read(&mut file)?;
         let cfg = LlamaConfig::from_gguf(&ct)?;
@@ -290,7 +360,7 @@ impl Llama {
             Ok(t) => t,
             Err(_) => tensor("token_embd.weight")?,
         };
-        if cfg!(target_arch = "aarch64") && opts.prepack_weights {
+        if device.is_cpu() && cfg!(target_arch = "aarch64") && opts.prepack_weights {
             prepack_weights(std::slice::from_mut(&mut output), &mut prepack)?;
         }
         let output = QMatMul::from_qtensor(output)?;
@@ -307,7 +377,7 @@ impl Llama {
                 read("ffn_up")?,
                 read("ffn_down")?,
             ];
-            if opts.prepack_weights {
+            if device.is_cpu() && opts.prepack_weights {
                 prepack_weights(&mut m, &mut prepack)?;
             }
             let [wq, wk, wv, wo, w_gate, w_up, w_down] = m.map(QMatMul::from_qtensor);
@@ -331,7 +401,7 @@ impl Llama {
                 w_up,
                 w_down,
                 ffn_norm,
-                kv: KvStore::new(n_kv_head, head_dim, opts.kv_dtype),
+                kv: LayerKv::new(n_kv_head, head_dim, opts.kv_dtype, device),
             });
         }
         let max_context = context_length.max(16);
@@ -365,13 +435,22 @@ impl Llama {
             .map_or(KvDtype::default(), |l| l.kv.dtype())
     }
 
-    /// Switches the KV cache element type; drops everything cached.
-    pub fn set_kv_dtype(&mut self, dtype: KvDtype) {
+    /// Switches the KV cache element type; drops everything cached on success.
+    /// Unsupported CUDA f32 requests leave the existing cache intact.
+    pub fn set_kv_dtype(&mut self, dtype: KvDtype) -> Result<()> {
+        if self.device.is_cuda() {
+            LoadOptions {
+                kv_dtype: dtype,
+                ..LoadOptions::default()
+            }
+            .validate_cuda()?;
+        }
         self.pos = 0;
         let (n_kv, hd) = (self.cfg.n_kv_head, self.cfg.head_dim);
         for l in &mut self.layers {
-            l.kv = KvStore::new(n_kv, hd, dtype);
+            l.kv = LayerKv::new(n_kv, hd, dtype, &self.device);
         }
+        Ok(())
     }
 
     pub fn max_context(&self) -> usize {
@@ -403,7 +482,10 @@ impl Llama {
     /// execute inline on a warm thread instead of waking global workers.
     pub fn forward(&mut self, ids: &[u32]) -> Result<Tensor> {
         let device = self.device.clone();
-        device.with_context(|| self.forward_impl(ids))
+        let out = device.with_context(|| self.forward_impl(ids))?;
+        // CUDA launches are asynchronous: include completion in prefill/decode timings.
+        device.synchronize()?;
+        Ok(out)
     }
 
     fn forward_impl(&mut self, ids: &[u32]) -> Result<Tensor> {
@@ -417,6 +499,11 @@ impl Llama {
         }
         let mut prof = Prof::new();
         self.rope.ensure(pos + s);
+        let rope = if self.device.is_cuda() {
+            Some(self.rope.tensors(pos, s, &self.device)?)
+        } else {
+            None
+        };
         let ids_t = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let mut x = self.tok_embd.embedding(&ids_t)?;
         prof.lap(0);
@@ -424,16 +511,33 @@ impl Llama {
         for layer in &mut self.layers {
             let h = layer.attn_norm.forward(&x)?;
             prof.lap(1);
-            let mut q: Vec<f32> = layer.wq.forward(&h)?.flatten_all()?.to_vec1()?;
-            let mut k: Vec<f32> = layer.wk.forward(&h)?.flatten_all()?.to_vec1()?;
-            let v: Vec<f32> = layer.wv.forward(&h)?.flatten_all()?.to_vec1()?;
+            let q = layer.wq.forward(&h)?;
+            let k = layer.wk.forward(&h)?;
+            let v = layer.wv.forward(&h)?;
             prof.lap(2);
-            rope_interleaved(&mut q, s, n_head, hd, pos, &self.rope.cos, &self.rope.sin);
-            rope_interleaved(&mut k, s, n_kv, hd, pos, &self.rope.cos, &self.rope.sin);
-            layer.kv.append(&k, &v);
-            prof.lap(3);
-            let y = attention(&q, &layer.kv, s, n_head, n_kv, hd, pos, &mut self.scratch);
-            let y = Tensor::from_vec(y, (1, s, n_head * hd), &self.device)?;
+            let y = match &mut layer.kv {
+                LayerKv::Cpu(kv) => {
+                    let mut q = q.flatten_all()?.to_vec1::<f32>()?;
+                    let mut k = k.flatten_all()?.to_vec1::<f32>()?;
+                    let v = v.flatten_all()?.to_vec1::<f32>()?;
+                    rope_interleaved(&mut q, s, n_head, hd, pos, &self.rope.cos, &self.rope.sin);
+                    rope_interleaved(&mut k, s, n_kv, hd, pos, &self.rope.cos, &self.rope.sin);
+                    kv.append(&k, &v);
+                    prof.lap(3);
+                    let y = attention(&q, kv, s, n_head, n_kv, hd, pos, &mut self.scratch);
+                    Tensor::from_vec(y, (1, s, n_head * hd), &self.device)?
+                }
+                LayerKv::Cuda(kv) => {
+                    let (cos, sin) = rope.as_ref().unwrap();
+                    let heads =
+                        |x: Tensor, n| x.reshape((1, s, n, hd))?.transpose(1, 2)?.contiguous();
+                    let q = candle_nn::rotary_emb::rope_i(&heads(q, n_head)?, cos, sin)?;
+                    let k = candle_nn::rotary_emb::rope_i(&heads(k, n_kv)?, cos, sin)?;
+                    let v = heads(v, n_kv)?;
+                    prof.lap(3);
+                    kv.attention(&q, &k, &v)?
+                }
+            };
             prof.lap(4);
             x = (x + layer.wo.forward(&y)?)?;
             prof.lap(5);
@@ -520,6 +624,48 @@ impl Prof {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_f32_is_rejected_without_allocating_a_device() {
+        assert!(LoadOptions::default().validate_cuda().is_ok());
+        let error = LoadOptions {
+            kv_dtype: KvDtype::F32,
+            ..LoadOptions::default()
+        }
+        .validate_cuda()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only f16 KV"), "{error}");
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "requires an NVIDIA GPU"]
+    fn cuda_rope_matches_cpu_at_nonzero_positions() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let (s, heads, hd, pos) = (7, 24, 64, 1234);
+        let mut rope = Rope::new(10_000.0, hd, 16);
+        rope.ensure(pos + s);
+        let mut expected: Vec<f32> = (0..s * heads * hd)
+            .map(|i| (i as f32 * 0.17).sin())
+            .collect();
+        let input = Tensor::from_slice(&expected, (1, s, heads, hd), &device)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        rope_interleaved(&mut expected, s, heads, hd, pos, &rope.cos, &rope.sin);
+        let (cos, sin) = rope.tensors(pos, s, &device)?;
+        let actual = candle_nn::rotary_emb::rope_i(&input, &cos, &sin)?
+            .transpose(1, 2)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let error = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-6, "CUDA RoPE error {error}");
+        Ok(())
+    }
 
     fn gguf_bytes(meta: &[(&str, gguf_file::Value)]) -> Vec<u8> {
         let refs: Vec<(&str, &gguf_file::Value)> = meta.iter().map(|(k, v)| (*k, v)).collect();

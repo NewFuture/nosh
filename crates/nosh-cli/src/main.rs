@@ -75,6 +75,9 @@ struct Cli {
 
 #[derive(Debug, clap::Args)]
 struct GlobalOpts {
+    /// Inference device: cpu (default), auto (CPU), cuda or cuda:N.
+    #[arg(long, global = true, value_name = "DEVICE")]
+    device: Option<nosh_llm::InferenceDevice>,
     /// Never touch the network.
     #[arg(long, global = true)]
     offline: bool,
@@ -184,12 +187,11 @@ fn main() {
     }
     let code = match cli.cmd.take() {
         Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
-        Some(Cmd::Debug { cmd }) => debug_cmd::run(
-            cmd,
-            cli.global.model_path.as_deref(),
-            cli.global.model.as_deref(),
-            cli.global.seed,
-        ),
+        Some(Cmd::Debug { cmd }) => {
+            let cfg = config::Config::load();
+            cfg.print_warnings();
+            debug_cmd::run(cmd, &engine_setup(&cli, &cfg))
+        }
         Some(Cmd::Doctor) => {
             let cfg = config::Config::load();
             doctor::run(&cfg, &engine_setup(&cli, &cfg))
@@ -201,6 +203,11 @@ fn main() {
 
 fn engine_setup(cli: &Cli, cfg: &config::Config) -> engine::EngineSetup {
     engine::EngineSetup {
+        device: cli
+            .global
+            .device
+            .map(Ok)
+            .unwrap_or_else(|| cfg.model_device.clone()),
         model_id: cli
             .global
             .model
@@ -355,6 +362,29 @@ fn fall_back(login: bool, fallback: &str) -> i32 {
 mod tests {
     use super::*;
     use nosh_permissions::ApprovalMode;
+
+    #[test]
+    fn device_override_is_global_and_config_is_shared() {
+        use nosh_llm::InferenceDevice;
+        let cfg = config::Config::parse("[model]\ndevice = 'cuda:1'");
+        let plain = Cli::try_parse_from(["nosh"]).unwrap();
+        assert_eq!(
+            engine_setup(&plain, &cfg).device,
+            Ok(InferenceDevice::Cuda(1))
+        );
+        for args in [
+            vec!["nosh", "--device", "cpu", "-s", "list files"],
+            vec!["nosh", "--device", "cpu", "-a", "list files"],
+            vec!["nosh", "doctor", "--device", "cpu"],
+            vec!["nosh", "debug", "gen", "hello", "--device", "cpu"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(engine_setup(&cli, &cfg).device, Ok(InferenceDevice::Cpu));
+        }
+        let invalid = config::Config::parse("[model]\ndevice = 'metal'");
+        assert!(engine_setup(&plain, &invalid).device.is_err());
+        assert!(Cli::try_parse_from(["nosh", "--device", "cdua"]).is_err());
+    }
 
     #[test]
     fn approval_defaults_and_explicit_overrides_are_shared() {

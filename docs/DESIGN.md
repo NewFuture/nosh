@@ -97,7 +97,7 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 | 领域 | 当前 | 规划或限制 |
 |---|---|---|
 | 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
-| 推理 | CPU、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、GPU 与资源自适应未实现 |
+| 推理 | CPU 默认、可选单卡 CUDA、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、CPU 按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、Metal、多卡与资源自适应未实现 |
 | 工具与权限 | Agent 三个工具（run_command/read_file/grep）；CommandAssist 使用查询工具与 finish，不执行目标；confirm/auto/yolo，默认 auto；结构化用户规则、有界会话授权和模式标识 | `write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
 | 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
@@ -721,9 +721,9 @@ Auto 以便利优先、防御破坏性操作为目标，不追求绝对安全。
 |---|---|---|
 | 1 | `MAX_SEQ_LEN = 4096` 是写死的 | RoPE 表按 `context_length` 计算；默认 8K，当前用户配置接受 1K–32K。模型原生 128K 是架构能力，不是当前 CLI 的配置上限 |
 | 2 | 整张 embedding 表被反量化成 f32（约 1.07 GB） | 保持量化，用 `QTensor::embedding` 按行反量化 |
-| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | 自有 KV 按 1024 token 分段增长，支持截断回退，默认 f16。decode 时按 256 个 key 一块转成 f32 计算；prefill 时把所需范围转换到可复用 scratch（8K 时 16 MiB）。磁盘 snapshot/restore 留到 M2 |
+| 3 | KV 用 `Tensor::cat` 逐步重新分配内存，而且不能回退 | CPU 自有 KV 按 1024 token 分段增长，支持截断回退，默认 f16。decode 时按 256 个 key 一块转成 f32 计算；prefill 时把所需范围转换到可复用 scratch（8K 时 16 MiB）。CUDA KV 保留在 GPU，以张量拼接追加，支持截断与覆盖；attention 中转为 f32 累积。磁盘 snapshot/restore 留到 M2 |
 | 4 | Q/K/V 和 gate/up 各自做一次 matmul | 使用融合 GEMV（M2） |
-| 5 | 注意力按"每个 token × 每个 head"逐行计算，每一行都要重新读一遍 K/V（MVP 在 1.5K 位置实测只有 57 GFLOP/s） | 使用自有的分块 GQA 内核：按"KV head × 一块 query token"划分工作，同组 head 共用一次 K/V 读取；decode 时按 key 区间切分，再合并局部 softmax。MVP 中 2K prompt 的 prefill 从 79 tok/s 提升到 124–140 tok/s |
+| 5 | 注意力按"每个 token × 每个 head"逐行计算，每一行都要重新读一遍 K/V（MVP 在 1.5K 位置实测只有 57 GFLOP/s） | CPU 使用自有的分块 GQA 内核：按"KV head × 一块 query token"划分工作，同组 head 共用一次 K/V 读取；decode 时按 key 区间切分，再合并局部 softmax。MVP 中 2K prompt 的 prefill 从 79 tok/s 提升到 124–140 tok/s。CUDA 使用 Candle 分组矩阵乘法、因果 mask 与 softmax，不复制 KV head，不经过 CPU attention |
 | 6 | 重排完成后，原始权重仍然常驻内存 | 加载时按层预重排，最多七个矩阵并行。x86：只释放层内 Q4K，省下 915 MiB，Q6K 和 output 保持不变；ARM + dotprod：释放层内 Q4K/Q6K 和 output 的原始数据。embedding 在所有平台都保留量化原始数据；`--no-prepack` 可关闭提前重排与释放 |
 
 - **其他要点**：
@@ -1078,7 +1078,7 @@ conversation_idle_minutes = 30 # 1–1440
 id = "minicpm5-2b:q4_k_m"
 # path = "/opt/models/MiniCPM5-2B-Q4_K_M.gguf"  # 可选；tokenizer 查找与校验见 §8.1
 context_length = 8192         # 1024–32768，不等于模型原生 128K 上限
-device = "auto"               # auto | cpu；当前都使用 CPU
+device = "cpu"                # cpu | auto（保持 CPU）| cuda | cuda:N；CUDA 需显式 feature 构建
 thinking = "off"              # off | on
 
 [download]
@@ -1110,7 +1110,7 @@ reason = "Allow project fetches"
 | 字段或入口 | 当前行为 | 目标 |
 |---|---|---|
 | `[engine] shared / idle_exit_minutes / kv_budget` | 键被识别，但值被忽略；始终进程内推理 | M2：默认共享，空闲 15 分钟退出，KV 预算为可用内存的 25% |
-| `model.device = "metal"` / `"cuda"` | 告警，仍使用 CPU | 后续 GPU 构建 |
+| `model.device = "cuda"` / `"cuda:N"` | `--features cuda` 构建后使用指定逻辑 GPU；不可用时报错，不回退 CPU | Metal 与多卡尚未实现；不支持的设备值拒绝加载 |
 | `model.thinking = "auto"` | 告警，按 off 处理 | 连续失败后自动开启 |
 | `shell.suggest_key` 的其他值 | 告警，仍使用 Ctrl+G | 后续按键扩展 |
 | `nosh config --defaults` | 子命令不存在 | 后续完整配置输出 |
@@ -1140,7 +1140,7 @@ nosh/
 │  ├─ nosh-core/           agent 循环、prompt、工具、审批 UI、REPL AI handler
 │  ├─ nosh-shell/          EmbeddedShell、AI 触发、行编辑、历史、终端与进程
 │  ├─ nosh-permissions/    AST 风险分析、路径分类、策略与会话放行
-│  ├─ nosh-llm/            CPU 模型、分词、模板、采样、KV、Local/MockChatEngine
+│  ├─ nosh-llm/            CPU／可选 CUDA 模型、分词、模板、采样、KV、Local/MockChatEngine
 │  └─ nosh-hub/            registry、下载、校验、导入、路径与终端能力
 ├─ assets/registry.toml    内置模型清单
 ├─ third_party/candle-core/  锁定上游版本与本地补丁
@@ -1168,7 +1168,7 @@ nosh/
 - `nosh-remote`：远程协议、会话宿主和客户端；系统 SSH 优先，`russh` 作为备用方案。
 - `xtask`：registry 生成、基准、分发；shell 集成脚本随 §9.2 交付。
 - 内容搜索已使用 `grep-regex`、`grep-searcher` 与 `ignore`。需要时再引入 `portable-pty/interprocess`、`similar`、`landlock/seccompiler`，不视为当前依赖。
-- CUDA 使用 NVIDIA 运行时，Metal 使用系统框架，均不属于当前 CPU 构建。
+- 可选 `cuda` feature 使用 NVIDIA toolkit 与运行库，不进入默认 CPU 构建。单卡路径保留量化权重，Candle 完成设备端 embedding、RoPE、GQA 和前馈，GPU KV 用张量拼接并支持前缀回退；CPU prepack 与原有 attention 不变。Metal 尚未实现。构建、逻辑设备编号和验证命令见 [README](../README.md#可选-nvidia-cuda-推理)；评估需显式 `--device`，不继承宿主模型配置。
 
 | 目标产物 | 平台 | 说明 |
 |---|---|---|

@@ -63,6 +63,8 @@ def arguments(argv=None):
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--device", type=runtime.inference_device, default="cpu",
+                        help="cpu (default), cuda or cuda:N; written into every isolated trial config")
     parser.add_argument("--timeout", type=float)
     parser.add_argument("--plan", action="store_true", help="print the validated trial plan without running tools or models")
     parser.add_argument("--budget", type=float, help="maximum total trial-deadline budget, in seconds")
@@ -109,6 +111,7 @@ def main(argv=None) -> int:
                 "scenarios": [scenario["id"] for scenario in suite["scenarios"]],
                 "seeds": selected_seeds, "repeat": args.repeat, "trials": planned,
                 "timeout_s": timeout, "maximum_trial_seconds": maximum,
+                "device": args.device,
             }, ensure_ascii=False, indent=2, allow_nan=False))
             return 0
         if args.model_path is None:

@@ -51,6 +51,29 @@ input_assist = false
 
 语法分析和文件查询由两个有界辅助进程隔离；超时或超出预算会明确降级，而不是等待查询完成或无限重启。`NO_COLOR` 关闭输入样式；未识别命令的无颜色提示留给后续状态栏/补全统一体验。基本终端和非 TTY 不启用实时输入提示。数据流、判定规则、资源边界、恢复条件及可复现对照见 [实时输入解析设计](docs/INPUT-ASSIST.md)。
 
+## 可选 NVIDIA CUDA 推理
+
+默认构建与运行仍使用 CPU，不需要 CUDA。Linux/WSL 上有 NVIDIA GPU、驱动和 CUDA toolkit（`nvcc`、头文件及 cuBLAS 等运行库）时，可以显式构建：
+
+```bash
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+cargo build --release --locked -p nosh-cli --features cuda
+CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda --offline doctor
+CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda debug gen "Explain a shell pipeline." --temp 0
+CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda -s "列出当前目录"
+```
+
+`--device cpu|auto|cuda|cuda:N` 对交互 shell、Agent、CommandAssist、debug 和 doctor 一致生效，覆盖 `[model] device = "cuda"`。缺省及 `auto` 保留历史 CPU 行为；CUDA 必须显式选择，初始化或显存不足会报错，**不会退回 CPU**。`N` 是 `CUDA_VISIBLE_DEVICES` 筛选后的逻辑序号：只暴露物理卡 1 时仍用 `--device cuda:0`。先用 `nvidia-smi` 检查共享 GPU 是否空闲。
+
+量化 GGUF 权重、embedding、RoPE、GQA、KV cache 和前馈层均在单张 GPU 上，跳过 CPU prepack；分词、调度和采样留在 CPU。GPU KV 当前**仅开放默认 f16**，支持分块 prefill 和前缀回退，但使用张量拼接，未实现 FlashAttention、多 GPU 或 Metal。`--device cuda --kv f32` 会在权重／分词器加载前明确报错，不会偷偷改用 f16 或 CPU；CPU 的 f32 KV 不变。不同后端的量化内核会有数值差异，固定 seed 不保证 CPU/GPU 输出逐字相同。debug、加载说明与原生评估 trace 会报告实际设备；debug 的 RSS 仅为主机内存，显存和利用率请用 `nvidia-smi` 观测。CUDA 版本产物依赖匹配的 NVIDIA 动态库，默认 CPU 产物不受影响。
+
+f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing 的验收：同为 f32 KV 时，CPU/GPU 的 top-5 完整集合一致率为 18/33，未达到既有 60% 门槛（KL 0.02841、可信 top-1 30/30）；跨 dtype 的 CUDA f32 对 CPU f16 另有 KL 0.04083，超过 0.03。CPU Q8K 与 CUDA Q8_1 激活量化是已发现的不等价因素，**不是已完全确认的根因**。没有放宽阈值或宣称 f32 已验收；默认 f16 的同 dtype 对照通过。
+
+首次使用 CUDA 内核可能触发驱动 PTX/JIT 编译，首 token 明显更慢；后续新进程可能复用驱动缓存。测速必须区分首次 JIT 冷启动、驱动缓存已暖的新进程和同一进程的 KV 复用，不能统称“冷启动”。`NOSH_PROFILE` 的 CUDA 分算子计时仅反映异步提交开销；debug 的整体 prefill/decode 计时会等待 GPU 完成。
+
+GPU 评估必须显式传 `python3 -m eval --device cuda ...`，不要依赖宿主配置；详见[评估说明](eval/README.md)。
+
 ## 命令建议与终端交接
 
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。

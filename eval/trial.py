@@ -42,7 +42,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         trace = home.parent / "engine.jsonl"
         env = environment(home, args.threads, trace, workspace.tools,
                           capture_output=scenario.get("capture_output"),
-                          command_assist=scenario.get("assistance", {}).get("automatic", False))
+                          command_assist=scenario.get("assistance", {}).get("automatic", False),
+                          device=getattr(args, "device", "cpu"))
         facts["tools"] = workspace.tools
         if scenario["check"] == "versions":
             facts["versions"] = {name: meta["tools"][name] for name in ("cargo", "node", "python3")}
@@ -76,7 +77,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                    file_snapshot=after, final_state=fixtures.fixture_state(scenario, facts, root, after, result))
         if result.error:
             if result.timeout_phase in ("agent", "cli", "assist") and trace.is_file():
-                observed = observe(result, scenario, trace, seed=seed, deadline_timeout=True)
+                observed = observe(result, scenario, trace, seed=seed, deadline_timeout=True,
+                                   expected_device=getattr(args, "device", "cpu"))
                 row.update(observed)
                 stage = ("after final generation completed but before the completion marker"
                          if observed["deadline_state"] == "after_generation"
@@ -91,14 +93,16 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
             raise driver.DriverError(result.error)
         if result.failure:
             if trace.is_file():
-                observed = observe(result, scenario, trace, seed=seed)
+                observed = observe(result, scenario, trace, seed=seed,
+                                   expected_device=getattr(args, "device", "cpu"))
                 row.update(observed)
                 if observed["metrics"]["task_status"] is None:
                     raise driver.DriverError("an agent task ran but its completion marker was not observed")
             row.update(status="fail", reasons=[result.failure],
                        grading={"facts": {"passed": False, "reasons": [result.failure]}, "experience": None})
             return row
-        observed = observe(result, scenario, trace, seed=seed)
+        observed = observe(result, scenario, trace, seed=seed,
+                           expected_device=getattr(args, "device", "cpu"))
         row.update(observed)
         verdict = checks.judge(scenario, row["answer"], facts, root, after, result, row["metrics"], row)
         if not verdict.passed and any(not a["allowed"] for a in result.approvals):

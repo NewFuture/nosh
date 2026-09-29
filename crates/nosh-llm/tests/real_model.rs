@@ -412,7 +412,7 @@ fn f16_kv_matches_f32_kv() {
     };
     let mut model = Llama::load(&r.weights, 8192, opts, &Device::Cpu).unwrap();
     let want = logits_along(&mut model, prompt, tail, 512);
-    model.set_kv_dtype(KvDtype::F16);
+    model.set_kv_dtype(KvDtype::F16).unwrap();
     let d = divergence(&want, &logits_along(&mut model, prompt, tail, 512), tail);
     eprintln!(
         "prompt {} tok + {} decode steps, f16 vs f32 KV: {d}",
@@ -420,6 +420,71 @@ fn f16_kv_matches_f32_kv() {
         tail.len()
     );
     d.assert_acceptable();
+}
+
+#[test]
+#[cfg(feature = "cuda")]
+#[ignore = "needs the real model and an NVIDIA GPU"]
+fn cuda_matches_cpu_logits_and_reuses_prefix() {
+    let r = resolved();
+    let mut tok = Tok::load(&r.tokenizer).unwrap();
+    let ids = validation_ids(
+        &mut tok,
+        include_str!("../../../docs/MVP-PLAN.md")
+            .chars()
+            .take(2400)
+            .collect(),
+    );
+    let (prompt, tail) = ids.split_at(ids.len() - 32);
+    let mut cpu = Llama::load(&r.weights, 8192, LoadOptions::default(), &Device::Cpu).unwrap();
+    let reference = logits_along(&mut cpu, prompt, tail, 512);
+    drop(cpu);
+    let device = Device::new_cuda(0).unwrap();
+    let mut gpu = Llama::load(&r.weights, 8192, LoadOptions::default(), &device).unwrap();
+    assert_eq!(gpu.prepack_stats().tensors, 0);
+    assert_eq!(gpu.prepack_stats().released_bytes, 0);
+    let actual = logits_along(&mut gpu, prompt, tail, 512);
+    let d = divergence(&reference, &actual, tail);
+    eprintln!(
+        "CUDA vs CPU: {} prompt + {} decode: {d}",
+        prompt.len(),
+        tail.len()
+    );
+    d.assert_acceptable();
+    assert!(gpu.kv_bytes() > 0);
+    let rewind = prompt.len() - 17;
+    gpu.truncate(rewind);
+    let replay = gpu.forward(&prompt[rewind..]).unwrap();
+    assert!(replay.device().is_cuda());
+    let replay = replay.to_vec1::<f32>().unwrap();
+    let similarity = cosine(&actual[0], &replay);
+    eprintln!("CUDA prefix rewind cosine: {similarity}");
+    assert!(similarity > 0.995);
+    let cached = gpu.kv_len();
+    let error = gpu.set_kv_dtype(KvDtype::F32).unwrap_err().to_string();
+    assert!(error.contains("only f16 KV"));
+    assert_eq!(
+        gpu.kv_len(),
+        cached,
+        "a rejected change must not lose cached context"
+    );
+    assert_eq!(gpu.kv_dtype(), KvDtype::F16);
+    gpu.set_kv_dtype(KvDtype::F16).unwrap();
+    assert_eq!(gpu.kv_len(), 0);
+    assert_eq!(gpu.kv_bytes(), 0);
+    let error = Llama::load(
+        std::path::Path::new("missing-model.gguf"),
+        8192,
+        LoadOptions {
+            kv_dtype: KvDtype::F32,
+            ..LoadOptions::default()
+        },
+        &device,
+    )
+    .err()
+    .expect("unsupported KV rejected before file I/O")
+    .to_string();
+    assert!(error.contains("only f16 KV"), "{error}");
 }
 
 #[test]

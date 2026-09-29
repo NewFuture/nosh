@@ -17,6 +17,18 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 
+def inference_device(value: str) -> str:
+    if value in ("cpu", "auto"):
+        return "cpu"
+    if value == "cuda":
+        return "cuda:0"
+    if isinstance(value, str) and re.fullmatch(r"cuda:[0-9]+", value):
+        index = int(value[5:])
+        if index < 2**31:
+            return f"cuda:{index}"
+    raise ValueError("device must be cpu, auto, cuda or cuda:N")
+
+
 def resolve_source_revision(source_ref: str = "main", revision: str = "", cwd: Path | None = None) -> str:
     """Pin a commit reachable from one explicit origin branch, never a shell expression."""
     if not source_ref or source_ref.startswith("-"):
@@ -94,7 +106,9 @@ def discover_tools(scenarios: list[dict]) -> dict:
 
 
 def environment(home: Path, threads: int, trace: Path | None, tools: dict | None = None,
-                capture_output: str | None = None, command_assist: bool = False) -> dict[str, str]:
+                capture_output: str | None = None, command_assist: bool = False,
+                device: str = "cpu") -> dict[str, str]:
+    device = inference_device(device)
     if capture_output not in (None, "off", "last"):
         raise ValueError("capture_output must be off or last")
     if type(command_assist) is not bool:
@@ -107,6 +121,10 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
         "NOSH_OFFLINE": "1", "HF_HUB_OFFLINE": "1",
         "CANDLE_NUM_THREADS": str(threads), "RAYON_NUM_THREADS": "1",
     })
+    if device.startswith("cuda:"):
+        for key in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH"):
+            if key in os.environ:
+                env[key] = os.environ[key]
     config = home / "nosh"
     config.mkdir(mode=0o700)
     shell_config = f"[shell]\ncommand_assist = {str(command_assist).lower()}\n"
@@ -114,7 +132,7 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
         shell_config += f'capture_output = "{capture_output}"\n'
     (config / "config.toml").write_text(
         shell_config + '[agent]\napproval = "confirm"\nmax_steps = 10\ncommand_timeout_sec = 60\nrestore_cwd = false\n'
-        '[model]\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
+        f'[model]\ndevice = "{device}"\ncontext_length = 8192\nthinking = "off"\n[download]\nauto = "never"\n',
         encoding="utf-8",
     )
     if trace:
@@ -149,6 +167,7 @@ def harness_sources() -> list[Path]:
 
 
 def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, toolchain: dict) -> dict:
+    device = inference_device(getattr(args, "device", "cpu"))
     binary_hash = fixtures.file_hash(binary)
     build = {"source_revision": None, "source_clean": None, "binary_sha256": binary_hash,
              "provenance": "unverified external binary"}
@@ -176,7 +195,11 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_sha256": fixtures.digest({name: fixtures.file_hash(path) for name, path in sources.items()}),
         "harness_content_sha256": fixtures.digest(content_hashes),
         "grading_content_sha256": fixtures.digest({name: value for name, value in content_hashes.items() if name.startswith("checks/")}),
-        "settings": {"threads": args.threads, "rayon_threads": 1, "context_length": 8192,
+        "settings": {"device": device,
+                     "cuda_environment": {key: os.environ.get(key) for key in
+                                          ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH")}
+                                         if device.startswith("cuda:") else None,
+                     "threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "capture_output": "binary_default",
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
                      "approval": "confirm", "locale": "C.UTF-8", "timezone": "UTC",

@@ -10,9 +10,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use candle_core::Device;
-
-use crate::LlmError;
 use crate::conversation::Conversation;
 pub use crate::conversation::shorten_tool_result;
 use crate::engine::{
@@ -25,6 +22,7 @@ use crate::sampling::Sampler;
 use crate::template;
 use crate::tokenizer::Tok;
 use crate::toolcall::{Parsed, StreamParser};
+use crate::{InferenceDevice, LlmError};
 
 pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
@@ -32,6 +30,7 @@ pub const EOS: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct LocalEngineOptions {
+    pub device: InferenceDevice,
     pub context_length: usize,
     pub prefill_chunk: usize,
     pub seed: Option<u64>,
@@ -44,6 +43,7 @@ impl Default for LocalEngineOptions {
     fn default() -> Self {
         let load = LoadOptions::default();
         Self {
+            device: InferenceDevice::default(),
             context_length: 8192,
             prefill_chunk: 512,
             seed: None,
@@ -55,6 +55,7 @@ impl Default for LocalEngineOptions {
 
 #[derive(Debug, Clone)]
 pub struct EngineInfo {
+    pub device: InferenceDevice,
     pub model_id: String,
     pub arch: String,
     pub layers: usize,
@@ -88,17 +89,16 @@ impl LocalChatEngine {
         let t0 = Instant::now();
         // The environment is set up by the binary (`configure_thread_env`).
         let threads = barrier_threads();
-        let device = Device::Cpu;
+        let load = LoadOptions {
+            kv_dtype: opts.kv_dtype,
+            prepack_weights: opts.prepack_weights,
+        };
+        if matches!(opts.device, InferenceDevice::Cuda(_)) {
+            load.validate_cuda()?;
+        }
+        let device = opts.device.open()?;
         let mut tok = Tok::load(&model.tokenizer)?;
-        let llama = Llama::load(
-            &model.weights,
-            opts.context_length,
-            LoadOptions {
-                kv_dtype: opts.kv_dtype,
-                prepack_weights: opts.prepack_weights,
-            },
-            &device,
-        )?;
+        let llama = Llama::load(&model.weights, opts.context_length, load, &device)?;
         let cfg = llama.config().clone();
         if cfg.arch != model.entry.arch {
             return Err(LlmError::Config(format!(
@@ -123,6 +123,7 @@ impl LocalChatEngine {
             ..SamplingParams::default()
         };
         let info = EngineInfo {
+            device: opts.device,
             model_id: model.entry.id.clone(),
             arch: cfg.arch.clone(),
             layers: cfg.n_layer,
@@ -523,6 +524,28 @@ pub fn rss_mb() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_cuda_kv_fails_before_device_or_model_io() {
+        let model = nosh_hub::ResolvedModel {
+            entry: nosh_hub::Registry::builtin().default_model().clone(),
+            dir: "missing-model".into(),
+            weights: "missing-model/weights.gguf".into(),
+            tokenizer: "missing-model/tokenizer.json".into(),
+        };
+        let error = LocalChatEngine::load(
+            &model,
+            LocalEngineOptions {
+                device: InferenceDevice::Cuda(0),
+                kv_dtype: KvDtype::F32,
+                ..LocalEngineOptions::default()
+            },
+        )
+        .err()
+        .expect("unsupported combination")
+        .to_string();
+        assert!(error.contains("only f16 KV"), "{error}");
+    }
 
     #[test]
     fn loading_reads_the_thread_count_without_changing_the_environment() {

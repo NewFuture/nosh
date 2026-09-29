@@ -72,6 +72,21 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
+    match setup.device.clone().and_then(|selection| {
+        selection
+            .open()
+            .map(|_| selection)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(device) => ok(
+            "device",
+            &format!("{device} · CUDA compiled: {}", cfg!(feature = "cuda")),
+        ),
+        Err(error) => {
+            problems += 1;
+            bad("device", &error);
+        }
+    }
 
     let (feats, usable) = cpu_features();
     let cores = std::thread::available_parallelism()

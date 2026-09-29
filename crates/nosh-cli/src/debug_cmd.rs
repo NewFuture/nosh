@@ -3,7 +3,6 @@
 use std::io::Write;
 
 use clap::Subcommand;
-use nosh_hub::ModelHub;
 use nosh_llm::{
     ChatEngine, Event, KvDtype, LocalChatEngine, LocalEngineOptions, Message, SessionSpec,
     ToolSpec, rss_mb,
@@ -38,7 +37,7 @@ pub enum DebugCmd {
         /// Run the same prompt this many times in one conversation (tests KV reuse).
         #[arg(long, default_value_t = 1)]
         repeat: usize,
-        /// KV cache element type.
+        /// KV cache element type (CUDA currently supports f16 only).
         #[arg(long, value_enum, default_value = "f16")]
         kv: KvArg,
         /// Keep raw weights instead of prepacking eligible CPU matrices at load.
@@ -47,12 +46,14 @@ pub enum DebugCmd {
     },
 }
 
-pub fn run(
-    cmd: DebugCmd,
-    model_path: Option<&std::path::Path>,
-    model: Option<&str>,
-    seed: Option<u64>,
-) -> i32 {
+pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
+    let device = match &setup.device {
+        Ok(device) => *device,
+        Err(error) => {
+            eprintln!("nosh: {error}");
+            return 1;
+        }
+    };
     match cmd {
         DebugCmd::Gen {
             prompt,
@@ -66,15 +67,13 @@ pub fn run(
             kv,
             no_prepack,
         } => {
-            let hub = ModelHub::new();
-            let resolved = match model_path {
-                Some(p) => hub.resolve_path(p, model),
-                None => hub.find(model).and_then(|r| {
-                    r.ok_or_else(|| {
-                        nosh_hub::HubError::NotInstalled(model.unwrap_or("default").into())
-                    })
-                }),
-            };
+            let resolved = crate::engine::locate(setup).and_then(|r| {
+                r.ok_or_else(|| {
+                    nosh_hub::HubError::NotInstalled(
+                        setup.model_id.as_deref().unwrap_or("default").into(),
+                    )
+                })
+            });
             let resolved = match resolved {
                 Ok(r) => r,
                 Err(e) => {
@@ -85,8 +84,9 @@ pub fn run(
             let mut engine = match LocalChatEngine::load(
                 &resolved,
                 LocalEngineOptions {
+                    device,
                     context_length: ctx,
-                    seed,
+                    seed: setup.seed,
                     kv_dtype: match kv {
                         KvArg::F16 => KvDtype::F16,
                         KvArg::F32 => KvDtype::F32,
@@ -103,8 +103,9 @@ pub fn run(
             };
             let info = engine.info().clone();
             eprintln!(
-                "[{} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
+                "[{} | device {} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
                 info.model_id,
+                info.device,
                 info.layers,
                 info.context,
                 info.threads,
