@@ -420,9 +420,10 @@ impl Llama {
             eps: rms_eps,
         };
         let mut prepack = PrepackStats::default();
-        let mut output = match tensor("output.weight") {
-            Ok(t) => t,
-            Err(_) => tensor("token_embd.weight")?,
+        let mut output = if ct.tensor_infos.contains_key("output.weight") {
+            tensor("output.weight").map_err(|error| error.context("loading output.weight"))?
+        } else {
+            tensor("token_embd.weight")?
         };
         if device.is_cpu() && cfg!(target_arch = "aarch64") && opts.prepack_weights {
             prepack_weights(std::slice::from_mut(&mut output), &mut prepack)?;
@@ -863,9 +864,6 @@ mod tests {
                 ("blk.0.ffn_up.weight", matrix(256, GgmlDType::Q4K)),
                 ("blk.0.ffn_down.weight", matrix(256, GgmlDType::Q6K)),
             ];
-            if has_output {
-                tensors.push(("output.weight", matrix(16, GgmlDType::Q6K)));
-            }
             for name in [
                 "output_norm.weight",
                 "blk.0.attn_norm.weight",
@@ -873,6 +871,9 @@ mod tests {
             ] {
                 let norm = Tensor::ones(256, DType::F32, &Device::Cpu).unwrap();
                 tensors.push((name, QTensor::quantize(&norm, GgmlDType::F32).unwrap()));
+            }
+            if has_output {
+                tensors.push(("output.weight", matrix(16, GgmlDType::Q6K)));
             }
             let mut file = std::io::Cursor::new(Vec::new());
             let metadata: Vec<_> = meta.iter().map(|(k, v)| (*k, v)).collect();
@@ -911,7 +912,6 @@ mod tests {
             let want = plain.forward(&[0, 1, 2]).unwrap().to_vec1::<f32>().unwrap();
             drop(plain);
             let mut packed = Llama::load(&path, 64, LoadOptions::default(), &Device::Cpu).unwrap();
-            std::fs::remove_file(&path).unwrap();
             assert_eq!(packed.prepack_stats().tensors, expected.tensors);
             assert_eq!(
                 packed.prepack_stats().released_bytes,
@@ -925,6 +925,23 @@ mod tests {
                 .unwrap();
             assert!(got.iter().all(|v| v.is_finite()));
             assert_eq!(got, want, "output.weight present: {has_output}");
+            if has_output {
+                let content = gguf_file::Content::read(&mut File::open(&path).unwrap()).unwrap();
+                let output_start =
+                    content.tensor_data_offset + content.tensor_infos["output.weight"].offset;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(output_start)
+                    .unwrap();
+                let error = Llama::load(&path, 64, LoadOptions::default(), &Device::Cpu)
+                    .err()
+                    .expect("a damaged output tensor must not fall back to embeddings")
+                    .to_string();
+                assert!(error.contains("tensor needs"), "{error}");
+            }
+            std::fs::remove_file(&path).unwrap();
         }
     }
 

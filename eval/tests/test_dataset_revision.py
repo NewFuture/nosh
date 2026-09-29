@@ -82,6 +82,10 @@ class DatasetRevisionTests(unittest.TestCase):
             measured = runtime.metadata(args, configured, path, path, path, {})
             self.assertEqual(measured["settings"]["timeout_s"], 60)
             self.assertEqual(configured["timeout_s"], 240)
+            with patch.dict("os.environ", {"LD_LIBRARY_PATH": "/cuda/lib64"}):
+                measured = runtime.metadata(args, configured, path, path, path, {})
+                self.assertEqual(measured["settings"]["device"], "cpu")
+                self.assertEqual(measured["settings"]["ld_library_path"], "/cuda/lib64")
 
     def test_hosted_campaign_budget_covers_every_seed_and_repeat(self):
         suite = suite_api.load_suite(runtime.HERE / "suites" / "regression.json")

@@ -34,10 +34,10 @@ class DeviceTests(unittest.TestCase):
                 self.assertEqual(cfg["model"]["device"], runtime.inference_device(device))
                 if device == "cpu":
                     self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
-                    self.assertNotIn("LD_LIBRARY_PATH", env)
                 else:
                     self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "1")
-                    self.assertEqual(env["LD_LIBRARY_PATH"], "/cuda/lib64")
+                self.assertEqual(env["LD_LIBRARY_PATH"], "/cuda/lib64",
+                                 "CUDA-linked binaries need their loader path even for explicit CPU inference")
                 self.assertNotIn("NOSH_DEVICE", env)
 
     def test_gpu_requests_require_observed_gpu_and_old_cpu_traces_still_work(self):

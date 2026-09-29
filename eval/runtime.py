@@ -121,8 +121,11 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
         "NOSH_OFFLINE": "1", "HF_HUB_OFFLINE": "1",
         "CANDLE_NUM_THREADS": str(threads), "RAYON_NUM_THREADS": "1",
     })
+    # A CUDA-linked executable needs its libraries before it can select CPU.
+    if "LD_LIBRARY_PATH" in os.environ:
+        env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     if device == "auto" or device.startswith("cuda:"):
-        for key in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH"):
+        for key in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
             if key in os.environ:
                 env[key] = os.environ[key]
     config = home / "nosh"
@@ -195,9 +198,9 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_sha256": fixtures.digest({name: fixtures.file_hash(path) for name, path in sources.items()}),
         "harness_content_sha256": fixtures.digest(content_hashes),
         "grading_content_sha256": fixtures.digest({name: value for name, value in content_hashes.items() if name.startswith("checks/")}),
-        "settings": {"device": device,
+        "settings": {"device": device, "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
                      "cuda_environment": {key: os.environ.get(key) for key in
-                                          ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH")}
+                                          ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")}
                                          if device == "auto" or device.startswith("cuda:") else None,
                      "threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "capture_output": "binary_default",
