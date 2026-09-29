@@ -205,6 +205,38 @@ impl LocalChatEngine {
 }
 
 impl ChatEngine for LocalChatEngine {
+    fn set_tool_choice(
+        &mut self,
+        sid: SessionId,
+        choice: crate::ToolChoice,
+    ) -> Result<(), LlmError> {
+        let conversation = self
+            .sessions
+            .get_mut(&sid)
+            .ok_or(LlmError::UnknownSession(sid))?;
+        if choice != crate::ToolChoice::Auto
+            && (conversation.spec.tools.is_empty() || conversation.spec.thinking)
+        {
+            return Err(LlmError::Config(
+                "required tool choice needs tools and thinking disabled".into(),
+            ));
+        }
+        if let crate::ToolChoice::Named(name) = &choice
+            && (!conversation
+                .spec
+                .tools
+                .iter()
+                .any(|tool| tool.name == *name)
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c)))
+        {
+            return Err(LlmError::Config("named tool is not available".into()));
+        }
+        conversation.tool_choice = choice;
+        Ok(())
+    }
+
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
         let conversation = Conversation::new(spec, &mut self.tok)?;
         let id = self.next_id;
@@ -229,9 +261,14 @@ impl ChatEngine for LocalChatEngine {
         let thinking = conversation.spec.thinking;
         let max_new_tokens = conversation.spec.max_new_tokens;
         let tools = conversation.spec.tools.clone();
-        let gen_prompt = self
+        let choice = std::mem::take(&mut conversation.tool_choice);
+        let forced_prefix = self
+            .tok
+            .encode_segments(&template::tool_choice_prefix(&choice))?;
+        let mut gen_prompt = self
             .tok
             .encode_segments(&[template::generation_prompt(Some(thinking))])?;
+        gen_prompt.extend_from_slice(&forced_prefix);
         let full = conversation.tokens(&gen_prompt);
         let max_ctx = self.model.max_context();
         let mut usage = Usage {
@@ -261,6 +298,9 @@ impl ChatEngine for LocalChatEngine {
 
         let mut sampler = Sampler::new(sampling);
         let mut parser = StreamParser::new(tools, thinking);
+        for id in forced_prefix {
+            dispatch(parser.push(id, &self.tok), &mut outcome, sink);
+        }
         let mut generated: Vec<u32> = Vec::new();
         let t_decode = Instant::now();
         let trace = std::env::var_os("NOSH_TRACE_DECODE").is_some();
@@ -283,6 +323,11 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::EndOfTurn;
             }
             dispatch(parser.push(id, &self.tok), &mut outcome, sink);
+            if choice != crate::ToolChoice::Auto
+                && (!outcome.tool_calls.is_empty() || !outcome.errors.is_empty())
+            {
+                break StopReason::EndOfTurn;
+            }
             if generated.len() >= max_new_tokens || self.kv_tokens.len() + 2 >= max_ctx {
                 break StopReason::MaxTokens;
             }

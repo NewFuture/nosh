@@ -35,7 +35,33 @@ impl Scope {
 }
 
 pub(crate) fn validate(text: &str, shell: &EmbeddedShell) -> bool {
-    let Ok(program) = shell.parse(text) else {
+    validate_view(text, shell)
+}
+
+pub(crate) trait CommandView {
+    fn parse(&self, text: &str) -> Option<ast::Program>;
+    fn resolve(&self, name: &str) -> Resolution;
+    fn var(&self, name: &str) -> Option<String>;
+    fn cwd(&self) -> std::path::PathBuf;
+}
+
+impl CommandView for EmbeddedShell {
+    fn parse(&self, text: &str) -> Option<ast::Program> {
+        self.parse(text).ok()
+    }
+    fn resolve(&self, name: &str) -> Resolution {
+        self.resolve(name)
+    }
+    fn var(&self, name: &str) -> Option<String> {
+        self.var(name)
+    }
+    fn cwd(&self) -> std::path::PathBuf {
+        self.cwd()
+    }
+}
+
+pub(crate) fn validate_view(text: &str, shell: &dyn CommandView) -> bool {
+    let Some(program) = shell.parse(text) else {
         return false;
     };
     if program
@@ -55,7 +81,7 @@ pub(crate) fn validate(text: &str, shell: &EmbeddedShell) -> bool {
 }
 
 struct Check<'a> {
-    shell: &'a EmbeddedShell,
+    shell: &'a dyn CommandView,
     calls_left: usize,
 }
 
@@ -374,7 +400,7 @@ impl Check<'_> {
             W::CommandSubstitution(text) | W::BackquotedCommandSubstitution(text) => self
                 .shell
                 .parse(text)
-                .is_ok_and(|p| self.program(&p, &mut scope.clone())),
+                .is_some_and(|p| self.program(&p, &mut scope.clone())),
             W::DoubleQuotedSequence(p) | W::GettextDoubleQuotedSequence(p) => self.pieces(p, scope),
             W::ArithmeticExpression(e) => self.words(&e.value, scope),
             W::ParameterExpansion(p) => self.parameter(p, scope),

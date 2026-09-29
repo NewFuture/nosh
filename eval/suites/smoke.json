@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "dataset_revision": 10,
+  "seeds": [
+    0
+  ],
+  "timeout_s": 120,
+  "scenarios": [
+    "typo-correction",
+    "largest-files",
+    "generate-archive",
+    "auto-fix-archive",
+    "next-no-goal"
+  ],
+  "catalogs": [
+    "../scenarios/agent.json",
+    "../scenarios/command_assist.json",
+    "../scenarios/shell.json"
+  ]
+}

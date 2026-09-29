@@ -3,11 +3,13 @@
 
 pub mod agent;
 pub mod approval;
+mod assist_worker;
+pub mod command_assist;
+mod command_info;
 mod guidance;
 pub mod handler;
 mod project;
 pub mod prompt;
-pub mod suggest;
 pub mod tools;
 pub mod ui;
 
@@ -15,7 +17,7 @@ pub use agent::{Agent, AgentConfig, TaskOutcome, TaskStatus};
 pub use approval::{
     ApprovalChannel, ApprovalRequest, ApprovalResponse, NoTerminal, Scripted, TerminalApproval,
 };
-pub use handler::{EngineLoader, LoadedEngine, ShellAi};
+pub use handler::{EngineLoader, LoadMode, LoadedEngine, ShellAi};
 pub use prompt::{Attachment, Environment, TaskInput};
 pub use tools::{NoRedact, Redactor, ToolSet};
 pub use ui::{AgentUi, JsonUi, RecordUi, TaskSummary, TermUi};

@@ -294,6 +294,7 @@ fn run_shell(
             ai_enabled: ai_on,
         },
         on_failure: cfg.on_failure,
+        command_assist: cfg.command_assist,
         input_assist: nosh_shell::input_assist::Config {
             enabled: cfg.input_assist,
             worker: if cfg.input_assist {
@@ -324,7 +325,7 @@ fn run_shell(
     }
     let loader_setup = setup.clone();
     let mut ai = nosh_core::ShellAi::new(
-        Box::new(move || engine::load(&loader_setup, true)),
+        Box::new(move |mode| engine::load(&loader_setup, mode)),
         agent_cmd::agent_config(&cfg, mode, cli.global.seed),
         nosh_core::TerminalApproval::detect(),
     );

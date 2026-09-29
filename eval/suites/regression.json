@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "dataset_revision": 10,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "timeout_s": 240,
+  "scenarios": [
+    "largest-files",
+    "listening-port",
+    "language-lines",
+    "rename-files",
+    "chinese-python",
+    "typo-correction",
+    "explain-failure",
+    "summarize-git-log",
+    "suggest-archive",
+    "persistent-cwd",
+    "zh-rust-build",
+    "zh-node-build",
+    "zh-rust-test",
+    "zh-node-test",
+    "zh-python-test",
+    "zh-git-diff",
+    "zh-git-commit",
+    "zh-git-log",
+    "zh-listening-port",
+    "zh-clean-build",
+    "zh-tool-versions",
+    "zh-clarify-task",
+    "zh-build-failure",
+    "zh-test-failure",
+    "zh-port-failure",
+    "captured-diagnosis",
+    "captured-diagnostic-id"
+  ],
+  "catalogs": [
+    "../scenarios/agent.json",
+    "../scenarios/command_assist.json",
+    "../scenarios/shell.json"
+  ]
+}

@@ -57,7 +57,9 @@ input_assist = false
 
 普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。
 
-`nosh -s` 和 Ctrl+G 使用无工具的独立短对话，返回一个完整 shell program，经 brush 语法和可解析命令名校验后输出或预填，从不自动执行。接受单行、单一 shell fence 和完整多行结构；拒绝说明文字、多候选、不完整语法和隐藏控制字符。静态检查递归覆盖命令／进程替换，按顺序和作用域检查可确定的函数调用；动态命令名、`eval`／`source`、条件定义和递归等复杂动态行为只能视为“无法确认”，不因此拒绝或额外显示提示。校验不证明运行成功或符合用户意图，执行前仍需检查。普通 agent 的建议只显示在最终文本中，不自动预填。
+`nosh -s` 和 Ctrl+G 使用 **CommandAssist Generate** 的独立短对话，可以按需查询命令身份、帮助和项目文件；通过 `finish` 提交完整 shell program、必要澄清或无建议。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝混合终态、Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
+
+用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，Ctrl+G 接受，回车才执行；继续输入会取消并丢弃旧建议。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断，`ai next` 显式请求后续建议。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留显式入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
 
 agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。复合命令前面的部分可能已经执行；交接提示会明确警告，请检查当前状态和整条命令后再自行运行，以免重复副作用。
 
@@ -103,9 +105,10 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 | [实时输入解析设计](docs/INPUT-ASSIST.md) | 输入辅助的数据流、判定语义、后台隔离、缓存与资源边界 |
 | [Project context 设计](docs/PROJECT-CONTEXT.md) | 紧凑上下文、项目发现、AGENTS／README 加载和缓存边界 |
 | [LLM tools 设计](docs/LLM-TOOLS.md) | 工具与模式、grep、权限、结果和建议契约 |
+| [CommandAssist 设计](docs/COMMAND-ASSIST.md) | Generate / Fix / Next、简短 instructions、查询工具、finish 协议与后台调度 |
 | [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
-| [固定 seed 的真实模型评测](eval/README.md) | 27 场景，revision 9 统一当前输入与输出诊断契约；历史 main 的 25 场景双跑基线为 48.0%，不代表新数据集成绩 |
+| [固定 seed 的真实模型评测](eval/README.md) | revision 10：27 场景回归与 5 场景 CommandAssist 专项分别运行；历史 main 的 48.0% 不代表新协议成绩 |
 
 开发入口见 [维护与扩展约定](docs/DESIGN.md#123-维护与扩展约定)：工具目录、对话日志、推理执行各自维护边界；错误显式传递，性能结论区分辅助路径优化与真实模型实测。
 

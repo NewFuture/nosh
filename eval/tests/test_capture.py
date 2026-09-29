@@ -49,7 +49,7 @@ class CaptureEvaluationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.data = suite.load_suite(run.HERE / "scenarios.json")
+        self.data = suite.load_suite(run.HERE / "suites" / "regression.json")
         self.scenario = next(s for s in self.data["scenarios"] if s["check"] == "captured-citation")
 
     def test_binary_defaults_and_explicit_capture_overrides_are_distinct(self):
@@ -63,7 +63,8 @@ class CaptureEvaluationTests(unittest.TestCase):
             config = tomllib.loads((Path(env["NOSH_HOME"]) / "config.toml").read_text())
             self.assertEqual(config.get("shell", {}).get("capture_output"), mode)
             if mode is None:
-                self.assertNotIn("shell", config, "binary defaults must not be silently overridden")
+                self.assertNotIn("capture_output", config.get("shell", {}), "capture defaults must not be silently overridden")
+                self.assertFalse(config["shell"]["command_assist"], "Agent evaluation excludes automatic assistance")
 
     def test_invalid_capture_settings_and_missing_initial_failure_are_rejected(self):
         for change in ({"capture_output": "all"}, {"capture_output": True},

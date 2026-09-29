@@ -80,7 +80,7 @@ pub fn run_agent(
         Ok(s) => s,
         Err(c) => return c,
     };
-    let loaded = match engine::load(setup, true) {
+    let loaded = match engine::load(setup, nosh_core::LoadMode::Foreground) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("nosh: {e}");
@@ -149,7 +149,7 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
         Ok(s) => s,
         Err(c) => return c,
     };
-    let mut loaded = match engine::load(setup, true) {
+    let mut loaded = match engine::load(setup, nosh_core::LoadMode::Foreground) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("nosh: {e}");
@@ -165,30 +165,22 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
     }
     let cancel = loaded.engine.cancel_handle();
     shell.interrupts().on_interrupt(move || cancel.cancel());
-    let env = Environment::detect(&shell);
     let config = agent_config(cfg, ApprovalMode::Confirm, seed);
-    let context = config.permission_context(&shell);
-    let r = nosh_core::suggest::suggest(
-        loaded.engine.as_mut(),
-        &env,
-        &shell,
-        &text,
-        Trigger::Cli,
-        config.sampling,
-        &context,
-    );
+    let r = nosh_core::command_assist::generate(loaded.engine.as_mut(), &shell, &text, &config);
     if shell.interrupts().count() > 0 {
         return 130;
     }
-    match r {
-        Ok(Some(s)) => {
-            println!("{}", s.command);
-            if let Some(e) = s.explanation.filter(|e| !e.trim().is_empty()) {
-                eprintln!("{}", e.trim());
-            }
+    use nosh_core::command_assist::AssistResult;
+    match r.map(|outcome| outcome.result) {
+        Ok(AssistResult::Command(command)) => {
+            println!("{command}");
             0
         }
-        Ok(None) => {
+        Ok(AssistResult::Clarify(question)) => {
+            eprintln!("{question}");
+            1
+        }
+        Ok(AssistResult::NoSuggestion) => {
             eprintln!("{}", tr!("nosh: 没有建议", "nosh: no suggestion"));
             1
         }

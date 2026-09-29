@@ -14,7 +14,7 @@ from eval import approval, checks, driver, fixtures, run, suite
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-SCENARIO_PATH = REPOSITORY / "eval" / "scenarios.json"
+SCENARIO_PATH = REPOSITORY / "eval" / "suites" / "regression.json"
 
 
 def execution(command: str, result: driver.Result | None = None) -> dict:
@@ -272,7 +272,7 @@ class DatasetRevisionTests(ProjectWorkCase):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 9)
+        self.assertEqual(data["dataset_revision"], 10)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
@@ -285,7 +285,7 @@ class DatasetRevisionTests(ProjectWorkCase):
             self.assertEqual(scenarios[sid]["expect"]["max_confirmations"], 0)
 
     def test_dataset_revision_is_optional_positive_and_never_normalized(self):
-        current = json.loads(SCENARIO_PATH.read_text(encoding="utf-8"))
+        current = suite.load_suite(SCENARIO_PATH)
         historical = copy.deepcopy(current)
         historical.pop("dataset_revision")
         next(s for s in historical["scenarios"] if s["id"] == "zh-git-commit")["fixture"] = "dirty-git"
@@ -314,7 +314,7 @@ class DatasetRevisionTests(ProjectWorkCase):
                 suite.load_suite(self.write_suite(invalid))
 
     def test_historical_schema_one_suite_stays_byte_semantically_unchanged(self):
-        current = json.loads(SCENARIO_PATH.read_text(encoding="utf-8"))
+        current = suite.load_suite(SCENARIO_PATH)
         historical = {
             "schema_version": 1,
             "seeds": current["seeds"],

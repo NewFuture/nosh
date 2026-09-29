@@ -76,7 +76,7 @@ class DatasetRevisionTests(unittest.TestCase):
             self.assertEqual(configured["timeout_s"], 240)
 
     def test_hosted_campaign_budget_covers_every_seed_and_repeat(self):
-        suite = run.load_suite(run.HERE / "scenarios.json")
+        suite = run.load_suite(run.HERE / "suites" / "regression.json")
         available_s = (360 - 90) * 60
         self.assertEqual(run.validate_campaign_budget(suite, 2, 60, available_s), 270 * 60)
         self.assertEqual(run.validate_campaign_budget(suite, 2, 59, available_s), 270 * 59)
@@ -88,8 +88,37 @@ class DatasetRevisionTests(unittest.TestCase):
         subset = dict(suite, scenarios=suite["scenarios"][:1], seeds=[0])
         self.assertEqual(run.validate_campaign_budget(subset, 2, 240, available_s), 480)
 
+    @unittest.skipUnless(sys.platform == "linux", "runner metadata uses Linux process priority")
+    def test_nested_scorers_are_fingerprinted_but_tests_and_archives_are_not(self):
+        args = SimpleNamespace(build_info=None, label="source-test", legacy=False,
+                               threads=1, timeout=None, seeds=None, repeat=1)
+        suite = {"schema_version": 2, "timeout_s": 30, "seeds": [0], "scenarios": [{"id": "example"}]}
+        with tempfile.TemporaryDirectory() as temporary, patch("eval.run.machine_info", return_value={}):
+            root = Path(temporary)
+            (root / "checks").mkdir()
+            (root / "tests").mkdir()
+            (root / "baselines").mkdir()
+            (root / "run.py").write_text("runner = 1\n")
+            (root / "checks" / "__init__.py").write_text("")
+            scorer = root / "checks" / "agent.py"
+            scorer.write_text("score = 1\n")
+            binary = root / "binary"
+            binary.write_bytes(b"fixture")
+            with patch("eval.run.HERE", root):
+                before = run.metadata(args, suite, binary, binary, binary, {})
+                scorer.write_text("score = 2\n")
+                changed = run.metadata(args, suite, binary, binary, binary, {})
+                self.assertNotEqual(before["grading_content_sha256"], changed["grading_content_sha256"])
+                self.assertNotEqual(before["harness_content_sha256"], changed["harness_content_sha256"])
+                self.assertEqual(before["suite_sha256"], changed["suite_sha256"])
+                (root / "tests" / "test_ignore.py").write_text("test = 1\n")
+                (root / "baselines" / "old.py").write_text("score = 0\n")
+                ignored = run.metadata(args, suite, binary, binary, binary, {})
+                for key in ("harness_sha256", "harness_content_sha256", "grading_content_sha256", "suite_sha256"):
+                    self.assertEqual(changed[key], ignored[key])
+
     def test_invalid_campaign_budgets_are_rejected(self):
-        suite = run.load_suite(run.HERE / "scenarios.json")
+        suite = run.load_suite(run.HERE / "suites" / "regression.json")
         for value in (0, -1, True, None, float("nan"), float("inf")):
             with self.subTest(timeout=value), self.assertRaises(ValueError):
                 run.validate_campaign_budget(suite, 2, value, 1000)
@@ -103,7 +132,7 @@ class DatasetRevisionTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "linux", "fixture command paths use Linux shell semantics")
 class TaskCompletionIntegrationTests(unittest.TestCase):
     def test_allowed_build_prerequisite_does_not_replace_test_execution(self):
-        scenario = next(s for s in run.load_suite(run.HERE / "scenarios.json")["scenarios"]
+        scenario = next(s for s in run.load_suite(run.HERE / "suites" / "regression.json")["scenarios"]
                         if s["id"] == "zh-node-test")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"

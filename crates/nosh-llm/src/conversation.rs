@@ -37,6 +37,7 @@ impl Entry {
 
 pub(crate) struct Conversation {
     pub(crate) spec: SessionSpec,
+    pub(crate) tool_choice: crate::ToolChoice,
     prefix: Vec<u32>,
     entries: Vec<Entry>,
 }
@@ -47,6 +48,7 @@ impl Conversation {
             tok.encode_segments(&template::render_system(Some(&spec.system), &spec.tools))?;
         Ok(Self {
             spec,
+            tool_choice: crate::ToolChoice::Auto,
             prefix,
             entries: Vec::new(),
         })
@@ -225,6 +227,7 @@ mod tests {
     fn conversation(tok: &mut Tok) -> Conversation {
         Conversation::new(
             SessionSpec {
+                label: "test".into(),
                 system: "system".into(),
                 tools: vec![],
                 thinking: false,

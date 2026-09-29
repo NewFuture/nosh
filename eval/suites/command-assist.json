@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "dataset_revision": 10,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "timeout_s": 120,
+  "scenarios": [
+    "generate-archive",
+    "generate-query-help",
+    "generate-clarify",
+    "auto-fix-archive",
+    "next-no-goal"
+  ],
+  "catalogs": [
+    "../scenarios/command_assist.json"
+  ]
+}

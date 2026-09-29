@@ -15,6 +15,7 @@ from .suite import CAPTURE_CHECKS, CAPTURE_PARTS
 
 SCHEMA_VERSION = 2
 METRICS = ("steps", "confirmations", "ttft_s", "total_s", "peak_rss_mib")
+TOKEN_METRICS = ("prompt_tokens", "cached_tokens", "completion_tokens")
 
 
 def validate(report: dict) -> None:
@@ -215,6 +216,10 @@ def summarize(trials: list[dict], planned: int) -> dict:
                        else max(values) if metric == "peak_rss_mib"
                        else statistics.median(values)) if values else None)
         row[metric + "_samples"] = len(values)
+    for metric in TOKEN_METRICS:
+        values = [r["metrics"][metric] for r in trials if r["metrics"].get(metric) is not None]
+        row[metric] = statistics.mean(values) if values else None
+        row[metric + "_samples"] = len(values)
     return row
 
 
@@ -265,10 +270,11 @@ def aggregate(report: dict) -> list[dict]:
 def groups(report: dict) -> list[dict]:
     meta = report["metadata"]
     rows = []
-    for name in ("all", "mvp", "expanded", "model", "local"):
+    for name in ("all", "mvp", "expanded", "command-assist", "generate", "fix", "next", "model", "local"):
         scenarios = [
             s for s in meta["scenarios"]
             if name == "all" or name == s.get("group")
+            or name == s.get("assistance", {}).get("intent")
             or (name == "model" and s.get("check") != "typos")
             or (name == "local" and s.get("check") == "typos")
         ]
@@ -322,6 +328,13 @@ def markdown(report: dict) -> str:
             f"{row['fail']} / {row['error']} / {row['missing']} | "
             + " | ".join(fmt(row[name]) for name in METRICS) + " |"
         )
+    if any(t.get("metrics", {}).get("prompt_tokens") is not None for t in report["trials"]):
+        rows.extend(["", "## Model token cost", "",
+                     "| Scenario | New prompt tokens | Reused tokens | Generated tokens |",
+                     "|---|---:|---:|---:|"])
+        for row in aggregate(report):
+            rows.append(f"| {row['scenario_id']} | " + " | ".join(fmt(row[name]) for name in TOKEN_METRICS) + " |")
+        rows.append("\nMeans include failed trials with measured usage. New and reused tokens are separate; tool schemas and message templates are included.")
     if report["schema_version"] == 2:
         rows.extend(["", "## Declared experience budgets", "",
                      "| Scenario | Max steps | Max confirmations | Language | Final question | Facts passed / measured | Experience passed / measured |",

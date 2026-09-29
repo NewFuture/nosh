@@ -1,6 +1,6 @@
 # nosh：纯 Rust 原生离线 AI Shell 设计文档
 
-> **代号**：nosh（Native Offline SHell）　**版本**：v0.19　**日期**：2026-09-27　**默认模型**：MiniCPM5-2B（Apache-2.0）
+> **代号**：nosh（Native Offline SHell）　**版本**：v0.20　**日期**：2026-09-28　**默认模型**：MiniCPM5-2B（Apache-2.0）
 >
 > **范围**：说明当前本地 MVP 的架构、行为与约束，并保留 M2/M3 的目标设计。在 `20ae1d6`（含 revision 2 评测语义）的实现基础上，同步工具分发、对话日志、错误恢复和辅助热路径的重构；设计决策不等于功能已经交付。
 >
@@ -18,6 +18,7 @@
 | [输出采集](OUTPUT-CAPTURE.md) | 最近用户命令输出的使用时机、上下文污染边界、PTY 协议、状态、隐私和验收 |
 | [Project context](PROJECT-CONTEXT.md) | 动态上下文、项目文档与缓存边界 |
 | [LLM tools](LLM-TOOLS.md) | 工具集合、模式与执行契约 |
+| [CommandAssist](COMMAND-ASSIST.md) | Generate/Fix/Next、最小指令、查询与 finish、后台完成事件 |
 | [MVP 实施计划](MVP-PLAN.md) | 已完成的 M0/M1 工作记录，保留当时的范围与任务拆分，不作为当前待办清单 |
 | [MVP 报告](MVP-REPORT.md) | 分阶段的实测结果、偏差、已知问题及其来源 |
 | [真实模型评测](../eval/README.md) | 可复现命令、场景、指标口径与版本化基线 |
@@ -61,7 +62,7 @@ nosh --safe                        # 跳过 rc，同时关闭 AI
 | 让 AI 做事 | `# 找出当前目录下最大的 10 个文件` |
 | 直接用中文说 | `帮我看看 8080 端口被谁占了`：无法解析为现有命令时交给 AI |
 | 命令打错了 | 输入 `gti status`，输入行会自动变成 `git status`，回车即可执行 |
-| 命令执行失败 | 出现 `✗ exit 1` 提示后按 Ctrl+G，或者输入 `# 为什么失败`、`ai fix` |
+| 命令执行失败 | 默认后台生成修正建议，Ctrl+G 接受；`ai fix` 显式生成修复命令，`ai fix 为什么失败` 进入 Agent 诊断 |
 | 只要命令，不执行 | 输入一句话后按 Ctrl+G，输入行会被替换成命令，检查后自己按回车 |
 | 追问 | `# 再把它们打包`：在同一个对话里，可以引用上一步的结果 |
 | 审批 | `y` 执行；`n` 拒绝（可以附理由）；`e` 编辑；`a` 本会话内同类放行。强确认需键入 `yes`，适用范围见 §6.3 |
@@ -97,11 +98,11 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 |---|---|---|
 | 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
 | 推理 | CPU、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、GPU 与资源自适应未实现 |
-| 工具与权限 | 三个内置工具（run_command/read_file/grep）；建议模式无工具；confirm/auto/yolo，默认 auto；结构化用户规则、有界会话授权和模式标识 | `write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现；新的切换 UX 另行设计 |
+| 工具与权限 | Agent 三个工具（run_command/read_file/grep）；CommandAssist 使用查询工具与 finish，不执行目标；confirm/auto/yolo，默认 auto；结构化用户规则、有界会话授权和模式标识 | `write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
 | 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
 | 本地数据 | shell 历史、agent 截断输出落盘；用户采集缓冲仅在内存；本地 `Redactor` 为 `NoRedact` | 显式评测 trace 仍记录输入；agent history/audit、自动清理、无痕模式和文件备份未实现 |
-| 评测 | 27 场景固定 seed 运行器，revision 9 统一 System context 与独立请求，保留分项诊断评分、确定性 trial 标识及总时限分类 | 新数据集成绩与历史基线分开；旧协议仅留证据，不以兼容分支约束当前设计；复现验收仍未满足（§13.2） |
+| 评测 | revision 10：27 场景回归与 5 场景 CommandAssist 专项；原生 trace 记录宿主接受结果、工作流标签和 token 成本 | 新数据集成绩与历史基线分开；旧协议仅留证据；复现验收仍未满足（§13.2） |
 
 ## 1. 目标与非目标
 
@@ -219,7 +220,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 
 ### 3.2 部署形态
 
-**当前：每个 nosh 进程独立加载模型**。加载是惰性的；普通命令、`-c` 和脚本不需要模型。`LocalChatEngine` 保存多份对话日志，但只有一份活动 KV，切换建议对话后可能需要重新 prefill 主对话。
+**当前：每个 nosh 进程独立加载模型**。加载是惰性的；普通命令执行本身不依赖模型，默认启用的完成事件辅助会在后台使用已安装模型；`-c` 和脚本不使用模型。CommandAssist worker 和前台 Agent 交接同一引擎，不各加载一份。`LocalChatEngine` 保存多份对话日志，但只有一份活动 KV，切换辅助对话后可能需要重新 prefill 主对话。
 
 ```text
 终端 1 ─ nosh 进程：Shell + Harness + Permissions + Tools + LocalChatEngine
@@ -331,7 +332,8 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 | `#` 前缀 | 忽略行首空白后以 `#` 开头；前缀可配置 | 否 | 有正文时交给 AI；单独输入前缀等同于 `ai fix` |
 | 解析失败 | 有语法错误；或者单词中间的撇号造成引号不闭合（如 `what's using port 8080`） | 否 | 自动交给 AI |
 | 命令不存在 | 静态检查发现命令名无法解析；自然语言通常落在这一类，不代表已经执行并返回 127 | 否 | 先尝试本地纠错，否则交给 AI |
-| 执行失败 | 非零退出且未被求助排除规则过滤 | 是 | 默认提示 `✗ exit 1 · Ctrl+G 或 # 交给 AI`；命中 CJK 字符范围时自动交给 AI；仍受 `on_failure` 和暂停开关控制 |
+| 执行失败 | 非零退出且未被求助排除规则过滤 | 是 | 默认提示退出码并在后台生成 Fix 修复建议，不自动执行；受 `command_assist`、`on_failure` 和暂停开关控制 |
+| 执行成功 | 用户交互命令以零退出 | 是 | 默认在后台进入 Next；没有合理下一步可不建议；受 `command_assist` 和暂停开关控制 |
 
 **判定细节**：
 - **不完整的输入**：引号没闭合、`do` 缺少 `done` 等情况，照常显示续行提示符。唯一的例外是单词中间的撇号（`what's`、`don't`），并且这一行没有其他 shell 结构，这时当作自然语言处理。想强制续行，可以按 Alt+Enter。
@@ -343,7 +345,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 - **纠错前识别问句**：命令名不存在时，先识别常见英语问句结构（如 `can you …`、`why is …`），避免把 `can`、`why` 误纠成 `cat`、`who`。真实存在的同名命令仍按命令执行；`is src` 这类短拼写错误仍可纠为 `ls src`。
 - **只在交互输入层生效**：脚本、`source`、函数体和 `nosh -c` 不经过 AI 输入分流，按 brush 的 shell 语义执行，`#` 仍然是注释。
 - **失败求助排除项**：hint 和 auto 都忽略 130、141，以及当前实现中的 148。`grep`、`rg`、`diff`、`test` 等名单内命令只在退出码为 **1** 时按“没有结果”处理，退出码 2 等错误仍可求助。名单匹配使用行尾文本片段的首词，不是完整 AST/别名/包装器分析。
-- **字符判定**：自动求助使用 `contains_cjk` 范围检查，除汉字外也包含日文假名、韩文和部分全角标点；这不是精确的中文语言识别，任务头的 `lang=zh` 也沿用这个判断（§5.4）。
+- **字符判定**：Agent 任务头的 `lang=zh` 使用 `contains_cjk` 范围检查，除汉字外也包含日文假名、韩文和部分全角标点；这不是精确语言识别。当前 Next/Fix 完成事件分流不依赖语言。
 
 **开关边界**：
 
@@ -351,7 +353,8 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 |---|---|---|
 | `shell.trigger_on_error = false` | 关闭普通解析错误、无法纠错的未知命令自动转 AI | 本地纠错、单词内撇号分流、安全网、显式 AI 入口；执行失败由 `on_failure` 单独控制 |
 | `shell.on_failure = "off"` | 关闭已执行命令的失败提示与自动求助，包括 CJK 输入 | 执行前分流、显式 `ai fix` 等入口 |
-| `ai auto off` | 本会话暂停普通解析错误/未知命令的自动路由，以及执行失败后的自动求助 | 本地纠错、单词内撇号分流、安全网、显式入口；配置允许时仍显示失败提示 |
+| `ai auto off` | 本会话暂停普通解析错误/未知命令的自动路由，以及命令完成后的 Next/Fix | 本地纠错、单词内撇号分流、安全网、显式入口；配置允许时仍显示失败提示 |
+| `shell.command_assist = false` | 关闭命令完成后的自动 Next/Fix | 显式 Ctrl+G、`-s`、`ai fix`、`ai next` 和 Agent |
 | `NOSH_DISABLE_AI=1` / `--safe` | 关闭 nosh AI 输入分流、纠错和自然语言安全网；`--safe` 还跳过 rc | 用户普通 shell 命令照常执行；不是沙箱或危险命令禁用开关 |
 
 因此，`ai auto off` **不是全局禁用 AI**；上述撇号例外是当前实现边界，不应靠该命令保证不会加载模型。
@@ -461,11 +464,11 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 
 | 入口 | 可用工具 | 执行方式 |
 |---|---|---|
-| shell 内（`#`、出错触发、`ai`）、无管道附件的 `nosh -a` | run_command、read_file、grep | 按审批模式执行（见 §6.3） |
-| 建议（Ctrl+G、`nosh -s`） | 无工具 | 直接返回完整 shell program，校验后输出或预填，从不执行 |
+| shell 内（`# <任务>`、自然语言、`ai`、`ai fix <question>`）、无管道附件的 `nosh -a` | run_command、read_file、grep | Agent 按审批模式分析／执行（见 §6.3） |
+| CommandAssist（Ctrl+G、`nosh -s`、裸 `ai fix`、`ai next`、用户命令完成事件） | command_info、read_file、grep、finish | 按需查询，提交命令／澄清／无建议；不执行目标 |
 | `nosh -a` 的管道附件 | `read_file`、`grep` | stdin 的内容截断后作为附件，不注册 `run_command` |
 
-**建议模式边界**：每次仅生成一轮，最多 256 个新 token；只接受完整回答中的一个 shell program，可带单一 shell fence 或 `$ ` 前缀。拒绝隐藏字符，而不是删除后继续返回。语法与有限名称检查（§5.4）不替代执行前权限分析，也不等于建议内容已获安全批准，见 [suggest.rs](../crates/nosh-core/src/suggest.rs)。
+**命令辅助边界**：Generate/Fix 最多 4 步、Next 最多 2 步，每步最多 512 个新 token，受更小的配置预算限制。唯一终态为 `finish(kind, text?)`；不能用自由文本或 Markdown 猜测命令。完整设计、后台取消和输出契约见 [CommandAssist](COMMAND-ASSIST.md)。语法／有限名称检查不替代执行前权限分析。
 
 ### 5.2 对话与任务
 
@@ -520,7 +523,7 @@ for step in 1..=max_steps (默认 10):
 
 ### 5.5 工具
 
-普通 agent 使用 `run_command`、`read_file`、`grep`；管道附件只读，建议模式无工具。工具目录统一维护 schema 与执行准入，未知工具不进入审批或执行，运行次数按真实执行结果计数。
+普通 agent 使用 `run_command`、`read_file`、`grep`；管道附件只读。CommandAssist 共用查询能力与 `finish` 协议，不注册目标执行工具。工具目录统一维护 schema 与执行准入，未知工具不进入审批或执行，运行次数按真实执行结果计数。
 
 参数、输出、权限、搜索与建议边界统一见 [LLM tools 设计](LLM-TOOLS.md)，实现见 [tools.rs](../crates/nosh-core/src/tools.rs)。`write_file`、专用澄清工具及其他扩展仍属后续方案，不在当前工具集中。
 
@@ -1059,6 +1062,7 @@ trigger_on_error = true       # 解析失败、命令不存在时自动交给 AI
 on_failure = "hint"           # 执行失败时：hint | auto | off
 capture_output = "last"      # last（默认）| off；仅交互 shell，最多 4,096 字节终端输出尾部
 input_assist = true           # 交互输入提示、语法高亮与有界后台诊断
+command_assist = true         # 用户命令完成后：成功 Next，失败 Fix；均不自动执行
 nl_guard = "destructive"      # 破坏性命令安全网：destructive | off
 builtin_name = "ai"
 suggest_key = "ctrl-g"        # 当前固定支持 Ctrl+G，不支持自定义按键
@@ -1178,9 +1182,17 @@ nosh/
 
 当前六个 crate 的职责分层继续保留，优先沿已有边界改进，不为尚未交付的远程、GPU 或插件方案提前增加空 crate、配置项或通用框架。
 
+确定性测试与真实模型评测分别组织：
+
+- 根目录 `tests/agent_flow.rs` 保留 Cargo 入口，`tests/flows/` 按 Agent、CommandAssist、context、permissions 拆分，公共夹具和进程内串行锁在 `support.rs`，不拆成多份独立测试程序。
+- `nosh-core/tests/terminal.rs` 保留同一测试目标及三个精确命名的子进程 probe，`terminal/` 按显示、审批、输入、命令辅助拆分并共用 PTY 驱动；CommandAssist 的模块单元测试位于 `src/command_assist/tests.rs`。
+- `eval/scenarios/` 按能力存放场景单一来源，`eval/suites/` 声明有序运行计划；`eval/checks/` 分离评分职责，`eval/tests/` 对应 suite、观测、驱动、评分和报告。平台与是否需要真实模型继续由已有 CI 矩阵和 ignored 标记表达，不复制场景。
+
+移动目录不修改场景 ID、seed、预算、评分标准或历史基线。新增评分子模块必须进入来源哈希，套件展开后的完整定义仍是报告和复现的依据。
+
 | 改动方向 | 维护入口与约束 |
 |---|---|
-| 新增内置工具 | 在 `tools.rs` 中维护 `BuiltinTool`、参数声明和 `ToolSet` 成员，并补齐 `Agent` 的穷尽分发；工具声明顺序影响 prompt，不随意调整；只读/建议入口不能绕过集合限制 |
+| 新增内置工具 | Agent 在 `tools.rs` 中维护 `BuiltinTool`、参数声明和 `ToolSet` 成员；CommandAssist 在 `command_assist.rs` 维护查询集合与 finish，复用读取实现但保留独立能力上限。工具声明顺序影响 prompt，不随意调整 |
 | 对话与上下文 | 在 `conversation.rs` 中处理 token 日志、分组和原子更新，在 `local.rs` 中处理模型、KV 与生成；不将模型格式细节移到 harness；修改 `ChatEngine` 契约时同步 Local、Mock、CLI 观测包装器和调用方 |
 | 输出与采样性能 | 输出内存按保留预算分配，采样 scratch 按单次生成复用；先证明字符预算、模板 token、固定 seed 序列和错误行为未漂移，再比较分配与耗时 |
 | 文档与评测 | README 说明可用功能，本设计说明现状与扩展边界，MVP 报告和版本化基线保留历史事实；不重写历史通过率，不把辅助路径优化等同于真实模型基线改善 |
@@ -1224,7 +1236,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | AI 触发 | 415 条标注语料：合法命令 200、中文自然语言 60、英文自然语言 55、拼写错误 50、安全网输入 50 | 所有样本逐条匹配期望动作，纠错需匹配完整命令；安全网误拦截 < 0.5%；中文自然语言 100% 交给 AI；破坏性命令误执行次数为 0；纠错命中率 ≥ 90% |
 | 权限 | 表驱动风险 / 日常命令、规则和作用域、MockChatEngine、CLI 与 PTY 覆盖；远程装配仍属于规划 | 验证 deny / allow 优先级、三档审批与执行次数、授权不扩张、实际参数 / 目标、构建便利类别、默认与输出契约；不把旧模式的确认比例当成新模式指标 |
 | 远程与离线（规划验收） | 断线重连、输出回放、nonce、多端附着、部署与模型推送；无网络 namespace 完整 E2E。当前 CI 不包含这些完整场景 | 远程流程全部通过；离线样本无模型下载/探测，不混同于限制 shell 命令联网 |
-| Agent 评测（当前） | [27 场景运行器](../eval/README.md)，revision 9 使用当前 System context＋独立请求，保留等价命令、数量／否定作用域、进程名及原文语言判定；每场景 5 个固定 seed，每轮 135 次 | 事实与状态、步数/确认上限、中文回答及收尾方式均须通过；采集/诊断/引用分别报告，有限规则不是完整准确率证明。历史报告不改写，旧采集消息不再进入现行评分。每 PR 仅跑无模型自测，真实模型仅手动运行 |
+| LLM 评测（当前） | [评测运行器](../eval/README.md)，revision 10：27 场景回归与 5 场景命令辅助专项，分别固定 seed 运行 | Agent 事实与状态、CommandAssist 协议／接受结果／不执行、步数与 token 成本分别报告。历史报告不改写；每 PR 仅跑无模型自测，真实模型仅手动运行 |
 | 性能 | 当前通过 `nosh debug gen`、`NOSH_STATS=1`、`-a --json` 与评测运行器观测；`xtask bench` 未实现 | 目标见 §7.5、§13.1；比较时必须固定构建、模型、硬件和冷热口径 |
 
 **25 场景 revision 1 历史基线**：精确 main `78b7e509ad0d6d71ce50397cfa9e9f2187b0db75` 在独立 GitHub-hosted Ubuntu runner 上串行双跑，[摘要](../eval/baselines/main-78b7e50-expanded/report.md)记录 250 次试验的指标，全部原始记录见 [#4 归档索引](https://github.com/NewFuture/nosh/issues/4#issuecomment-5844795358)。原始为 120/129/1/0（通过/失败/错误/缺失）；根据原始 trace 将一条正在生成的模型超时归为任务失败并恢复可观测指标，另修正一条不影响通过数的收尾误判原因，归一化为 **120/130/0/0**，没有重新采样。综合通过率 48.0%，模型单独 110/240；51 次事实正确但体验不达标。平均步数/确认为 4.88/1.028；判定加状态仅 107/125 对一致，最终状态 119/125。[分析与来源](../eval/baselines/main-78b7e50-expanded/analysis.md)区分运行时 main、评测器与确定性处理版本；原始失败工作流、诊断运行和全部原始判断保留在经哈希验证的附件中。两线程/Rayon 1、nice 10 与检查点是本次测量条件，不与旧 WSL 结果作受控性能比较。后续任务语义修订不回写这份历史记录。
@@ -1426,3 +1438,4 @@ tokenizer.ggml.add_bos_token = false  tokenizer.chat_template = <9060 字符>
 | v0.17 | 保留六 crate 分层，提取可独立测试的 token 对话日志，消除 assistant token 副本和逐步 SessionSpec 深拷贝；追加/回退/压缩先编码后更新，恢复错误显式传递。工具声明和准入使用统一枚举目录，命令计数来自执行结果；截断按字符边界保留首尾，采样复用候选与去重缓冲，不改变采样数学或随机数顺序。补充维护/扩展入口，校正已有 ShellBackend trait 的实际接入边界；不修改模型内核、权限策略、prompt、评测语义或历史性能数字。 |
 | v0.18 | 新增三档审批目标专章：询问 / 自动（默认）/ YOLO，用户 deny 优先于用户白名单，白名单优先于内置默认规则；明确非递增矩阵、轻微可恢复副作用、入口一致性与常驻 UI 标识。以 main `16e4f49` 区分当前行为和待实现目标，保留当前 confirm 配置示例；补充实现验收与待细化事项，仅文档变更，不启用任何新审批行为。 |
 | v0.19 | 实现三档及默认 Auto，统一实际操作 / 用户规则 / 有界会话授权，接通审批标识与独立状态。按 #32 实施确认，常见 build/test/check 默认自动执行，即使项目代码效果未知；仍保留禁止和显式高风险。配置采用统一 TOML 条目，不修改历史 MVP 数据或纳入后续切换 UX。 |
+| v0.20 | 分离 CommandAssist 与 Agent，Generate/Fix/Next 共用查询、finish 和独立短对话；用户命令完成事件进入可取消的后台辅助，模型与主 Agent 共用。增加 Required/Named 工具解码约束与宿主结果观测，拆分 Agent 回归和命令辅助专项；未宣称真实模型质量已通过验收。 |

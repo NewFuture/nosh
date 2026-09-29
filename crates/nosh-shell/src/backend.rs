@@ -1431,7 +1431,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "wait",
 ];
 
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use brush_core::sys::fs::PathExt;
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p)

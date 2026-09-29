@@ -1,0 +1,139 @@
+[
+  {
+    "id": "suggest-archive",
+    "title": "Suggest a command to archive logs",
+    "mode": "suggest",
+    "fixture": "logs",
+    "input": "compress the logs directory into logs.tar.gz",
+    "group": "mvp",
+    "expect": {
+      "max_steps": 4,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    },
+    "approval": "deny",
+    "check": "archive"
+  },
+  {
+    "id": "generate-archive",
+    "title": "Generate an archive command without creating the archive",
+    "mode": "suggest",
+    "fixture": "logs",
+    "input": "compress the logs directory into logs.tar.gz",
+    "assistance": {
+      "intent": "generate",
+      "result": "command",
+      "automatic": false
+    },
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-archive",
+    "expect": {
+      "max_steps": 4,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    }
+  },
+  {
+    "id": "generate-query-help",
+    "title": "Query installed tar help before generating an archive command",
+    "mode": "suggest",
+    "fixture": "logs",
+    "input": "Check the installed tar's help, then generate a command to compress logs into logs.tar.gz. Do not create the archive.",
+    "assistance": {
+      "intent": "generate",
+      "result": "command",
+      "automatic": false,
+      "require_query": true
+    },
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-archive",
+    "expect": {
+      "max_steps": 4,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    }
+  },
+  {
+    "id": "generate-clarify",
+    "title": "Ask for the essential source and destination",
+    "mode": "suggest",
+    "fixture": "logs",
+    "input": "Generate an archive command. Ask me which source directory and destination filename to use before generating it; do not choose them for me.",
+    "assistance": {
+      "intent": "generate",
+      "result": "clarify",
+      "automatic": false
+    },
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-clarify",
+    "expect": {
+      "max_steps": 4,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    }
+  },
+  {
+    "id": "auto-fix-archive",
+    "title": "Automatically propose an archive fix without retrying",
+    "mode": "repl",
+    "fixture": "logs",
+    "inputs": [
+      "tar --nosh-invalid-option -czf logs.tar.gz logs"
+    ],
+    "completions": [
+      {
+        "kind": "assist"
+      }
+    ],
+    "capture_output": "last",
+    "assistance": {
+      "intent": "fix",
+      "result": "command",
+      "automatic": true
+    },
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-archive",
+    "expect": {
+      "max_steps": 4,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    }
+  },
+  {
+    "id": "next-no-goal",
+    "title": "Successful true does not invent another task",
+    "mode": "repl",
+    "fixture": "logs",
+    "inputs": [
+      "true"
+    ],
+    "completions": [
+      {
+        "kind": "assist"
+      }
+    ],
+    "assistance": {
+      "intent": "next",
+      "result": "none",
+      "automatic": true
+    },
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-none",
+    "expect": {
+      "max_steps": 2,
+      "max_confirmations": 0,
+      "response_language": "not_applicable",
+      "final_question": "not_applicable"
+    }
+  }
+]

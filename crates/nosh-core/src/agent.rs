@@ -239,10 +239,6 @@ impl Agent {
         self.engine.as_mut()
     }
 
-    pub fn environment(&self) -> &Environment {
-        &self.env
-    }
-
     /// Starts a new conversation (`ai clear`, idle timeout, config change).
     pub fn reset_conversation(&mut self) {
         if let Some(sid) = self.sid.take() {
@@ -266,11 +262,9 @@ impl Agent {
     }
 
     fn spec(&self) -> SessionSpec {
-        let system = match self.tools {
-            ToolSet::Suggest => prompt::suggest_system_prompt(&self.env),
-            _ => prompt::system_prompt(&self.env),
-        };
+        let system = prompt::system_prompt(&self.env);
         SessionSpec {
+            label: "agent".into(),
             system,
             tools: tools::specs(self.tools),
             thinking: self.cfg.thinking,

@@ -1,6 +1,6 @@
 # LLM tools 设计
 
-原则：**维持三个通用工具，明确能力、证据和权限，不按场景硬路由。** schema 与执行准入共用 `BuiltinTool`／`ToolSet`；上下文选择见 [Project context](PROJECT-CONTEXT.md)。
+原则：**Agent 维持三个通用工具；CommandAssist 共用查询工具与终态协议，明确能力、证据和权限。** schema 与执行准入共用 `BuiltinTool`／`ToolSet`；上下文选择见 [Project context](PROJECT-CONTEXT.md)。
 
 ## 工具与模式
 
@@ -10,7 +10,7 @@
 | `read_file` | `path`，`start_line?`，`end_line?` | 读取文本和行号，一次最多 400 行；目录不能当文件读取 |
 | `grep` | `pattern`，`path?`，`glob?` | 递归搜索**文件内容**，返回相对路径、行号、匹配行；不搜索文件名 |
 
-普通 agent 开放三个工具；管道附件仅 `read_file`、`grep`；`-s`／Ctrl+G 无工具，只生成建议。
+普通 agent 开放三个工具；管道附件仅 `read_file`、`grep`。CommandAssist 的 Generate/Fix/Next 使用 `command_info`、`read_file`、`grep`、`finish`，不注册 `run_command`。帮助查询是真实且受限的执行，详情见 [CommandAssist](COMMAND-ASSIST.md)。
 
 `list_dir` 已移除，不保留执行别名。目录／文件名查询用 `run_command` 调用 `ls` 等命令；受限模式不因此开放执行。
 
@@ -45,7 +45,7 @@
 
 建议仅接受一个完整 shell program，可为单行或完整多行结构。由 brush 检查语法与可确认的命令名；递归覆盖替换和已知函数作用域。动态无法确认不等于成功或安全，建议从不自动执行。
 
-`suggest` 只有显式权限 context 的入口，不构造默认保护策略替代调用方配置。
+CommandAssist 从调用方 `AgentConfig` 构造明确权限 context，复用用户规则，不构造默认策略替代调用方配置。
 
 ## 后续设计，不代表已实现
 
@@ -59,4 +59,4 @@
 
 主提示、建议提示和 `run_command` 说明均以当前目录、持久会话为准；保留合法 `cd`，执行器不改写命令。已有定向无模型验证，真实模型效果仍待测量，不把展示变短当作行为改善。
 
-实现入口：[tools.rs](../crates/nosh-core/src/tools.rs)、[agent.rs](../crates/nosh-core/src/agent.rs)、[suggest.rs](../crates/nosh-core/src/suggest.rs)、[suggestion.rs](../crates/nosh-shell/src/suggestion.rs)。
+实现入口：[tools.rs](../crates/nosh-core/src/tools.rs)、[agent.rs](../crates/nosh-core/src/agent.rs)、[command_assist.rs](../crates/nosh-core/src/command_assist.rs)、[suggestion.rs](../crates/nosh-shell/src/suggestion.rs)。

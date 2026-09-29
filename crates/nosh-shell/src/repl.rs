@@ -51,6 +51,16 @@ pub trait AiHandler {
     /// Ctrl+G: rewrite natural language in the input line into a command.
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String>;
     fn badge(&self) -> Badge;
+    fn assistance(&self) -> Option<crate::AssistDisplay> {
+        None
+    }
+    fn after_command(
+        &mut self,
+        _shell: &EmbeddedShell,
+        _command: UserCommand,
+        _output: Option<UserOutput>,
+    ) {
+    }
 }
 
 /// Handler used when AI is disabled (`NOSH_DISABLE_AI=1`).
@@ -106,12 +116,25 @@ impl OnFailure {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReplConfig {
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
+    pub command_assist: bool,
     pub input_assist: input_assist::Config,
     pub input_abbreviations: input_assist::Abbreviations,
+}
+
+impl Default for ReplConfig {
+    fn default() -> Self {
+        Self {
+            trigger: Default::default(),
+            on_failure: Default::default(),
+            command_assist: true,
+            input_assist: Default::default(),
+            input_abbreviations: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +191,7 @@ pub enum LineOutcome {
 }
 
 const HANDLER_SUBCOMMANDS: &[&str] = &[
-    "mode", "think", "clear", "ctx", "status", "out", "history", "private", "undo", "model",
+    "mode", "think", "clear", "ctx", "status", "out", "history", "private", "undo", "model", "next",
 ];
 
 /// Decides what to do with each input line and runs it.
@@ -206,6 +229,9 @@ impl Pipeline {
         ui: &mut dyn ReplUi,
         line: &str,
     ) -> LineOutcome {
+        if let Some(display) = ai.assistance() {
+            display.invalidate();
+        }
         let tc = self.trigger_cfg();
         let t = line.trim();
         if tc.ai_enabled && !tc.ai_prefix.is_empty() && t == tc.ai_prefix {
@@ -335,6 +361,13 @@ impl Pipeline {
         }
         if run.exit_code == 0 {
             self.last_failure = None;
+            if self.cfg.command_assist
+                && self.cfg.trigger.ai_enabled
+                && !self.auto_paused
+                && let Some(command) = shell.recent_commands().last().cloned()
+            {
+                let _ = isolate(|| ai.after_command(shell, command, None));
+            }
             return LineOutcome::Continue(None);
         }
         let tc = self.trigger_cfg();
@@ -343,7 +376,27 @@ impl Pipeline {
         }
         let cmd = shell.recent_commands().last().cloned();
         self.last_failure = cmd.clone();
-        let auto = !self.auto_paused
+        if self.cfg.command_assist
+            && self.cfg.on_failure != OnFailure::Off
+            && !self.auto_paused
+            && let Some(command) = cmd.clone()
+        {
+            let output = shell
+                .last_user_output()
+                .filter(|o| o.command_id == command.id)
+                .cloned();
+            let _ = isolate(|| ai.after_command(shell, command, output));
+            if ai.assistance().is_some() {
+                ui.notice(&style::dim(&format!(
+                    "{} exit {} · Ctrl+G / ai fix",
+                    style::glyph("✗", "x"),
+                    run.exit_code
+                )));
+                return LineOutcome::Continue(None);
+            }
+        }
+        let auto = ai.assistance().is_none()
+            && !self.auto_paused
             && (self.cfg.on_failure == OnFailure::Auto || trigger::contains_cjk(line));
         match self.cfg.on_failure {
             OnFailure::Off => LineOutcome::Continue(None),
@@ -447,8 +500,13 @@ fn builtin_help(name: &str) -> String {
         ),
         (
             "fix [question]",
-            "诊断上一条失败的命令",
-            "diagnose the last failed command",
+            "生成修复命令；附问题时交给 Agent 诊断",
+            "suggest a fix; add a question for Agent diagnosis",
+        ),
+        (
+            "next",
+            "生成上一条成功命令的后续建议",
+            "suggest a next command after success",
         ),
         (
             "out <n>",
@@ -477,6 +535,7 @@ struct ReplPrompt {
     right_color: Color,
     continuation: String,
     input_assist: Option<input_assist::InputAssist>,
+    command_assist: Option<crate::AssistDisplay>,
 }
 
 impl ReplPrompt {
@@ -517,6 +576,7 @@ impl ReplPrompt {
             },
             continuation: shell.continuation_prompt(),
             input_assist: None,
+            command_assist: None,
         }
     }
 }
@@ -527,6 +587,16 @@ impl Prompt for ReplPrompt {
             format!(" {}", self.left).into()
         } else {
             self.left.as_str().into()
+        };
+        let left = if let Some(assist) = &self.command_assist {
+            let status = assist.status();
+            if status.is_empty() {
+                left
+            } else {
+                Cow::Owned(format!("{}\n{left}", style::stdout().paint("2", &status)))
+            }
+        } else {
+            left
         };
         if let Some(assist) = &self.input_assist {
             let status = assist.status();
@@ -776,6 +846,7 @@ impl reedline::Validator for LineValidator {
 fn build_editor(
     shell: &EmbeddedShell,
     cfg: &ReplConfig,
+    command_assist: Option<crate::AssistDisplay>,
 ) -> (Reedline, Option<input_assist::InputAssist>) {
     let (rt, sh) = shell.shared();
     let mut kb = reedline::default_emacs_keybindings();
@@ -842,12 +913,21 @@ fn build_editor(
         shell: sh,
         input_assist: assist.clone(),
     }));
-    editor = if let Some(assist) = &assist {
-        editor
-            .with_highlighter(assist.highlighter())
-            .with_edit_mode(assist.edit_mode(Emacs::new(kb)))
+    let edit_mode: Box<dyn reedline::EditMode> = if let Some(assist) = &assist {
+        editor = editor.with_highlighter(assist.highlighter());
+        assist.edit_mode(Emacs::new(kb))
     } else {
-        editor.with_edit_mode(Box::new(Emacs::new(kb)))
+        Box::new(Emacs::new(kb))
+    };
+    editor = if let Some(display) = command_assist {
+        let repaint = editor.repaint_signal();
+        display.on_repaint(Arc::new(move || repaint.request_repaint()));
+        editor.with_edit_mode(Box::new(crate::assist_display::AssistEditMode {
+            inner: edit_mode,
+            display,
+        }))
+    } else {
+        editor.with_edit_mode(edit_mode)
     };
     (editor, assist)
 }
@@ -892,7 +972,11 @@ fn read_plain_prompt(
             prompt.continuation.clone()
         };
         let label = style::strip_ansi(&label);
-        let line = match term::read_plain_line(&style::visible_text(&label), initial)? {
+        let line = match term::read_plain_line(
+            &style::visible_text(&label),
+            initial,
+            prompt.command_assist.as_ref(),
+        )? {
             Signal::Success(line) => line,
             signal => return Ok(signal),
         };
@@ -912,7 +996,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
     let (mut editor, input_assist) = if style::stdout().ansi && std::io::stdin().is_terminal() {
-        let (editor, assist) = build_editor(shell, &cfg);
+        let (editor, assist) = build_editor(shell, &cfg, ai.assistance());
         (Some(editor), assist)
     } else {
         (None, None)
@@ -930,6 +1014,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let code = loop {
         shell.pre_prompt();
         let mut prompt = ReplPrompt::build(shell, &ai.badge());
+        prompt.command_assist = ai.assistance();
         if let Some(assist) = &input_assist {
             assist.prepare(
                 shell.input_context(&pipeline.trigger_cfg(), &pipeline.cfg.input_abbreviations),
@@ -966,6 +1051,22 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                 eprintln!();
                 if buf.trim().is_empty() {
                     set_buffer(editor, "");
+                    if let Some(display) = ai.assistance()
+                        && let Some(crate::Assistance::Command {
+                            command_id,
+                            program,
+                            ..
+                        }) = display.result()
+                        && shell
+                            .recent_commands()
+                            .last()
+                            .is_some_and(|command| command.id == command_id)
+                        && crate::trigger::is_suggestion_program(&program, shell)
+                    {
+                        display.invalidate();
+                        set_buffer(editor, &program);
+                        continue;
+                    }
                     match pipeline.fix(shell, ai, &mut ui) {
                         LineOutcome::Continue(p) => prefill = p,
                         LineOutcome::Exit(c) => break c,

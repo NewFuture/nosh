@@ -24,8 +24,6 @@ pub enum ToolSet {
     Full,
     /// Piped attachments: read_file and grep only.
     ReadOnly,
-    /// Suggestions: no tools, just a shell program.
-    Suggest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +60,6 @@ impl ToolSet {
                 BuiltinTool::Grep,
             ],
             Self::ReadOnly => &[BuiltinTool::ReadFile, BuiltinTool::Grep],
-            Self::Suggest => &[],
         }
     }
 
@@ -743,6 +740,9 @@ fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<Stri
             path.display()
         ));
     }
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular text file", path.display()));
+    }
     let start = call.int_arg("start_line").unwrap_or(1).max(1) as usize;
     let end_req = call
         .int_arg("end_line")
@@ -893,7 +893,6 @@ mod tests {
         for (set, names) in [
             (ToolSet::Full, vec!["run_command", "read_file", "grep"]),
             (ToolSet::ReadOnly, vec!["read_file", "grep"]),
-            (ToolSet::Suggest, vec![]),
         ] {
             let advertised = specs(set);
             assert_eq!(
@@ -907,6 +906,7 @@ mod tests {
                 let tool = set.resolve(&spec.name).unwrap();
                 assert_eq!(tool.spec(), spec);
             }
+
             for name in [
                 "run_command",
                 "read_file",
@@ -922,6 +922,25 @@ mod tests {
                 assert_eq!(set.resolve(name).is_some(), names.contains(&name));
             }
         }
+    }
+
+    #[test]
+    fn read_file_rejects_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pipe");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a NUL-terminated path in this test's temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let call = ToolCall {
+            name: "read_file".into(),
+            args: json!({"path":"pipe"}).as_object().unwrap().clone(),
+        };
+        assert!(
+            super::read_file(&call, directory.path())
+                .unwrap_err()
+                .contains("not a regular text file")
+        );
     }
 
     #[test]

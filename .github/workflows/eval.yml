@@ -11,6 +11,14 @@ on:
         description: Exact source commit to evaluate (empty pins source_ref)
         type: string
         default: ''
+      suite:
+        description: Evaluation suite
+        type: choice
+        options:
+          - regression
+          - command-assist
+          - smoke
+        default: regression
 
 concurrency:
   group: evaluation-${{ github.ref }}
@@ -33,6 +41,7 @@ jobs:
       RAYON_NUM_THREADS: 1
       PYTHONDONTWRITEBYTECODE: '1'
       EVAL_TRIAL_TIMEOUT_S: '60'
+      EVAL_SUITE: ${{ inputs.suite || 'regression' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +51,10 @@ jobs:
           python3 - <<'PY'
           import os
           from eval import run
-          suite = run.load_suite(run.HERE / "scenarios.json")
+          name = os.environ["EVAL_SUITE"]
+          if name not in ("regression", "command-assist", "smoke"):
+              raise SystemExit("unknown evaluation suite")
+          suite = run.load_suite(run.HERE / "suites" / f"{name}.json")
           # Reserve at least 90 minutes of the six-hour job for setup, fixtures and uploads.
           available_s = (360 - 90) * 60
           timeout_s = int(os.environ["EVAL_TRIAL_TIMEOUT_S"])
@@ -155,6 +167,7 @@ jobs:
             const root = process.env.EVAL_ARTIFACTS;
             const log = fs.createWriteStream(path.join(root, 'campaign.log'));
             const args = ['-n', '10', 'python3', '-u', '-m', 'eval.run',
+              '--suite', path.join('eval', 'suites', `${process.env.EVAL_SUITE}.json`),
               '--binary', process.env.EVAL_BINARY,
               '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
               '--build-info', path.join(root, 'build-info.json'),
@@ -220,14 +233,15 @@ jobs:
           raw_hashes = {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")}
           revision = os.environ["GITHUB_SHA"]
           committed = {}
-          for file in sorted(run.HERE.glob("*.py")):
-              text = subprocess.check_output(["git", "show", f"{revision}:eval/{file.name}"]).decode("utf-8")
-              committed[file.name] = hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode()).hexdigest()
+          for file in run.harness_sources():
+              relative = file.relative_to(run.HERE).as_posix()
+              text = subprocess.check_output(["git", "show", f"{revision}:eval/{relative}"]).decode("utf-8")
+              committed[relative] = hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode()).hexdigest()
           if fixtures.digest(committed) != data["metadata"]["harness_content_sha256"]:
               raise SystemExit("harness source does not match its recorded commit")
           data["metadata"]["harness_revision"] = revision
           report.save(data, path.parent)
-          complete = run.campaign_complete(data, run.load_suite(run.HERE / "scenarios.json"))
+          complete = run.campaign_complete(data, run.load_suite(run.HERE / "suites" / f"{os.environ['EVAL_SUITE']}.json"))
           provenance = {
               "schema_version": 1, "complete": complete,
               "dataset_revision": data["metadata"].get("dataset_revision", 1),

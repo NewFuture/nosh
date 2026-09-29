@@ -119,7 +119,7 @@ pub fn read_key() -> Option<KeyEvent> {
 /// Reads a short line on stderr, starting from `initial`.
 /// `None` on Esc, Ctrl-C or Ctrl-D.
 pub fn read_text(prompt: &str, initial: &str) -> Option<String> {
-    text_result(read_short_line(prompt, initial, false))
+    text_result(read_short_line(prompt, initial, false, None))
 }
 
 fn text_result(result: io::Result<Signal>) -> Option<String> {
@@ -133,11 +133,20 @@ fn text_result(result: io::Result<Signal>) -> Option<String> {
     }
 }
 
-pub(crate) fn read_plain_line(prompt: &str, initial: &str) -> io::Result<Signal> {
-    read_short_line(prompt, initial, true)
+pub(crate) fn read_plain_line(
+    prompt: &str,
+    initial: &str,
+    assistance: Option<&crate::AssistDisplay>,
+) -> io::Result<Signal> {
+    read_short_line(prompt, initial, true, assistance)
 }
 
-fn read_short_line(prompt: &str, initial: &str, command: bool) -> io::Result<Signal> {
+fn read_short_line(
+    prompt: &str,
+    initial: &str,
+    command: bool,
+    assistance: Option<&crate::AssistDisplay>,
+) -> io::Result<Signal> {
     if !available() {
         return Err(io::Error::new(
             io::ErrorKind::NotConnected,
@@ -161,13 +170,41 @@ fn read_short_line(prompt: &str, initial: &str, command: bool) -> io::Result<Sig
     };
     line.start(&mut err)?;
     line.draw(&mut err, &buf)?;
+    let mut shown = String::new();
     let result = loop {
+        if let Some(display) = assistance {
+            if buf.is_empty() {
+                let status = display.status();
+                if !status.is_empty() && status != shown {
+                    write!(err, "\r\n{status}\r\n")?;
+                    shown = status;
+                    line.previous_width = 0;
+                    line.draw(&mut err, &buf)?;
+                }
+            }
+            if !event::poll(std::time::Duration::from_millis(100))? {
+                continue;
+            }
+        }
         match event::read()? {
             Event::Paste(s) => {
+                if let Some(display) = assistance {
+                    display.invalidate();
+                }
                 buf.extend(s.chars().filter(|c| !c.is_control()));
             }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                if ctrl && k.code == KeyCode::Char('g') && buf.is_empty() {
+                    if let Some(display) = assistance
+                        && let Some(crate::Assistance::Command { program, .. }) = display.result()
+                    {
+                        buf = program;
+                        display.invalidate();
+                    }
+                } else if let Some(display) = assistance {
+                    display.invalidate();
+                }
                 match k.code {
                     KeyCode::Enter => break Signal::Success(buf),
                     KeyCode::Esc => break Signal::CtrlC,
@@ -300,7 +337,7 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
         ed.run_edit_commands(&[reedline::EditCommand::InsertString(initial.to_string())]);
         text_result(ed.read_line(&PlainPrompt(prompt.to_string())))
     } else {
-        text_result(read_plain_line(prompt, initial))
+        text_result(read_plain_line(prompt, initial, None))
     }
 }
 

@@ -53,10 +53,12 @@ capture_output = "last"  # last（默认）| off
 
 | AI 入口 | 是否附带最近输出 | 关联要求 |
 |---|---|---|
-| `ai fix [question]`、失败后的裸 `#`、空输入失败求助、失败自动诊断 | 是 | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
+| 裸 `ai fix`、失败后的裸 `#`、失败自动辅助 | 是，进入 CommandAssist Fix | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
+| `ai fix <question>` | 是，进入 Agent 诊断 | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
 | `# <任务>`、`ai "<任务>"` | 否 | 普通任务默认不带终端输出 |
 | 被路由到 AI 的解析错误、未知命令或自然语言 | 否 | 新输入不能继承上一条命令的正文 |
-| Ctrl+G / `nosh -s` 命令建议 | 否 | 建议模式仍是独立、无工具、只回填 |
+| 非空输入 Ctrl+G / `nosh -s` | 否 | CommandAssist Generate 按需查询，只输出／回填 |
+| 成功后的 Next / `ai next` | 否 | 仅提供执行元信息，不自动扩展成功输出的注入范围 |
 | `nosh -a`、管道附件 | 否 | 新进程没有交互会话采集槽 |
 | `ai mode/status/clear` 等管理子命令 | 否 | 它们不创建普通 `AiRequest` |
 
@@ -72,9 +74,9 @@ ai fix 解释实际报错并给出修复方法，不要修改文件
 
 采集默认开启，但注入默认关闭。当前通过以下规则限制上下文污染：
 
-- 只有 `Trigger::Failed` 可以携带 `[user_output]`，普通交互任务和解析/命令不存在路由均不携带。
+- Agent 的 `Trigger::Failed` 与 CommandAssist Fix 可以携带 `[user_output]`，普通交互任务、Generate、Next 和解析/命令不存在路由均不携带。
 - 失败命令 ID 与输出命令 ID 必须完全一致。
-- 同一对话中每个命令 ID 最多附带一次正文；重复 `ai fix` 使用对话内已有证据。
+- 同一 Agent 对话中每个命令 ID 最多附带一次正文；CommandAssist 每次是独立短对话，重复显式 Fix 可以重新附带仍匹配的证据，不复用主对话的去重标记。
 - `ai clear`、空闲重置、上下文重建和相关配置变化会清空对话级去重状态；之后再次 `ai fix` 可以重新附带仍匹配的失败证据。
 - 每次请求最多一个快照，正文最多 4,096 字节。
 - 证据位于动态 System context，真实请求单独使用 User；不修改静态 system prefix。

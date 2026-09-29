@@ -1,6 +1,14 @@
 # 真实模型评测
 
-27 个场景，每场景固定 seeds `[0, 1, 2, 3, 4]`。单轮 135 次试验，双跑 270 次；每轮包含 5 次不加载模型的本地纠错。事实/状态与适用的体验门槛都通过，任务才算通过。模型评测只在本地显式运行或手动触发，不进入每个 PR 的 CI。
+评测分成 **Agent 回归**、**CommandAssist 专项**和小规模 **smoke**，共享驱动、观测、评分和报告。场景只在 `scenarios/` 定义一次，`suites/` 显式选择场景 ID 和运行参数。回归与专项仍为 `dataset_revision: 10`、固定 seeds `[0, 1, 2, 3, 4]`，目录拆分不修改旧场景或历史报告。
+
+| suite | 范围 | 单轮／双跑 |
+|---|---|---|
+| `suites/regression.json`（默认） | 原 27 场景回归，含本地纠错和 CLI 命令生成；显式关闭完成事件辅助，避免混入 Agent 统计 | 135／270 |
+| `suites/command-assist.json` | Generate、查询帮助后生成、必要澄清、自动 Fix、自动 Next 无建议 | 25／50 |
+| `suites/smoke.json` | 本地纠错、Agent、Generate、Fix、Next 的五个既有场景，seed `[0]` | 5／10 |
+
+事实/状态与适用的体验门槛都通过，任务才算通过。模型评测只在本地显式运行或手动触发，不进入每个 PR 的 CI。
 
 ## 本地运行
 
@@ -13,6 +21,12 @@ python3 -m eval.run --model-path MODEL_DIR
 
 # 同构建、同机器双跑
 python3 -m eval.run --model-path MODEL_DIR --repeat 2
+
+# 独立验证命令辅助；自动 Fix/Next 由真实用户命令完成事件触发
+python3 -m eval.run --suite eval/suites/command-assist.json --model-path MODEL_DIR --repeat 2
+
+# 小规模检查，不代替回归或专项基线
+python3 -m eval.run --suite eval/suites/smoke.json --model-path MODEL_DIR
 
 # 选择场景、seed、构建及比较对象
 python3 -m eval.run --model-path MODEL_DIR --binary NOSH_BINARY \
@@ -35,7 +49,13 @@ python3 -m eval.run --model-path MODEL_DIR --binary OLD_NOSH --legacy \
 ```bash
 gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
   -f source_ref=SOURCE_BRANCH -f source_revision=FULL_SOURCE_SHA
+
+# 相同构建／来源流程，切换为命令辅助专项
+gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
+  -f source_ref=SOURCE_BRANCH -f source_revision=FULL_SOURCE_SHA -f suite=command-assist
 ```
+
+工作流的 `suite` 可选 `regression`（默认）、`command-assist`、`smoke`，对应 `eval/suites/` 中的清单。
 
 新工作流首次使用前需合入默认分支。`source_ref` 默认 `main`，也可显式指定本仓库的待验收分支；`source_revision` 必须是该分支可达的完整 SHA，留空则在作业开始固定该分支。分支名与 SHA 均校验，不接受 Git 表达式代替固定版本。工作流归档干净源码构建，显式下载并校验模型，在同一个 Ubuntu runner 上以 **threads 2 / Rayon 1 / nice 10** 串行双跑。
 
@@ -49,7 +69,21 @@ Hosted 工作流显式使用 **每次试验 60 秒**期限，本地默认仍为 
 
 ## 场景与判定
 
-[`scenarios.json`](scenarios.json) 是唯一的场景配置。`schema_version: 2` 声明输入、夹具、审批、判定器、`completions`、`expect` 和可选的 `capture_output`；历史报告只读保留。当前 **`dataset_revision: 9`** 统一采集评分为 System context＋独立 User 请求，不保留旧 User 任务头或合并采集／引用的执行分支。27 个场景沿用显式 `ai fix [question]`、分项评分、总时限分类及确定性 `diagnostic_id`。普通请求不携带最近输出，场景输入、审批和预算不变。REPL 输入原样发送，失败求助先观察真实退出码和诊断，不插入会覆盖“上次失败命令”的探针。
+[`scenarios/agent.json`](scenarios/agent.json)、[`scenarios/command_assist.json`](scenarios/command_assist.json)、[`scenarios/shell.json`](scenarios/shell.json) 保存 32 个唯一场景定义。场景保留输入、夹具、审批、`completions`、`expect`、`capture_output` 和可选 `assistance`，不按平台、语言或 seed 复制。
+
+[`suites/regression.json`](suites/regression.json) 与 [`suites/command-assist.json`](suites/command-assist.json) 分别引用原回归和专项场景；[`suites/smoke.json`](suites/smoke.json) 只选已有场景，不另造评分标准。清单的 `catalogs` 使用相对清单文件的显式路径，`scenarios` 是有序 ID 列表。不使用隐式 glob 或按目录排序决定试验顺序；重复定义／选择、未知 ID、缺失文件、非法字段均报错。
+
+加载后展开成原来的 schema v2 完整场景结构，再执行统一校验。报告保存展开后的场景与 `suite_sha256`，因此单纯移动定义不改变场景哈希；自包含 v1/v2 suite 仍可用于历史与外部数据。运行器／评分器哈希覆盖 `checks/` 下全部 Python 模块，不把测试和历史裁判归档算作当前运行时代码。
+
+revision 10 的协议变化：裸 `#`／`ai fix` 现在生成修复建议，因此旧缺文件解释场景改为显式 `ai fix <question>`，保持诊断目标；归档建议允许最多 4 个模型步以覆盖查询循环，不再假定单轮无工具。其他原场景的目标、审批和预算保留。Agent 的 System context＋独立 User 请求、分项采集评分和确定性 `diagnostic_id` 不变；历史结果不重评。
+
+自动专项用 `completions: [{"kind":"assist"}]` 等待原生 trace 中的宿主结果，不用固定 sleep 或猜测屏幕文字判断完成。`tool_choice` 记录单步 Required／Named 解码策略，宿主预填的调用开头计入输入成本。`SessionSpec.label` 标记意图和前台／后台，不进入 prompt。模型发出 `finish` 不代表成功：只有经过 harness 校验的 `observation` 才能作为 command／clarify／none 结果，错误和取消不能折叠成 none。`finish` 不计为工具执行；帮助查询必须观测到实际返回，不以一个未执行的查询调用通过。归档只在评分器的严格 tar 子集内验证，并检查 nosh 本身未修改夹具。
+
+等待自动结果时增量读取 JSONL，每个完整记录只解析一次；跨写入的 UTF-8 和未完成行留待后续读取，截断、消失或损坏显式报错。该优化不改变模型输入、轮询完成条件、seed 或评分；推理仍占主要耗时，线程数通过 `--threads` 显式设置并记录，不靠缩短任务期限提速。
+
+接受结果需同时匹配会话身份、执行 command ID／退出状态和该步实际生成的唯一 finish。`-s` 的 stdout 必须与已接受命令一致，clarify／none 的 stdout 必须为空；不能用 trace 覆盖错误的 CLI 输出。帮助查询只有返回 `exit=0` 才满足成功查询要求。
+
+自动辅助在版本校验和发布成功后才记录 completed；在发布前被新输入取代的结果记录 cancelled，即使模型已经生成合法 finish，也不能作为接受成功的证据。
 
 失败诊断场景必须先声明一个带退出码和诊断特征的 `shell` 输入，再进入 agent 求助；缺少这一前置步骤会在预检时报错，而不是开始运行后才崩溃。
 
@@ -92,7 +126,7 @@ revision 2 修正了任务的隐含要求，而不是按历史失败结果放宽
 | 需求澄清 | 请求缺失的任务目标即可，例如“请说明具体目标，我再处理。”；不要求问号，也不把泛泛的继续操作建议当作澄清 |
 | 构建、测试、失败诊断 | 允许夹具内合理的受限执行路径；额外步骤/确认仍由独立体验门槛计分，不用人为拒绝制造失败现场 |
 
-当前评分保留 27 场景、seed、审批和预算，以及以下解释规则：
+当前回归保留 27 场景、seed、审批和以下解释规则；revision 10 的入口与归档建议预算变化见上文：
 
 | 修正 | 边界 |
 |---|---|
@@ -106,7 +140,7 @@ revision 2 修正了任务的隐含要求，而不是按历史失败结果放宽
 | 中文收尾 | 识别无问号的条件式继续邀请；保留必要澄清和不索要回复的直接建议 |
 | 编译错误位置 | 接受可唯一定位的文件名；位置遗漏与类型解释分开报告，反向类型检查只针对明确的肯定断言 |
 
-报告继续记录裁判源码哈希，并通过 `dataset_revision` 区分语义。采集评分只接受当前 System context 中的失败命令、退出码、原始输出及独立请求，不要求暴露内部路由标签。revision 9 不用于重评旧协议记录，旧报告与归档不改写；未来对照须使用相同的输入契约和裁判，不能只给候选补分。
+报告继续记录裁判源码哈希，并通过 `dataset_revision` 区分语义。采集评分只接受当前 System context 中的失败命令、退出码、原始输出及独立请求，不要求模型复述路由标签。revision 10 不用于重评旧协议记录，旧报告与归档不改写；对照须使用相同输入契约和裁判。
 
 `expect` 必须包含：
 
@@ -119,7 +153,7 @@ revision 2 修正了任务的隐含要求，而不是按历史失败结果放宽
 
 具体门槛直接见场景文件：普通只读查询 3–4 步，构建/测试 4 步，提交 5 步，诊断 6 步；只读/版本不确认。端口失败诊断允许一次对已占用本地端口的原命令复现，因此最多 1 次确认；这是对合法诊断路径的授权，不要求必须重跑。其余既有预算不变。正式采样前冻结门槛，不因模型表现不佳放宽。
 
-事实裁判使用最终回答、实际执行结果和状态，不把输入回显或工具输出直接当作正确回答。新执行类场景要求 native trace：未执行的工具调用、已有产物、只编译不跑测试都不算成功。构建必须保留源码，清理不能删配置，提交必须覆盖正确改动且不增加多余提交。语言行数、列表作用域等保守规则和正反例见 [checks.py](checks.py) 与[测试](tests/)。
+事实裁判使用最终回答、实际执行结果和状态，不把输入回显或工具输出直接当作正确回答。新执行类场景要求 native trace：未执行的工具调用、已有产物、只编译不跑测试都不算成功。构建必须保留源码，清理不能删配置，提交必须覆盖正确改动且不增加多余提交。语言行数、列表作用域等保守规则和正反例见 [checks](checks/) 与[测试](tests/)。
 
 语言和收尾是确定性启发式，不用另一模型裁判。语言计数先匹配完整的已记录 Git 原文，再剔除代码、引用诊断、路径、URL、版本号、工具名及已知 hash；中文正文至少两个汉字，且汉字数大于残余拉丁词数。不按英文列表外观整段豁免；事实中的数量、条目和收尾邀请仍单独判断。JSON 保留抽取正文、统计及原因，供复核。纠错和 `-s` 纯命令输出不检查回答语言/收尾。
 
@@ -152,6 +186,8 @@ revision 2 修正了任务的隐含要求，而不是按历史失败结果放宽
 | TTFT | 首步 Usage 的首 token 延迟，不含加载；汇总为中位数 |
 | 总耗时 | 进程启动至退出，含加载/交互/退出，不含夹具准备与独立验证；汇总为中位数 |
 | RSS | Linux wait4 峰值 MiB，含内核对已等待后代的统计，不是进程树求和；汇总取最大值 |
+| Token 成本 | 分别记录新增 prompt、复用缓存、生成 token；包含工具 schema 与模板，缺失观测不填零 |
+| CommandAssist 结果 | 记录宿主接受的 kind、意图、command ID、前后台来源及完成／错误／取消状态 |
 
 native 观测由 `NOSH_EVAL_TRACE` 的私有版本化 JSONL 提供；缺失/损坏时不自动降级。legacy 的 `-s` TTFT 为 N/A，旧 REPL 显示精度有限，差异记录在报告中。必须观测不到的数据不填 0。
 
@@ -163,7 +199,7 @@ native 观测由 `NOSH_EVAL_TRACE` 的私有版本化 JSONL 提供；缺失/损�
 
 ## 基线生命周期
 
-以下均是 **revision 1 的历史基线**。当前 revision 9 尚未运行真实模型，也没有用新规则重评或替换旧记录；48.0% 不是当前新评测语义下的通过率。
+以下均是 **revision 1 的历史基线**。revision 10 尚无完整固定 seed 双跑基线，也没有用新规则重评或替换旧记录；开发 smoke run 不能代替正式基线，48.0% 不是当前协议下的通过率。
 
 | 基线 | 范围与结果 | 证据 |
 |---|---|---|
@@ -182,14 +218,19 @@ native 观测由 `NOSH_EVAL_TRACE` 的私有版本化 JSONL 提供；缺失/损�
 | 模块 | 职责 |
 |---|---|
 | `run.py` | CLI、工具预检、环境/来源、逐次执行与保存 |
-| `suite.py` | v1/v2 契约与场景/夹具/审批兼容性 |
+| `suite.py` / `scenarios/` / `suites/` | 场景定义、显式套件选择、v1/v2 契约与夹具/审批兼容性 |
 | `driver.py` / `observations.py` | PTY/进程生命周期；原生/legacy 观测解码 |
 | `fixtures.py` / `approval.py` | 夹具、隔离和允许变化；受限命令解析/审批 |
-| `checks.py` / `report.py` | 事实/体验判定；统计、比较、JSON/Markdown |
+| `checks/` | `agent`、`project`、`command_assist`、`capture`、`experience` 分别评分，`common` 共用文本解析，`__init__` 保留统一接口 |
+| `report.py` | 统计、比较、JSON/Markdown |
 | `checkpoint.py` | 复制原子报告与已结束试验日志，不改实时结果 |
 
 ```bash
 python3 -m unittest discover -s eval -v
+
+# 按职责选择无模型回归
+python3 -m unittest eval.tests.test_suite eval.tests.test_observations
+python3 -m unittest eval.tests.test_agent_checks eval.tests.test_command_assist
 
 # 从 archive.json 的地址下载 ZIP 后，可选地完整复核证据
 python3 eval/baselines/main-78b7e50-expanded/reproduce.py --archive PATH_TO_ZIP --check
