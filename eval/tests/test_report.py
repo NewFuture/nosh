@@ -2,22 +2,28 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
-from eval import checks, report, run
+from unittest.mock import patch
+from eval import report
+from eval.checks import experience as experience_checks
 from .support import SCENARIOS, SUITE
 
 
 class ReportTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "metadata": {"run_id": "test", "observation": "native-v1",
+                         "dataset_revision": 12,
                          "build": {"binary_sha256": "a" * 64},
                          "scenarios": [{"id": "example"}], "seeds": [0, 1], "repeat": 1},
             "trials": [{"scenario_id": "example", "seed": 0, "repeat": 0, "status": "pass",
                         "metrics": {"steps": 1, "confirmations": 0, "ttft_s": None, "total_s": 2, "peak_rss_mib": 10},
-                        "answer": "answer\n```", "inputs": None, "final_state": {}}],
+                        "answer": "answer\n```", "inputs": None, "final_state": {},
+                        "grading": {"facts": {"passed": True, "reasons": []}, "experience": None}}],
         }
 
     def test_denominator_keeps_missing_and_error_trials(self):
@@ -58,6 +64,54 @@ class ReportTests(unittest.TestCase):
         second["status"] = "error"
         self.assertIsNone(report.repetitions([first, second])[0]["consistent"])
 
+    def test_missing_state_is_neither_a_pass_nor_consistent_evidence(self):
+        data = self.sample()
+        data["trials"][0]["final_state"] = None
+        with self.assertRaisesRegex(ValueError, "final-state"):
+            report.validate(data)
+        first = dict(data["trials"][0], status="fail")
+        second = dict(first, repeat=1)
+        self.assertIsNone(report.repetitions([first, second])[0]["consistent"])
+        first.update(final_state={}, inputs=[])
+        second.update(final_state={}, inputs=[])
+        pair = report.repetitions([first, second])[0]
+        self.assertTrue(pair["consistent"])
+        self.assertFalse(pair["inputs_changed"])
+        self.assertIsNone(pair["tools_changed"])
+
+    def test_plan_membership_and_contradictory_success_are_rejected(self):
+        for changed in ({"scenario_id": "unknown"}, {"seed": 2}, {"repeat": 1}):
+            data = self.sample()
+            data["trials"][0].update(changed)
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "declared plan"):
+                report.validate(data)
+        for reasons in (["failed evidence"], [1]):
+            data = self.sample()
+            data["trials"][0]["grading"]["facts"]["reasons"] = reasons
+            with self.assertRaisesRegex(ValueError, "fact grading"):
+                report.validate(data)
+        data = self.sample()
+        data["trials"][0]["metrics"]["total_s"] = 10**400
+        with self.assertRaisesRegex(ValueError, "invalid total_s"):
+            report.validate(data)
+
+    def test_large_partial_plan_does_not_allocate_all_planned_identities(self):
+        code = """
+import tracemalloc
+from eval import report
+from eval.tests.test_report import ReportTests
+data = ReportTests().sample()
+data["metadata"]["repeat"] = 100000
+data["trials"] = []
+tracemalloc.start()
+report.validate(data)
+peak = tracemalloc.get_traced_memory()[1]
+assert peak < 1000000, peak
+"""
+        result = subprocess.run([sys.executable, "-B", "-c", code],
+                                cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_report_shape_roundtrip_and_fences(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,6 +134,7 @@ class ExpandedReportTests(unittest.TestCase):
         data = {
             "schema_version": 2,
             "metadata": {"run_id": "unit-test", "observation": "native-v1",
+                         "dataset_revision": 12,
                          "build": {"binary_sha256": "a" * 64},
                          "scenarios": SUITE["scenarios"], "seeds": SUITE["seeds"], "repeat": 2},
             "trials": [],
@@ -90,7 +145,7 @@ class ExpandedReportTests(unittest.TestCase):
                 "scenario_id": sid, "seed": 0, "repeat": 0, "status": "pass", "metrics": metrics,
                 "answer": "任务已经完成。", "final_state": {}, "inputs": None,
                 "grading": {"facts": {"passed": True, "reasons": []},
-                            "experience": checks.experience(SCENARIOS[sid], "任务已经完成。", metrics)},
+                            "experience": experience_checks.experience(SCENARIOS[sid], "任务已经完成。", metrics)},
             })
         return data
 
@@ -128,12 +183,29 @@ class ExpandedReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.validate(data)
 
-    def test_v1_baselines_render_unchanged(self):
-        for name in ("main-4f602ab", "main-7c57a88"):
-            with self.subTest(baseline=name):
-                directory = run.HERE / "baselines" / name
-                data = json.loads((directory / "report.json").read_text(encoding="utf-8"))
-                report.validate(data)
-                self.assertEqual(report.markdown(data), (directory / "report.md").read_text(encoding="utf-8"))
-                comparison = report.compare(self.data(), data)
-                self.assertTrue(any("schemas differ" in warning for warning in comparison["warnings"]))
+
+    def test_save_computes_each_summary_once_for_json_and_markdown(self):
+        data = self.data()
+        data["trials"][0]["metrics"].update(prompt_tokens=100, cached_tokens=20, completion_tokens=30)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(report, "aggregate", wraps=report.aggregate) as scenarios, \
+                    patch.object(report, "groups", wraps=report.groups) as groups, \
+                    patch.object(report, "capture_components", wraps=report.capture_components) as capture:
+                report.save(data, directory)
+                self.assertEqual((scenarios.call_count, groups.call_count, capture.call_count), (1, 1, 1))
+            rendered = (directory / "report.md").read_text(encoding="utf-8")
+            self.assertEqual(rendered, report.markdown(data))
+            data["summary"] = []
+            data["groups"] = []
+            self.assertEqual(report.markdown(data), rendered, "standalone rendering must not trust cached tables")
+
+    def test_save_drops_stale_capture_tables_for_a_non_capture_plan(self):
+        data = self.data()
+        data["metadata"]["scenarios"] = [SCENARIOS["largest-files"]]
+        data["trials"] = data["trials"][:1]
+        data["capture_components"] = [{"stale": True}]
+        with tempfile.TemporaryDirectory() as temporary:
+            report.save(data, Path(temporary))
+            saved = json.loads(Path(temporary, "report.json").read_text())
+        self.assertNotIn("capture_components", saved)

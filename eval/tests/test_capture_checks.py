@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from eval import checks, fixtures, report, run, suite
+from eval import checks, fixtures, report, runtime, suite
 from .test_capture import capture_trial, observed_input
 
 
@@ -17,7 +17,7 @@ class DiagnosticContractTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.data = suite.load_suite(run.HERE / "suites" / "regression.json")
+        self.data = suite.load_suite(runtime.HERE / "suites" / "regression.json")
         self.scenarios = {s["check"]: s for s in self.data["scenarios"]
                           if s["check"] in suite.CAPTURE_CHECKS}
         self.scenario = self.scenarios["captured-diagnosis"]
@@ -56,6 +56,60 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertNotEqual(ids[0], ids[2])
         self.assertRegex(ids[0], r"^CAPTURE-[0-9a-f]{8}$")
 
+    def test_repeatability_preserves_raw_evidence_and_only_normalizes_unchanged_scripts(self):
+        with fixtures.Workspace(self.base / "repetitions") as workspace:
+            for scenario in self.scenarios.values():
+                rows = []
+                for repeat in range(2):
+                    root, home, facts = workspace.prepare(scenario, 0, repeat)
+                    original = subprocess.run(
+                        [sys.executable, "once.py"], cwd=root, env=fixtures.project_environment(home),
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(original.returncode, 17)
+                    metadata = dict(self.metadata, execution_cwd=str(root),
+                                    retained_bytes=len(original.stderr.encode("utf-8")))
+                    result = copy.deepcopy(self.result)
+                    result.turns[0]["output"] = original.stderr
+                    answer = f"REGION 未设置，请配置该环境变量。diagnostic_id: {facts['diagnostic_id']}"
+                    evidence = observed_input(original.stderr, metadata,
+                                              scenario["inputs"][-1].removeprefix("ai fix").strip())
+                    after = fixtures.snapshot(root)
+                    metrics = dict.fromkeys(report.METRICS)
+                    metrics.update(self.metrics)
+                    verdict = checks.judge(scenario, answer, facts, root, after, result, metrics, evidence)
+                    self.assertTrue(verdict.passed, verdict.reasons)
+                    rows.append({
+                        "scenario_id": scenario["id"], "seed": 0, "repeat": repeat, "status": "pass",
+                        "metrics": metrics, "answer": answer, "inputs": evidence["inputs"],
+                        "file_snapshot": after, "grading": verdict.details,
+                        "final_state": fixtures.fixture_state(scenario, facts, root, after, result),
+                    })
+                self.assertNotEqual(rows[0]["file_snapshot"]["once.py"], rows[1]["file_snapshot"]["once.py"])
+                self.assertTrue(report.repetitions(rows)[0]["consistent"])
+                self.assertTrue(report.repetitions(rows)[0]["inputs_changed"])
+                directory = self.base / ("report-" + scenario["id"])
+                directory.mkdir()
+                data = {
+                    "schema_version": 2,
+                    "metadata": {"run_id": "capture-repetitions", "scenarios": [scenario],
+                                 "seeds": [0], "repeat": 2, "dataset_revision": 12,
+                                 "observation": "native-v1", "build": {"binary_sha256": "a" * 64}},
+                    "trials": rows,
+                }
+                report.save(data, directory)
+                saved = json.loads((directory / "report.json").read_text())
+                self.assertTrue(saved["reproducibility"][0]["consistent"])
+                self.assertEqual(saved["trials"][1]["file_snapshot"], rows[1]["file_snapshot"])
+                for mutation in ("script", "counter", "deleted"):
+                    changed = copy.deepcopy(after)
+                    if mutation == "deleted":
+                        del changed["once.py"]
+                    else:
+                        changed["once.py" if mutation == "script" else "calls.count"]["sha256"] = "changed"
+                    second = dict(rows[1], final_state=fixtures.fixture_state(scenario, facts, root, changed, result))
+                    self.assertFalse(report.repetitions([rows[0], second])[0]["consistent"], mutation)
+
     def test_current_capture_scenarios_require_explicit_ai_fix(self):
         data = copy.deepcopy(self.data)
         scenario = next(item for item in data["scenarios"]
@@ -85,6 +139,49 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertFalse(parts["citation"]["passed"])
         self.assertTrue(all(reason.startswith("citation:") for reason in verdict.reasons))
         self.assertTrue(self.grade(scenario=self.scenarios["captured-citation"]).passed)
+
+    def test_cause_words_and_negated_repairs_are_not_a_remedy(self):
+        for scenario in self.scenarios.values():
+            for answer in (
+                "REGION 未设置，程序因此退出。",
+                "REGION is unset.",
+                "REGION 未配置。不要设置 REGION，直接反复重试即可。",
+                "REGION is missing. Do not set REGION.",
+            ):
+                text = answer + " diagnostic_id: " + self.facts["diagnostic_id"]
+                with self.subTest(scenario=scenario["id"], answer=answer):
+                    verdict = self.grade(text, scenario=scenario)
+                    self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"])
+        for answer in (
+            "REGION 未设置，请配置该环境变量。",
+            "REGION 缺失，请设置 REGION=所需值。",
+            "REGION 未配置，使用 export REGION=所需值 设置环境变量。",
+            "REGION 未设置。修复：将 REGION 环境变量设为应用要求的值。",
+            "REGION 缺失，把 REGION 设置为应用需要的值。",
+            "REGION 未设置。请设置一下 REGION 环境变量。",
+            "REGION 未设置。把 REGION 设置成应用要求的值。",
+            "REGION 未设置。把 REGION 这个环境变量设置为应用要求的值。",
+            "REGION 未设置。请把 REGION 设置好。",
+            "`REGION` 未设置。请设置一下 `REGION` 环境变量。",
+            "**REGION** 未配置，把 `REGION` 这个环境变量设置为应用要求的值。",
+        ):
+            self.assertTrue(self.grade(answer).passed, answer)
+        for answer in (
+            "REGION 未设置。设置 REGION 并不能解决问题，继续重试即可。",
+            "REGION 缺失，将 REGION 设为所需值也无法解决问题。",
+            "REGION is missing. Set REGION but it will not fix the problem.",
+            "REGION 未设置。不要把 REGION 这个环境变量设置成任意值。",
+            "REGION is missing. Do not set up REGION.",
+            "`REGION` 未设置。不要设置 `REGION`。",
+        ):
+            verdict = self.grade(answer)
+            self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"], answer)
+        for answer in (
+            "REGION is missing. Define REGION in your environment.",
+            "REGION is unset. REGION should be set to the value required by the application.",
+            "REGION is missing. Please set up REGION in your environment.",
+        ):
+            self.assertTrue(self.grade(answer).details["facts"]["components"]["diagnosis"]["passed"], answer)
 
     def test_capture_failures_do_not_masquerade_as_diagnosis_failures(self):
         verdict = self.grade(evidence={"inputs": []})
@@ -203,6 +300,7 @@ class DiagnosticContractTests(unittest.TestCase):
         invalid = copy.deepcopy(data)
         invalid["trials"][0]["status"] = "pass"
         invalid["trials"][0]["grading"]["facts"]["passed"] = True
+        invalid["trials"][0]["grading"]["facts"]["reasons"] = []
         with self.assertRaisesRegex(ValueError, "failed capture components"):
             report.validate(invalid)
         del invalid["trials"][0]["grading"]["facts"]["components"]

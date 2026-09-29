@@ -7,7 +7,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from eval import checks, driver, fixtures, observations, report, run
+from eval import driver, fixtures, observations, report, trial
+from eval.checks import experience as experience_checks
 from types import SimpleNamespace
 from .support import SCENARIOS
 
@@ -154,7 +155,7 @@ assert os.read(0, 1) == b"y"
 out("y\r\n┃ answer\r\n┃ ✔ 1 steps · 0.1 s\r\n┃ stats: ttft 0.01s\r\n__NOSH_EVAL_PROMPT__ ")
 assert b"exit 0" in line()
 '''
-        scenario = {"inputs": ["# task"], "check": "largest"}
+        scenario = {"inputs": ["# task"], "check": "largest", "completions": [{"kind": "agent"}]}
         ascii_script = script.translate(str.maketrans({
             "┃": "|", "╭": "+", "╰": "+", "─": "-", "│": "|",
             "·": "|", "›": ">", "✔": "+",
@@ -221,9 +222,10 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
     def test_trial_pipeline_records_grades_raw_state_and_cleanup(self):
         scenario = SCENARIOS["zh-clarify-task"]
         answer = "你希望我完成什么具体任务？"
-        meta = {"run_id": "unit-test", "observation": "native-v1", "build": {"binary_sha256": "a" * 64},
+        meta = {"run_id": "unit-test", "observation": "native-v1", "dataset_revision": 12,
+                "build": {"binary_sha256": "a" * 64},
                 "settings": {"timeout_s": 5}, "scenarios": [scenario], "seeds": [0], "repeat": 1}
-        args = SimpleNamespace(threads=1, legacy=False)
+        args = SimpleNamespace(threads=1)
 
         def child(argv, cwd, env, timeout, case, approve):
             events = [
@@ -240,8 +242,8 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
             base = Path(temporary)
             output = base / "output"
             output.mkdir()
-            with fixtures.Workspace(base / "work") as workspace, patch("eval.run.driver.run_repl", side_effect=child):
-                row = run.run_trial(args, meta, scenario, 0, 0, workspace, output, Path(sys.executable), base / "unused-model")
+            with fixtures.Workspace(base / "work") as workspace, patch("eval.trial.driver.run_repl", side_effect=child):
+                row = trial.run_trial(args, meta, scenario, 0, 0, workspace, output, Path(sys.executable), base / "unused-model")
                 self.assertEqual(row["status"], "pass", row["reasons"])
                 self.assertTrue(row["grading"]["facts"]["passed"])
                 self.assertTrue(row["grading"]["experience"]["final_question"]["passed"])
@@ -276,13 +278,29 @@ assert b"exit 0" in line()
                                  {"PATH": "/usr/bin:/bin"}, 5, scenario, lambda *_: False)
         self.assertIsNone(result.error)
         self.assertEqual(len(result.approvals), 2)
-        observed = observations.observe(result, scenario, Path("unused"), True, 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.jsonl"
+            events = [
+                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
+            ]
+            for index in range(3):
+                events.extend([
+                    {"ev": "step_start", "sid": 1, "messages": [
+                        {"role": "user" if index == 0 else "tool",
+                         "text": "编译" if index == 0 else "[denied] command was not run"}]},
+                    {"ev": "step_end", "sid": 1, "text": "未执行命令。" if index == 2 else "",
+                     "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.01},
+                     "tool_calls": [{"name": "run_command", "args": {"command": "cargo build"}}] if index < 2 else []},
+                ])
+            trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
+            observed = observations.observe(result, scenario, trace, seed=0)
         self.assertEqual(observed["metrics"]["confirmations"], 2)
-        self.assertFalse(checks.experience(scenario, observed["answer"], observed["metrics"])["confirmations"]["passed"])
+        self.assertFalse(experience_checks.experience(scenario, observed["answer"], observed["metrics"])["confirmations"]["passed"])
 
     def test_trial_records_proven_generation_deadline_as_failure(self):
         scenario = SCENARIOS["zh-rust-build"]
-        args = SimpleNamespace(threads=1, legacy=False)
+        args = SimpleNamespace(threads=1)
         meta = {"settings": {"timeout_s": 5}}
         def child(argv, cwd, env, timeout, case, approve):
             events = [
@@ -297,8 +315,8 @@ assert b"exit 0" in line()
             base = Path(temporary)
             output = base / "output"
             output.mkdir()
-            with fixtures.Workspace(base / "work") as workspace, patch("eval.run.driver.run_repl", side_effect=child):
-                row = run.run_trial(args, meta, scenario, 0, 0, workspace, output, Path(sys.executable), base / "unused-model")
+            with fixtures.Workspace(base / "work") as workspace, patch("eval.trial.driver.run_repl", side_effect=child):
+                row = trial.run_trial(args, meta, scenario, 0, 0, workspace, output, Path(sys.executable), base / "unused-model")
                 self.assertEqual(row["status"], "fail", row["reasons"])
                 self.assertEqual(row["metrics"]["task_status"], "timed_out")
                 self.assertEqual(row["metrics"]["steps"], 1)
@@ -309,7 +327,7 @@ assert b"exit 0" in line()
 
     def test_trial_records_post_generation_deadline_as_failure(self):
         scenario = SCENARIOS["zh-node-test"]
-        args = SimpleNamespace(threads=1, legacy=False)
+        args = SimpleNamespace(threads=1)
         meta = {"settings": {"timeout_s": 60}}
 
         def child(argv, cwd, env, timeout, case, approve):
@@ -329,9 +347,9 @@ assert b"exit 0" in line()
             output = base / "output"
             output.mkdir()
             with fixtures.Workspace(base / "work") as workspace, patch(
-                "eval.run.driver.run_repl", side_effect=child
+                "eval.trial.driver.run_repl", side_effect=child
             ):
-                row = run.run_trial(
+                row = trial.run_trial(
                     args, meta, scenario, 0, 0, workspace, output,
                     Path(sys.executable), base / "unused-model")
                 self.assertEqual(row["status"], "fail", row["reasons"])

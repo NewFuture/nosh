@@ -4,12 +4,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from eval import checks, driver, observations, report, run, suite
+from eval import checks, driver, observations, report, runtime, suite
 
 
 class CommandAssistTests(unittest.TestCase):
     def setUp(self):
-        self.suite = suite.load_suite(run.HERE / "suites" / "command-assist.json")
+        self.suite = suite.load_suite(runtime.HERE / "suites" / "command-assist.json")
         self.scenarios = {s["id"]: s for s in self.suite["scenarios"]}
 
     def events(self, intent="next", kind="none", text=None, status="completed"):
@@ -37,10 +37,10 @@ class CommandAssistTests(unittest.TestCase):
             path = Path(temporary) / "trace"
             path.write_text("".join(json.dumps(dict(e, engine=1, schema_version=1)) + "\n" for e in events))
             return observations.observe(result or driver.Result(exit_code=0),
-                                        scenario or self.scenarios["next-no-goal"], path, False, 0)
+                                        scenario or self.scenarios["next-no-goal"], path, seed=0)
 
     def test_suite_covers_three_intents_and_three_results(self):
-        self.assertEqual(self.suite["dataset_revision"], 10)
+        self.assertEqual(self.suite["dataset_revision"], 12)
         self.assertEqual({s["assistance"]["intent"] for s in self.suite["scenarios"]}, {"generate", "fix", "next"})
         self.assertEqual({s["assistance"]["result"] for s in self.suite["scenarios"]}, {"command", "clarify", "none"})
         self.assertTrue(self.scenarios["generate-query-help"]["assistance"]["require_query"])
@@ -171,11 +171,68 @@ class CommandAssistTests(unittest.TestCase):
                                        driver.Result(exit_code=0), evidence["metrics"], evidence)
                 self.assertEqual(verdict.passed, code == 0, verdict.reasons)
 
-    def test_legacy_runs_do_not_send_new_configuration_keys_to_old_binaries(self):
+    def test_help_query_must_be_for_the_requested_program(self):
+        scenario = copy.deepcopy(self.scenarios["next-no-goal"])
+        scenario["assistance"]["require_query"] = True
+        evidence = self.observe(self.events())
+        evidence["metrics"]["confirmations"] = 0
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary) / "home"
-            home.mkdir()
-            run.environment(home, 1, None, command_assist=None)
-            config = (home / "nosh" / "config.toml").read_text()
-            self.assertNotIn("command_assist", config)
-            self.assertNotIn("[shell]", config)
+            for name, program, passed in (
+                ("tar", "/usr/bin/tar", True), ("/bin/tar", "/bin/tar", True),
+                ("ls", "/usr/bin/ls", False), ("tar", "/usr/bin/ls", False),
+                ("ls", "/usr/bin/tar", False), ("tar", "/usr/bin/gtar", False),
+            ):
+                call = {"name": "command_info", "args": {"name": name, "query": "help"}}
+                evidence["executions"] = [{
+                    "call": call, "state": "returned",
+                    "result": f"[query program={program} exit=0 truncated=false]\nusage",
+                }]
+                verdict = checks.judge(scenario, "", {"before": {}}, Path(temporary), {},
+                                       driver.Result(exit_code=0), evidence["metrics"], evidence)
+                self.assertEqual(verdict.passed, passed, (name, program, verdict.reasons))
+
+    def test_clarification_requests_both_choices_instead_of_assigning_them(self):
+        scenario = self.scenarios["generate-clarify"]
+        evidence = {"assistance": [{"status": "completed", "intent": "generate",
+                                    "kind": "clarify", "background": False}]}
+        metrics = {"task_status": "completed", "steps": 1, "confirmations": 0}
+        for answer, passed in (
+            ("Which source directory and destination filename should I use?", True),
+            ("Please specify the source folder and output filename.", True),
+            ("源目录是什么？目标文件名是什么？", True),
+            ("Source directory? Destination filename?", True),
+            ("What should I use as source directory and destination filename?", True),
+            ("The source is not decided. Please provide source directory and destination filename.", True),
+            ("What is the source directory? What is the destination filename?", True),
+            ("What source directory should I archive, and what destination filename should I use?", True),
+            ("Which folder do you want to archive, and what should the output filename be?", True),
+            ("Please provide the source directory to archive and the destination filename.", True),
+            ("Please provide the source directory for archiving and the output filename.", True),
+            ("Please provide the `source directory`. Please provide the `destination filename`.", True),
+            ("Which source directory, and which destination filename, should I use?", True),
+            ("源目录是哪个，目标文件名是哪个？", True),
+            ("请说明源目录，以及目标文件名。", True),
+            ("要归档哪个目录？输出文件名用什么？", True),
+            ("Source directory is logs; destination filename is logs.tar.gz.", False),
+            ("Which source directory? The destination filename is logs.tar.gz.", False),
+            ("Which source directory should I archive to the destination filename logs.tar.gz?", False),
+            ("Which destination filename should I use for source directory logs?", False),
+            ("The source directory is logs, which destination filename should I use?", False),
+            ("What is the destination filename for source directory logs?", False),
+            ("Which source directory and destination filename `logs.tar.gz` should I use?", False),
+            ("Which source directory `logs/` and destination filename should I use?", False),
+            ("Please provide the source directory to logs and the destination filename.", False),
+            ("What is the source directory for logs/? What is the destination filename?", False),
+            ("Please provide the source directory as logs and the destination filename.", False),
+            ("Please provide the source directory from logs and the destination filename.", False),
+            ("What is the source directory `.`? What is the destination filename?", False),
+            ("What is the source directory `..`? What is the destination filename?", False),
+            ("What is the source directory`.`? What is the destination filename?", False),
+            ("源目录用 logs，目标文件名是什么？", False),
+            ("Should I use logs as source and logs.tar.gz as destination?", False),
+            ("> Which source directory and destination filename?", False),
+        ):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as temporary:
+                verdict = checks.judge(scenario, answer, {"before": {}}, Path(temporary), {},
+                                       driver.Result(exit_code=1), metrics, evidence)
+                self.assertEqual(verdict.passed, passed, verdict.reasons)

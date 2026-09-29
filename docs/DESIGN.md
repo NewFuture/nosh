@@ -102,7 +102,7 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 | 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
 | 本地数据 | shell 历史、agent 截断输出落盘；用户采集缓冲仅在内存；本地 `Redactor` 为 `NoRedact` | 显式评测 trace 仍记录输入；agent history/audit、自动清理、无痕模式和文件备份未实现 |
-| 评测 | revision 10：27 场景回归与 5 场景 CommandAssist 专项；原生 trace 记录宿主接受结果、工作流标签和 token 成本 | 新数据集成绩与历史基线分开；旧协议仅留证据；复现验收仍未满足（§13.2） |
+| 评测 | revision 12 基础套件与 revision 13 的 8 场景真实工作流专项；原生 trace 记录宿主接受结果、工作流标签和 token 成本 | 新数据集成绩与历史基线分开；旧协议仅留证据；复现验收仍未满足（§13.2） |
 
 ## 1. 目标与非目标
 
@@ -1186,7 +1186,7 @@ nosh/
 
 - 根目录 `tests/agent_flow.rs` 保留 Cargo 入口，`tests/flows/` 按 Agent、CommandAssist、context、permissions 拆分，公共夹具和进程内串行锁在 `support.rs`，不拆成多份独立测试程序。
 - `nosh-core/tests/terminal.rs` 保留同一测试目标及三个精确命名的子进程 probe，`terminal/` 按显示、审批、输入、命令辅助拆分并共用 PTY 驱动；CommandAssist 的模块单元测试位于 `src/command_assist/tests.rs`。
-- `eval/scenarios/` 按能力存放场景单一来源，`eval/suites/` 声明有序运行计划；`eval/checks/` 分离评分职责，`eval/tests/` 对应 suite、观测、驱动、评分和报告。平台与是否需要真实模型继续由已有 CI 矩阵和 ignored 标记表达，不复制场景。
+- `eval/scenarios/` 按能力存放场景单一来源，`eval/suites/` 声明有序运行计划，`eval/contracts.py` 集中 check／夹具／审批关系。`python3 -m eval` 是唯一入口，支持内置套件名和不加载模型的 `--plan`；`campaign` 管串行计划，`runtime` 管预检与来源，`trial` 管单次执行与清理，`checks` 按文件、Git、项目、辅助和采集分域，报告汇总只计算一次。只支持当前 suite/report v2 与原生观测，历史证据只读归档，不维护旧入口或旧格式适配；`python3 -m unittest eval.tests` 覆盖各层当前契约。平台与是否需要真实模型继续由已有 CI 矩阵和 ignored 标记表达，不复制场景。
 
 移动目录不修改场景 ID、seed、预算、评分标准或历史基线。新增评分子模块必须进入来源哈希，套件展开后的完整定义仍是报告和复现的依据。
 
@@ -1236,7 +1236,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | AI 触发 | 415 条标注语料：合法命令 200、中文自然语言 60、英文自然语言 55、拼写错误 50、安全网输入 50 | 所有样本逐条匹配期望动作，纠错需匹配完整命令；安全网误拦截 < 0.5%；中文自然语言 100% 交给 AI；破坏性命令误执行次数为 0；纠错命中率 ≥ 90% |
 | 权限 | 表驱动风险 / 日常命令、规则和作用域、MockChatEngine、CLI 与 PTY 覆盖；远程装配仍属于规划 | 验证 deny / allow 优先级、三档审批与执行次数、授权不扩张、实际参数 / 目标、构建便利类别、默认与输出契约；不把旧模式的确认比例当成新模式指标 |
 | 远程与离线（规划验收） | 断线重连、输出回放、nonce、多端附着、部署与模型推送；无网络 namespace 完整 E2E。当前 CI 不包含这些完整场景 | 远程流程全部通过；离线样本无模型下载/探测，不混同于限制 shell 命令联网 |
-| LLM 评测（当前） | [评测运行器](../eval/README.md)，revision 10：27 场景回归与 5 场景命令辅助专项，分别固定 seed 运行 | Agent 事实与状态、CommandAssist 协议／接受结果／不执行、步数与 token 成本分别报告。历史报告不改写；每 PR 仅跑无模型自测，真实模型仅手动运行 |
+| LLM 评测（当前） | [评测运行器](../eval/README.md)，原 27 场景回归、5 场景命令辅助，以及 revision 13 的 8 场景真实工作流专项，分别固定 seed 运行 | Agent 事实与状态、CommandAssist 协议／接受结果／不执行、步数与 token 成本分别报告。历史报告不改写；每 PR 仅跑无模型自测，真实模型仅手动运行 |
 | 性能 | 当前通过 `nosh debug gen`、`NOSH_STATS=1`、`-a --json` 与评测运行器观测；`xtask bench` 未实现 | 目标见 §7.5、§13.1；比较时必须固定构建、模型、硬件和冷热口径 |
 
 **25 场景 revision 1 历史基线**：精确 main `78b7e509ad0d6d71ce50397cfa9e9f2187b0db75` 在独立 GitHub-hosted Ubuntu runner 上串行双跑，[摘要](../eval/baselines/main-78b7e50-expanded/report.md)记录 250 次试验的指标，全部原始记录见 [#4 归档索引](https://github.com/NewFuture/nosh/issues/4#issuecomment-5844795358)。原始为 120/129/1/0（通过/失败/错误/缺失）；根据原始 trace 将一条正在生成的模型超时归为任务失败并恢复可观测指标，另修正一条不影响通过数的收尾误判原因，归一化为 **120/130/0/0**，没有重新采样。综合通过率 48.0%，模型单独 110/240；51 次事实正确但体验不达标。平均步数/确认为 4.88/1.028；判定加状态仅 107/125 对一致，最终状态 119/125。[分析与来源](../eval/baselines/main-78b7e50-expanded/analysis.md)区分运行时 main、评测器与确定性处理版本；原始失败工作流、诊断运行和全部原始判断保留在经哈希验证的附件中。两线程/Rayon 1、nice 10 与检查点是本次测量条件，不与旧 WSL 结果作受控性能比较。后续任务语义修订不回写这份历史记录。

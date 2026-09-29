@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-from eval import fixtures, report, run
+from eval import campaign, fixtures, report, runtime
 
 
 class SourceSelectionTests(unittest.TestCase):
@@ -29,19 +29,19 @@ class SourceSelectionTests(unittest.TestCase):
                        check=True)
 
     def test_default_main_and_explicit_branch_are_pinned(self):
-        self.assertEqual(run.resolve_source_revision(cwd=self.checkout), self.main)
-        self.assertEqual(run.resolve_source_revision("feature/capture", cwd=self.checkout), self.feature)
-        self.assertEqual(run.resolve_source_revision("feature/capture", self.main, self.checkout), self.main)
+        self.assertEqual(runtime.resolve_source_revision(cwd=self.checkout), self.main)
+        self.assertEqual(runtime.resolve_source_revision("feature/capture", cwd=self.checkout), self.feature)
+        self.assertEqual(runtime.resolve_source_revision("feature/capture", self.main, self.checkout), self.main)
         with self.assertRaisesRegex(ValueError, "reachable"):
-            run.resolve_source_revision("main", self.feature, self.checkout)
+            runtime.resolve_source_revision("main", self.feature, self.checkout)
 
     def test_invalid_refs_and_revision_expressions_are_not_executed(self):
         for ref in ("", "--upload-pack=anything", "main\nother", "main:other"):
             with self.subTest(ref=ref), self.assertRaises(ValueError):
-                run.resolve_source_revision(ref, cwd=self.checkout)
+                runtime.resolve_source_revision(ref, cwd=self.checkout)
         for revision in ("HEAD", "main~1", "-bad", "A" * 40, "a" * 39):
             with self.subTest(revision=revision), self.assertRaises(ValueError):
-                run.resolve_source_revision("main", revision, self.checkout)
+                runtime.resolve_source_revision("main", revision, self.checkout)
 
 
 class CampaignCompletenessTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class CampaignCompletenessTests(unittest.TestCase):
         data = {
             "schema_version": 2,
             "metadata": {"scenarios": declared["scenarios"], "seeds": declared["seeds"],
-                         "repeat": 2, "dataset_revision": 4},
+                         "repeat": 2, "dataset_revision": 4, "observation": "native-v1"},
             "trials": [{
                 "scenario_id": "example", "seed": seed, "repeat": repeat, "status": "fail",
                 "metrics": {name: None for name in report.METRICS}, "answer": "", "final_state": {},
@@ -63,25 +63,25 @@ class CampaignCompletenessTests(unittest.TestCase):
 
     def test_complete_model_failures_are_kept_but_missing_trials_are_not_complete(self):
         declared, data = self.data()
-        self.assertTrue(run.campaign_complete(data, declared))
+        self.assertTrue(campaign.is_complete(data, declared))
         missing = copy.deepcopy(data)
         missing["trials"].pop()
-        self.assertFalse(run.campaign_complete(missing, declared))
+        self.assertFalse(campaign.is_complete(missing, declared))
         error = copy.deepcopy(data)
         error["trials"][0]["status"] = "error"
-        self.assertFalse(run.campaign_complete(error, declared))
+        self.assertFalse(campaign.is_complete(error, declared))
         changed = copy.deepcopy(data)
         changed["metadata"]["dataset_revision"] = 3
-        self.assertFalse(run.campaign_complete(changed, declared))
+        self.assertFalse(campaign.is_complete(changed, declared))
         duplicate = copy.deepcopy(data)
         duplicate["trials"].append(duplicate["trials"][0])
         with self.assertRaisesRegex(ValueError, "duplicate trial"):
-            run.campaign_complete(duplicate, declared)
+            campaign.is_complete(duplicate, declared)
 
     def test_workflow_uses_the_tested_guards_instead_of_stale_counts(self):
-        workflow = run.ROOT.joinpath(".github", "workflows", "eval.yml").read_text()
+        workflow = runtime.ROOT.joinpath(".github", "workflows", "eval.yml").read_text()
         self.assertIn("resolve_source_revision", workflow)
-        self.assertIn("run.campaign_complete(data", workflow)
+        self.assertIn("campaign.is_complete(data", workflow)
         self.assertIn("EVAL_SOURCE_REF", workflow)
         self.assertNotIn('len(data["trials"]) == 250', workflow)
         self.assertIn("EVAL_TRIAL_TIMEOUT_S: '60'", workflow)

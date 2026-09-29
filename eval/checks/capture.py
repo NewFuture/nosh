@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-from ..suite import CAPTURE_CHECKS
-from .common import response_prose
+from ..contracts import CAPTURE_CHECKS
+from .common import has_affirmative_match, response_prose
 
 
 def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
@@ -74,9 +74,17 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
 
 def region_diagnosis(answer: str) -> list[str]:
     reasons = []
+    answer = answer.replace("`", " ").replace("**", " ")
     if "REGION" not in answer or not re.search(r"unset|missing|未设置|缺失|没有设置|未配置", answer, re.I):
         reasons.append("answer does not explain the missing REGION setting")
-    if not re.search(r"\bexport\b|configur|set\b|设置|配置", answer, re.I):
+    if not has_affirmative_match(
+        answer,
+        r"\bexport\s+REGION\s*="
+        r"|\b(?:set(?:\s+up)?|configure|define)\s+(?:(?:the|this|that)\s+)?(?:REGION\b|environment variable\b|variable\b|it\b)"
+        r"|(?:设置|配置|设定|补齐)\s*(?:(?:一下|好|上)\s*)?(?:REGION\b|(?:该|这个|此)?(?:环境)?变量)"
+        r"|(?:将|把)?\s*REGION\s*(?:(?:这个|该|此)?(?:环境)?变量)?\s*(?:设置(?:为|成|好)|配置(?:为|成|好)|设为|设成|设好)"
+        r"|\bREGION\s+(?:must|should|needs to)\s+be\s+(?:set|configured|defined)\b",
+    ):
         reasons.append("answer provides no remedy for REGION")
     return reasons
 

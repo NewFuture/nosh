@@ -10,7 +10,8 @@ import sys
 import tempfile
 import unittest
 
-from eval import approval, checks, driver, fixtures, run, suite
+from eval import approval, checks, driver, fixtures, runtime, suite
+from eval.checks import project as project_checks
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -58,7 +59,7 @@ class ProjectWorkCase(unittest.TestCase):
 class FixtureSemanticsTests(ProjectWorkCase):
     @classmethod
     def setUpClass(cls):
-        cls.tools = run.discover_tools(suite.load_suite(SCENARIO_PATH)["scenarios"])
+        cls.tools = runtime.discover_tools(suite.load_suite(SCENARIO_PATH)["scenarios"])
 
     def test_commit_fixture_is_all_staged_while_diff_fixture_remains_mixed(self):
         dirty_root, dirty = self.make_fixture("dirty", "dirty-git")
@@ -90,7 +91,7 @@ class FixtureSemanticsTests(ProjectWorkCase):
         after = fixtures.snapshot(staged_root)
         evidence = {
             "executions": [execution(command)],
-            "final_state": checks.fixture_state(scenario, staged, staged_root, after, result),
+            "final_state": fixtures.fixture_state(scenario, staged, staged_root, after, result),
         }
         verdict = checks.judge(
             scenario,
@@ -138,7 +139,7 @@ class FixtureSemanticsTests(ProjectWorkCase):
                 evidence = {"executions": [execution(command, result)]}
                 for primary in policies:
                     self.assertEqual(
-                        checks.completed_commands(evidence, root, facts, primary, after),
+                        project_checks.completed_commands(evidence, root, facts, primary, after),
                         evidence["executions"],
                     )
                 if kind == "node":
@@ -151,7 +152,7 @@ class FixtureSemanticsTests(ProjectWorkCase):
         self.assertTrue(approval.allow_approval("rust-build", rust_command, rust_root, rust))
         self.assertEqual(approval.project_actions("rust-build", rust_command, rust_root, rust), {"rust-test"})
         self.assertEqual(
-            checks.completed_commands(
+            project_checks.completed_commands(
                 {"executions": [execution(rust_command)]},
                 rust_root,
                 rust,
@@ -166,7 +167,7 @@ class FixtureSemanticsTests(ProjectWorkCase):
         self.assertTrue(approval.allow_approval("node-test", node_command, node_root, node))
         self.assertEqual(approval.project_actions("node-test", node_command, node_root, node), {"node-build"})
         self.assertEqual(
-            checks.completed_commands(
+            project_checks.completed_commands(
                 {"executions": [execution(node_command)]},
                 node_root,
                 node,
@@ -272,7 +273,7 @@ class DatasetRevisionTests(ProjectWorkCase):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 10)
+        self.assertEqual(data["dataset_revision"], 12)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
@@ -284,21 +285,20 @@ class DatasetRevisionTests(ProjectWorkCase):
         for sid in ("listening-port", "zh-listening-port", "zh-tool-versions"):
             self.assertEqual(scenarios[sid]["expect"]["max_confirmations"], 0)
 
-    def test_dataset_revision_is_optional_positive_and_never_normalized(self):
+    def test_current_schema_requires_revision_and_current_fixture_contracts(self):
         current = suite.load_suite(SCENARIO_PATH)
-        historical = copy.deepcopy(current)
-        historical.pop("dataset_revision")
-        next(s for s in historical["scenarios"] if s["id"] == "zh-git-commit")["fixture"] = "dirty-git"
-        loaded = suite.load_suite(self.write_suite(historical))
-        self.assertEqual(loaded, historical)
-        self.assertNotIn("dataset_revision", loaded)
-        self.assertEqual(fixtures.digest(loaded), fixtures.digest(historical))
-
-        explicit_first = dict(historical, dataset_revision=1)
-        self.assertEqual(suite.load_suite(self.write_suite(explicit_first)), explicit_first)
-        revised_dirty = dict(historical, dataset_revision=2)
-        with self.assertRaisesRegex(ValueError, "required facts"):
-            suite.load_suite(self.write_suite(revised_dirty))
+        missing = copy.deepcopy(current)
+        missing.pop("dataset_revision")
+        with self.assertRaisesRegex(ValueError, "dataset_revision"):
+            suite.validate_suite(missing)
+        with self.assertRaisesRegex(ValueError, "unsupported scenario schema"):
+            suite.validate_suite(dict(current, schema_version=1))
+        for revision in (1, 12):
+            changed = copy.deepcopy(current)
+            changed["dataset_revision"] = revision
+            next(s for s in changed["scenarios"] if s["id"] == "zh-git-commit")["fixture"] = "dirty-git"
+            with self.assertRaisesRegex(ValueError, "required facts"):
+                suite.validate_suite(changed)
 
         revision_four = copy.deepcopy(current)
         revision_four["dataset_revision"] = 4
@@ -312,24 +312,6 @@ class DatasetRevisionTests(ProjectWorkCase):
             invalid = dict(current, dataset_revision=revision)
             with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "dataset_revision"):
                 suite.load_suite(self.write_suite(invalid))
-
-    def test_historical_schema_one_suite_stays_byte_semantically_unchanged(self):
-        current = suite.load_suite(SCENARIO_PATH)
-        historical = {
-            "schema_version": 1,
-            "seeds": current["seeds"],
-            "timeout_s": current["timeout_s"],
-            "scenarios": [
-                {
-                    key: value for key, value in scenario.items()
-                    if key not in ("group", "expect", "completions")
-                }
-                for scenario in current["scenarios"][:10]
-            ],
-        }
-        loaded = suite.load_suite(self.write_suite(historical))
-        self.assertEqual(loaded, historical)
-        self.assertNotIn("dataset_revision", loaded)
 
 
 if __name__ == "__main__":

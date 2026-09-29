@@ -18,6 +18,7 @@ on:
           - regression
           - command-assist
           - smoke
+          - workflows
         default: regression
 
 concurrency:
@@ -50,15 +51,16 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
-          from eval import run
+          from eval import campaign
+          from eval.suite import load_suite
           name = os.environ["EVAL_SUITE"]
-          if name not in ("regression", "command-assist", "smoke"):
+          if name not in ("regression", "command-assist", "smoke", "workflows"):
               raise SystemExit("unknown evaluation suite")
-          suite = run.load_suite(run.HERE / "suites" / f"{name}.json")
+          suite = load_suite(name)
           # Reserve at least 90 minutes of the six-hour job for setup, fixtures and uploads.
           available_s = (360 - 90) * 60
           timeout_s = int(os.environ["EVAL_TRIAL_TIMEOUT_S"])
-          worst_case = run.validate_campaign_budget(suite, 2, timeout_s, available_s)
+          worst_case = campaign.validate_budget(suite, 2, timeout_s, available_s)
           print(f"Hosted trial timeout: {timeout_s}s; worst-case trial time: {worst_case / 60:g} minutes; "
                 "at least 90 minutes reserved for non-trial work.")
           PY
@@ -72,7 +74,7 @@ jobs:
           REQUESTED_SOURCE: ${{ inputs.source_revision }}
         run: |
           source_ref="${REQUESTED_REF:-main}"
-          source="$(python3 -c 'import os; from eval.run import resolve_source_revision; print(resolve_source_revision(os.environ.get("REQUESTED_REF") or "main", os.environ.get("REQUESTED_SOURCE") or ""))')"
+          source="$(python3 -c 'import os; from eval.runtime import resolve_source_revision; print(resolve_source_revision(os.environ.get("REQUESTED_REF") or "main", os.environ.get("REQUESTED_SOURCE") or ""))')"
           EVAL_SOURCE="$RUNNER_TEMP/nosh-evaluation-source"
           EVAL_ARTIFACTS="$GITHUB_WORKSPACE/target/evaluation-artifacts"
           {
@@ -102,7 +104,7 @@ jobs:
           key: evaluation-clean-source-release
       - name: evaluation harness tests (no model)
         timeout-minutes: 10
-        run: python3 -m unittest discover -s eval -v
+        run: python3 -m unittest eval.tests -v
       - name: build the pinned clean source
         timeout-minutes: 30
         working-directory: ${{ runner.temp }}/nosh-evaluation-source
@@ -166,8 +168,8 @@ jobs:
             const artifacts = new DefaultArtifactClient();
             const root = process.env.EVAL_ARTIFACTS;
             const log = fs.createWriteStream(path.join(root, 'campaign.log'));
-            const args = ['-n', '10', 'python3', '-u', '-m', 'eval.run',
-              '--suite', path.join('eval', 'suites', `${process.env.EVAL_SUITE}.json`),
+            const args = ['-n', '10', 'python3', '-u', '-m', 'eval',
+              '--suite', process.env.EVAL_SUITE,
               '--binary', process.env.EVAL_BINARY,
               '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
               '--build-info', path.join(root, 'build-info.json'),
@@ -225,7 +227,8 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
-          from eval import fixtures, report, run
+          from eval import campaign, fixtures, report, runtime
+          from eval.suite import load_suite
           root = Path(os.environ["EVAL_ARTIFACTS"])
           path = root / "campaign" / "report.json"
           data = json.loads(path.read_text(encoding="utf-8"))
@@ -233,18 +236,18 @@ jobs:
           raw_hashes = {name: fixtures.file_hash(path.parent / name) for name in ("report.json", "report.md")}
           revision = os.environ["GITHUB_SHA"]
           committed = {}
-          for file in run.harness_sources():
-              relative = file.relative_to(run.HERE).as_posix()
+          for file in runtime.harness_sources():
+              relative = file.relative_to(runtime.HERE).as_posix()
               text = subprocess.check_output(["git", "show", f"{revision}:eval/{relative}"]).decode("utf-8")
               committed[relative] = hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode()).hexdigest()
           if fixtures.digest(committed) != data["metadata"]["harness_content_sha256"]:
               raise SystemExit("harness source does not match its recorded commit")
           data["metadata"]["harness_revision"] = revision
           report.save(data, path.parent)
-          complete = run.campaign_complete(data, run.load_suite(run.HERE / "suites" / f"{os.environ['EVAL_SUITE']}.json"))
+          complete = campaign.is_complete(data, load_suite(os.environ["EVAL_SUITE"]))
           provenance = {
               "schema_version": 1, "complete": complete,
-              "dataset_revision": data["metadata"].get("dataset_revision", 1),
+              "dataset_revision": data["metadata"]["dataset_revision"],
               "source_revision": os.environ["EVAL_SOURCE_REVISION"],
               "source_ref": os.environ["EVAL_SOURCE_REF"], "harness_revision": revision,
               "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",

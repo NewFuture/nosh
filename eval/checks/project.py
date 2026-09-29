@@ -3,13 +3,12 @@
 from __future__ import annotations
 from pathlib import Path
 import re
-import subprocess
-from .. import driver, fixtures
+from .. import driver
 from ..approval import PROJECT_POLICIES, command_groups, project_actions, shell_parts
-from ..fixtures import artifact, protected_files
-from ..suite import PROJECT_CHECKS
-from .common import HISTORY_ALIASES, mentioned_files, response_prose
-from .experience import clarification_request, history_prose
+from ..fixtures import protected_files
+from .common import has_affirmative_match, mentioned_files, response_prose
+from .experience import clarification_request
+from .git import git_judgment
 
 
 VERSION_FLAGS = {
@@ -20,20 +19,6 @@ VERSION_FLAGS = {
 
 
 VERSION_ALIASES = {"cargo": r"cargo", "node": r"node(?:\.js)?", "python3": r"python3?"}
-
-
-def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) -> dict:
-    kind = scenario["check"]
-    state = {"files": after, "cwd": result.pwd}
-    if kind in PROJECT_CHECKS:
-        state["files"] = protected_files(after, kind)
-        state["artifacts"] = sorted({
-            re.sub(r"(?<=eval_math-)[0-9a-f]+", "<hash>", name)
-            for name, item in after.items() if artifact(name, item, kind)
-        })
-        if kind in ("git-diff", "git-commit", "recent-history"):
-            state["git"] = fixtures.git_state(root)
-    return state
 
 
 def version_queries(command: str, root: Path, facts: dict) -> set[str]:
@@ -181,50 +166,6 @@ def completed_commands(evidence: dict, root: Path, facts: dict, action: str, aft
     return matches
 
 
-def change_entries(answer: str) -> dict[str, list[dict]]:
-    entries = {"maths.py": [], "README.md": []}
-    scope = None
-    current = None
-    negative = r"\bunstaged\b|not\s+(?:yet\s+)?staged|未(?:被|加入)?暂存(?:区)?|尚未暂存|没有暂存|不在暂存区"
-    positive = r"\bstaged\b|已(?:经)?(?:加入)?暂存|暂存区"
-    filenames = r"(?<![\w.-])(?:maths\.py|README\.md)(?![\w.-])"
-
-    def staging(text):
-        unstaged = bool(re.search(negative, text, re.I))
-        staged = bool(re.search(positive, re.sub(negative, "", text, flags=re.I), re.I))
-        return "contradictory" if staged and unstaged else "staged" if staged else "unstaged" if unstaged else None
-
-    clauses = re.split(r"\n|[;；。]|[,，](?=[^,，;；。\n]*" + filenames + ")",
-                       answer.replace("`", "").replace("**", ""))
-    for line in clauses:
-        matches = list(re.finditer(filenames, line))
-        if not matches:
-            label = staging(line)
-            heading = re.sub(negative + "|" + positive, "", line, flags=re.I)
-            heading = re.sub(r"\b(?:changes?|files?)\b|的|改动|修改|更改|变更|文件|[\s#*\-:：()（）]", "",
-                             heading, flags=re.I)
-            if label is not None:
-                if not heading:
-                    scope, current = label, None
-                elif current is not None:
-                    current["text"] += "\n" + line
-                    current["stage"] = "contradictory" if current["stage"] not in (None, label) else label
-            elif line.strip().endswith((":", "：")) or re.match(r"^\s*#", line):
-                scope, current = None, None
-            elif current is not None:
-                current["text"] += "\n" + line
-            continue
-        for i, match in enumerate(matches):
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
-            suffix = line[match.end():end]
-            prefix = line[:match.start()] if i == 0 else ""
-            label = staging(prefix + suffix)
-            current = {"stage": "contradictory" if label and scope and label != scope else label or scope,
-                       "text": prefix + line[match.start():end]}
-            entries[match[0]].append(current)
-    return entries
-
-
 def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result, evidence: dict) -> list[str]:
     kind = scenario["check"]
     reasons = []
@@ -264,118 +205,7 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
         if any(name.startswith("target/") for name in after) or (root / "target").is_symlink():
             reasons.append("build artifacts remain after cleanup")
     elif kind in ("git-diff", "git-commit", "recent-history"):
-        state = evidence["final_state"]["git"]
-        before = facts["git_before"]
-        if kind != "git-commit" and state != before:
-            reasons.append("read-only task changed git HEAD, index or worktree")
-        if kind == "git-commit":
-            if state["parents"] != [before["head"]] or state["commits"] != before["commits"] + 1:
-                reasons.append("expected exactly one new commit on the original HEAD")
-            if state["status"]:
-                reasons.append("git index/worktree is not clean after commit")
-            changes = fixtures.git(root, "diff", "--name-only", before["head"], "HEAD").splitlines()
-            if sorted(changes) != facts["changed_files"]:
-                reasons.append("commit contains the wrong changed-file set")
-            for name, item in facts["before"].items():
-                blob = subprocess.run(["git", "show", f"HEAD:{name}"], cwd=root,
-                                      env=fixtures.project_environment(root.parent / "home"),
-                                      capture_output=True, timeout=5)
-                import hashlib
-
-                if blob.returncode or hashlib.sha256(blob.stdout).hexdigest() != item["sha256"]:
-                    reasons.append(f"committed content differs from requested change: {name}")
-        elif kind == "git-diff":
-            entries = change_entries(answer)
-            for name, fact, stage in (("maths.py", r"subtract|减法|相减", "staged"),
-                                      ("README.md", r"unittest|测试", "unstaged")):
-                contradiction = (
-                    r"未修改|没有改动|无改动|\bunchanged\b|\bnot (?:changed|modified)\b|\bno changes?\b"
-                    r"|(?:未|没有|并未)(?:新增|添加|补充)|\b(?:did not add|not added)\b"
-                    r"|(?:\b(?:remove[ds]?|delete[ds]?)\b|(?<!未)(?<!没有)(?:删除|移除|删去|去掉))"
-                    rf"[^。！？;\n]*(?:{fact})"
-                    rf"|(?:{fact})[^。！？;\n]*(?:已删除|被删除|\bremoved\b|\bdeleted\b)"
-                )
-                if (not any(item["stage"] in (stage, None) and re.search(fact, item["text"], re.I) for item in entries[name])
-                        or any(item["stage"] not in (stage, None)
-                               or re.search(contradiction, item["text"], re.I)
-                               for item in entries[name])):
-                    reasons.append(f"missing, contradictory or incorrectly staged change: {name}")
-        else:
-            blocks = re.split(r"\n\s*\n|(?=^[ \t]*(?:[-*]|\d+[.)])[ \t]+)", answer, flags=re.M)
-            blocks = [line for block in blocks for line in (block.splitlines() if "|" in block else [block])]
-            order = []
-            listed = set()
-            listing = True
-            history = list(reversed(facts["history"]))
-            for position, raw in enumerate(blocks):
-                item = re.match(r"^[ \t]*(?:[-*]|\d+[.)])[ \t]+", raw)
-                block = raw[item.end():] if item else raw
-                block = block.replace("`", "").replace("**", "").strip()
-                if not block or re.fullmatch(r"[\s|:-]+", block):
-                    continue
-                if re.match(r"^(?:#{1,6}\s*)?(?:note|summary|next steps|注意|备注|说明|总结|建议)\s*[:：]", block, re.I):
-                    listing = False
-                    continue
-                if "|" in raw:
-                    if position + 1 < len(blocks) and re.fullmatch(r"[\s|:-]+", blocks[position + 1]):
-                        continue
-                    cells = [cell.strip().lower() for cell in block.strip("|").split("|")]
-                    if all(cell in {
-                        "#", "commit", "commits", "sha", "hash", "component", "subject", "message",
-                        "description", "feature", "提交", "哈希", "组件", "说明", "描述", "功能", "序号",
-                    } for cell in cells):
-                        continue
-                components = [i for i, (component, _) in enumerate(history) if re.search(rf"\b{component}\b", block, re.I)]
-                feature_matches = [i for i, (_, feature) in enumerate(history)
-                                   if re.search(HISTORY_ALIASES[feature], block, re.I)]
-                label = re.match(r"^\s*([a-zA-Z_-]+)\s*[:：]", block)
-                if label and label[1].lower() not in {c for c, _ in history} | {"note", "summary"}:
-                    reasons.append(f"unknown commit component: {label[1]}")
-                index = None
-                if len(components) == 1:
-                    index = components[0]
-                    if not re.search(HISTORY_ALIASES[history[index][1]], block, re.I):
-                        reasons.append(f"incorrect/unrecognized recent commit fact: {history[index][0]}")
-                        index = None
-                elif not components and len(feature_matches) == 1:
-                    index = feature_matches[0]
-                if index is not None:
-                    if item or "|" in raw:
-                        if index in listed:
-                            reasons.append(f"duplicate recent commit entry: {history[index][0]}")
-                        listed.add(index)
-                    if index not in order:
-                        order.append(index)
-                    listing = True
-                elif (item or "|" in raw) and listing:
-                    reasons.append(f"unrecognized recent commit entry: {block[:120]}")
-                elif block.endswith((":", "：")):
-                    listing = bool(re.search(r"提交|commits?|history", block, re.I))
-            if not order or order[0] != 0 or order != sorted(order):
-                reasons.append("recent history must identify the newest commit and keep newest-first order")
-            for sha in re.findall(r"\b[0-9a-f]{7,40}\b", answer):
-                if not any(commit.startswith(sha) for commit in facts["commit_ids"]):
-                    reasons.append(f"unknown commit hash: {sha}")
-            prose = history_prose(answer, facts)
-            for clause in re.split(r"[。！？!?；;\n，,]", prose):
-                counts = re.findall(r"(?<![\d.])(\d+)\s*(?:个|条|次)?\s*(?:提交|commits?\b|记录)", clause, re.I)
-                counts.extend(re.findall(
-                    r"(?:提交|commits?)\s*[（(]\s*(?:共|total(?:\s+of)?\s*:?)?\s*(\d+)\s*(?:个|条|次)?\s*[）)]",
-                    clause, re.I,
-                ))
-                displayed = bool(re.search(
-                    r"最近|最新|以下|列出|展示|\b(?:last|latest|recent|following|shown|listed)\b",
-                    clause, re.I,
-                ))
-                inventory = not displayed and bool(re.search(
-                    r"仓库|全部|所有|共|合计|总计|\b(?:repository|repo|total)\b|entire history", clause, re.I,
-                ))
-                expected_count = len(history) if inventory else len(order)
-                for count in set(map(int, counts)):
-                    if count > len(history) or (
-                        (inventory or displayed or clause.endswith((":", "："))) and count != expected_count
-                    ):
-                        reasons.append(f"incorrect recent commit count: {count}, expected {expected_count}")
+        reasons.extend(git_judgment(kind, answer, facts, root, evidence))
     elif kind == "versions":
         queried = set()
         for execution in evidence.get("executions") or []:
@@ -423,15 +253,40 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                 r"\s*(?:type\s+)?(?:&?str\b|string\b|字符串)", diagnosis, re.I,
             ):
                 reasons.append("answer reverses the compiler's expected i32 and actual string types")
+            if has_affirmative_match(diagnosis,
+                r"(?:要求|预期|期望)(?:的)?(?:类型)?(?:是|为)?\s*(?:&?str\b|string\b|字符串)"
+                r"|(?:将|把)\s*(?:i32\s*)?整数\s*(?:赋(?:值)?给|赋予|放入)\s*字符串"
+                r"|\b(?:expected?|expects?|requires?)\s+(?:an?\s+)?(?:&?str\b|string\b)",
+            ):
+                reasons.append("answer reverses the expected integer and actual string")
             remedy = r"改为|改成|替换|转换|解析|parse|replace|convert"
         elif kind == "test-failure":
             if not all(re.search(p, answer, re.I) for p in (r"maths\.py|add", r"减|subtract|a\s*-\s*b", r"加|addition|a\s*\+\s*b")):
                 reasons.append("answer does not explain subtraction instead of addition")
+            if has_affirmative_match(answer,
+                r"(?:改为|改成|换成|替换为)\s*(?:减法|a\s*-\s*b)"
+                r"|\b(?:replace|change|convert)\b[^。！？!?；;\n]{0,60}"
+                r"(?:addition|a\s*\+\s*b)\s+(?:with|to|into)\s+(?:subtraction|a\s*-\s*b)"
+                r"|(?:测试|预期)\s*(?:要求|应为|是)\s*(?:减法|a\s*-\s*b)"
+                r"|\bexpect(?:ed|s)?\s+subtraction\b"
+            ):
+                reasons.append("answer reverses the required addition and erroneous subtraction")
             remedy = r"改为|改成|修改|修正|替换|replace|change|fix"
         else:
             if str(facts["listener"]["port"]) not in answer or not re.search(r"占用|冲突|already in use|bind", answer, re.I):
                 reasons.append("answer does not explain the occupied port")
-            remedy = r"换|更改|修改|其他端口|另.*端口|空闲|change|another port|free port|停止|关闭|stop"
-        if not re.search(remedy, answer, re.I):
+            if re.search(
+                r"(?:并未|没有|未|并非|不是)\s*(?:被)?\s*(?:占用|冲突)"
+                r"|\b(?:not|isn't|is not)\s+(?:already\s+)?(?:in use|occupied|bound)", answer, re.I,
+            ):
+                reasons.append("answer denies the observed address conflict")
+            remedy = (
+                r"(?:换|更改|修改|改用|选择|使用)[^。！？!?；;\n]{0,20}(?:端口|port)"
+                r"|其他端口|另[^。！？!?；;\n]{0,10}端口|空闲端口"
+                r"|\b(?:change[^.?!;\n]{0,20}port|another port|free port)\b"
+                r"|(?:停止|关闭|结束)[^。！？!?；;\n]{0,20}(?:进程|服务|监听)"
+                r"|\bstop\s+(?:(?:the|existing|listening)\s+)*(?:process|server|service|listener)\b"
+            )
+        if not has_affirmative_match(answer, remedy):
             reasons.append("answer provides no recognized repair action")
     return reasons

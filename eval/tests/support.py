@@ -1,8 +1,8 @@
 """Shared evaluation scenarios and execution evidence fixtures."""
 
-from eval import run
+from eval import runtime, suite as suite_api
 
-SUITE = run.load_suite(run.HERE / "suites" / "regression.json")
+SUITE = suite_api.load_suite(runtime.HERE / "suites" / "regression.json")
 
 
 SCENARIOS = {s["id"]: s for s in SUITE["scenarios"]}

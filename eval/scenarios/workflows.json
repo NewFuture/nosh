@@ -1,0 +1,89 @@
+[
+  {
+    "id": "next-review-after-tests",
+    "title": "Suggest reviewing changes after successful tests and explicit project guidance",
+    "mode": "repl",
+    "fixture": "review-workflow",
+    "inputs": ["python3 -m unittest discover -s tests -v"],
+    "completions": [{"kind": "assist"}],
+    "assistance": {"intent": "next", "result": "command", "automatic": true},
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-next-review",
+    "expect": {"max_steps": 2, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
+  },
+  {
+    "id": "fix-partially-completed-archive",
+    "title": "Resume archiving after a move succeeded but the output directory was missing",
+    "mode": "repl",
+    "fixture": "partial-archive",
+    "inputs": ["mv incoming/report.csv archive/report.csv && tar -czf backups/reports.tar.gz archive"],
+    "completions": [{"kind": "assist"}],
+    "capture_output": "last",
+    "assistance": {"intent": "fix", "result": "command", "automatic": true},
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-resume-archive",
+    "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
+  },
+  {
+    "id": "respect-rename-denial",
+    "title": "Respect a declined rename and report that it was not performed",
+    "mode": "repl",
+    "fixture": "rename",
+    "inputs": ["# rename every .txt file in this directory to .md"],
+    "completions": [{"kind": "agent"}],
+    "group": "expanded",
+    "approval": "deny",
+    "check": "denied-rename",
+    "expect": {"max_steps": 4, "max_confirmations": 1, "response_language": "any", "final_question": "forbid"}
+  },
+  {
+    "id": "piped-config-lookup",
+    "title": "Resolve an incident profile through repository configuration using read-only tools",
+    "mode": "agent",
+    "fixture": "config-lookup",
+    "input": "根据附件中的 active profile 查询当前项目配置，报告存储 endpoint 和负责团队，并说明依据。没有匹配配置就直接说明未找到，不要猜测或修改文件。",
+    "stdin_file": "incident.txt",
+    "group": "expanded",
+    "approval": "deny",
+    "check": "config-lookup",
+    "expect": {"max_steps": 5, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
+  },
+  {
+    "id": "piped-config-missing",
+    "title": "Report an unknown incident profile without substituting another environment",
+    "mode": "agent",
+    "fixture": "config-missing",
+    "input": "根据附件中的 active profile 查询当前项目配置，报告存储 endpoint 和负责团队，并说明依据。没有匹配配置就直接说明未找到，不要猜测或修改文件。",
+    "stdin_file": "incident.txt",
+    "group": "expanded",
+    "approval": "deny",
+    "check": "config-missing",
+    "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "zh", "final_question": "forbid"}
+  },
+  {
+    "id": "cwd-follow-up",
+    "title": "Use the changed working directory in a later independent request",
+    "mode": "repl",
+    "fixture": "big",
+    "inputs": ["# change the current directory to data", "# list the files here"],
+    "completions": [{"kind": "agent"}, {"kind": "agent"}],
+    "group": "expanded",
+    "approval": "cwd",
+    "check": "cwd-follow-up",
+    "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "any", "final_question": "forbid"}
+  },
+  {
+    "id": "generate-natural-clarification",
+    "title": "Notice unspecified archive operands without being told to ask a question",
+    "mode": "suggest",
+    "fixture": "logs",
+    "input": "Archive that directory and overwrite the previous backup.",
+    "assistance": {"intent": "generate", "result": "clarify", "automatic": false},
+    "group": "command-assist",
+    "approval": "deny",
+    "check": "assist-clarify",
+    "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
+  }
+]

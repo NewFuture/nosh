@@ -8,7 +8,7 @@ import tempfile
 import tomllib
 import unittest
 
-from eval import checks, driver, fixtures, run, suite
+from eval import checks, driver, fixtures, runtime, suite
 
 
 def capture_trial(base, scenario):
@@ -49,7 +49,7 @@ class CaptureEvaluationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.data = suite.load_suite(run.HERE / "suites" / "regression.json")
+        self.data = suite.load_suite(runtime.HERE / "suites" / "regression.json")
         self.scenario = next(s for s in self.data["scenarios"] if s["check"] == "captured-citation")
 
     def test_binary_defaults_and_explicit_capture_overrides_are_distinct(self):
@@ -59,7 +59,7 @@ class CaptureEvaluationTests(unittest.TestCase):
         for mode in ("off", "last", None):
             home = self.base / (mode or "default")
             home.mkdir()
-            env = run.environment(home, 1, None, capture_output=mode)
+            env = runtime.environment(home, 1, None, capture_output=mode)
             config = tomllib.loads((Path(env["NOSH_HOME"]) / "config.toml").read_text())
             self.assertEqual(config.get("shell", {}).get("capture_output"), mode)
             if mode is None:

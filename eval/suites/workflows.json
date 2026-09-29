@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "dataset_revision": 13,
+  "seeds": [0, 1, 2, 3, 4],
+  "timeout_s": 120,
+  "scenarios": [
+    "next-review-after-tests",
+    "fix-partially-completed-archive",
+    "respect-rename-denial",
+    "piped-config-lookup",
+    "piped-config-missing",
+    "cwd-follow-up",
+    "generate-natural-clarification",
+    "generate-archive"
+  ],
+  "catalogs": [
+    "../scenarios/workflows.json",
+    "../scenarios/command_assist.json"
+  ]
+}
