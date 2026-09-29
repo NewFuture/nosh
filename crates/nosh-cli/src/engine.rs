@@ -209,11 +209,19 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
     let engine =
         engine.map_err(|e| format!("failed to load {}: {e}", resolved.weights.display()))?;
     let info = engine.info();
+    if !background && info.device_selection.requested == nosh_llm::InferenceDevice::Auto {
+        eprintln!(
+            "nosh: device auto -> {}: {}",
+            info.device, info.device_selection.reason
+        );
+    }
     let description = format!(
-        "{} · {} · {} · ctx {} · {} threads · loaded in {:.1}s",
+        "{} · {} · {} ({}: {}) · ctx {} · {} threads · loaded in {:.1}s",
         resolved.entry.display,
         resolved.weights.display(),
         info.device,
+        info.device_selection.requested,
+        info.device_selection.reason,
         info.context,
         info.threads,
         info.load_secs
@@ -222,6 +230,10 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
     let metadata = serde_json::json!({
         "model": resolved.entry.id,
         "device": info.device.to_string(),
+        "device_requested": info.device_selection.requested.to_string(),
+        "device_reason": info.device_selection.reason,
+        "cuda_required_bytes": info.device_selection.required_cuda_bytes,
+        "cuda_free_bytes": info.device_selection.free_cuda_bytes,
         "cuda_compiled": cfg!(feature = "cuda"),
         "context_length": info.context,
         "threads": info.threads,

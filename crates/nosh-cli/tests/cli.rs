@@ -178,7 +178,7 @@ fn cpu_build_reports_device_and_rejects_cuda_without_fallback() {
     };
     let out = doctor().output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("cpu · CUDA compiled: false"), "{stderr}");
+    assert!(stderr.contains("auto · CUDA compiled: false"), "{stderr}");
     std::fs::write(home.join("config.toml"), "[model]\ndevice = 'cuda'\n").unwrap();
     let out = doctor().output().unwrap();
     assert_eq!(out.status.code(), Some(1));

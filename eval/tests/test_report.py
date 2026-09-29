@@ -42,6 +42,16 @@ class ReportTests(unittest.TestCase):
         gpu["metadata"]["settings"]["device"] = "cuda:0"
         self.assertIn("Inference device: `cuda:0`", report.markdown(gpu))
         self.assertTrue(any("settings differs" in warning for warning in report.compare(gpu, cpu)["warnings"]))
+        cpu["metadata"]["settings"]["device"] = "auto"
+        gpu["metadata"]["settings"]["device"] = "auto"
+        cpu["trials"][0]["engines"] = [{"device": "cpu"}]
+        gpu["trials"][0]["engines"] = [{"device": "cuda:0"}]
+        self.assertTrue(any("observed devices differ" in warning for warning in report.compare(gpu, cpu)["warnings"]))
+        for engines in ("cuda", [None], [{"device": "auto"}], [{"device": 0}]):
+            invalid = copy.deepcopy(cpu)
+            invalid["trials"][0]["engines"] = engines
+            with self.assertRaisesRegex(ValueError, "invalid observed devices"):
+                report.validate(invalid)
 
     def test_paired_comparison_and_incompatibility(self):
         before = self.sample()

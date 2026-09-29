@@ -57,7 +57,7 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 
 默认输出为 `eval/results/<run-id>/report.json` 和 `report.md`。`--output` 必须是尚不存在的目录；`--label` 只是名称，不证明构建来源。默认推理线程 8、Rayon 1；单次试验期限来自所选 suite：回归 240 秒，专项和 smoke 120 秒。可用 `--threads`、`--timeout` 调整。模型和工具不会自动安装。
 
-`--device` 默认 `cpu`，可选 `cuda`／`cuda:N`；`auto` 仍是 CPU。评估会将设备写入**每个隔离 trial 的配置**，不读取宿主的 nosh 配置。CUDA 试验只额外继承 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER` 和 `LD_LIBRARY_PATH`，并在 settings 中记录；不调整用户的 GPU 占用或驱动。原生 engine trace 的实际设备必须与请求一致，否则是观测错误而非通过。旧版 native-v1 没有 device 字段，只允许作为 CPU 证据；新报告保留每个 engine 的元数据。CPU/GPU settings 不同会触发非受控对照警告，GPU smoke 不应混入历史 CPU 基线。GPU 型号、驱动、显存／利用率、构建 flags 和并发负载应另存实测来源；RSS 不含 GPU 显存。
+`--device` 默认仍显式 `cpu`，不随生产程序默认 `auto` 改变历史基线。可选 `cuda`／`cuda:N` 或 `auto`：自动模式由引擎按构建与可用显存选择，并必须原生记录具体的 `device`、`device_requested = "auto"` 和非空 `device_reason`；旧二进制没有这些观测时拒绝 auto 评估。评估会将设备写入**每个隔离 trial 的配置**，不读取宿主的 nosh 配置。CUDA／auto 试验只额外继承 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER` 和 `LD_LIBRARY_PATH`，并在 settings 中记录；不调整用户的 GPU 占用或驱动。显式 CPU/CUDA 的实际设备必须与请求一致，否则是观测错误而非通过。旧版 native-v1 没有 device 字段，只允许作为 CPU 证据；新报告保留每个 engine 的元数据。CPU/GPU settings 或逐 trial 实际设备不同都会触发非受控对照警告，auto 可能在不同 trial 选择不同设备，不能混成固定 GPU/CPU 基线。GPU 型号、驱动、显存／利用率、构建 flags 和并发负载应另存实测来源；RSS 不含 GPU 显存。
 
 真实运行退出码：**0** 全部通过且重复结果一致，**1** 判定失败/不一致，**2** 基础设施或观测错误，**130** 中断。`--plan` 的 0 只表示计划有效，不代表模型通过。失败、超时和未完成试验不从计划分母中消失。
 

@@ -52,6 +52,13 @@ def validate(report: dict) -> None:
             raise ValueError(f"trial was not in the declared plan: {key}")
         if trial.get("status") not in ("pass", "fail", "error"):
             raise ValueError(f"invalid trial status: {key}")
+        engines = trial.get("engines")
+        if engines is not None and (not isinstance(engines, list) or any(
+                not isinstance(engine, dict)
+                or ("device" in engine and (not isinstance(engine["device"], str)
+                    or not re.fullmatch(r"cpu|cuda:(?:0|[1-9][0-9]*)", engine["device"])))
+                for engine in engines)):
+            raise ValueError(f"invalid observed devices: {key}")
         metrics = trial.get("metrics")
         if not isinstance(metrics, dict):
             raise ValueError(f"missing metrics: {key}")
@@ -169,6 +176,12 @@ def compare(current: dict, previous: dict) -> dict:
         })
     if any(change["sampling_changed"] for change in changes):
         warnings.append("observed sampling parameters differ")
+    def observed_devices(trial):
+        engines = trial.get("engines")
+        return [engine.get("device", "cpu") for engine in engines] if engines is not None else None
+    if any(observed_devices(trial) != observed_devices(old[trial_key(trial)])
+           for trial in current["trials"] if trial_key(trial) in old):
+        warnings.append("observed devices differ; auto-selected backends may not be a controlled regression")
     return {
         "previous_run": previous["metadata"].get("run_id"),
         "warnings": warnings,

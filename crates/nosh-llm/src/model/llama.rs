@@ -265,6 +265,40 @@ fn prepack_weights(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
 }
 
 impl LlamaConfig {
+    /// Conservative f16-KV budget, including non-FlashAttention prefill temporaries.
+    pub fn cuda_memory_bytes(&self, weights: u64, context: usize, chunk: usize) -> Result<u64> {
+        let overflow = || candle_core::Error::Msg("CUDA memory estimate overflow".into());
+        let product = |factors: &[u64]| {
+            factors
+                .iter()
+                .try_fold(1u64, |v, n| v.checked_mul(*n).ok_or_else(overflow))
+        };
+        let context = context.max(16) as u64;
+        let chunk = (chunk.max(1) as u64).min(context);
+        // Two copies allow for KV append/rewind and f32 attention reads.
+        let kv = product(&[
+            2,
+            2,
+            2,
+            self.n_layer as u64,
+            self.n_kv_head as u64,
+            self.head_dim as u64,
+            context,
+        ])?;
+        let scores = product(&[3, 4, self.n_head as u64, chunk, context])?;
+        let hidden = product(&[8, 4, chunk, self.hidden as u64])?;
+        let ffn = product(&[4, 4, chunk, self.ffn as u64])?;
+        let rope = product(&[8, context, self.head_dim as u64])?;
+        let logits = product(&[4, 4, self.vocab as u64])?;
+        let subtotal = [weights, kv, scores, hidden, ffn, rope, logits, 512 << 20]
+            .into_iter()
+            .try_fold(0u64, |a, b| a.checked_add(b).ok_or_else(overflow))?;
+        // Allocator/library overhead plus spare memory for other GPU users.
+        subtotal
+            .checked_add((subtotal / 10).max(512 << 20))
+            .ok_or_else(overflow)
+    }
+
     /// Reads and checks the hyper-parameters; malformed values (zero or
     /// non-dividing head counts, inconsistent sizes) are load errors, checked
     /// before anything divides by them.
@@ -321,6 +355,36 @@ impl LlamaConfig {
             native_context,
         })
     }
+}
+
+/// Reads metadata only, not the model's tensors. Invalid models remain errors.
+pub fn cuda_memory_estimate(path: &Path, context: usize, chunk: usize) -> Result<u64> {
+    let mut file = File::open(path)?;
+    let mut weights = file.metadata()?.len();
+    let content = gguf_file::Content::read(&mut file)?;
+    let cfg = LlamaConfig::from_gguf(&content)?;
+    let enabled = |key| std::env::var(key).is_ok_and(|v| !v.is_empty() && v != "0");
+    let expanded_bytes = if enabled("CANDLE_DEQUANTIZE_ALL") {
+        Some(4u64)
+    } else if enabled("CANDLE_DEQUANTIZE_ALL_F16") {
+        Some(2u64)
+    } else {
+        None
+    };
+    if let Some(element_bytes) = expanded_bytes {
+        let overflow = || candle_core::Error::Msg("CUDA expanded-weight estimate overflow".into());
+        let expanded = content
+            .tensor_infos
+            .values()
+            .try_fold(0u64, |sum, tensor| {
+                let bytes = tensor.shape.dims().iter().try_fold(element_bytes, |n, d| {
+                    n.checked_mul(*d as u64).ok_or_else(overflow)
+                })?;
+                sum.checked_add(bytes).ok_or_else(overflow)
+            })?;
+        weights = weights.max(expanded);
+    }
+    cfg.cuda_memory_bytes(weights, context, chunk)
 }
 
 impl Llama {
@@ -721,6 +785,50 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let err = r.err().expect("load fails").to_string();
         assert!(err.contains("malformed GGUF"), "{err}");
+    }
+
+    #[test]
+    fn cuda_budget_covers_context_workspaces_and_overflow() {
+        let bytes = header(8, 2, None);
+        let content = gguf_file::Content::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let mut cfg = LlamaConfig::from_gguf(&content).unwrap();
+        cfg.n_layer = 42;
+        cfg.n_head = 24;
+        cfg.n_kv_head = 2;
+        cfg.head_dim = 64;
+        cfg.hidden = 1536;
+        cfg.ffn = 8960;
+        let weights = 1_561_318_368;
+        let need = cfg.cuda_memory_bytes(weights, 8192, 512).unwrap();
+        // Real RTX4090 measurements reached ~3.43 GiB; leave meaningful headroom.
+        assert!(need >= 4 * (1 << 30));
+        assert!(need < 6 * (1 << 30));
+        assert!(cfg.cuda_memory_bytes(weights, 32768, 512).unwrap() > need);
+        assert!(cfg.cuda_memory_bytes(weights, 8192, 256).unwrap() < need);
+        assert!(cfg.cuda_memory_bytes(weights * 2, 8192, 512).unwrap() > need);
+        assert!(cfg.cuda_memory_bytes(u64::MAX, 8192, 512).is_err());
+        assert_eq!(
+            cfg.cuda_memory_bytes(weights, 0, 0).unwrap(),
+            cfg.cuda_memory_bytes(weights, 16, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn cuda_sizing_reports_model_errors_not_cpu_fallbacks() {
+        let path =
+            std::env::temp_dir().join(format!("nosh-bad-cuda-budget-{}.gguf", std::process::id()));
+        std::fs::write(&path, header(0, 0, None)).unwrap();
+        let error = cuda_memory_estimate(&path, 8192, 512)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("malformed GGUF"), "{error}");
+        #[cfg(feature = "cuda")]
+        assert!(
+            crate::InferenceDevice::Auto
+                .select(&path, 8192, 512, KvDtype::F16)
+                .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

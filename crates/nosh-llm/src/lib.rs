@@ -15,7 +15,7 @@ pub mod template;
 pub mod tokenizer;
 pub mod toolcall;
 
-pub use device::InferenceDevice;
+pub use device::{DeviceSelection, InferenceDevice};
 pub use engine::{
     CallError, CallErrorKind, CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId,
     SessionSpec, StepOutcome, StopReason, ToolCall, ToolChoice, ToolSpec, Usage,

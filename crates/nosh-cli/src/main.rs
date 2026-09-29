@@ -75,7 +75,7 @@ struct Cli {
 
 #[derive(Debug, clap::Args)]
 struct GlobalOpts {
-    /// Inference device: cpu (default), auto (CPU), cuda or cuda:N.
+    /// Inference device: auto (default; available CUDA memory), cpu, cuda or cuda:N.
     #[arg(long, global = true, value_name = "DEVICE")]
     device: Option<nosh_llm::InferenceDevice>,
     /// Never touch the network.
@@ -114,7 +114,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: model_cmd::ModelCmd,
     },
-    /// Check CPU, memory, model, download sources and configuration.
+    /// Check inference device selection, CPU, memory, model, sources and configuration.
     Doctor,
     /// Developer utilities.
     Debug {
@@ -368,6 +368,10 @@ mod tests {
         use nosh_llm::InferenceDevice;
         let cfg = config::Config::parse("[model]\ndevice = 'cuda:1'");
         let plain = Cli::try_parse_from(["nosh"]).unwrap();
+        assert_eq!(
+            engine_setup(&plain, &config::Config::default()).device,
+            Ok(InferenceDevice::Auto)
+        );
         assert_eq!(
             engine_setup(&plain, &cfg).device,
             Ok(InferenceDevice::Cuda(1))

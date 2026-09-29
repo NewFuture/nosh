@@ -103,6 +103,10 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
             };
             let info = engine.info().clone();
             eprintln!(
+                "[device {} -> {}: {}]",
+                info.device_selection.requested, info.device, info.device_selection.reason,
+            );
+            eprintln!(
                 "[{} | device {} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
                 info.model_id,
                 info.device,

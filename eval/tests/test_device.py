@@ -15,7 +15,7 @@ class DeviceTests(unittest.TestCase):
     def test_selection_is_explicit_and_cpu_is_default(self):
         self.assertEqual(campaign.arguments([]).device, "cpu")
         self.assertEqual(campaign.arguments(["--device", "cuda"]).device, "cuda:0")
-        self.assertEqual(runtime.inference_device("auto"), "cpu")
+        self.assertEqual(runtime.inference_device("auto"), "auto")
         self.assertEqual(runtime.inference_device("cuda:01"), "cuda:1")
         for value in ("", "metal", "cuda:-1", "cuda:+1", "cuda:", "cuda:2147483648"):
             with self.assertRaises(ValueError):
@@ -26,7 +26,7 @@ class DeviceTests(unittest.TestCase):
             "CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "LD_LIBRARY_PATH": "/cuda/lib64", "NOSH_DEVICE": "cuda",
         }):
-            for device in ("cpu", "cuda", "cuda:1"):
+            for device in ("cpu", "auto", "cuda", "cuda:1"):
                 home = Path(temporary) / device.replace(":", "-")
                 home.mkdir()
                 env = runtime.environment(home, 4, None, device=device)
@@ -56,6 +56,8 @@ class DeviceTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             save()
             observations.observe(result, scenario, trace, seed=0)
+            with self.assertRaisesRegex(ValueError, "actual device and selection reason"):
+                observations.observe(result, scenario, trace, seed=0, expected_device="auto")
             for actual in (None, "cpu", "cuda:1"):
                 if actual is not None:
                     events[0]["info"]["device"] = actual
@@ -68,3 +70,18 @@ class DeviceTests(unittest.TestCase):
             self.assertEqual(observed["engines"][0]["device"], "cuda:0")
             with self.assertRaisesRegex(ValueError, "device mismatch"):
                 observations.observe(result, scenario, trace, seed=0)
+            for actual in ("cpu", "cuda:0", "cuda:1"):
+                events[0]["info"].update(device=actual, device_requested="auto",
+                                         device_reason="available memory decision")
+                save()
+                observed = observations.observe(result, scenario, trace, seed=0, expected_device="auto")
+                self.assertEqual(observed["engines"][0]["device"], actual)
+            for field, value in (("device", "auto"), ("device", "cuda"), ("device", "cuda:x"),
+                                 ("device", "cuda:-1"), ("device_reason", ""),
+                                 ("device_reason", None), ("device_requested", "cpu")):
+                original = events[0]["info"][field]
+                events[0]["info"][field] = value
+                save()
+                with self.assertRaises(ValueError):
+                    observations.observe(result, scenario, trace, seed=0, expected_device="auto")
+                events[0]["info"][field] = original

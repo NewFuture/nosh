@@ -97,7 +97,7 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 | 领域 | 当前 | 规划或限制 |
 |---|---|---|
 | 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
-| 推理 | CPU 默认、可选单卡 CUDA、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、CPU 按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、Metal、多卡与资源自适应未实现 |
+| 推理 | 默认 auto 按构建／可用显存选择 CPU 或单卡 CUDA、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、CPU 按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、Metal、多卡推理与运行中设备迁移未实现 |
 | 工具与权限 | Agent 三个工具（run_command/read_file/grep）；CommandAssist 使用查询工具与 finish，不执行目标；confirm/auto/yolo，默认 auto；结构化用户规则、有界会话授权和模式标识 | `write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
 | 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
@@ -1078,7 +1078,7 @@ conversation_idle_minutes = 30 # 1–1440
 id = "minicpm5-2b:q4_k_m"
 # path = "/opt/models/MiniCPM5-2B-Q4_K_M.gguf"  # 可选；tokenizer 查找与校验见 §8.1
 context_length = 8192         # 1024–32768，不等于模型原生 128K 上限
-device = "cpu"                # cpu | auto（保持 CPU）| cuda | cuda:N；CUDA 需显式 feature 构建
+device = "auto"               # auto（按可用显存选择）| cpu | cuda | cuda:N；CUDA 需显式 feature 构建
 thinking = "off"              # off | on
 
 [download]
@@ -1168,7 +1168,7 @@ nosh/
 - `nosh-remote`：远程协议、会话宿主和客户端；系统 SSH 优先，`russh` 作为备用方案。
 - `xtask`：registry 生成、基准、分发；shell 集成脚本随 §9.2 交付。
 - 内容搜索已使用 `grep-regex`、`grep-searcher` 与 `ignore`。需要时再引入 `portable-pty/interprocess`、`similar`、`landlock/seccompiler`，不视为当前依赖。
-- 可选 `cuda` feature 使用 NVIDIA toolkit 与运行库，不进入默认 CPU 构建。单卡路径保留量化权重，Candle 完成设备端 embedding、RoPE、GQA 和前馈，GPU KV 用张量拼接并支持前缀回退；CPU prepack 与原有 attention 不变。Metal 尚未实现。构建、逻辑设备编号和验证命令见 [README](../README.md#可选-nvidia-cuda-推理)；评估需显式 `--device`，不继承宿主模型配置。
+- 可选 `cuda` feature 使用 NVIDIA toolkit 与运行库，不进入默认 CPU-only 构建。默认设备 `auto` 根据 GGUF/context/prefill 的保守显存预算，选择空闲显存最多的合格 GPU，否则使用 CPU 并报告原因；显式设备优先，不自动迁移或在模型加载错误后换后端。单卡路径保留量化权重，Candle 完成设备端 embedding、RoPE、GQA 和前馈，GPU KV 用张量拼接并支持前缀回退；CPU prepack 与原有 attention 不变。Metal 尚未实现。构建、逻辑设备编号和验证命令见 [README](../README.md#可选-nvidia-cuda-推理)；评估默认仍显式 CPU，`--device auto` 必须观测实际设备与原因，不继承宿主模型配置。
 
 | 目标产物 | 平台 | 说明 |
 |---|---|---|

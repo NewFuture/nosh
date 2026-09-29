@@ -22,7 +22,7 @@ use crate::sampling::Sampler;
 use crate::template;
 use crate::tokenizer::Tok;
 use crate::toolcall::{Parsed, StreamParser};
-use crate::{InferenceDevice, LlmError};
+use crate::{DeviceSelection, InferenceDevice, LlmError};
 
 pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
@@ -53,9 +53,24 @@ impl Default for LocalEngineOptions {
     }
 }
 
+impl LocalEngineOptions {
+    pub fn select_device(
+        &self,
+        model: &nosh_hub::ResolvedModel,
+    ) -> Result<(candle_core::Device, DeviceSelection), LlmError> {
+        self.device.select(
+            &model.weights,
+            self.context_length,
+            self.prefill_chunk,
+            self.kv_dtype,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineInfo {
     pub device: InferenceDevice,
+    pub device_selection: DeviceSelection,
     pub model_id: String,
     pub arch: String,
     pub layers: usize,
@@ -93,12 +108,13 @@ impl LocalChatEngine {
             kv_dtype: opts.kv_dtype,
             prepack_weights: opts.prepack_weights,
         };
-        if matches!(opts.device, InferenceDevice::Cuda(_)) {
-            load.validate_cuda()?;
-        }
-        let device = opts.device.open()?;
+        let (device, device_selection) = opts.select_device(model)?;
         let mut tok = Tok::load(&model.tokenizer)?;
-        let llama = Llama::load(&model.weights, opts.context_length, load, &device)?;
+        let llama = Llama::load(&model.weights, opts.context_length, load, &device)
+            .map_err(|error| error.context(format!(
+                "loading on {} (requested {}): {}; device memory is not reserved; no automatic retry on another backend",
+                device_selection.actual, device_selection.requested, device_selection.reason,
+            )))?;
         let cfg = llama.config().clone();
         if cfg.arch != model.entry.arch {
             return Err(LlmError::Config(format!(
@@ -123,7 +139,8 @@ impl LocalChatEngine {
             ..SamplingParams::default()
         };
         let info = EngineInfo {
-            device: opts.device,
+            device: device_selection.actual,
+            device_selection,
             model_id: model.entry.id.clone(),
             arch: cfg.arch.clone(),
             layers: cfg.n_layer,

@@ -57,7 +57,7 @@ impl Default for Config {
             model_id: None,
             model_path: None,
             context_length: 8192,
-            model_device: Ok(nosh_llm::InferenceDevice::Cpu),
+            model_device: Ok(nosh_llm::InferenceDevice::Auto),
             thinking: false,
             download_auto: true,
             source_selection: SourceSelection::Auto,
@@ -404,11 +404,11 @@ mod tests {
     fn device_requests_are_preserved_or_rejected_never_silently_cpu() {
         assert_eq!(
             Config::default().model_device,
-            Ok(nosh_llm::InferenceDevice::Cpu)
+            Ok(nosh_llm::InferenceDevice::Auto)
         );
         for (text, expected) in [
             ("cpu", nosh_llm::InferenceDevice::Cpu),
-            ("auto", nosh_llm::InferenceDevice::Cpu),
+            ("auto", nosh_llm::InferenceDevice::Auto),
             ("cuda", nosh_llm::InferenceDevice::Cuda(0)),
             ("cuda:1", nosh_llm::InferenceDevice::Cuda(1)),
         ] {

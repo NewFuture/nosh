@@ -239,7 +239,13 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         for info in engines:
             # Historical native-v1 traces omitted device and were CPU-only.
             actual = info.get("device", "cpu")
-            if actual != expected_device:
+            if expected_device == "auto":
+                if (info.get("device_requested") != "auto" or "device" not in info
+                        or actual == "auto" or inference_device(actual) != actual
+                        or not isinstance(info.get("device_reason"), str)
+                        or not info["device_reason"].strip()):
+                    raise ValueError("automatic device selection requires actual device and selection reason")
+            elif actual != expected_device:
                 raise ValueError(f"inference device mismatch: requested {expected_device}, observed {actual}")
         starts, ends, opens = records["step_start"], records["step_end"], records["open"]
         if not starts or not opens or (not deadline_timeout and pending):

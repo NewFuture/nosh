@@ -19,7 +19,7 @@ ROOT = HERE.parent
 
 def inference_device(value: str) -> str:
     if value in ("cpu", "auto"):
-        return "cpu"
+        return value
     if value == "cuda":
         return "cuda:0"
     if isinstance(value, str) and re.fullmatch(r"cuda:[0-9]+", value):
@@ -121,7 +121,7 @@ def environment(home: Path, threads: int, trace: Path | None, tools: dict | None
         "NOSH_OFFLINE": "1", "HF_HUB_OFFLINE": "1",
         "CANDLE_NUM_THREADS": str(threads), "RAYON_NUM_THREADS": "1",
     })
-    if device.startswith("cuda:"):
+    if device == "auto" or device.startswith("cuda:"):
         for key in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH"):
             if key in os.environ:
                 env[key] = os.environ[key]
@@ -198,7 +198,7 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "settings": {"device": device,
                      "cuda_environment": {key: os.environ.get(key) for key in
                                           ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "LD_LIBRARY_PATH")}
-                                         if device.startswith("cuda:") else None,
+                                         if device == "auto" or device.startswith("cuda:") else None,
                      "threads": args.threads, "rayon_threads": 1, "context_length": 8192,
                      "capture_output": "binary_default",
                      "max_steps": 10, "command_timeout_s": 60, "timeout_s": args.timeout or suite["timeout_s"],
