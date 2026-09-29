@@ -7,6 +7,123 @@ import json
 import re
 
 from .. import approval, fixtures
+from .common import has_affirmative_match
+
+
+def config_claims(answer, facts):
+    """Collect bounded endpoint/owner assertions, including repeated fields."""
+    aliases = {
+        "endpoint": r"(?<![a-z0-9_-])(?:storage\s+)?endpoint(?![a-z0-9_-])|(?:存储)?端点",
+        "owner": r"(?<![a-z0-9_-])(?:owner|(?:responsible\s+)?team|owned\s+by|maintained\s+by)(?![a-z0-9_-])"
+                 r"|(?:负责|责任|维护)?团队|负责人",
+    }
+    label = re.compile("|".join(f"(?P<{name}>{pattern})" for name, pattern in aliases.items()), re.I)
+    claims = {name: [] for name in aliases}
+    text = re.sub(r"(?m)^\s*(?:`{3,}|~{3,})[^\n]*$", "", answer)
+    text = re.sub(r"(\*\*|__)(.+?)\1", r"\2", text)
+    text = text.replace("`", "").replace('"', "").replace("'", "")
+    url = r"[a-z][a-z0-9+.-]*://[^\s<>\"'`|，。；、！？,;)\]}]+"
+    owners = re.findall(r"(?m)^owner\s*=\s*(\S+)\s*$", facts["storage_text"])
+    known = {"endpoint": url, "owner": r"(?<![\w.-])(?:" + "|".join(map(re.escape, owners)) + r")(?![\w.-])"}
+    for field, pattern in known.items():
+        previous_end, previous_negative = 0, False
+        for match in re.finditer(pattern, text, re.I if field == "endpoint" else 0):
+            prefix = re.split(r"[。！？!?；;\n，,|{}]|(?<=\.)\s+", text[:match.start()])[-1]
+            suffix = text[match.end():]
+            negative = not has_affirmative_match(prefix + match[0], re.escape(match[0]) + r"$")
+            negative |= bool(previous_negative and re.fullmatch(
+                r"\s*(?:or|and|或|或者|和)\s*", text[previous_end:match.start()], re.I,
+            ))
+            negative |= bool(re.match(
+                r"\s*(?:(?:is|are)\s+not\s+(?:the\s+)?(?:endpoint|owner|responsible|team)\b"
+                r"|不是|并非|不负责)", suffix, re.I,
+            ))
+            claims[field].append((match[0].rstrip("."), negative))
+            previous_end, previous_negative = match.end(), negative
+
+    def record(field, value):
+        value = re.sub(r"^\s*[-*]\s+", "", value).strip(" \t:：=[]{}<>()（），,；;")
+        value = re.sub(r"^(?:字段\s*)?(?:(?:is|are)\b|为|是)\s*", "", value, flags=re.I)
+        value = re.split(r"\s+(?:from|according to|based on|per)\b|依据|根据|来自|未修改",
+                         value, maxsplit=1, flags=re.I)[0].strip(" \t()（）")
+        if not value or re.fullmatch(r"(?:and|or|和|及|与|以及|的)", value, re.I):
+            return
+        previous_negative = False
+        for part in re.split(r"(\s+(?:and|or|but)\s+|[，,；;、]|和|或|以及|而是)", value, flags=re.I):
+            if re.fullmatch(r"\s*(?:but|而是)\s*", part, re.I):
+                previous_negative = False
+                continue
+            if re.fullmatch(r"\s*(?:and|or|[，,；;、]|和|或|以及)\s*", part, re.I):
+                continue
+            part = part.strip(" \t:：=[]{}<>。.")
+            if not part:
+                continue
+            if re.fullmatch(
+                r"(?:unknown|unavailable|undetermined|not found|not configured|not known|not available|n/a|null|none)"
+                r"|(?:均|都)?(?:未知|不明|未找到|未配置|不存在|无法确定|无法确认|未确定)", part, re.I,
+            ):
+                part, negative = None, False
+            else:
+                negative = previous_negative or bool(re.match(r"^(?:not\b|不是|并非|非)", part, re.I))
+                part = re.sub(r"^(?:not\b|不是|并非|非)\s*", "", part, flags=re.I)
+            claims[field].append((part, negative))
+            previous_negative = negative
+
+    columns = {}
+    value_column = None
+    pending = None
+    fields = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)",
+                    lambda m: m[2] if re.match(r"[a-z][a-z0-9+.-]*://", m[2], re.I) else m[1], text)
+    for line in fields.splitlines():
+        line = line.strip()
+        if not line:
+            columns, value_column, pending = {}, None, None
+            continue
+        if "|" in line:
+            pending = None
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                continue
+            headers = {i: match.lastgroup for i, cell in enumerate(cells)
+                       if (match := label.fullmatch(cell)) is not None}
+            if headers and all(i in headers or re.fullmatch(
+                r"(?:active\s+)?profile|store|storage|source|evidence|basis|环境|配置|来源|依据", cell, re.I,
+            ) for i, cell in enumerate(cells)):
+                columns, value_column = headers, None
+                continue
+            value_header = next((i for i, cell in enumerate(cells)
+                                 if re.fullmatch(r"value|setting|(?:配置)?值|结果", cell, re.I)), None)
+            if value_header is not None and not headers:
+                columns, value_column = {}, value_header
+                continue
+            if columns:
+                for index, field in columns.items():
+                    record(field, cells[index] if index < len(cells) else "unknown")
+                continue
+            if headers:
+                for index, field in headers.items():
+                    if value_column is None:
+                        value = " ".join(cells[index + 1:])
+                    else:
+                        value = cells[value_column] if value_column < len(cells) else "unknown"
+                    record(field, value)
+                continue
+        else:
+            columns, value_column = {}, None
+        labels = list(label.finditer(line))
+        if not labels and pending is not None:
+            record(pending, line)
+        pending = None
+        for index, match in enumerate(labels):
+            value = line[match.end():labels[index + 1].start() if index + 1 < len(labels) else len(line)]
+            value = re.split(r"[。!?！？}]|(?<=\.)\s+", value, maxsplit=1)[0]
+            if not value.strip(" \t:：=*-"):
+                pending = match.lastgroup
+            else:
+                record(match.lastgroup, value)
+        for match in re.finditer(r"由\s*(.+?)\s*(?:负责|维护)", line):
+            record("owner", match[1])
+    return claims
 
 
 def followup_context_judgment(scenario, root, evidence):
@@ -140,9 +257,8 @@ def config_judgment(scenario, answer, facts, root, evidence):
         for value in (facts["profile"], facts["store"], facts["endpoint"], facts["owner"]):
             if value not in "\n".join(returned):
                 reasons.append(f"configuration fact was not actually retrieved: {value}")
-        for value in (facts["profile"], facts["endpoint"], facts["owner"]):
-            if value not in answer:
-                reasons.append(f"answer omits the selected configuration fact: {value}")
+        if facts["profile"] not in answer:
+            reasons.append(f"answer omits the selected profile: {facts['profile']}")
     else:
         if not complete_lookup:
             reasons.append("no complete lookup of the requested profile was observed")
@@ -150,8 +266,13 @@ def config_judgment(scenario, answer, facts, root, evidence):
             r"未找到|不存在|没有匹配|无匹配|没有配置|无法确定|not found|no matching|unknown profile", answer, re.I,
         ):
             reasons.append("answer does not explain the missing profile")
-        if re.search(r"https?://", answer, re.I):
-            reasons.append("an endpoint was supplied for a profile with no matching configuration")
+    for field, claims in config_claims(answer, facts).items():
+        expected = facts[field] if scenario["check"] == "config-lookup" else None
+        if expected is not None and (expected, False) not in claims:
+            reasons.append(f"answer omits the selected configuration fact: {expected}")
+        if any((negative and value == expected) or (not negative and value != expected)
+               for value, negative in claims):
+            reasons.append(f"answer supplies a contradictory or unobserved {field}")
     return reasons
 
 

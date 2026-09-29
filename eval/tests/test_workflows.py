@@ -233,26 +233,121 @@ class WorkflowTests(unittest.TestCase):
             ]
             Path(env["NOSH_EVAL_TRACE"]).write_text("\n".join(
                 json.dumps(dict(event, engine=1, schema_version=1)) for event in events))
-            text = "wrong visible answer" if corrupt else answer
+            text = "wrong visible answer" if corruption == "answer" else answer
             stdout = "\n".join(json.dumps(event) for event in (
                 {"ev": "text", "text": "Inspecting the configuration."},
                 {"ev": "tool_call", "name": "read_file"},
                 {"ev": "output", "text": "tool output is not the final answer"},
                 {"ev": "text", "text": text},
-                {"ev": "done", "status": "completed", "secs": 0.2},
+                {"ev": "done", "status": "malformed" if corruption == "status" else "completed", "secs": 0.2},
             ))
             return driver.Result(exit_code=0, stdout=stdout, total_s=0.3)
 
         with fixtures.Workspace(self.base / "work") as workspace:
-            for number, corrupt in enumerate((False, True)):
+            for number, corruption in enumerate((None, "answer", "status")):
                 with patch("eval.trial.driver.run_cli", side_effect=cli):
                     row = trial.run_trial(args, meta, scenario, 0, number, workspace, output,
                                           Path(sys.executable), self.base / "unused-model")
-                self.assertEqual(row["status"], "error" if corrupt else "pass", row["reasons"])
+                self.assertEqual(row["status"], "error" if corruption else "pass", row["reasons"])
                 self.assertFalse((workspace.root / scenario["id"]).exists())
                 self.assertTrue((output / row["logs"] / "engine.jsonl").is_file())
-                if corrupt:
-                    self.assertTrue(any("CLI agent answer" in reason for reason in row["reasons"]))
+                if corruption:
+                    error = "CLI agent answer" if corruption == "answer" else "CLI completion"
+                    self.assertTrue(any(error in reason for reason in row["reasons"]))
+
+    def test_lookup_checks_all_endpoint_and_team_assertions(self):
+        self.prepare("piped-config-lookup")
+        self.readonly_session()
+        self.read_result(self.facts["profile_file"])
+        self.read_result(self.facts["storage_file"])
+        endpoint, owner = self.facts["endpoint"], self.facts["owner"]
+        answer = f"staging_eu 的存储 endpoint 是 {endpoint}，负责团队为 {owner}。"
+        for valid in (
+            answer,
+            f"查询 staging_eu 的项目配置，结果如下：\n- **endpoint**: `{endpoint}`\n- **owner**: `{owner}`",
+            f"查询 staging_eu 的项目配置，结果如下：\n| endpoint | owner |\n| --- | --- |\n| {endpoint} | {owner} |",
+            f"查询项目配置，结果如下：\n| profile | endpoint | owner |\n| --- | --- | --- |\n| staging_eu | {endpoint} | {owner} |",
+            f"查询 staging_eu 配置，结果如下：\n| endpoint | owner | source |\n| --- | --- | --- |\n| {endpoint} | {owner} | config/storage.ini |",
+            f"staging_eu 配置：\n| 字段 | 值 |\n| --- | --- |\n| endpoint | {endpoint} |\n| 团队 | {owner} |",
+            f"staging_eu 配置：\n| 字段 | 值 | 依据 |\n| --- | --- | --- |\n| endpoint | {endpoint} | config/storage.ini |\n| 团队 | {owner} | config/storage.ini |",
+            f'配置：\n```json\n{{"profile": "staging_eu", "endpoint": "{endpoint}", "owner": "{owner}"}}\n```',
+            f"查询 staging_eu 的项目配置，结果如下：\nendpoint:\n{endpoint}\nowner:\n{owner}",
+            answer + "不是 operations，也不是 https://invented.example.invalid。",
+            answer + "团队不是 operations 或 development。",
+            f"staging_eu 使用 {endpoint}，由 {owner} 负责。",
+            f"staging_eu 的 endpoint 字段为 {endpoint}，负责团队（owner）：{owner}。",
+            f"staging_eu 的 endpoint 是 [存储地址]({endpoint})，负责团队为 [{owner}](config/storage.ini)。",
+            f"staging_eu 的 endpoint 是 <{endpoint}>，负责团队为 {owner}。",
+            f"staging_eu 的 endpoint 是 {endpoint}，负责团队为 __{owner}__（来自 config/storage.ini）。",
+        ):
+            with self.subTest(answer=valid):
+                verdict = self.grade(valid)
+                self.assertTrue(verdict.passed, verdict.reasons)
+        for extra in (
+            "https://invented.example.invalid and operations",
+            "负责团队为 operations。",
+            "owner: platform-engineering",
+            "负责团队为基础架构组。",
+            "由 platform-engineering 负责。",
+            "维护团队是 platform-engineering。",
+            f"owner: {owner} and platform-engineering",
+            f"owner: {owner}, platform-engineering",
+            f"owner: {owner} (or platform-engineering)",
+            f"owner: {owner}-",
+            f"owner: {owner}__",
+            "HTTPS://invented.example.invalid",
+            f"endpoint: [{endpoint}](https://invented.example.invalid)",
+            "endpoint: objects.invented.example.invalid",
+            f"endpoint: {endpoint}/invented",
+            "endpoint: unknown",
+            "owner: unknown",
+            "\n| endpoint | owner |\n| --- | --- |\n| https://invented.example.invalid | platform |",
+            f"\n| owner |\n| --- |\n| {owner} |\n| platform |",
+            "\n| profile | endpoint | owner |\n| --- | --- | --- |\n| staging_eu | unknown | platform |",
+            f"\n| 字段 | 值 | 依据 |\n| --- | --- | --- |\n| owner | {owner} | config/storage.ini |\n| owner | platform | config/storage.ini |",
+            '\n```json\n{"owner": "release-team", "owner": "platform"}\n```',
+            f"不是 {owner}。",
+            f"不是 {endpoint}。",
+            f"endpoint: {endpoint}.invented.invalid",
+        ):
+            with self.subTest(extra=extra):
+                verdict = self.grade(answer + "\n" + extra)
+                self.assertFalse(verdict.passed, extra)
+                self.assertTrue(any("contradictory or unobserved" in reason for reason in verdict.reasons))
+        self.assertFalse(self.grade(f"staging_eu 使用 {endpoint}，不是 {owner}。").passed)
+
+    def test_missing_profile_rejects_team_guesses_without_rejecting_unknowns(self):
+        self.prepare("piped-config-missing")
+        self.readonly_session()
+        self.read_result(self.facts["profile_file"])
+        answer = "未找到 retired_lab，无法确定 endpoint 和负责团队。"
+        for valid in (
+            answer,
+            "项目配置中未找到 retired_lab，不能据此推断。\nendpoint: unknown\nowner: unknown",
+            "项目配置中未找到 retired_lab，不能据此推断。\nendpoint: not found\nowner: not known",
+            "未找到 retired_lab，endpoint 和负责团队均无法确定。",
+            "未找到 retired_lab。\n| endpoint | owner |\n| --- | --- |\n| 未知 | 无法确定 |",
+            '未找到 retired_lab。\n```json\n{"endpoint": null, "owner": null}\n```',
+            answer + "负责团队不是 operations，也不是 release-team。",
+        ):
+            with self.subTest(answer=valid):
+                verdict = self.grade(valid)
+                self.assertTrue(verdict.passed, verdict.reasons)
+        for extra in (
+            "负责团队为 operations。",
+            "owner: platform-engineering",
+            "负责团队是基础架构组。",
+            "由 release-team 负责。",
+            "\n| owner | platform-engineering |",
+            "\n| endpoint | owner |\n| --- | --- |\n| 未知 | platform |",
+            '\n```json\n{"owner": "platform-engineering"}\n```',
+            "endpoint: storage.internal",
+            "endpoint: https://invented.example.invalid",
+        ):
+            with self.subTest(extra=extra):
+                verdict = self.grade(answer + "\n" + extra)
+                self.assertFalse(verdict.passed, extra)
+                self.assertTrue(any("contradictory or unobserved" in reason for reason in verdict.reasons))
 
     def test_missing_profile_needs_a_complete_lookup_and_must_not_invent_an_endpoint(self):
         self.prepare("piped-config-missing")

@@ -203,7 +203,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             elif event["ev"] in ("tool_call", "error"):
                 cli_text.clear()
             elif event["ev"] == "done":
-                if (done is not None or not isinstance(event.get("status"), str) or not event["status"]
+                if (done is not None or event.get("status") not in ("completed", "incomplete", "cancelled", "failed")
                         or not finite_number(event.get("secs")) or event["secs"] < 0):
                     raise ValueError("invalid or duplicate CLI completion")
                 done = event

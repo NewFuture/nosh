@@ -170,6 +170,24 @@ class ObservationTests(unittest.TestCase):
             with self.subTest(events=events), self.assertRaisesRegex(ValueError, "CLI"):
                 observations.observe(result, {"mode": "agent", "check": "history"}, Path("unused"), seed=0)
 
+    def test_cli_completion_status_matches_the_producer_enum(self):
+        scenario = {"mode": "agent", "check": "history"}
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.jsonl"
+            self.agent_trace(trace)
+            for status, exit_code in (("completed", 0), ("incomplete", 1), ("cancelled", 130), ("failed", 2)):
+                result = driver.Result(exit_code=exit_code, stdout="\n".join(json.dumps(event) for event in (
+                    {"ev": "text", "text": "Actual final answer."},
+                    {"ev": "done", "status": status, "secs": 1},
+                )))
+                with self.subTest(status=status):
+                    observed = observations.observe(result, scenario, trace, seed=0)
+                    self.assertEqual(observed["metrics"]["task_status"], status)
+            for status in (None, "", " ", "unknown", "Completed", "completed ", "timed_out", 1, [], {}):
+                result = driver.Result(stdout=json.dumps({"ev": "done", "status": status, "secs": 1}))
+                with self.subTest(status=status), self.assertRaisesRegex(ValueError, "CLI completion"):
+                    observations.observe(result, scenario, trace, seed=0)
+
     def test_multiple_agent_turns_do_not_hide_an_incomplete_task(self):
         text = ("| + 2 steps | 0.1 s\n| stats: ttft 0.01s\n"
                 "| ! 3 steps | 0.2 s\n| stats: ttft 0.02s\n")
