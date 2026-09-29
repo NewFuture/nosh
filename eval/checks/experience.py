@@ -25,11 +25,13 @@ def history_prose(answer: str, facts: dict) -> str:
     )
 
 
-def clarification_request(prose: str) -> str | None:
+def clarification_request(prose: str, *, archive: bool = False) -> str | None:
     target = (
         r"目标|任务|需求|要求|问题|事项|内容|输入|文件|路径|代码|报错|错误信息|上下文|预期|期望"
         r"|\b(?:goal|objective|task|requirements?|input|files?|path|problem|error|context|details)\b"
     )
+    if archive:
+        target += r"|目录|\b(?:filenames?|directories|directory|folders?|source|destination|output)\b"
     imperative = (
         r"(?:请(?:你|您)?|烦请|麻烦(?:你|您)?|还请|需要[你您]|^\s*(?:[-*]\s*)?)"
         r"\s*(?:先|再)?(?:说明|明确|描述|指定|提供|给出|补充|告诉我|告知(?:我)?)"
@@ -38,18 +40,23 @@ def clarification_request(prose: str) -> str | None:
         r"(?:tell me|let me know|specify|describe|clarify|provide|share)\b"
         r"[^.?!;\n]*?(?:" + target + r")"
     )
-    for sentence in re.split(r"(?<=[。！？!?])|\n", prose):
+    for sentence in re.split(r"(?<=[。！？!?])|\n|(?<=\.)\s+", prose):
         request = re.search(imperative, sentence, re.I)
         if request and not re.search(r"是否|要不要|需不需要|\b(?:if|whether)\b", request[0], re.I):
             return sentence.strip()
-        open_question = re.search(r"什么|哪(?:个|些|种)?|\b(?:what|which)\b", sentence, re.I)
+        open_question = re.search(r"什么|啥|哪(?:个|些|种)?|\b(?:what|which|where)\b", sentence, re.I)
         question_cue = re.search(
             r"[?？]|请问|[你您](?:希望|想|需要)|^\s*(?:具体)?(?:要|需要)我"
             r"|^\s*(?:what|which)\b", sentence, re.I,
         )
         if open_question and question_cue and (
             re.search(target, sentence, re.I)
-            or re.search(r"做|处理|完成|实现|解决|\b(?:do|process|handle|work on)\b", sentence, re.I)
+            or re.search(r"做|干|处理|完成|实现|解决|\b(?:do|process|handle|work on)\b", sentence, re.I)
+        ):
+            return sentence.strip()
+        if archive and re.fullmatch(
+            r"\s*(?:(?:the|your)\s+)?(?:source\s+(?:directory|folder)|destination\s+(?:file(?:name)?|path)"
+            r"|output\s+file(?:name)?|源目录|目标文件名)\s*[?？]\s*", sentence, re.I,
         ):
             return sentence.strip()
     return None
@@ -79,7 +86,7 @@ def experience(scenario: dict, answer: str, metrics: dict, *, facts: dict | None
         r"(?:请|可以|随时)[你您]?(?:再|随时)?(?:告诉我|告知我|联系我)"
         r"|\b(?:would you like|do you want|shall I|should I|please confirm|please let me know"
         r"|let me know (?:if|whether|when|your))\b", closing, re.I,
-    ) or clarification_request(closing))
+    ) or clarification_request(closing, archive=True))
     clarification = clarification_request(prose) if scenario["check"] == "clarification" else None
     rule = expect["final_question"]
     required = bool(clarification) if scenario["check"] == "clarification" else question

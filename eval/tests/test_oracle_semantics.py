@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 from eval import checks, driver, fixtures
+from eval.checks import command_assist as assist_checks, experience as experience_checks, files as file_checks, project as project_checks
+from .support import SCENARIOS
 
 
 class FixtureOracleTestCase(unittest.TestCase):
@@ -52,8 +54,8 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
         }
 
     def test_per_file_table_with_language_and_overall_totals(self):
-        self.assertEqual(checks.line_counts(self.TABLE + "\n" + self.SUMMARY, self.facts), [])
-        self.assertEqual(checks.line_counts(
+        self.assertEqual(file_checks.line_counts(self.TABLE + "\n" + self.SUMMARY, self.facts), [])
+        self.assertEqual(file_checks.line_counts(
             self.TABLE + "\n| Python | 3 | 15 |\n| JS | 1 | 4 |\n| Rust | 1 | 6 |"
             "\n| Shell | 1 | 4 |\n| Total | 6 | 29 |", self.facts,
         ), [])
@@ -61,7 +63,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
     def test_complete_per_file_table_can_supply_the_language_totals(self):
         for answer in (self.TABLE, self.TABLE + "\nOverall: 29 lines across 6 files."):
             with self.subTest(answer=answer):
-                self.assertEqual(checks.line_counts(answer, self.facts), [])
+                self.assertEqual(file_checks.line_counts(answer, self.facts), [])
 
     def test_column_order_units_aliases_and_scoped_tables(self):
         reversed_columns = "\n".join(
@@ -79,7 +81,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
         )
         for answer in (reversed_columns, chinese, scoped, self.TABLE.replace("/", "\\")):
             with self.subTest(answer=answer):
-                self.assertEqual(checks.line_counts(answer, self.facts), [])
+                self.assertEqual(file_checks.line_counts(answer, self.facts), [])
 
     def test_grouped_file_rows_and_inline_file_details(self):
         grouped = self.TABLE.replace(
@@ -90,17 +92,17 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             "Python: main.py: 5 lines, lib/maths.py: 5 lines, tools/report.py: 5 lines\n"
             "JS: web/app.js: 4 lines; Rust: src/main.rs: 6 lines; Shell: scripts/check.sh: 4 lines"
         )
-        self.assertEqual(checks.line_counts(grouped, self.facts), [])
-        self.assertEqual(checks.line_counts(inline, self.facts), [])
-        self.assertEqual(checks.line_counts(inline.replace(" lines", ""), self.facts), [])
+        self.assertEqual(file_checks.line_counts(grouped, self.facts), [])
+        self.assertEqual(file_checks.line_counts(inline, self.facts), [])
+        self.assertEqual(file_checks.line_counts(inline.replace(" lines", ""), self.facts), [])
 
     def test_named_file_counts_are_checked_even_in_optional_prose(self):
         for suffix in ("5 lines", "5"):
             answer = f"**Python:**\n- main.py: {suffix}\n\n**Summary:**\n" + self.SUMMARY
-            self.assertEqual(checks.line_counts(answer, self.facts), [])
+            self.assertEqual(file_checks.line_counts(answer, self.facts), [])
             for wrong in ("4", "-5", "1.5"):
                 with self.subTest(suffix=suffix, wrong=wrong):
-                    self.assertTrue(checks.line_counts(answer.replace(f"main.py: {suffix}", f"main.py: {wrong}"), self.facts))
+                    self.assertTrue(file_checks.line_counts(answer.replace(f"main.py: {suffix}", f"main.py: {wrong}"), self.facts))
 
     def test_wrong_file_counts_cannot_hide_behind_correct_aggregates(self):
         for wrong in (
@@ -112,7 +114,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             self.TABLE.replace("| main.py | 5 |", "| main.py | 5 lines and 6 lines |"),
         ):
             with self.subTest(answer=wrong):
-                self.assertTrue(checks.line_counts(wrong + "\n" + self.SUMMARY, self.facts))
+                self.assertTrue(file_checks.line_counts(wrong + "\n" + self.SUMMARY, self.facts))
 
     def test_duplicate_omitted_and_unknown_files_are_not_a_complete_table(self):
         for wrong in (
@@ -125,7 +127,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
         ):
             for summary in ("", "\n" + self.SUMMARY):
                 with self.subTest(answer=wrong, summary=bool(summary)):
-                    self.assertTrue(checks.line_counts(wrong + summary, self.facts))
+                    self.assertTrue(file_checks.line_counts(wrong + summary, self.facts))
 
     def test_explicit_and_negated_file_classifications_are_checked(self):
         for wrong in (
@@ -136,7 +138,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             "**非 Python 文件：**\n- main.py: 5 lines\n\n**Summary:**\n" + self.SUMMARY,
         ):
             with self.subTest(answer=wrong):
-                self.assertTrue(checks.line_counts(wrong + "\n" + self.SUMMARY, self.facts))
+                self.assertTrue(file_checks.line_counts(wrong + "\n" + self.SUMMARY, self.facts))
 
     def test_wrong_aggregates_and_contradictory_numbers_still_fail(self):
         for wrong in (
@@ -149,9 +151,9 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             self.SUMMARY + "\n| Language | Files | Lines |\n| Total | 6 | 30 |",
         ):
             with self.subTest(answer=wrong):
-                self.assertTrue(checks.line_counts(self.TABLE + "\n" + wrong, self.facts))
+                self.assertTrue(file_checks.line_counts(self.TABLE + "\n" + wrong, self.facts))
 
-    def test_legacy_aggregates_optional_details_and_split_subtotals(self):
+    def test_aggregates_optional_details_and_split_subtotals(self):
         answers = (
             self.SUMMARY,
             "**Python:**\n- main.py: 5 lines\n- Total: 15 lines\n\n**Summary:**\n" + self.SUMMARY,
@@ -159,11 +161,9 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             self.TABLE,
             self.TABLE + "\n" + self.SUMMARY,
         )
-        legacy = {key: value for key, value in self.facts.items() if key != "file_lines"}
-        for facts in (self.facts, legacy):
-            for answer in answers:
-                with self.subTest(file_lines="file_lines" in facts, answer=answer):
-                    self.assertEqual(checks.line_counts(answer, facts), [])
+        for answer in answers:
+            with self.subTest(answer=answer):
+                self.assertEqual(file_checks.line_counts(answer, self.facts), [])
 
     def test_subtotals_cannot_offset_errors_or_omit_named_scope_members(self):
         for wrong in (
@@ -174,7 +174,7 @@ class LineCountSemanticsTests(FixtureOracleTestCase):
             self.SCOPES.replace("Total: 5 lines", "Total: 5 lines and 5 lines"),
         ):
             with self.subTest(answer=wrong):
-                self.assertTrue(checks.line_counts(wrong + self.SUMMARY, self.facts))
+                self.assertTrue(file_checks.line_counts(wrong + self.SUMMARY, self.facts))
 
 
 class GitDiffSemanticsTests(FixtureOracleTestCase):
@@ -197,6 +197,8 @@ class GitDiffSemanticsTests(FixtureOracleTestCase):
             "maths.py 已暂存，新增 subtract，README.md 补充 unittest 测试说明。",
             "已暂存：\nmaths.py 新增 subtract。\n\n其他改动：\nREADME.md 补充 unittest 测试说明。",
             "maths.py：\n- 新增 subtract 减法函数（已暂存）。\nREADME.md：\n- 补充 unittest 测试说明（未暂存）。",
+            "maths.py：新增求差函数。\nREADME.md：说明单元测试覆盖正负整数。",
+            "maths.py：增加差值函数。\nREADME.md：补充测试说明。",
             "| File | Staged changes | Description |\n| maths.py | staged | 新增 subtract |"
             "\n| README.md | unstaged | 补充 unittest 测试说明 |",
         ):
@@ -271,6 +273,8 @@ class ClarificationSemanticsTests(FixtureOracleTestCase):
             "你希望我处理什么具体任务？",
             "请问具体需求是什么",
             "请说明具体目标。\n\n我可以编译或测试。",
+            "方便说下具体想做点啥吗？",
+            "你具体想让我干什么？",
         ):
             with self.subTest(answer=answer):
                 verdict = self.grade(answer)
@@ -285,6 +289,7 @@ class ClarificationSemanticsTests(FixtureOracleTestCase):
             "", "准备好了。", "随时可以帮忙。", "你的目标尚不明确。", "请提供帮助。",
             "是否需要我继续？", "您希望我继续构建吗？", "要不要运行测试？",
             "请告诉我是否需要编译项目。", "请确认是否继续运行测试。",
+            "请说明源目录。", "请提供目录。", "源目录是哪个？", "Source directory?",
         ):
             with self.subTest(answer=answer):
                 verdict = self.grade(answer)
@@ -320,16 +325,17 @@ class ClarificationSemanticsTests(FixtureOracleTestCase):
             "测试完成。告诉我是否继续。",
             "测试完成。确认后我再进行下一步。",
             "测试完成。请说明具体目标，我再处理。",
+            "测试完成。请提供源目录。",
             "测试完成。Please confirm before I continue.",
         ):
             with self.subTest(answer=answer):
-                self.assertFalse(checks.experience(scenario, answer, self.metrics)["final_question"]["passed"])
+                self.assertFalse(experience_checks.experience(scenario, answer, self.metrics)["final_question"]["passed"])
         for answer in (
             "测试完成。下一步建议：检查配置是否需要更新。",
             "测试完成。\n\n```text\n请确认是否继续。\n```\n> 你希望我处理什么任务？",
         ):
             with self.subTest(answer=answer):
-                self.assertTrue(checks.experience(scenario, answer, self.metrics)["final_question"]["passed"])
+                self.assertTrue(experience_checks.experience(scenario, answer, self.metrics)["final_question"]["passed"])
 
 
 class RevisedOracleSmokeTests(FixtureOracleTestCase):
@@ -360,7 +366,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
         execution["result"] = "cargo not found\nv22.23.3\nPython 3.14.4"
         self.assertFalse(self.grade(self.versions).passed)
         with self.assertRaises(ValueError):
-            checks.version_queries(
+            project_checks.version_queries(
                 'cargo --version || echo "cargo 1.98.1 (example)"', self.root, self.facts,
             )
 
@@ -384,22 +390,22 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
         before = self.facts["before"]
         for command in ("tar czf logs.tar.gz logs", "tar cfz logs.tar.gz -C logs ."):
             with self.subTest(command=command):
-                self.assertEqual(checks.check_archive(command, self.root, before, before), [])
+                self.assertEqual(assist_checks.check_archive(command, self.root, before, before), [])
         for command in (
             "tar czf ../outside.tar.gz logs",
             "tar czf logs.tar.gz .",
             "tar czf logs.tar.gz logs; echo extra",
         ):
             with self.subTest(command=command), self.assertRaises(ValueError):
-                checks.archive_command(command, self.root)
+                assist_checks.archive_command(command, self.root)
 
     def test_line_shares_check_both_the_part_and_the_total(self):
         table = LineCountSemanticsTests.TABLE
         summary = "Python accounts for 15 of the 29 lines."
-        self.assertEqual(checks.line_counts(table + "\n" + summary, self.facts), [])
+        self.assertEqual(file_checks.line_counts(table + "\n" + summary, self.facts), [])
         for wrong in (summary.replace("15", "16"), summary.replace("29", "30")):
             with self.subTest(summary=wrong):
-                self.assertTrue(checks.line_counts(table + "\n" + wrong, self.facts))
+                self.assertTrue(file_checks.line_counts(table + "\n" + wrong, self.facts))
 
     def test_python_counts_and_negative_directory_notes_keep_their_scope(self):
         self.scenario = {"check": "python"}
@@ -421,7 +427,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
         }
         self.facts["git_log"] = "commit " + "a" * 40 + "\n    docs: update README.md\n"
         answer = "最近提交如下。\n1. `aaaaaaa` docs: update `README.md`"
-        language = lambda text: checks.experience(
+        language = lambda text: experience_checks.experience(
             self.scenario, text, self.metrics, facts=self.facts,
         )["response_language"]
         self.assertTrue(language(answer)["passed"])
@@ -442,6 +448,37 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
         self.assertFalse(self.grade(answer.replace("最近2个", "最近4个")).passed)
         self.assertFalse(self.grade(answer + "\n3. fixture (current HEAD)").passed)
         self.assertFalse(self.grade(answer + "\n3. core: truncate long tool output").passed)
+        self.assertFalse(self.grade(answer.replace("document offline usage", "删除离线使用说明")).passed)
+        self.assertFalse(self.grade(answer.replace("document offline usage", "offline documentation was deleted")).passed)
+
+    def test_failure_diagnosis_keeps_cause_and_repair_direction(self):
+        for sid, fixture, positive, negatives in (
+            ("zh-build-failure", "rust-broken",
+             "src/main.rs 要求 i32 整数，却赋入字符串，类型不匹配。应将值改为数字。",
+             ("src/main.rs 要求字符串类型，却传入 i32 整数；把整数改为字符串即可。",
+              "src/main.rs 将整数赋给字符串，类型不匹配；请转换 i32。")),
+            ("zh-test-failure", "python-broken",
+             "maths.py 的 add 误用减法 a - b，应改成加法 a + b。",
+             ("maths.py 的 add 使用加法 a + b，而测试要求减法 a - b；请将加法改为减法。",
+              "maths.py 的 add uses addition instead of subtraction. Replace addition with subtraction.")),
+            ("zh-port-failure", "port",
+             "8080 被占用，导致绑定失败；请改用其他空闲端口。",
+             ("8080 端口并未被占用，关闭防火墙即可。",
+              "8080 端口冲突，关闭防火墙即可。")),
+        ):
+            self.prepare(fixture)
+            self.scenario = SCENARIOS[sid]
+            self.facts["listener"] = {"port": 8080, "alive_at_end": True}
+            first = self.scenario["completions"][0]
+            self.result.turns = [{"exit_code": first["exit_code"], "output": "\n".join(first["contains"])}]
+            self.evidence = {"executions": []}
+            with self.subTest(scenario=sid):
+                self.assertTrue(self.grade(positive).passed, self.grade(positive).reasons)
+                if sid == "zh-test-failure":
+                    caution = positive + "不要将加法改为减法。"
+                    self.assertTrue(self.grade(caution).passed, self.grade(caution).reasons)
+                for answer in negatives:
+                    self.assertFalse(self.grade(answer).details["facts"]["passed"], answer)
 
     def test_conditional_closing_offers_are_not_direct_advice(self):
         scenario = {
@@ -454,7 +491,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
             ("如果需要重新生成，可以运行构建命令。", True),
         ):
             with self.subTest(ending=ending):
-                result = checks.experience(scenario, "已完成。\n\n" + ending, self.metrics)
+                result = experience_checks.experience(scenario, "已完成。\n\n" + ending, self.metrics)
                 self.assertEqual(result["final_question"]["passed"], passed)
 
 

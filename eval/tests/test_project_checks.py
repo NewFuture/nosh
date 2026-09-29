@@ -7,7 +7,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from eval import approval, checks, driver, fixtures, run
+from eval import approval, checks, driver, fixtures, runtime
+from eval.checks import project as project_checks
 from .support import SCENARIOS, SUITE, execution
 
 
@@ -15,7 +16,7 @@ from .support import SCENARIOS, SUITE, execution
 class ProjectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tools = run.discover_tools(SUITE["scenarios"])
+        cls.tools = runtime.discover_tools(SUITE["scenarios"])
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -29,7 +30,7 @@ class ProjectTests(unittest.TestCase):
     def prepare(self, sid):
         self.scenario = copy.deepcopy(SCENARIOS[sid])
         self.root, self.home, self.facts = self.workspace.prepare(self.scenario)
-        self.env = run.environment(self.home, 1, None, self.tools)
+        self.env = runtime.environment(self.home, 1, None, self.tools)
         self.facts["tools"] = self.tools
         if self.scenario["check"] == "versions":
             self.facts["versions"] = {n: self.tools[n]["version"] for n in ("cargo", "node", "python3")}
@@ -50,14 +51,14 @@ class ProjectTests(unittest.TestCase):
 
     def grade(self, answer="任务已经完成。"):
         after = fixtures.snapshot(self.root)
-        self.evidence["final_state"] = checks.fixture_state(self.scenario, self.facts, self.root, after, self.result)
+        self.evidence["final_state"] = fixtures.fixture_state(self.scenario, self.facts, self.root, after, self.result)
         return checks.judge(self.scenario, answer, self.facts, self.root, after, self.result, self.metrics, self.evidence)
 
     def test_real_build_and_test_commands(self):
         cases = [
-            ("zh-rust-build", "cat Cargo.toml && cargo build --offline --locked 2>&1"),
+            ("zh-rust-build", "cat Cargo.toml && cargo build --offline --locked -j 1 2>&1"),
             ("zh-node-build", "node build.js 2>&1"),
-            ("zh-rust-test", "cargo test --manifest-path Cargo.toml --offline --locked 2>&1"),
+            ("zh-rust-test", "cargo test --manifest-path Cargo.toml --offline --locked --all-features 2>&1"),
             ("zh-node-test", "npm test 2>&1"),
             ("zh-python-test", "python3 -m unittest discover -s tests -v 2>&1"),
         ]
@@ -110,7 +111,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn("FAILED", proc.stderr)
         self.assertFalse(approval.allow_approval("python-test", command, self.root, self.facts))
         after = fixtures.snapshot(self.root)
-        self.assertEqual(checks.completed_commands(self.evidence, self.root, self.facts, "python-test", after), [])
+        self.assertEqual(project_checks.completed_commands(self.evidence, self.root, self.facts, "python-test", after), [])
         for accepted in (
             "python3 -m unittest discover -s tests -v && ls",
             "python3 -m unittest discover -s tests -v;",
@@ -126,7 +127,7 @@ class ProjectTests(unittest.TestCase):
         self.prepare("zh-python-test")
         self.assertEqual(self.command("python3 -m unittest discover -s tests -v").returncode, 0)
         after = fixtures.snapshot(self.root)
-        self.evidence["final_state"] = checks.fixture_state(self.scenario, self.facts, self.root, after, self.result)
+        self.evidence["final_state"] = fixtures.fixture_state(self.scenario, self.facts, self.root, after, self.result)
         self.evidence["executions"] *= 3
         with patch("eval.fixtures.snapshot", side_effect=AssertionError("grading must use the captured state")), \
                 patch("eval.approval.command_groups", wraps=approval.command_groups) as parsed:
@@ -136,7 +137,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(parsed.call_count, 3)
         changed = copy.deepcopy(after)
         changed["maths.py"]["sha256"] = "modified"
-        self.assertFalse(checks.completed_commands(self.evidence, self.root, self.facts, "python-test", changed))
+        self.assertFalse(project_checks.completed_commands(self.evidence, self.root, self.facts, "python-test", changed))
 
     def test_bounded_approval_rejects_escapes_and_modified_scripts(self):
         self.prepare("zh-rust-build")
@@ -145,6 +146,11 @@ class ProjectTests(unittest.TestCase):
         alias = self.home / "bin" / "cargo"
         self.assertTrue(approval.allow_approval("rust-build", f"{alias} build --offline 2>&1", self.root, self.facts))
         self.assertTrue(approval.allow_approval("rust-build", "cargo build 2>&1 && ls", self.root, self.facts))
+        for flags in ("-j 1", "--jobs 1", "-j1", "--jobs=1", "--all-features", "--no-default-features"):
+            self.assertTrue(approval.allow_approval("rust-build", f"cargo build {flags}", self.root, self.facts), flags)
+        for flags in ("-j 2", "--jobs=2", "-j", "--jobs 0", "--jobs 1 2", "--features other"):
+            self.assertFalse(approval.allow_approval("rust-build", f"cargo build {flags}", self.root, self.facts), flags)
+        self.assertFalse(approval.allow_approval("rust-test", "cargo test -- -j 1", self.root, self.facts))
         for command in (
             "cargo build --manifest-path ../Cargo.toml", "cargo build; touch outside",
             "cargo build || curl https://example.invalid", "cargo install evil",
@@ -199,6 +205,10 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse(self.grade(answer.replace("docs", "shell")).passed)
         self.assertFalse(self.grade(answer + "\n不存在的提交 deadbeef。").passed)
         self.assertFalse(self.grade(answer + "\n4. auth：添加用户验证。").passed)
+        latest_two = "仓库最近2个提交：\n1. docs：记录离线使用方式。\n2. tests：覆盖命令超时。"
+        self.assertTrue(self.grade(latest_two).passed, self.grade(latest_two).reasons)
+        skipped = latest_two.replace("tests：覆盖命令超时", "shell：支持管道")
+        self.assertFalse(self.grade(skipped).passed)
 
     def test_version_queries_use_real_tool_versions_without_confirmations(self):
         self.prepare("zh-tool-versions")
@@ -250,10 +260,10 @@ class ProjectTests(unittest.TestCase):
     def test_stable_state_does_not_include_compiler_cache_bytes(self):
         self.prepare("zh-rust-build")
         self.assertEqual(self.command("cargo build --offline").returncode, 0)
-        before = checks.fixture_state(self.scenario, self.facts, self.root, fixtures.snapshot(self.root), self.result)
+        before = fixtures.fixture_state(self.scenario, self.facts, self.root, fixtures.snapshot(self.root), self.result)
         info = self.root / "target" / ".rustc_info.json"
         info.write_text('{"changed": "cache metadata"}\n')
-        after = checks.fixture_state(self.scenario, self.facts, self.root, fixtures.snapshot(self.root), self.result)
+        after = fixtures.fixture_state(self.scenario, self.facts, self.root, fixtures.snapshot(self.root), self.result)
         self.assertEqual(before, after)
         self.assertTrue(any("target/" in name for name in before["artifacts"]))
 

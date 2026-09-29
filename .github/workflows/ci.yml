@@ -43,7 +43,7 @@ jobs:
         with:
           node-version: '22'
       - name: evaluation runner tests (no model)
-        run: python3 -m unittest discover -s eval -v
+        run: python3 -m unittest eval.tests -v
       - name: cpu features and kernel paths
         if: success() || failure()
         run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1

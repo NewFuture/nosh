@@ -16,13 +16,18 @@ import sys
 import time
 
 from . import driver
+from .contracts import CAPTURE_CHECKS, STATEFUL_CHECKS
 
 EPOCH = 1_700_000_000
 OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
     "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
+    "review-workflow",
 }
-FIXTURES = {"big", "port", "project", "rename", "typo", "failure", "diagnostic-failure", "history", "logs"} | PROJECT_FIXTURES
+FIXTURES = {
+    "big", "port", "project", "rename", "typo", "failure", "diagnostic-failure", "history", "logs",
+    "partial-archive", "config-lookup", "config-missing",
+} | PROJECT_FIXTURES
 PROJECT = {
     "main.py": "from lib.maths import add\nvalues = [1, 2, 3]\nresult = add(values[0], values[1])\nprint(result)\nprint(len(values))\n",
     "lib/maths.py": "def add(a, b):\n    return a + b\ndef square(value):\n    return value * value\nprint(square(3))\n",
@@ -293,6 +298,31 @@ def create(root: Path, kind: str, env: dict | None = None,
     elif kind == "logs":
         write(root, "logs/app.log", "INFO service started\nERROR fixture error\n")
         write(root, "logs/old/access.log", "GET /health 200\n")
+    elif kind == "partial-archive":
+        write(root, "incoming/report.csv", "invoice_id,total\nINV-001,19\n")
+        write(root, "archive/previous.csv", "invoice_id,total\nINV-000,7\n")
+    elif kind in ("config-lookup", "config-missing"):
+        profile = "staging_eu" if kind == "config-lookup" else "retired_lab"
+        profiles = "[profiles]\nproduction = primary\nstaging_eu = backup_east\nsandbox = local\n"
+        stores = (
+            "[primary]\nendpoint = https://objects.production.example.invalid\nowner = operations\n\n"
+            "[backup_east]\nendpoint = https://objects.staging.example.invalid\nowner = release-team\n\n"
+            "[local]\nendpoint = http://127.0.0.1:9000\nowner = development\n"
+        )
+        incident = f"Deployment check: atlas-api cannot reach artifact storage.\nActive profile: {profile}\n"
+        write(root, "incident.txt", incident)
+        write(root, "config/environments.ini", profiles)
+        write(root, "config/storage.ini", stores)
+        write(root, "README.md", "# atlas-api\n\nEnvironment and storage settings are in config/.\n")
+        facts.update(
+            profile=profile, incident_text=incident, profile_file="config/environments.ini", profile_text=profiles,
+            storage_file="config/storage.ini", storage_text=stores,
+            endpoint="https://objects.staging.example.invalid", owner="release-team", store="backup_east",
+            known_endpoints=[
+                "https://objects.production.example.invalid", "https://objects.staging.example.invalid",
+                "http://127.0.0.1:9000",
+            ],
+        )
     elif kind in {"history", "typo"}:
         git(root, "init", "--quiet", "--initial-branch=fixture", "--template=")
         if kind == "history":
@@ -306,6 +336,11 @@ def create(root: Path, kind: str, env: dict | None = None,
         project = RUST_PROJECT if kind.startswith("rust") else NODE_PROJECT if kind == "node" else PYTHON_PROJECT
         for name, text in project.items():
             write(root, name, text)
+        if kind == "review-workflow":
+            write(root, "AGENTS.md",
+                  "# Review workflow\n\n"
+                  "After a successful unittest run, review both staged and unstaged changes with git diff "
+                  "before preparing a commit. Do not stage or commit as part of this review.\n")
         facts["project"] = kind
         facts["test_count"] = 2
         if kind == "rust-broken":
@@ -315,7 +350,7 @@ def create(root: Path, kind: str, env: dict | None = None,
             write(root, "src/main.rs", text)
         elif kind == "python-broken":
             write(root, "maths.py", "def add(a, b):\n    return a - b\n")
-        elif kind in {"dirty-git", "staged-git"}:
+        elif kind in {"dirty-git", "staged-git", "review-workflow"}:
             git(root, "init", "--quiet", "--initial-branch=fixture", "--template=")
             git(root, "config", "user.name", "Eval Fixture")
             git(root, "config", "user.email", "fixture@example.invalid")
@@ -444,3 +479,22 @@ def listener(root: Path, port: int = 8080):
                 proc.wait()
         proc.stdout.close()
         proc.stderr.close()
+
+
+def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) -> dict:
+    kind = scenario["check"]
+    state = {"files": after, "cwd": result.pwd}
+    if kind in STATEFUL_CHECKS:
+        state["files"] = protected_files(after, kind)
+        state["artifacts"] = sorted({
+            re.sub(r"(?<=eval_math-)[0-9a-f]+", "<hash>", name)
+            for name, item in after.items() if artifact(name, item, kind)
+        })
+        if (kind in CAPTURE_CHECKS and "once.py" in after
+                and after["once.py"] == facts["before"].get("once.py")):
+            # The original snapshot remains in file_snapshot; the trial-specific
+            # diagnostic ID must not make an unchanged script look nondeterministic.
+            state["files"] = dict(state["files"], **{"once.py": {"unchanged_from_fixture": True}})
+    if kind in ("git-diff", "git-commit", "recent-history", "assist-next-review"):
+        state["git"] = git_state(root)
+    return state

@@ -2,21 +2,65 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from eval import driver, fixtures, observations, run
+from eval import approval, contracts, driver, fixtures, observations, runtime, suite, suite as suite_api
 from .support import SCENARIOS, SUITE
 
 
 class ContractTests(unittest.TestCase):
+    def test_registry_is_the_shared_source_of_check_and_policy_relationships(self):
+        self.assertIs(suite.CHECK_FIXTURES, contracts.CHECK_FIXTURES)
+        self.assertIs(approval.APPROVAL_CHECKS, contracts.APPROVAL_CHECKS)
+        self.assertEqual(set(contracts.CHECK_FIXTURES.values()), fixtures.FIXTURES)
+        for name, spec in contracts.CHECK_SPECS.items():
+            self.assertIs(contracts.check_spec(name), spec)
+            self.assertIn(spec.family, ("agent", "project", "capture", "assist"))
+            if spec.approval != "deny":
+                self.assertIn(name, approval.APPROVAL_CHECKS[spec.approval])
+        self.assertEqual(approval.PROJECT_POLICY_FIXTURES["git-commit"], {"staged-git"})
+        with self.assertRaisesRegex(ValueError, "unknown check"):
+            contracts.check_spec("unknown")
+
+
+    def test_suite_loading_has_no_runtime_or_scorer_dependency(self):
+        result = subprocess.run([
+            sys.executable, "-B", "-c",
+            "import sys; from eval.suite import load_suite; load_suite('smoke'); "
+            "assert not {'eval.run', 'eval.runtime', 'eval.driver', 'eval.fixtures', 'eval.checks'} & sys.modules.keys()",
+        ], cwd=runtime.ROOT, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_suite_names_paths_and_in_memory_validation_share_the_same_contract(self):
+        for name in suite.BUILTIN_SUITES:
+            with self.subTest(name=name):
+                expanded = suite.load_suite(name)
+                self.assertEqual(expanded, suite.load_suite(runtime.HERE / "suites" / f"{name}.json"))
+                before = copy.deepcopy(expanded)
+                self.assertEqual(suite.validate_suite(expanded), before)
+                self.assertEqual(expanded, before)
+        self.assertEqual(suite.suite_path(Path("smoke")), Path("smoke"))
+        catalog = json.loads((runtime.HERE / "suites" / "smoke.json").read_text())
+        with self.assertRaisesRegex(ValueError, "catalog_root"):
+            suite.validate_suite(catalog)
+        self.assertEqual(suite.validate_suite(catalog, catalog_root=runtime.HERE / "suites"),
+                         suite.load_suite("smoke"))
+        for value in (None, [], {}, 1, True):
+            invalid = copy.deepcopy(SUITE)
+            invalid["scenarios"][0]["check"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "unknown fixture or check"):
+                suite.validate_suite(invalid)
+
     def test_workspace_cannot_inherit_project_guidance(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             work = root / "isolated"
-            run.validate_workspace_ancestry(work)
+            runtime.validate_workspace_ancestry(work)
             (root / "NOSH.md").write_text("Legacy name is not an instruction source")
-            run.validate_workspace_ancestry(work)
+            runtime.validate_workspace_ancestry(work)
             for name in (
                 ".git", "AGENTS.md", "README.md", "Readme.md", "readme.md", "README.rst", "README.txt", "README",
             ):
@@ -24,16 +68,16 @@ class ContractTests(unittest.TestCase):
                     path = root / name
                     path.write_text("Project-specific context")
                     with self.assertRaisesRegex(ValueError, "AGENTS.md/README ancestry"):
-                        run.validate_workspace_ancestry(work)
+                        runtime.validate_workspace_ancestry(work)
                     path.unlink()
             (root / "AGENTS.md").symlink_to(root / "missing")
             with self.assertRaisesRegex(ValueError, "AGENTS.md/README ancestry"):
-                run.validate_workspace_ancestry(work)
+                runtime.validate_workspace_ancestry(work)
 
     def test_guidance_ancestry_does_not_treat_errors_as_absence(self):
         with patch.object(Path, "lstat", side_effect=PermissionError("blocked")):
             with self.assertRaisesRegex(PermissionError, "blocked"):
-                run.validate_workspace_ancestry(Path("/isolated/workspace"))
+                runtime.validate_workspace_ancestry(Path("/isolated/workspace"))
 
     def test_source_fingerprint_ignores_platform_line_endings(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -44,18 +88,18 @@ class ContractTests(unittest.TestCase):
             self.assertNotEqual(fixtures.file_hash(a), fixtures.file_hash(b))
 
     def test_default_suite_and_seeds(self):
-        suite = run.load_suite(run.HERE / "suites" / "regression.json")
+        suite = suite_api.load_suite(runtime.HERE / "suites" / "regression.json")
         self.assertEqual(len(suite["scenarios"]), 27)
         self.assertEqual(sum(s["group"] == "mvp" for s in suite["scenarios"]), 10)
         self.assertEqual(sum(s["group"] == "expanded" for s in suite["scenarios"]), 17)
         self.assertEqual(suite["seeds"], [0, 1, 2, 3, 4])
-        self.assertEqual(run.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
+        self.assertEqual(suite_api.seeds([0, 2**64 - 1]), [0, 2**64 - 1])
         for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                run.seeds(bad)
+                suite_api.seeds(bad)
 
     def test_invalid_suite_rejected(self):
-        original = run.load_suite(run.HERE / "suites" / "regression.json")
+        original = suite_api.load_suite(runtime.HERE / "suites" / "regression.json")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "suite.json"
             for field, value in (("id", "../outside"), ("mode", "unknown"), ("approval", "yolo"),
@@ -65,7 +109,24 @@ class ContractTests(unittest.TestCase):
                 suite["scenarios"][0][field] = value
                 path.write_text(json.dumps(suite))
                 with self.subTest(field=field), self.assertRaises(ValueError):
-                    run.load_suite(path)
+                    suite_api.load_suite(path)
+
+    def test_input_types_are_checked_before_route_specific_parsing(self):
+        for sid in ("captured-diagnosis", "zh-build-failure", "largest-files"):
+            for value in (None, {}, [], 1, True):
+                data = copy.deepcopy(SUITE)
+                scenario = next(s for s in data["scenarios"] if s["id"] == sid)
+                scenario["inputs"][-1] = value
+                with self.subTest(scenario=sid, value=value), self.assertRaisesRegex(ValueError, "single lines"):
+                    suite_api.validate_suite(data)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            suite_api.validate_suite(dict(SUITE, timeout_s=10**400))
+
+    def test_stdin_producers_are_not_silently_ignored_in_repl_mode(self):
+        data = copy.deepcopy(SUITE)
+        data["scenarios"][0]["stdin_command"] = ["git", "log", "--stat", "-8"]
+        with self.assertRaisesRegex(ValueError, "stdin attachments require agent mode"):
+            suite_api.validate_suite(data)
 
 
     def test_isolated_config_uses_the_existing_string_contract(self):
@@ -73,31 +134,19 @@ class ContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            env = run.environment(home, 4, None)
+            env = runtime.environment(home, 4, None)
             cfg = tomllib.loads((Path(env["NOSH_HOME"]) / "config.toml").read_text())
             self.assertEqual(cfg["model"]["thinking"], "off")
             result = driver.Result(stdout="tar -czf logs.tar.gz logs", exit_code=0,
                                    stderr="nosh: /tmp/config.toml: model.thinking: expected a string\n")
             with self.assertRaises(ValueError):
-                observations.observe(result, {"mode": "suggest", "check": "archive"}, home / "trace", True, 0)
+                observations.observe(result, {"mode": "suggest", "check": "archive"}, home / "trace", seed=0)
 class ExpandedContractTests(unittest.TestCase):
-    def test_original_tasks_preserve_facts_with_explicit_diagnosis_routing(self):
-        baseline = json.loads((run.HERE / "baselines" / "main-4f602ab" / "report.json").read_text(encoding="utf-8"))
-        legacy = copy.deepcopy(SUITE)
-        legacy["schema_version"] = 1
-        legacy["scenarios"] = [
-            {k: v for k, v in s.items() if k not in ("expect", "completions", "group")}
-            for s in legacy["scenarios"] if s["group"] == "mvp"
-        ]
-        previous = copy.deepcopy(baseline["metadata"]["scenarios"])
-        diagnosis = next(s for s in previous if s["id"] == "explain-failure")
-        self.assertEqual(diagnosis["inputs"], ["python3 broken.py", "#"])
-        diagnosis["inputs"][-1] = "ai fix Explain why this failed and how to fix it without changing files."
-        self.assertEqual(legacy["scenarios"], previous)
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "suite.json"
-            path.write_text(json.dumps(legacy), encoding="utf-8")
-            self.assertEqual(run.load_suite(path), legacy)
+    def test_current_tasks_declare_diagnosis_routing_and_short_requests(self):
+        diagnosis = SCENARIOS["explain-failure"]
+        self.assertEqual(diagnosis["inputs"][0], "python3 broken.py")
+        self.assertTrue(diagnosis["inputs"][1].startswith("ai fix "))
+        self.assertEqual(diagnosis["completions"][0]["kind"], "shell")
         short = [s for s in SUITE["scenarios"] if s["group"] == "expanded" and len(s["inputs"]) == 1]
         self.assertEqual(len(short), 12)
         self.assertTrue(all(not s["inputs"][0].startswith("#") and s["mode"] == "repl" for s in short))
@@ -125,15 +174,15 @@ class ExpandedContractTests(unittest.TestCase):
                 suite = dict(SUITE, scenarios=[dict(SCENARIOS["zh-rust-build"], **{field: value})])
                 path.write_text(json.dumps(suite), encoding="utf-8")
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                    run.load_suite(path)
+                    suite_api.load_suite(path)
 
     def test_only_selected_tools_are_required(self):
         old = [s for s in SUITE["scenarios"] if s["group"] == "mvp"]
-        self.assertEqual(run.required_tools(old), {"git", "bash", "python3", "tar", "ss"})
-        self.assertNotIn("npm", run.required_tools([SCENARIOS["zh-tool-versions"]]))
-        self.assertNotIn("cc", run.required_tools([SCENARIOS["zh-tool-versions"]]))
-        with patch("eval.run.shutil.which", return_value=None), self.assertRaisesRegex(ValueError, "missing required executable"):
-            run.discover_tools(old)
+        self.assertEqual(runtime.required_tools(old), {"git", "bash", "python3", "tar", "ss"})
+        self.assertNotIn("npm", runtime.required_tools([SCENARIOS["zh-tool-versions"]]))
+        self.assertNotIn("cc", runtime.required_tools([SCENARIOS["zh-tool-versions"]]))
+        with patch("eval.runtime.shutil.which", return_value=None), self.assertRaisesRegex(ValueError, "missing required executable"):
+            runtime.discover_tools(old)
 
     def test_failure_diagnosis_requires_the_initial_shell_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -149,12 +198,7 @@ class ExpandedContractTests(unittest.TestCase):
                     with self.subTest(scenario=sid, inputs=inputs), self.assertRaisesRegex(
                         ValueError, "initial failed shell command",
                     ):
-                        run.load_suite(path)
-    def test_legacy_failure_contract_is_normalized(self):
-        scenario = {"inputs": ["python3 broken.py", "#"], "check": "failure"}
-        self.assertEqual(driver.input_contracts(scenario), [
-            {"kind": "shell", "exit_code": 1, "contains": ["FileNotFoundError"]}, {"kind": "agent"},
-        ])
+                        suite_api.load_suite(path)
 
 
 class CatalogSuiteTests(unittest.TestCase):
@@ -171,7 +215,7 @@ class CatalogSuiteTests(unittest.TestCase):
 
     def load(self, **changes):
         self.path.write_text(json.dumps(dict(self.manifest, **changes)), encoding="utf-8")
-        return run.load_suite(self.path)
+        return suite_api.load_suite(self.path)
 
     def test_catalogs_expand_to_the_existing_contract_in_explicit_order(self):
         expected = dict(SUITE, scenarios=list(reversed(self.entries)))
@@ -204,15 +248,15 @@ class CatalogSuiteTests(unittest.TestCase):
 
     def test_bundled_suites_reuse_one_catalog_without_changing_cases(self):
         catalog = {}
-        for path in sorted((run.HERE / "scenarios").glob("*.json")):
+        for path in sorted((runtime.HERE / "scenarios").glob("*.json")):
             for scenario in json.loads(path.read_text(encoding="utf-8")):
                 self.assertNotIn(scenario["id"], catalog)
                 catalog[scenario["id"]] = scenario
-        self.assertEqual(len(catalog), 32)
-        for name, count in (("regression", 27), ("command-assist", 5), ("smoke", 5)):
-            loaded = run.load_suite(run.HERE / "suites" / f"{name}.json")
+        self.assertEqual(len(catalog), 39)
+        for name, count in (("regression", 27), ("command-assist", 5), ("smoke", 5), ("workflows", 8)):
+            loaded = suite_api.load_suite(runtime.HERE / "suites" / f"{name}.json")
             self.assertEqual(len(loaded["scenarios"]), count)
             for scenario in loaded["scenarios"]:
                 self.assertEqual(scenario, catalog[scenario["id"]])
-        smoke = run.load_suite(run.HERE / "suites" / "smoke.json")
+        smoke = suite_api.load_suite(runtime.HERE / "suites" / "smoke.json")
         self.assertEqual(smoke["seeds"], [0])

@@ -108,7 +108,7 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 | [CommandAssist 设计](docs/COMMAND-ASSIST.md) | Generate / Fix / Next、简短 instructions、查询工具、finish 协议与后台调度 |
 | [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
-| [固定 seed 的真实模型评测](eval/README.md) | revision 10：27 场景回归与 5 场景 CommandAssist 专项分别运行；历史 main 的 48.0% 不代表新协议成绩 |
+| [固定 seed 的真实模型评测](eval/README.md) | 原 27 场景回归、5 场景 CommandAssist 与新增 8 场景真实工作流专项分别运行；历史 main 的 48.0% 不代表当前评分成绩 |
 
 开发入口见 [维护与扩展约定](docs/DESIGN.md#123-维护与扩展约定)：工具目录、对话日志、推理执行各自维护边界；错误显式传递，性能结论区分辅助路径优化与真实模型实测。
 

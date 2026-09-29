@@ -204,18 +204,6 @@ class Result:
     timeout_phase: str | None = None
 
 
-def input_contracts(scenario: dict) -> list[dict]:
-    if "completions" in scenario:
-        return scenario["completions"]
-    if scenario.get("corrections"):
-        return [{"kind": "correction"} for _ in scenario["inputs"]]
-    return [
-        {"kind": "shell", "exit_code": 1, "contains": ["FileNotFoundError"]}
-        if scenario["check"] == "failure" and i == 0 else {"kind": "agent"}
-        for i, _ in enumerate(scenario["inputs"])
-    ]
-
-
 def owned_pids(token: str) -> list[int]:
     marker = f"NOSH_EVAL_RUN={token}".encode()
     found = []
@@ -406,6 +394,9 @@ def run_cli(argv: list[str], cwd: Path, env: dict, timeout: float, stdin: bytes 
 
 
 def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: dict, approve) -> Result:
+    contracts = scenario.get("completions")
+    if not isinstance(contracts, list) or len(contracts) != len(scenario["inputs"]):
+        raise ValueError("each REPL input requires an explicit completion contract")
     child = Child(argv, cwd, dict(env, PS1=PROMPT), True)
     result = child.result
     deadline = child.start + timeout
@@ -455,7 +446,6 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
 
     try:
         child.until(prompt, deadline, "initial prompt")
-        contracts = input_contracts(scenario)
         for i, line in enumerate(scenario["inputs"]):
             contract = contracts[i]
             phase = contract["kind"]
@@ -491,7 +481,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                 result.failure = f"input {i + 1}: returned without an agent task (routing/completion failure)"
             if result.failure:
                 break
-        if scenario["check"] == "cwd" and not result.failure:
+        if scenario["check"] in ("cwd", "cwd-follow-up") and not result.failure:
             phase = "cwd_probe"
             start = len(result.transcript)
             child.send(b"\x15printf '\\n__NOSH_EVAL_PWD_BEGIN__\\n'; pwd -P; printf '__NOSH_EVAL_PWD_END__\\n'\r")

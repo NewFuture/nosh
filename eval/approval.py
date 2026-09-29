@@ -8,15 +8,8 @@ import re
 import shlex
 
 from . import fixtures
+from .contracts import APPROVAL_CHECKS, POLICY_FIXTURES
 from .fixtures import protected_files
-
-APPROVAL_CHECKS = {
-    "rename": {"rename"}, "cwd": {"cwd"},
-    "rust-build": {"rust-build", "build-failure"}, "rust-test": {"rust-test"},
-    "rust-clean": {"rust-clean"}, "node-build": {"node-build"}, "node-test": {"node-test"},
-    "python-test": {"python-test", "test-failure"}, "git-commit": {"git-commit"},
-    "port-failure": {"port-failure"},
-}
 
 PROJECT_POLICIES = APPROVAL_CHECKS.keys() - {"rename", "cwd", "port-failure"}
 PROJECT_ACTIONS = {
@@ -26,15 +19,7 @@ PROJECT_ACTIONS = {
     "node-test": {"node-build", "node-test"},
     "git-commit": {"git-add", "git-commit"},
 }
-PROJECT_POLICY_FIXTURES = {
-    "rust-build": {"rust", "rust-broken"},
-    "rust-test": {"rust"},
-    "rust-clean": {"rust-built"},
-    "node-build": {"node"},
-    "node-test": {"node"},
-    "python-test": {"python", "python-broken"},
-    "git-commit": {"dirty-git", "staged-git"},
-}
+PROJECT_POLICY_FIXTURES = {policy: POLICY_FIXTURES[policy] for policy in PROJECT_POLICIES}
 
 def shell_parts(command: str) -> list[str]:
     if any(ch in command for ch in "$`<>\\\0"):
@@ -120,6 +105,14 @@ def project_action(parts: list[str], root: Path) -> str | None:
             if verb != "test" or any(a not in ("--nocapture", "--test-threads=1") for a in args[split + 1:]):
                 return None
             args = args[:split]
+        if verb in ("build", "test"):
+            for flag in ("-j", "--jobs"):
+                if flag in args:
+                    index = args.index(flag)
+                    if index + 1 >= len(args) or args[index + 1] != "1":
+                        return None
+                    args = args[:index] + args[index + 2:]
+            common |= {"-j1", "--jobs=1", "--all-features", "--no-default-features"}
         flags = common | ({"--release", "--workspace", "--all-targets"} if verb != "clean" else set())
         if verb in ("build", "test", "clean") and all(arg in flags for arg in args):
             return "rust-" + verb
@@ -278,7 +271,7 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
         # Only this bounded loop is allowed; substituted shell expressions or
         # extra commands must not ride along with a fixture approval.
         loop = re.fullmatch(
-            r'for ([a-zA-Z_]\w*) in (?:\./)?\*\.txt;\s*do\s+mv(?: -v)?(?: --)? '
+            r'for ([a-zA-Z_]\w*) in (?:\./)?\*\.txt;\s*do\s+mv(?: (?:-v|-n|--no-clobber))*(?: --)? '
             r'"\$\1" "\$\{\1%(?:\.txt|\.\*)\}\.md";?\s*done;?',
             command.strip(),
         )
@@ -303,9 +296,13 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
             if not group or group[0] != "mv":
                 return False
             args = group[1:]
-            while args and args[0] in ("-v", "--"):
+            while args and args[0] in ("-v", "-n", "--no-clobber", "--"):
                 args = args[1:]
-            if len(args) != 2 or facts["renames"].get(args[0]) != args[1]:
+            if len(args) != 2 or not any(
+                (root / args[0]).resolve() == root / source
+                and (root / args[1]).resolve() == root / destination
+                for source, destination in facts["renames"].items()
+            ):
                 return False
         return bool(groups)
     if policy == "cwd":
