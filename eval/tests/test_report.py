@@ -53,6 +53,29 @@ class ReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid observed devices"):
                 report.validate(invalid)
 
+    def test_legacy_cpu_device_observations_do_not_produce_false_warnings(self):
+        legacy = self.sample()
+        current = copy.deepcopy(legacy)
+        for engines in ([{"device": "cpu"}], [{"device": "cpu"}, {"device": "cpu"}]):
+            current["trials"][0]["engines"] = engines
+            self.assertEqual(report.compare(current, legacy)["warnings"], [])
+            self.assertEqual(report.compare(legacy, current)["warnings"], [])
+        current["trials"][0]["engines"] = [{"device": "cuda:0"}]
+        self.assertTrue(any("observed devices differ" in warning
+                            for warning in report.compare(current, legacy)["warnings"]))
+        legacy["trials"][0]["metrics"]["task_status"] = "local"
+        current = copy.deepcopy(legacy)
+        current["trials"][0]["engines"] = []
+        self.assertEqual(report.compare(current, legacy)["warnings"], [])
+
+    def test_missing_auto_observations_are_not_assumed_to_be_cpu(self):
+        missing = self.sample()
+        missing["metadata"]["settings"] = {"device": "auto"}
+        observed = copy.deepcopy(missing)
+        observed["trials"][0]["engines"] = [{"device": "cpu"}]
+        self.assertTrue(any("observed devices differ" in warning
+                            for warning in report.compare(observed, missing)["warnings"]))
+
     def test_paired_comparison_and_incompatibility(self):
         before = self.sample()
         after = copy.deepcopy(before)

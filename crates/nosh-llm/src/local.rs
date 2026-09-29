@@ -96,6 +96,17 @@ pub struct LocalChatEngine {
     default_sampling: SamplingParams,
 }
 
+fn load_error_context(selection: &DeviceSelection) -> String {
+    let mut context = format!(
+        "loading on {} (requested {}): {}",
+        selection.actual, selection.requested, selection.reason,
+    );
+    if matches!(selection.actual, InferenceDevice::Cuda(_)) {
+        context.push_str("; device memory is not reserved; no automatic retry on another backend");
+    }
+    context
+}
+
 impl LocalChatEngine {
     pub fn load(
         model: &nosh_hub::ResolvedModel,
@@ -111,10 +122,7 @@ impl LocalChatEngine {
         let (device, device_selection) = opts.select_device(model)?;
         let mut tok = Tok::load(&model.tokenizer)?;
         let llama = Llama::load(&model.weights, opts.context_length, load, &device)
-            .map_err(|error| error.context(format!(
-                "loading on {} (requested {}): {}; device memory is not reserved; no automatic retry on another backend",
-                device_selection.actual, device_selection.requested, device_selection.reason,
-            )))?;
+            .map_err(|error| error.context(load_error_context(&device_selection)))?;
         let cfg = llama.config().clone();
         if cfg.arch != model.entry.arch {
             return Err(LlmError::Config(format!(
@@ -541,6 +549,38 @@ pub fn rss_mb() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_failure_context_only_describes_cuda_memory_for_cuda() {
+        for requested in [InferenceDevice::Cpu, InferenceDevice::Auto] {
+            let selection = DeviceSelection {
+                requested,
+                actual: InferenceDevice::Cpu,
+                reason: "CPU selection reason".into(),
+                required_cuda_bytes: None,
+                free_cuda_bytes: None,
+            };
+            let context = load_error_context(&selection);
+            assert!(context.contains(&format!("loading on cpu (requested {requested})")));
+            assert!(context.contains(&selection.reason));
+            assert!(!context.contains("memory is not reserved"));
+            assert!(!context.contains("retry"));
+        }
+        for requested in [InferenceDevice::Auto, InferenceDevice::Cuda(1)] {
+            let selection = DeviceSelection {
+                requested,
+                actual: InferenceDevice::Cuda(1),
+                reason: "CUDA selection reason".into(),
+                required_cuda_bytes: None,
+                free_cuda_bytes: None,
+            };
+            let context = load_error_context(&selection);
+            assert!(context.contains(&format!("loading on cuda:1 (requested {requested})")));
+            assert!(context.contains(&selection.reason));
+            assert!(context.contains("memory is not reserved"));
+            assert!(context.contains("no automatic retry"));
+        }
+    }
 
     #[test]
     fn unsupported_cuda_kv_fails_before_device_or_model_io() {

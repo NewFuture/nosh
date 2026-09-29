@@ -176,10 +176,17 @@ def compare(current: dict, previous: dict) -> dict:
         })
     if any(change["sampling_changed"] for change in changes):
         warnings.append("observed sampling parameters differ")
-    def observed_devices(trial):
+    def observed_devices(trial, metadata):
         engines = trial.get("engines")
-        return [engine.get("device", "cpu") for engine in engines] if engines is not None else None
-    if any(observed_devices(trial) != observed_devices(old[trial_key(trial)])
+        if engines is not None:
+            return sorted({engine.get("device", "cpu") for engine in engines})
+        if trial["metrics"].get("task_status") == "local":
+            return []
+        # Native-v1 reports without device settings/observations were CPU-only.
+        if metadata.get("settings", {}).get("device", "cpu") == "cpu":
+            return ["cpu"]
+        return None
+    if any(observed_devices(trial, a) != observed_devices(old[trial_key(trial)], b)
            for trial in current["trials"] if trial_key(trial) in old):
         warnings.append("observed devices differ; auto-selected backends may not be a controlled regression")
     return {
