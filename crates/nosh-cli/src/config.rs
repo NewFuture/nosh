@@ -25,6 +25,7 @@ pub struct Config {
     pub model_id: Option<String>,
     pub model_path: Option<PathBuf>,
     pub context_length: usize,
+    pub model_device: Result<nosh_llm::InferenceDevice, String>,
     pub thinking: bool,
     pub download_auto: bool,
     pub source_selection: SourceSelection,
@@ -56,6 +57,7 @@ impl Default for Config {
             model_id: None,
             model_path: None,
             context_length: 8192,
+            model_device: Ok(nosh_llm::InferenceDevice::Auto),
             thinking: false,
             download_auto: true,
             source_selection: SourceSelection::Auto,
@@ -304,13 +306,14 @@ impl Config {
         if let Some(v) = r.int("model", "context_length", 1024, 32768) {
             c.context_length = v as usize;
         }
-        if let Some(v) = r.str("model", "device")
-            && v != "auto"
-            && v != "cpu"
-        {
-            r.warnings.push(format!(
-                "model.device = {v}: only cpu is available in this build"
-            ));
+        if let Some(v) = r.get("model", "device") {
+            c.model_device = v
+                .as_str()
+                .ok_or_else(|| "model.device: expected a string".to_string())
+                .and_then(|s| s.parse().map_err(|e| format!("model.device: {e}")));
+            if let Err(error) = &c.model_device {
+                r.warnings.push(error.clone());
+            }
         }
         if let Some(v) = r.str("model", "thinking") {
             match v.as_str() {
@@ -396,6 +399,29 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_requests_are_preserved_or_rejected_never_silently_cpu() {
+        assert_eq!(
+            Config::default().model_device,
+            Ok(nosh_llm::InferenceDevice::Auto)
+        );
+        for (text, expected) in [
+            ("cpu", nosh_llm::InferenceDevice::Cpu),
+            ("auto", nosh_llm::InferenceDevice::Auto),
+            ("cuda", nosh_llm::InferenceDevice::Cuda(0)),
+            ("cuda:1", nosh_llm::InferenceDevice::Cuda(1)),
+        ] {
+            let config = Config::parse(&format!("[model]\ndevice = \"{text}\""));
+            assert_eq!(config.model_device, Ok(expected));
+            assert!(config.warnings.is_empty());
+        }
+        for text in ["\"metal\"", "\"cdua\"", "42"] {
+            let config = Config::parse(&format!("[model]\ndevice = {text}"));
+            assert!(config.model_device.is_err());
+            assert!(!config.warnings.is_empty());
+        }
+    }
 
     #[test]
     fn parses_known_keys_and_warns_on_unknown() {

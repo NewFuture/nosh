@@ -35,6 +35,47 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((row["pass"], row["planned"], row["error"]), (1, 2, 1))
         self.assertIn("1/2 (50%)", report.markdown(data))
 
+    def test_device_is_visible_and_cpu_gpu_comparisons_are_not_controlled(self):
+        cpu = self.sample()
+        cpu["metadata"]["settings"] = {"device": "cpu"}
+        gpu = copy.deepcopy(cpu)
+        gpu["metadata"]["settings"]["device"] = "cuda:0"
+        self.assertIn("Inference device: `cuda:0`", report.markdown(gpu))
+        self.assertTrue(any("settings differs" in warning for warning in report.compare(gpu, cpu)["warnings"]))
+        cpu["metadata"]["settings"]["device"] = "auto"
+        gpu["metadata"]["settings"]["device"] = "auto"
+        cpu["trials"][0]["engines"] = [{"device": "cpu"}]
+        gpu["trials"][0]["engines"] = [{"device": "cuda:0"}]
+        self.assertTrue(any("observed devices differ" in warning for warning in report.compare(gpu, cpu)["warnings"]))
+        for engines in ("cuda", [None], [{"device": "auto"}], [{"device": 0}]):
+            invalid = copy.deepcopy(cpu)
+            invalid["trials"][0]["engines"] = engines
+            with self.assertRaisesRegex(ValueError, "invalid observed devices"):
+                report.validate(invalid)
+
+    def test_legacy_cpu_device_observations_do_not_produce_false_warnings(self):
+        legacy = self.sample()
+        current = copy.deepcopy(legacy)
+        for engines in ([{"device": "cpu"}], [{"device": "cpu"}, {"device": "cpu"}]):
+            current["trials"][0]["engines"] = engines
+            self.assertEqual(report.compare(current, legacy)["warnings"], [])
+            self.assertEqual(report.compare(legacy, current)["warnings"], [])
+        current["trials"][0]["engines"] = [{"device": "cuda:0"}]
+        self.assertTrue(any("observed devices differ" in warning
+                            for warning in report.compare(current, legacy)["warnings"]))
+        legacy["trials"][0]["metrics"]["task_status"] = "local"
+        current = copy.deepcopy(legacy)
+        current["trials"][0]["engines"] = []
+        self.assertEqual(report.compare(current, legacy)["warnings"], [])
+
+    def test_missing_auto_observations_are_not_assumed_to_be_cpu(self):
+        missing = self.sample()
+        missing["metadata"]["settings"] = {"device": "auto"}
+        observed = copy.deepcopy(missing)
+        observed["trials"][0]["engines"] = [{"device": "cpu"}]
+        self.assertTrue(any("observed devices differ" in warning
+                            for warning in report.compare(observed, missing)["warnings"]))
+
     def test_paired_comparison_and_incompatibility(self):
         before = self.sample()
         after = copy.deepcopy(before)

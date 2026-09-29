@@ -52,6 +52,13 @@ def validate(report: dict) -> None:
             raise ValueError(f"trial was not in the declared plan: {key}")
         if trial.get("status") not in ("pass", "fail", "error"):
             raise ValueError(f"invalid trial status: {key}")
+        engines = trial.get("engines")
+        if engines is not None and (not isinstance(engines, list) or any(
+                not isinstance(engine, dict)
+                or ("device" in engine and (not isinstance(engine["device"], str)
+                    or not re.fullmatch(r"cpu|cuda:(?:0|[1-9][0-9]*)", engine["device"])))
+                for engine in engines)):
+            raise ValueError(f"invalid observed devices: {key}")
         metrics = trial.get("metrics")
         if not isinstance(metrics, dict):
             raise ValueError(f"missing metrics: {key}")
@@ -169,6 +176,19 @@ def compare(current: dict, previous: dict) -> dict:
         })
     if any(change["sampling_changed"] for change in changes):
         warnings.append("observed sampling parameters differ")
+    def observed_devices(trial, metadata):
+        engines = trial.get("engines")
+        if engines is not None:
+            return sorted({engine.get("device", "cpu") for engine in engines})
+        if trial["metrics"].get("task_status") == "local":
+            return []
+        # Native-v1 reports without device settings/observations were CPU-only.
+        if metadata.get("settings", {}).get("device", "cpu") == "cpu":
+            return ["cpu"]
+        return None
+    if any(observed_devices(trial, a) != observed_devices(old[trial_key(trial)], b)
+           for trial in current["trials"] if trial_key(trial) in old):
+        warnings.append("observed devices differ; auto-selected backends may not be a controlled regression")
     return {
         "previous_run": previous["metadata"].get("run_id"),
         "warnings": warnings,
@@ -317,6 +337,9 @@ def _markdown(report: dict, tables: dict) -> str:
         f"Binary SHA-256: `{build['binary_sha256']}`.",
         "",
         f"Harness source: `{meta.get('harness_revision') or meta.get('harness_content_sha256') or 'unverified'}`.",
+        "",
+        f"Inference device: `{meta.get('settings', {}).get('device', 'cpu')}`. "
+        "Peak RSS measures host memory only, not GPU memory.",
         "",
         f"Seeds: `{meta['seeds']}`; repeats: {meta['repeat']}. "
         + f"Dataset revision: {meta['dataset_revision']}. "

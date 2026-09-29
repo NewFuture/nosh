@@ -1,4 +1,4 @@
-//! `nosh doctor`: CPU, memory, model, download sources, offline state, config.
+//! `nosh doctor`: device selection, CPU, memory, model, sources, offline state, config.
 
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,37 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
     let hub = ModelHub::new();
     let entry = hub.registry().lookup(setup.model_id.as_deref()).cloned();
     let located = engine::locate(setup);
+    let device_check = setup.device.clone().and_then(|request| {
+        if let Ok(Some(model)) = &located {
+            let opts = nosh_llm::LocalEngineOptions {
+                device: request,
+                context_length: setup.context_length,
+                ..Default::default()
+            };
+            opts.select_device(model)
+                .map(|(_, selection)| format!(
+                    "{} · CUDA compiled: {} · requested {}: {}",
+                    selection.actual, cfg!(feature = "cuda"), selection.requested, selection.reason,
+                ))
+                .map_err(|error| error.to_string())
+        } else if request == nosh_llm::InferenceDevice::Auto {
+            Ok(format!(
+                "auto · CUDA compiled: {} · install/resolve a model to check its GPU memory requirement",
+                cfg!(feature = "cuda"),
+            ))
+        } else {
+            request.open().map(|_| format!(
+                "{request} · CUDA compiled: {} · explicit device selection", cfg!(feature = "cuda"),
+            )).map_err(|error| error.to_string())
+        }
+    });
+    match device_check {
+        Ok(message) => ok("device", &message),
+        Err(error) => {
+            problems += 1;
+            bad("device", &error);
+        }
+    }
     // The model memory is checked for: the installed one, else the selected
     // (or default) registry entry.
     let model: Option<ModelEntry> = match &located {

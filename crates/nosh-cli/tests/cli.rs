@@ -165,6 +165,41 @@ fn empty_home(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(not(feature = "cuda"))]
+fn cpu_build_reports_device_and_rejects_cuda_without_fallback() {
+    let home = empty_home("device");
+    let doctor = || {
+        let mut command = nosh();
+        command
+            .env("NOSH_HOME", &home)
+            .env_remove("NOSH_MODEL_PATH");
+        command.args(["--offline", "doctor"]);
+        command
+    };
+    let out = doctor().output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("auto · CUDA compiled: false"), "{stderr}");
+    std::fs::write(home.join("config.toml"), "[model]\ndevice = 'cuda'\n").unwrap();
+    let out = doctor().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("CUDA is not enabled"));
+    let out = doctor().args(["--device", "cpu"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cpu · CUDA compiled: false"));
+    let out = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["-c", "printf raw"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"raw");
+    assert!(
+        out.stderr.is_empty(),
+        "non-AI commands must not initialize CUDA"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn agent_modes_without_a_model_exit_2() {
     let home = empty_home("a");
     let out = nosh()

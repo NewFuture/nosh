@@ -51,6 +51,43 @@ input_assist = false
 
 语法分析和文件查询由两个有界辅助进程隔离；超时或超出预算会明确降级，而不是等待查询完成或无限重启。`NO_COLOR` 关闭输入样式；未识别命令的无颜色提示留给后续状态栏/补全统一体验。基本终端和非 TTY 不启用实时输入提示。数据流、判定规则、资源边界、恢复条件及可复现对照见 [实时输入解析设计](docs/INPUT-ASSIST.md)。
 
+## 可选 NVIDIA CUDA 推理
+
+默认设备为 **`auto`**：根据构建能力、可见 GPU 和当前可用显存，在加载时选择 GPU 或 CPU。普通构建仍是 CPU-only，不需要 CUDA；使用 GPU 需在 Linux/WSL 上有 NVIDIA 驱动与 CUDA toolkit（`nvcc`、头文件及 cuBLAS 等运行库），并显式构建 CUDA 版本：
+
+```bash
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+cargo build --release --locked -p nosh-cli --features cuda
+./target/release/nosh --offline doctor
+./target/release/nosh debug gen "Explain a shell pipeline." --temp 0
+./target/release/nosh -s "列出当前目录"
+# 显式覆盖自动选择
+CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda -s "列出当前目录"
+./target/release/nosh --device cpu -s "列出当前目录"
+```
+
+`--device auto|cpu|cuda|cuda:N` 对交互 shell、Agent、CommandAssist、debug 和 doctor 一致生效，覆盖 `[model] device = "auto"`（默认）。`auto` 通过 CUDA API 检查设备及空闲显存，根据实际 GGUF 权重、配置上下文、prefill 块和 attention/KV 临时张量估算预算，并保留至少 512 MiB 余量；在满足预算的 GPU 中选择空闲显存最多的一张，相同则取较低逻辑序号。没有 CUDA 构建支持、驱动／设备不可用、显存不足或选择 f32 KV 时使用 CPU，并在诊断／引擎状态／原生 trace 中报告原因。它依据显存快照，不是 GPU 利用率调度器，不保证共享 GPU 没有计算负载。
+
+显式 `cpu` 强制 CPU；显式 `cuda`／`cuda:N` 强制 GPU，初始化或加载失败会报错，**不会退回 CPU**。`N` 是 `CUDA_VISIBLE_DEVICES` 筛选后的逻辑序号：只暴露物理卡 1 时仍用 `cuda:0`。自动选择在初始化 CUDA 库后再次核对空闲显存，但不预留显存；之后若其他进程抢占导致加载失败，明确报错，不用宽泛重试掩盖模型损坏、shape 或算子错误。选择只在加载时进行，不迁移正在运行的模型。CUDA 版依赖的动态库必须能被系统加载；若动态链接器在进程启动前报缺库，程序无法回退，应使用 CPU-only 产物。
+
+量化 GGUF 权重、embedding、RoPE、GQA、KV cache 和前馈层均在单张 GPU 上，跳过 CPU prepack；分词、调度和采样留在 CPU。GPU KV 当前**仅开放默认 f16**，支持分块 prefill 和前缀回退，但使用张量拼接，未实现 FlashAttention、多 GPU 或 Metal。`--device cuda --kv f32` 会在权重／分词器加载前明确报错，不会偷偷改用 f16 或 CPU；CPU 的 f32 KV 不变。不同后端的量化内核会有数值差异，固定 seed 不保证 CPU/GPU 输出逐字相同。debug、加载说明与原生评估 trace 会报告实际设备；debug 的 RSS 仅为主机内存，显存和利用率请用 `nvidia-smi` 观测。CUDA 版本产物依赖匹配的 NVIDIA 动态库，默认 CPU 产物不受影响。
+
+f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing 的验收：同为 f32 KV 时，CPU/GPU 的 top-5 完整集合一致率为 18/33，未达到既有 60% 门槛（KL 0.02841、可信 top-1 30/30）；跨 dtype 的 CUDA f32 对 CPU f16 另有 KL 0.04083，超过 0.03。CPU Q8K 与 CUDA Q8_1 激活量化是已发现的不等价因素，**不是已完全确认的根因**。没有放宽阈值或宣称 f32 已验收；默认 f16 的同 dtype 对照通过。
+
+首次使用 CUDA 内核可能触发驱动 PTX/JIT 编译，首 token 明显更慢；后续新进程可能复用驱动缓存。测速必须区分首次 JIT 冷启动、驱动缓存已暖的新进程和同一进程的 KV 复用，不能统称“冷启动”。`NOSH_PROFILE` 的 CUDA 分算子计时仅反映异步提交开销；debug 的整体 prefill/decode 计时会等待 GPU 完成。
+
+为保持历史基线，评估器默认仍显式选择 CPU。GPU 评估传 `python3 -m eval --device cuda ...`；验证自动选择可传 `--device auto`，逐 trial 记录实际设备和选择原因，不依赖宿主配置，见[评估说明](eval/README.md)。
+
+实测源码 `780b952`：Ubuntu、单张 RTX 4090 24 GB、驱动 615.71.09、CUDA 13.4、Rust 1.98.1，MiniCPM5-2B Q4_K_M、f16 KV、seed 42、temperature 0、1457 token 输入／128 token 输出。两次均为新进程、无 KV 命中：
+
+| 驱动缓存状态 | 总墙钟（含加载） | TTFT | Prefill | Decode |
+|---|---:|---:|---:|---:|
+| 显式空 CUDA 缓存，首次 JIT | 16.153 s | 13.60 s | 107.1 tok/s | 169.5 tok/s |
+| 同一驱动缓存已暖 | 2.170 s | 0.19 s | 7490.4 tok/s | 178.7 tok/s |
+
+`nvidia-smi` 捕获到 nosh 的实际 GPU PID，峰值 95% 利用率、2210 MiB 显存。主机推理线程为 4、实际 nice 为 19，另有 CPU 28 线程评估并行运行，**不是无干扰 CPU/GPU 受控对照**。同构建五场景 smoke 原样得到 **2 pass／3 fail／0 error**：本地纠错与 Next 无建议通过；Agent 文件事实／预算及 Generate、Fix 的 finish 字段校验失败，未重抽或改判。四个载模场景均原生记录 `cuda:0`／`F16`；这证明 GPU 入口连通，不代表模型任务质量全通过。
+
 ## 命令建议与终端交接
 
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。

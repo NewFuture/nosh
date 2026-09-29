@@ -10,9 +10,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use candle_core::Device;
-
-use crate::LlmError;
 use crate::conversation::Conversation;
 pub use crate::conversation::shorten_tool_result;
 use crate::engine::{
@@ -25,6 +22,7 @@ use crate::sampling::Sampler;
 use crate::template;
 use crate::tokenizer::Tok;
 use crate::toolcall::{Parsed, StreamParser};
+use crate::{DeviceSelection, InferenceDevice, LlmError};
 
 pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
@@ -32,6 +30,7 @@ pub const EOS: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct LocalEngineOptions {
+    pub device: InferenceDevice,
     pub context_length: usize,
     pub prefill_chunk: usize,
     pub seed: Option<u64>,
@@ -44,6 +43,7 @@ impl Default for LocalEngineOptions {
     fn default() -> Self {
         let load = LoadOptions::default();
         Self {
+            device: InferenceDevice::default(),
             context_length: 8192,
             prefill_chunk: 512,
             seed: None,
@@ -53,8 +53,24 @@ impl Default for LocalEngineOptions {
     }
 }
 
+impl LocalEngineOptions {
+    pub fn select_device(
+        &self,
+        model: &nosh_hub::ResolvedModel,
+    ) -> Result<(candle_core::Device, DeviceSelection), LlmError> {
+        self.device.select(
+            &model.weights,
+            self.context_length,
+            self.prefill_chunk,
+            self.kv_dtype,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineInfo {
+    pub device: InferenceDevice,
+    pub device_selection: DeviceSelection,
     pub model_id: String,
     pub arch: String,
     pub layers: usize,
@@ -80,6 +96,17 @@ pub struct LocalChatEngine {
     default_sampling: SamplingParams,
 }
 
+fn load_error_context(selection: &DeviceSelection) -> String {
+    let mut context = format!(
+        "loading on {} (requested {}): {}",
+        selection.actual, selection.requested, selection.reason,
+    );
+    if matches!(selection.actual, InferenceDevice::Cuda(_)) {
+        context.push_str("; device memory is not reserved; no automatic retry on another backend");
+    }
+    context
+}
+
 impl LocalChatEngine {
     pub fn load(
         model: &nosh_hub::ResolvedModel,
@@ -88,17 +115,14 @@ impl LocalChatEngine {
         let t0 = Instant::now();
         // The environment is set up by the binary (`configure_thread_env`).
         let threads = barrier_threads();
-        let device = Device::Cpu;
+        let load = LoadOptions {
+            kv_dtype: opts.kv_dtype,
+            prepack_weights: opts.prepack_weights,
+        };
+        let (device, device_selection) = opts.select_device(model)?;
         let mut tok = Tok::load(&model.tokenizer)?;
-        let llama = Llama::load(
-            &model.weights,
-            opts.context_length,
-            LoadOptions {
-                kv_dtype: opts.kv_dtype,
-                prepack_weights: opts.prepack_weights,
-            },
-            &device,
-        )?;
+        let llama = Llama::load(&model.weights, opts.context_length, load, &device)
+            .map_err(|error| error.context(load_error_context(&device_selection)))?;
         let cfg = llama.config().clone();
         if cfg.arch != model.entry.arch {
             return Err(LlmError::Config(format!(
@@ -123,6 +147,8 @@ impl LocalChatEngine {
             ..SamplingParams::default()
         };
         let info = EngineInfo {
+            device: device_selection.actual,
+            device_selection,
             model_id: model.entry.id.clone(),
             arch: cfg.arch.clone(),
             layers: cfg.n_layer,
@@ -523,6 +549,60 @@ pub fn rss_mb() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_failure_context_only_describes_cuda_memory_for_cuda() {
+        for requested in [InferenceDevice::Cpu, InferenceDevice::Auto] {
+            let selection = DeviceSelection {
+                requested,
+                actual: InferenceDevice::Cpu,
+                reason: "CPU selection reason".into(),
+                required_cuda_bytes: None,
+                free_cuda_bytes: None,
+            };
+            let context = load_error_context(&selection);
+            assert!(context.contains(&format!("loading on cpu (requested {requested})")));
+            assert!(context.contains(&selection.reason));
+            assert!(!context.contains("memory is not reserved"));
+            assert!(!context.contains("retry"));
+        }
+        for requested in [InferenceDevice::Auto, InferenceDevice::Cuda(1)] {
+            let selection = DeviceSelection {
+                requested,
+                actual: InferenceDevice::Cuda(1),
+                reason: "CUDA selection reason".into(),
+                required_cuda_bytes: None,
+                free_cuda_bytes: None,
+            };
+            let context = load_error_context(&selection);
+            assert!(context.contains(&format!("loading on cuda:1 (requested {requested})")));
+            assert!(context.contains(&selection.reason));
+            assert!(context.contains("memory is not reserved"));
+            assert!(context.contains("no automatic retry"));
+        }
+    }
+
+    #[test]
+    fn unsupported_cuda_kv_fails_before_device_or_model_io() {
+        let model = nosh_hub::ResolvedModel {
+            entry: nosh_hub::Registry::builtin().default_model().clone(),
+            dir: "missing-model".into(),
+            weights: "missing-model/weights.gguf".into(),
+            tokenizer: "missing-model/tokenizer.json".into(),
+        };
+        let error = LocalChatEngine::load(
+            &model,
+            LocalEngineOptions {
+                device: InferenceDevice::Cuda(0),
+                kv_dtype: KvDtype::F32,
+                ..LocalEngineOptions::default()
+            },
+        )
+        .err()
+        .expect("unsupported combination")
+        .to_string();
+        assert!(error.contains("only f16 KV"), "{error}");
+    }
 
     #[test]
     fn loading_reads_the_thread_count_without_changing_the_environment() {

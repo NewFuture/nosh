@@ -38,6 +38,10 @@ python3 -m eval --suite workflows --model-path MODEL_DIR --repeat 2
 # 小规模检查，不代替回归或专项基线
 python3 -m eval --suite smoke --model-path MODEL_DIR
 
+# 单张 GPU 的独立 smoke；需要使用 --features cuda 构建的二进制
+CUDA_VISIBLE_DEVICES=0 python3 -m eval --suite smoke --device cuda \
+  --model-path MODEL_DIR --output /tmp/nosh-gpu-smoke
+
 # 选择场景、seed、构建及比较对象
 python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
   --scenario zh-rust-build --scenario zh-node-test --seeds 0 1 \
@@ -52,6 +56,8 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 框架只支持当前协议：suite/report 为 schema v2，必须显式记录 `dataset_revision`，模型结果必须有原生 trace；不再提供 `--legacy`、旧 schema 适配、旧入口或 helper 转发。原生 trace 与 build-info 各自使用 schema v1，这与已移除的 suite/report v1 不是同一种协议。`--compare` 也只接受当前报告格式。
 
 默认输出为 `eval/results/<run-id>/report.json` 和 `report.md`。`--output` 必须是尚不存在的目录；`--label` 只是名称，不证明构建来源。默认推理线程 8、Rayon 1；单次试验期限来自所选 suite：回归 240 秒，专项和 smoke 120 秒。可用 `--threads`、`--timeout` 调整。模型和工具不会自动安装。
+
+`--device` 默认仍显式 `cpu`，不随生产程序默认 `auto` 改变历史基线。可选 `cuda`／`cuda:N` 或 `auto`：自动模式由引擎按构建与可用显存选择，并必须原生记录具体的 `device`、`device_requested = "auto"` 和非空 `device_reason`；旧二进制没有这些观测时拒绝 auto 评估。评估会将设备写入**每个隔离 trial 的配置**，不读取宿主的 nosh 配置。所有设备模式都继承并在 settings 中记录 `LD_LIBRARY_PATH`：CUDA 构建的二进制即使选择 CPU，也必须先由动态链接器加载运行库。只有 CUDA／auto 额外继承 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`，也会记录；不调整用户的 GPU 占用或驱动。显式 CPU/CUDA 的实际设备必须与请求一致，否则是观测错误而非通过。旧版 native-v1 没有 device 字段，只允许作为 CPU 证据；新报告保留每个 engine 的元数据。CPU/GPU settings 或逐 trial 实际设备不同都会触发非受控对照警告，auto 可能在不同 trial 选择不同设备，不能混成固定 GPU/CPU 基线。GPU 型号、驱动、显存／利用率、构建 flags 和并发负载应另存实测来源；RSS 不含 GPU 显存。
 
 真实运行退出码：**0** 全部通过且重复结果一致，**1** 判定失败/不一致，**2** 基础设施或观测错误，**130** 中断。`--plan` 的 0 只表示计划有效，不代表模型通过。失败、超时和未完成试验不从计划分母中消失。
 

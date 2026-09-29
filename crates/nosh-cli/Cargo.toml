@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = ["nosh-llm/cuda"]
+
 [[bin]]
 name = "nosh"
 path = "src/main.rs"

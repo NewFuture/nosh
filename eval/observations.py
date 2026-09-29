@@ -169,7 +169,9 @@ def execution_evidence(events: list[dict]) -> list[dict]:
 
 
 def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
-            deadline_timeout: bool = False) -> dict:
+            deadline_timeout: bool = False, expected_device: str = "cpu") -> dict:
+    from .runtime import inference_device
+    expected_device = inference_device(expected_device)
     if type(seed) is not int or not 0 <= seed < 2**64:
         raise ValueError("observation requires a u64 seed")
     if deadline_timeout and (result.timeout_phase not in ("agent", "cli", "assist")
@@ -217,6 +219,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
     executions = None
     deadline_state = None
     assistance = []
+    engines = []
     if scenario["check"] != "typos":
         if not trace.is_file():
             raise ValueError("native engine trace is missing")
@@ -232,6 +235,18 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         if errors:
             raise RuntimeError("model engine failed: " + "; ".join(errors))
         records, pending = index_trace(events)
+        engines = [event["info"] for event in records["engine"]]
+        for info in engines:
+            # Historical native-v1 traces omitted device and were CPU-only.
+            actual = info.get("device", "cpu")
+            if expected_device == "auto":
+                if (info.get("device_requested") != "auto" or "device" not in info
+                        or actual == "auto" or inference_device(actual) != actual
+                        or not isinstance(info.get("device_reason"), str)
+                        or not info["device_reason"].strip()):
+                    raise ValueError("automatic device selection requires actual device and selection reason")
+            elif actual != expected_device:
+                raise ValueError(f"inference device mismatch: requested {expected_device}, observed {actual}")
         starts, ends, opens = records["step_start"], records["step_end"], records["open"]
         if not starts or not opens or (not deadline_timeout and pending):
             raise ValueError("incomplete engine observations; no successful fallback")
@@ -319,5 +334,6 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         if metrics["task_status"] == "completed" and "".join(cli_text).strip() != answer:
             raise ValueError("CLI agent answer differs from the native final response")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
+            "engines": engines,
             "executions": executions, "sampling": sampling, "generated_answers": generated,
             "assistance": assistance, "deadline_state": deadline_state, "metric_notes": notes}
