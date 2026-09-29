@@ -74,6 +74,15 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 
 GPU 评估必须显式传 `python3 -m eval --device cuda ...`，不要依赖宿主配置；详见[评估说明](eval/README.md)。
 
+实测源码 `780b952`：Ubuntu、单张 RTX 4090 24 GB、驱动 615.71.09、CUDA 13.4、Rust 1.98.1，MiniCPM5-2B Q4_K_M、f16 KV、seed 42、temperature 0、1457 token 输入／128 token 输出。两次均为新进程、无 KV 命中：
+
+| 驱动缓存状态 | 总墙钟（含加载） | TTFT | Prefill | Decode |
+|---|---:|---:|---:|---:|
+| 显式空 CUDA 缓存，首次 JIT | 16.153 s | 13.60 s | 107.1 tok/s | 169.5 tok/s |
+| 同一驱动缓存已暖 | 2.170 s | 0.19 s | 7490.4 tok/s | 178.7 tok/s |
+
+`nvidia-smi` 捕获到 nosh 的实际 GPU PID，峰值 95% 利用率、2210 MiB 显存。主机推理线程为 4、实际 nice 为 19，另有 CPU 28 线程评估并行运行，**不是无干扰 CPU/GPU 受控对照**。同构建五场景 smoke 原样得到 **2 pass／3 fail／0 error**：本地纠错与 Next 无建议通过；Agent 文件事实／预算及 Generate、Fix 的 finish 字段校验失败，未重抽或改判。四个载模场景均原生记录 `cuda:0`／`F16`；这证明 GPU 入口连通，不代表模型任务质量全通过。
+
 ## 命令建议与终端交接
 
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。
