@@ -63,6 +63,49 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 
 中断或基础设施失败时会尽力保存部分报告；若保存也失败，会明确输出警告并保留原退出类别，不用二次写入错误掩盖中断或原始故障。
 
+## 冷进程与驻留引擎协议
+
+`--execution-mode cold`（默认，保持旧运行口径）每个 trial 启动独立 CLI 并加载模型。
+`--execution-mode resident` 只加载一个评测专用引擎，通过私有 Unix socket 串行服务原生产
+`ChatEngine` 调用；每个 trial **仍是新的 CLI/PTY、shell、cwd、环境、home、fixture、审批和对话**。
+Agent、CommandAssist、工具模板与工具执行宿主均未替换，不是 LLM replay。
+每个 SessionSpec 原样传递 seed 和采样参数；连接内 sid 从 1 开始，不能操作上一连接的 session。
+
+```bash
+python3 -m eval --suite regression --scenario largest-files --seeds 0 --repeat 2 \
+  --execution-mode resident --worker-start-timeout 120 --model-path MODEL_DIR \
+  --output /tmp/nosh-resident-check
+```
+
+这里只是显式有界运行示例，不自动预热或追加试验。worker readiness **只加载模型，不生成 token**；
+第一条正式 trial 的首次设备 kernel/workspace 初始化照常计时，不把它悄悄丢掉。
+后续 case 只复用活动 KV 的**精确 token 最长共同前缀**；切换 prompt 的不同后缀重新计算，
+不会携带上一任务的聊天历史，也不承诺每条都是全缓存命中。顺序仍为 repeat → scenario → seed，
+因此是否热命中必须看原生 first-step new/cached tokens，而不是仅凭 repeat 编号。
+
+客户端和 worker 核对模型/分词器路径、模型 ID、请求设备、CUDA mask、context、
+KV dtype、prefill chunk、预打包与线程配置。不匹配、不可用和断连都显式报错，
+不回退本地引擎、不重启 worker、不重抽失败 trial。断连取消独立于 token 流；
+上一生成退出、reader join、所有连接 session close 后，worker 才接受下一客户。
+每条试验后最多等待 10 秒收尾并获取 `active_sessions: 0` 回执；收尾超时/worker 退出即停止
+campaign，保留已结束结果及未完成分母。推理底层错误可能破坏 KV，因此 worker 退出而非继续复用；
+正常取消和 case 失败则清理 session 后继续。任务仍串行，8080 fixture 不并发。
+
+报告显式记录 `settings.execution_mode`、一次性 `metadata.worker.startup_s`（含 model load）、
+设备选择/初始化与模型初始化的原生子计时、每条 prefill/decode、首步缓存 token、
+以及 `case_other_s = CLI total - load - prefill - decode`。该余量包含工具、等待、tokenization、
+IPC 和 shell 生命周期，不是“纯工具时间”。prefill 是包含同步等待的 wall-clock 区间，
+**不能未经 profile 称为纯 GPU 计算时间**。未结束生成的余量为未知，已完成步的计时不冒充全量。
+驻留 trial 的 `load_s = 0`，真实加载只在 worker 记录一次，不通过漏掉启动成本声称提速。
+执行总 wall（含 fixture、裁判和报告写入）另列；cold/resident 对照会明确警告计量范围不同。
+
+`worker.jsonl`、`worker.stderr.txt` 和每个 trial 的原生 trace 是独立证据。
+`worker_after` 保存收尾后的连接数、关闭 session 数和驻留 RSS；CLI 的 wait4 RSS 不包括 worker，
+两者均不代表显存。CUDA workspace 是进程缓存，close session 不表示全部 VRAM 释放；
+真实 GPU 验证仍须在固定设备上单独采样显存增长，不能用重启掩盖泄漏。
+`--plan` 不启动 worker；resident 总预算另加启动、每条收尾和最终关闭的有界上限。
+所选套件的 dataset revision、case 输入、seed、审批、预算和裁判不因执行模式改变。
+
 ## 手动 GitHub Actions 基线
 
 独立的 [Evaluation 工作流](../.github/workflows/eval.yml) 不占用本地 CPU/RAM，也不会被常规 CI 的 push 取消：

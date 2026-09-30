@@ -28,6 +28,9 @@ def validate(report: dict) -> None:
         raise ValueError("dataset_revision must be a positive integer")
     seen = set()
     meta = report["metadata"]
+    mode = meta.get("settings", {}).get("execution_mode", "cold")
+    if mode not in ("cold", "resident"):
+        raise ValueError("invalid model execution mode")
     if meta.get("observation") != "native-v1":
         raise ValueError("report requires native-v1 observations")
     if (not isinstance(meta.get("scenarios"), list) or not meta["scenarios"]
@@ -75,6 +78,18 @@ def validate(report: dict) -> None:
                 raise ValueError(f"invalid {name} for {key}")
         if any(metrics[k] is not None and type(metrics[k]) is not int for k in ("steps", "confirmations")):
             raise ValueError(f"step/confirmation counts must be integers: {key}")
+        for name in ("load_s", "prefill_s", "decode_s"):
+            if metrics.get(name) is not None and (not finite_number(metrics[name]) or metrics[name] < 0):
+                raise ValueError(f"invalid {name} for {key}")
+        if metrics.get("case_other_s") is not None and not finite_number(metrics["case_other_s"]):
+            raise ValueError(f"invalid case_other_s for {key}")
+        if engines:
+            for engine in engines:
+                if engine.get("execution_mode", "cold") != mode:
+                    raise ValueError(f"mixed cold/resident engine observations: {key}")
+                if mode == "resident" and (engine.get("load_s") != 0
+                        or engine.get("worker_pid") != meta.get("worker", {}).get("pid")):
+                    raise ValueError(f"invalid resident worker identity/cost: {key}")
         grading = trial.get("grading")
         if grading is not None:
             if (not isinstance(grading, dict) or set(grading) != {"facts", "experience"}
@@ -153,6 +168,8 @@ def compare(current: dict, previous: dict) -> dict:
     warnings = []
     if a["dataset_revision"] != b["dataset_revision"]:
         warnings.append("dataset_revision differs; paired deltas are descriptive, not a controlled regression")
+    if a.get("settings", {}).get("execution_mode", "cold") != b.get("settings", {}).get("execution_mode", "cold"):
+        warnings.append("cold/resident model lifecycles differ; per-trial latency and RSS are not the same measurement scope")
     for key in ("suite_sha256", "suite_schema_version", "grading_content_sha256", "model",
                 "settings", "machine", "tools", "toolchain", "observation"):
         if a.get(key) != b.get(key):
@@ -329,6 +346,7 @@ def markdown(report: dict) -> str:
 def _markdown(report: dict, tables: dict) -> str:
     meta = report["metadata"]
     build = meta["build"]
+    mode = meta.get("settings", {}).get("execution_mode", "cold")
     rows = [
         "# nosh real-model evaluation",
         "",
@@ -343,7 +361,10 @@ def _markdown(report: dict, tables: dict) -> str:
         "",
         f"Seeds: `{meta['seeds']}`; repeats: {meta['repeat']}. "
         + f"Dataset revision: {meta['dataset_revision']}. "
-        + "Each scenario/seed starts a new process. The typo scenario does not load a model.",
+        + f"Execution mode: **{mode}**. Each trial starts an isolated CLI/shell. "
+        + ("One resident model/prefix cache is shared; conversations are not. " if mode == "resident"
+           else "Each model trial loads its own engine with an empty prefix cache. ")
+        + "The typo scenario does not use a model.",
         "",
         "| Scenario | Passed/planned | Failed / error / missing | Steps (mean) | Confirmations (mean) | TTFT (median s) | Process time (median s) | Peak RSS (max MiB) |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -372,6 +393,30 @@ def _markdown(report: dict, tables: dict) -> str:
         for row in tables["summary"]:
             rows.append(f"| {row['scenario_id']} | " + " | ".join(fmt(row[name]) for name in TOKEN_METRICS) + " |")
         rows.append("\nMeans include failed trials with measured usage. New and reused tokens are separate; tool schemas and message templates are included.")
+    worker = meta.get("worker")
+    if worker:
+        rows.extend(["", "## Resident worker lifecycle", "",
+                     f"Status: `{worker['status']}`; startup to readiness: {fmt(worker.get('startup_s'))} s "
+                     f"(includes model load {fmt(worker.get('info', {}).get('load_s'))} s); "
+                     f"shutdown: {fmt(worker.get('shutdown_s'))} s. "
+                     "These one-time costs are NOT included in individual CLI process times. "
+                     "No warmup generation is discarded. The first real case warms the process.",
+                     f"Execution wall time, including fixtures, grading and report writes: {fmt(meta.get('execution_wall_s'))} s. "
+                     "Worker RSS snapshots are recorded separately in worker_after; CLI wait4 RSS excludes the worker. "
+                     "Neither metric measures VRAM."])
+    if any(t["metrics"].get("prefill_s") is not None for t in report["trials"]):
+        rows.extend(["", "## Per-trial engine timing", "",
+                     "| Trial / seed / repeat | Model load s | Prefill s | Decode s | Other case wall s | First-step new / cached tokens |",
+                     "|---|---:|---:|---:|---:|---:|"])
+        for trial in report["trials"]:
+            m = trial["metrics"]
+            rows.append(f"| {trial['scenario_id']} / {trial['seed']} / {trial['repeat']} | "
+                        + " | ".join(fmt(m.get(key)) for key in ("load_s", "prefill_s", "decode_s", "case_other_s"))
+                        + f" | {fmt(m.get('first_step_prompt_tokens'))} / {fmt(m.get('first_step_cached_tokens'))} |")
+        rows.append("\nPrefill/decode are native wall-clock regions, not GPU busy time. Other case wall time is "
+                    "CLI total minus native load/prefill/decode: tokenization, IPC, tools, approval/input waits and "
+                    "shell lifecycle remain included. For an unfinished step the residual is unknown, not zero; "
+                    "prefill/decode totals then cover completed steps only. Exact-token prefix hits are measured, not assumed.")
     rows.extend(["", "## Declared experience budgets", "",
                  "| Scenario | Max steps | Max confirmations | Language | Final question | Facts passed / measured | Experience passed / measured |",
                  "|---|---:|---:|---|---|---:|---:|"])
@@ -406,8 +451,9 @@ def _markdown(report: dict, tables: dict) -> str:
     rows.extend([
         "",
         "TTFT is the engine's first-step time to its first sampled token, excluding model loading. "
-        "Process time includes loading, terminal interactions, and shutdown, but excludes fixture setup. "
-        "A fresh process has a cold conversation/KV cache, not necessarily a cold OS page cache. "
+        "CLI process time includes terminal interactions and shutdown, but excludes fixture setup. "
+        "Cold mode includes per-trial model loading; resident mode reports worker startup/loading separately. "
+        "A cold model process has an empty KV cache, not necessarily a cold OS page cache. "
         "RSS is Linux wait4 ru_maxrss for each nosh process (including the kernel's accounting of waited-for descendants, "
         "not a sum of a process tree); the listener/verifier are separate. "
         "Timing aggregates include failed executions with available measurements. JSON contains sample counts and all raw values.",

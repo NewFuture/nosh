@@ -17,6 +17,12 @@ pub enum KvArg {
 
 #[derive(Debug, Subcommand)]
 pub enum DebugCmd {
+    /// Private serial engine for the evaluation harness (not a user service).
+    #[command(hide = true)]
+    EvalWorker {
+        #[arg(long)]
+        socket: std::path::PathBuf,
+    },
     /// Generate a reply to PROMPT and report prefill/decode speed.
     Gen {
         prompt: String,
@@ -55,6 +61,13 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
         }
     };
     match cmd {
+        DebugCmd::EvalWorker { socket } => match crate::eval_worker::run(&socket, setup) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("nosh: evaluation worker: {error}");
+                2
+            }
+        },
         DebugCmd::Gen {
             prompt,
             max_tokens,

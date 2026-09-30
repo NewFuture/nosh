@@ -26,7 +26,7 @@ def attachment_bytes(root: Path, name: str, facts: dict) -> bytes:
 
 
 def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
-              workspace: fixtures.Workspace, output: Path, binary: Path, weights: Path) -> dict:
+              workspace: fixtures.Workspace, output: Path, binary: Path, weights: Path, *, worker=None) -> dict:
     row = {
         "scenario_id": scenario["id"], "seed": seed, "repeat": repeat, "status": "error",
         "metrics": {key: None for key in report.METRICS},
@@ -35,6 +35,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
     }
     result = None
     trace = None
+    expected_worker = worker.record if worker is not None else None
     logs = output / "logs" / f"{scenario['id']}-{seed}-{repeat}"
     logs.mkdir(parents=True)
     try:
@@ -44,6 +45,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                           capture_output=scenario.get("capture_output"),
                           command_assist=scenario.get("assistance", {}).get("automatic", False),
                           device=getattr(args, "device", "cpu"))
+        if worker is not None and scenario["check"] != "typos":
+            env["NOSH_EVAL_WORKER"] = str(worker.path)
         facts["tools"] = workspace.tools
         if scenario["check"] == "versions":
             facts["versions"] = {name: meta["tools"][name] for name in ("cargo", "node", "python3")}
@@ -78,6 +81,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         if result.error:
             if result.timeout_phase in ("agent", "cli", "assist") and trace.is_file():
                 observed = observe(result, scenario, trace, seed=seed, deadline_timeout=True,
+                                   expected_worker=expected_worker,
                                    expected_device=getattr(args, "device", "cpu"))
                 row.update(observed)
                 stage = ("after final generation completed but before the completion marker"
@@ -94,6 +98,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
         if result.failure:
             if trace.is_file():
                 observed = observe(result, scenario, trace, seed=seed,
+                                   expected_worker=expected_worker,
                                    expected_device=getattr(args, "device", "cpu"))
                 row.update(observed)
                 if observed["metrics"]["task_status"] is None:
@@ -102,6 +107,7 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                        grading={"facts": {"passed": False, "reasons": [result.failure]}, "experience": None})
             return row
         observed = observe(result, scenario, trace, seed=seed,
+                           expected_worker=expected_worker,
                            expected_device=getattr(args, "device", "cpu"))
         row.update(observed)
         verdict = checks.judge(scenario, row["answer"], facts, root, after, result, row["metrics"], row)
