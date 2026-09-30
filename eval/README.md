@@ -90,12 +90,16 @@ KV dtype、prefill chunk、预打包与线程配置。不匹配、不可用和�
 每条试验后最多等待 10 秒收尾并获取 `active_sessions: 0` 回执；收尾超时/worker 退出即停止
 campaign，保留已结束结果及未完成分母。推理底层错误可能破坏 KV，因此 worker 退出而非继续复用；
 正常取消和 case 失败则清理 session 后继续。任务仍串行，8080 fixture 不并发。
+campaign 独占 worker 的 stdin 生命周期管道；worker 在加载模型前启动独立监控。
+父进程被 SIGTERM/SIGKILL 终止时，管道关闭使 worker 退出，不依赖 Python 上下文管理器、
+模型生成完成或客户连接断开。该管道不传任务数据，不能把 worker 当作脱离 campaign 的服务。
 
 报告显式记录 `settings.execution_mode`、一次性 `metadata.worker.startup_s`（含 model load）、
 设备选择/初始化与模型初始化的原生子计时、每条 prefill/decode、首步缓存 token、
 以及 `case_other_s = CLI total - load - prefill - decode`。该余量包含工具、等待、tokenization、
 IPC 和 shell 生命周期，不是“纯工具时间”。prefill 是包含同步等待的 wall-clock 区间，
 **不能未经 profile 称为纯 GPU 计算时间**。未结束生成的余量为未知，已完成步的计时不冒充全量。
+负的耗时余量属于计时证据矛盾，观测器和报告校验都拒绝它，不截成零或作为正常结果保存。
 驻留 trial 的 `load_s = 0`，真实加载只在 worker 记录一次，不通过漏掉启动成本声称提速。
 执行总 wall（含 fixture、裁判和报告写入）另列；cold/resident 对照会明确警告计量范围不同。
 
@@ -104,6 +108,7 @@ IPC 和 shell 生命周期，不是“纯工具时间”。prefill 是包含同�
 两者均不代表显存。CUDA workspace 是进程缓存，close session 不表示全部 VRAM 释放；
 真实 GPU 验证仍须在固定设备上单独采样显存增长，不能用重启掩盖泄漏。
 `--plan` 不启动 worker；resident 总预算另加启动、每条收尾和最终关闭的有界上限。
+如果所选场景全部是本地纠错，resident 同样不启动 worker，也不占用这部分额外预算。
 所选套件的 dataset revision、case 输入、seed、审批、预算和裁判不因执行模式改变。
 
 ## 手动 GitHub Actions 基线

@@ -560,7 +560,29 @@ fn serve(
     result
 }
 
+fn watch_parent() -> io::Result<()> {
+    // The harness alone owns the pipe's write end. EOF covers abrupt parent death
+    // even while loading or inside a model call; cancellation alone cannot do that.
+    std::thread::Builder::new()
+        .name("eval-parent".into())
+        .spawn(|| {
+            let mut stdin = io::stdin().lock();
+            let reason = loop {
+                match stdin.read(&mut [0; 1]) {
+                    Ok(0) => break "campaign lifetime pipe closed".to_string(),
+                    Ok(_) => break "unexpected data on campaign lifetime pipe".to_string(),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => break format!("campaign lifetime pipe: {error}"),
+                }
+            };
+            eprintln!("nosh: evaluation worker: {reason}");
+            std::process::exit(2);
+        })?;
+    Ok(())
+}
+
 pub fn run(path: &Path, setup: &crate::engine::EngineSetup) -> Result<(), String> {
+    watch_parent().map_err(|error| format!("cannot supervise campaign lifetime: {error}"))?;
     let parent = path
         .parent()
         .ok_or("worker socket needs a private directory")?;
@@ -631,6 +653,77 @@ mod tests {
             &mut |_| {},
             false,
         )
+    }
+
+    #[test]
+    fn parent_lifetime_probe() {
+        if std::env::var_os("NOSH_TEST_PARENT_WATCHER").is_none() {
+            return;
+        }
+        watch_parent().unwrap();
+        println!("parent watcher ready");
+        io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn parent_pipe_eof_terminates_worker_without_waiting_for_model_work() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "eval_worker::tests::parent_lifetime_probe",
+                "--nocapture",
+            ])
+            .env("NOSH_TEST_PARENT_WATCHER", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if line.unwrap() == "parent watcher ready" {
+                    sender.send(()).unwrap();
+                    return;
+                }
+            }
+        });
+        let ready = receiver.recv_timeout(Duration::from_secs(5));
+        if ready.is_err() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            reader.join().unwrap();
+            panic!("worker did not start its parent watcher: {ready:?}");
+        }
+        reader.join().unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("worker survived the campaign lifetime pipe closing");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.code(), Some(2));
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(stderr.contains("campaign lifetime pipe closed"), "{stderr}");
     }
 
     #[test]

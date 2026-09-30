@@ -34,7 +34,7 @@ class Worker:
             self.proc = subprocess.Popen(
                 [str(self.binary), "--offline", "--no-download", "--norc",
                  "--model-path", str(self.weights), "debug", "eval-worker", "--socket", str(self.path)],
-                cwd=home, env=env, stdin=subprocess.DEVNULL, stdout=self.stdout, stderr=self.stderr,
+                cwd=home, env=env, stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr,
                 start_new_session=True,
             )
             deadline = started + self.args.worker_start_timeout
@@ -97,6 +97,8 @@ class Worker:
                     self.proc.kill()
                     self.proc.wait(timeout=5)
             self.record["exit_code"] = self.proc.returncode
+            if self.proc.stdin is not None:
+                self.proc.stdin.close()
         for stream in (self.stdout, self.stderr):
             if stream is not None:
                 stream.close()

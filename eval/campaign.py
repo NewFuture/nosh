@@ -112,7 +112,8 @@ def main(argv=None) -> int:
         timeout = args.timeout if args.timeout is not None else suite["timeout_s"]
         maximum = validate_budget(dict(suite, seeds=selected_seeds), args.repeat, timeout, args.budget)
         planned = len(suite["scenarios"]) * len(selected_seeds) * args.repeat
-        worker_budget = args.worker_start_timeout + 10.0 * (planned + 2) + 10 if args.execution_mode == "resident" else 0
+        needs_worker = args.execution_mode == "resident" and any(s["check"] != "typos" for s in suite["scenarios"])
+        worker_budget = args.worker_start_timeout + 10.0 * (planned + 2) + 10 if needs_worker else 0
         positive_seconds(maximum + worker_budget, "combined campaign deadlines")
         if args.budget is not None and maximum + worker_budget > args.budget:
             raise ValueError("trial deadlines plus resident startup/cleanup exceed campaign budget")
@@ -153,7 +154,7 @@ def main(argv=None) -> int:
         with fixtures.Workspace(work, toolchain) as workspace, contextlib.ExitStack() as stack:
             report.save(data, output, previous)
             worker = None
-            if args.execution_mode == "resident" and any(s["check"] != "typos" for s in suite["scenarios"]):
+            if needs_worker:
                 worker = stack.enter_context(resident.Worker(args, binary, weights, output, meta))
                 report.save(data, output, previous)
             for repeat in range(args.repeat):

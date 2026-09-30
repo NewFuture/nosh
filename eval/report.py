@@ -78,11 +78,9 @@ def validate(report: dict) -> None:
                 raise ValueError(f"invalid {name} for {key}")
         if any(metrics[k] is not None and type(metrics[k]) is not int for k in ("steps", "confirmations")):
             raise ValueError(f"step/confirmation counts must be integers: {key}")
-        for name in ("load_s", "prefill_s", "decode_s"):
+        for name in ("load_s", "prefill_s", "decode_s", "case_other_s"):
             if metrics.get(name) is not None and (not finite_number(metrics[name]) or metrics[name] < 0):
                 raise ValueError(f"invalid {name} for {key}")
-        if metrics.get("case_other_s") is not None and not finite_number(metrics["case_other_s"]):
-            raise ValueError(f"invalid case_other_s for {key}")
         if engines:
             for engine in engines:
                 if engine.get("execution_mode", "cold") != mode:

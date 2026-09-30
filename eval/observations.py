@@ -306,7 +306,10 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         metrics["timing_complete"] = not pending
         metrics["case_other_s"] = None
         if not pending and all(metrics[name] is not None for name in ("prefill_s", "decode_s")):
-            metrics["case_other_s"] = result.total_s - sum(metrics[name] for name in ("load_s", "prefill_s", "decode_s"))
+            other_s = result.total_s - sum(metrics[name] for name in ("load_s", "prefill_s", "decode_s"))
+            if not finite_number(other_s) or other_s < 0:
+                raise ValueError("invalid case_other_s: native model timings exceed measured case wall time")
+            metrics["case_other_s"] = other_s
         metrics["first_step_cached_tokens"] = first_end["usage"].get("cached_tokens") if first_end else None
         metrics["first_step_prompt_tokens"] = first_end["usage"].get("prompt_tokens") if first_end else None
         inputs = [e for e in events if e["ev"] in ("open", "step_start", "rewind", "compact", "tool_choice")]

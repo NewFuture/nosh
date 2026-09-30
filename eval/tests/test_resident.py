@@ -7,6 +7,8 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import select
+import signal
 import socket
 import subprocess
 import sys
@@ -40,6 +42,13 @@ class AccountingTests(unittest.TestCase):
             for wrong in (None, dict(worker, pid=43), dict(worker, config={})):
                 with self.assertRaisesRegex(ValueError, "resident"):
                     observations.observe(result, SCENARIOS["largest-files"], trace, seed=0, expected_worker=wrong)
+            for total in (.5, 2):
+                result.total_s = total
+                observed = observations.observe(result, SCENARIOS["largest-files"], trace, seed=0, expected_worker=worker)
+                self.assertEqual(observed["metrics"]["case_other_s"], total - .5)
+            result.total_s = .4
+            with self.assertRaisesRegex(ValueError, "case_other_s"):
+                observations.observe(result, SCENARIOS["largest-files"], trace, seed=0, expected_worker=worker)
             events.append({"ev": "step_start", "schema_version": 1, "engine": 1, "sid": 1, "messages": []})
             trace.write_text("\n".join(map(json.dumps, events)))
             result = driver.Result(total_s=2, exit_code=-9, timeout_phase="agent")
@@ -78,10 +87,41 @@ class AccountingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mixed cold/resident"):
             report.validate(data)
 
+    def test_residual_duration_validation_rejects_negative_and_nonfinite_values(self):
+        from .test_report import ReportTests
+        data = ReportTests().sample()
+        for value in (-.001, float("nan"), float("inf"), "0", False):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "case_other_s"):
+                data["trials"][0]["metrics"]["case_other_s"] = value
+                report.validate(data)
+        for value in (None, 0, 1.25):
+            data["trials"][0]["metrics"]["case_other_s"] = value
+            report.validate(data)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux planning entry")
+    def test_typo_only_resident_plan_has_no_worker_budget(self):
+        arguments = ["--suite", "smoke", "--scenario", "typo-correction", "--seeds", "0",
+                     "--execution-mode", "resident", "--timeout", "7", "--budget", "7", "--plan"]
+        with patch("eval.resident.Worker", side_effect=AssertionError("started worker")), \
+                contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(campaign.main(arguments), 0)
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual(plan["trials"], 1)
+        self.assertEqual(plan["maximum_trial_seconds"], 7)
+        self.assertEqual(plan["maximum_worker_seconds"], 0)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(campaign.main(arguments + ["--scenario", "largest-files", "--budget", "14"]), 2)
+        self.assertIn("resident startup/cleanup", stderr.getvalue())
+
 
 WORKER_SCRIPT = r"""
-import json, os, socket, sys, time
+import json, os, socket, sys, threading, time
 path, mode = sys.argv[1:]
+if mode == "supervised":
+    def watch_parent():
+        assert os.read(0, 1) == b""
+        os._exit(2)
+    threading.Thread(target=watch_parent, daemon=True).start()
 if mode == "stall":
     time.sleep(30)
 listener = socket.socket(socket.AF_UNIX)
@@ -148,6 +188,83 @@ class WorkerTests(unittest.TestCase):
                     self.fail("unready worker was used")
             self.assertEqual(meta["worker"]["status"], "startup_failed")
             self.assertIsNotNone(started[0].poll())
+
+    def test_campaign_sigterm_and_sigkill_close_the_worker_lifetime_pipe(self):
+        supervisor = r"""
+import json, os, subprocess, sys, tempfile, time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from eval.resident import Worker
+root = Path(sys.argv[1])
+tempfile.tempdir = str(root)
+popen = subprocess.Popen
+def launch(argv, **kwargs):
+    assert kwargs["stdin"] == subprocess.PIPE
+    return popen([sys.executable, "-c", sys.argv[2], argv[-1], "supervised"], **kwargs)
+with patch("eval.resident.subprocess.Popen", side_effect=launch):
+    with Worker(SimpleNamespace(device="cpu", threads=1, worker_start_timeout=3),
+                Path("unused"), Path("unused"), root, {}) as worker:
+        print(json.dumps({"worker_pid": worker.proc.pid}), flush=True)
+        while True:
+            time.sleep(1)
+"""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as temporary:
+                parent = subprocess.Popen([sys.executable, "-c", supervisor, temporary, WORKER_SCRIPT],
+                                          cwd=runtime.ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                          text=True, start_new_session=True)
+                pidfd = None
+                try:
+                    self.assertTrue(select.select([parent.stdout], [], [], 5)[0], "supervisor never became ready")
+                    message = parent.stdout.readline()
+                    self.assertTrue(message, parent.stderr.read() if parent.poll() is not None else "no worker receipt")
+                    worker_pid = json.loads(message)["worker_pid"]
+                    self.assertNotEqual(os.getpgid(worker_pid), os.getpgid(parent.pid))
+                    pidfd = os.pidfd_open(worker_pid)
+                    self.assertFalse(select.select([pidfd], [], [], 0)[0], "worker exited before parent")
+                    parent.send_signal(sig)
+                    self.assertEqual(parent.wait(timeout=5), -sig)
+                    self.assertTrue(select.select([pidfd], [], [], 5)[0], "worker survived abrupt campaign death")
+                finally:
+                    if parent.poll() is None:
+                        parent.kill()
+                    parent.wait(timeout=5)
+                    if pidfd is not None:
+                        if not select.select([pidfd], [], [], 0)[0]:
+                            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                        os.close(pidfd)
+                    parent.stdout.close()
+                    parent.stderr.close()
+
+    def test_typo_only_campaign_never_starts_a_worker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            weights, tokenizer = root / "model.gguf", root / "tokenizer.json"
+            weights.write_bytes(b"unused")
+            tokenizer.write_text("{}")
+
+            def metadata(args, suite, *_):
+                return {"run_id": "local-only", "observation": "native-v1",
+                        "dataset_revision": suite["dataset_revision"], "build": {"binary_sha256": "a" * 64},
+                        "settings": {"execution_mode": "resident"}, "scenarios": suite["scenarios"],
+                        "seeds": [0], "repeat": 1}
+
+            row = {"scenario_id": "typo-correction", "seed": 0, "repeat": 0, "status": "fail",
+                   "metrics": {key: None for key in report.METRICS},
+                   "answer": "", "final_state": None, "reasons": ["scripted"]}
+            with patch("eval.resident.Worker", side_effect=AssertionError("unneeded worker")), \
+                    patch("eval.runtime.discover_tools", return_value={}), \
+                    patch("eval.runtime.metadata", side_effect=metadata), \
+                    patch("eval.campaign.run_trial", return_value=row) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = campaign.main(["--suite", "smoke", "--scenario", "typo-correction", "--seeds", "0",
+                                      "--execution-mode", "resident", "--timeout", "7", "--budget", "7",
+                                      "--binary", sys.executable, "--model-path", str(weights),
+                                      "--output", str(root / "report"), "--work-dir", str(root / "work")])
+            self.assertEqual(code, 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertNotIn("worker", run.call_args.kwargs)
 
     def test_campaign_preserves_row_and_missing_denominator_on_worker_loss(self):
         with tempfile.TemporaryDirectory() as temporary:
