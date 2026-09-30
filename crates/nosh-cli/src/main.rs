@@ -8,6 +8,7 @@ mod debug_cmd;
 mod doctor;
 mod engine;
 mod eval_trace;
+mod eval_worker;
 mod model_cmd;
 mod shell_cmd;
 

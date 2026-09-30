@@ -78,6 +78,8 @@ pub struct EngineInfo {
     pub context: usize,
     pub threads: usize,
     pub load_secs: f64,
+    pub device_init_secs: f64,
+    pub model_init_secs: f64,
     pub kv_dtype: KvDtype,
     pub prepack: PrepackStats,
 }
@@ -120,6 +122,8 @@ impl LocalChatEngine {
             prepack_weights: opts.prepack_weights,
         };
         let (device, device_selection) = opts.select_device(model)?;
+        let device_init_secs = t0.elapsed().as_secs_f64();
+        let model_start = Instant::now();
         let mut tok = Tok::load(&model.tokenizer)?;
         let llama = Llama::load(&model.weights, opts.context_length, load, &device)
             .map_err(|error| error.context(load_error_context(&device_selection)))?;
@@ -156,6 +160,8 @@ impl LocalChatEngine {
             context: llama.max_context(),
             threads,
             load_secs: t0.elapsed().as_secs_f64(),
+            device_init_secs,
+            model_init_secs: model_start.elapsed().as_secs_f64(),
             kv_dtype: llama.kv_dtype(),
             prepack: llama.prepack_stats(),
         };

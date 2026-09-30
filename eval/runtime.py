@@ -199,6 +199,10 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_content_sha256": fixtures.digest(content_hashes),
         "grading_content_sha256": fixtures.digest({name: value for name, value in content_hashes.items() if name.startswith("checks/")}),
         "settings": {"device": device, "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
+                     "execution_mode": getattr(args, "execution_mode", "cold"),
+                     "warmup_generations": 0,
+                     "worker_start_timeout_s": getattr(args, "worker_start_timeout", 120)
+                                                if getattr(args, "execution_mode", "cold") == "resident" else None,
                      "cuda_environment": {key: os.environ.get(key) for key in
                                           ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")}
                                          if device == "auto" or device.startswith("cuda:") else None,
