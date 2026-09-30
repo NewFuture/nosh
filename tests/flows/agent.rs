@@ -9,7 +9,7 @@ fn multi_step_task_uses_tool_results() {
         match last {
             Message::User(_) => vec![
                 text("Let me check."),
-                call("run_command", json!({"command": "echo hello-from-shell"})),
+                call("exec", json!({"command": "echo hello-from-shell"})),
             ],
             Message::Tool(t) if t.contains("hello-from-shell") => vec![text("It printed hello.")],
             _ => vec![text("unexpected")],
@@ -40,11 +40,11 @@ fn multi_step_task_uses_tool_results() {
     let spec = &specs.lock().unwrap()[0];
     assert!(spec.system.contains("<tool_def_sep>"));
     let names: Vec<_> = spec.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["run_command", "read_file", "grep"]);
+    assert_eq!(names, ["exec", "read_file", "grep"]);
     assert!(
         ui.events
             .iter()
-            .any(|e| e.starts_with("tool run_command [SAFE] SAFE · read-only"))
+            .any(|e| e.starts_with("tool exec [SAFE] SAFE · read-only"))
     );
 }
 
@@ -146,10 +146,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
             if has_result {
                 vec![text("The command printed printed-once.")]
             } else {
-                vec![call(
-                    "run_command",
-                    json!({"command": "printf printed-once"}),
-                )]
+                vec![call("exec", json!({"command": "printf printed-once"}))]
             }
         });
         let received = engine.received();
@@ -236,7 +233,7 @@ fn malformed_calls_are_fed_back_then_give_up() {
             CallErrorKind::MissingParam,
             "missing parameter 'command'",
         )],
-        vec![call("run_command", json!({"command": "echo fixed"}))],
+        vec![call("exec", json!({"command": "echo fixed"}))],
         vec![text("Fixed.")],
     ]);
     let received = engine.received();
@@ -270,7 +267,7 @@ fn long_output_is_truncated_and_saved() {
     let _g = setup();
     let mut sh = shell();
     let engine = MockChatEngine::new(vec![
-        vec![call("run_command", json!({"command": "seq 1 20000"}))],
+        vec![call("exec", json!({"command": "seq 1 20000"}))],
         vec![text("Many numbers.")],
     ]);
     let received = engine.received();
@@ -305,12 +302,12 @@ fn step_limit_asks_for_a_summary() {
     let engine = MockChatEngine::with_responder(|history| match history.last() {
         Some(Message::System(u)) if u.contains("Step limit reached") => vec![text("Summary.")],
         Some(Message::User(u)) if u == "next task" => {
-            vec![call("run_command", json!({"command": "printf fresh-task"}))]
+            vec![call("exec", json!({"command": "printf fresh-task"}))]
         }
         Some(Message::Tool(result)) if result.contains("fresh-task") => {
             vec![text("Next task done.")]
         }
-        _ => vec![call("run_command", json!({"command": "true"}))],
+        _ => vec![call("exec", json!({"command": "true"}))],
     });
     let received = engine.received();
     let specs = engine.specs();
@@ -379,8 +376,8 @@ fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
     // A real stop signal, without depending on the test runner having a PTY.
     let command = "python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGTTIN)'";
     let engine = MockChatEngine::new(vec![vec![
-        call("run_command", json!({"command": command})),
-        call("run_command", json!({"command": "echo must-not-run"})),
+        call("exec", json!({"command": command})),
+        call("exec", json!({"command": "echo must-not-run"})),
     ]]);
     let received = engine.received();
     let mut a = agent(engine, AgentConfig::default());
@@ -414,8 +411,8 @@ fn compound_terminal_handoff_warns_about_partial_execution_without_replaying() {
     sh.run_user_line(&format!("cd {}", dir.display()));
     let command = "printf 'charged\\n' >> marker; python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGTTIN)'";
     let engine = MockChatEngine::new(vec![vec![
-        call("run_command", json!({"command": command})),
-        call("run_command", json!({"command": "touch must-not-run"})),
+        call("exec", json!({"command": command})),
+        call("exec", json!({"command": "touch must-not-run"})),
     ]]);
     let received = engine.received();
     let mut a = agent(engine, AgentConfig::default());
@@ -474,7 +471,7 @@ fn grep_cancellation_stops_the_task_without_counting_a_command() {
     let engine = MockChatEngine::new(vec![
         vec![
             call("grep", json!({"pattern": "needle"})),
-            call("run_command", json!({"command": "touch should-not-exist"})),
+            call("exec", json!({"command": "touch should-not-exist"})),
         ],
         vec![text("done")],
     ]);
@@ -569,7 +566,7 @@ fn timeout_is_reported() {
     let mut sh = shell();
     let engine = MockChatEngine::new(vec![
         vec![call(
-            "run_command",
+            "exec",
             json!({"command": "sleep 30", "timeout_sec": 1}),
         )],
         vec![text("It hung.")],
@@ -596,7 +593,7 @@ fn repl_pipeline_with_mock_engine() {
     let mut sh = shell();
     let engine = MockChatEngine::with_responder(move |history| match history.last() {
         Some(Message::User(u)) if u.contains("go to tmp") => {
-            vec![call("run_command", json!({"command": "cd /tmp"}))]
+            vec![call("exec", json!({"command": "cd /tmp"}))]
         }
         Some(Message::Tool(t)) if t.contains("[state] cwd:") => vec![text("Now in /tmp.")],
         _ => vec![text("ok")],

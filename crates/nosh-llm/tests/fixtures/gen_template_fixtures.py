@@ -27,7 +27,7 @@ with open(os.path.join(HERE, "minicpm5_chat_template.jinja"), encoding="utf-8") 
 RUN = {
     "type": "function",
     "function": {
-        "name": "run_command",
+        "name": "exec",
         "description": "Run a bash command in the user's shell session.",
         "parameters": {
             "type": "object",
@@ -66,7 +66,7 @@ CASES = [
         "messages": [
             {"role": "system", "content": SYS},
             {"role": "user", "content": "[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？"},
-            {"role": "assistant", "content": "我先看看端口。", "tool_calls": [call("run_command", command="ss -ltnp 'sport = :8080'")]},
+            {"role": "assistant", "content": "我先看看端口。", "tool_calls": [call("exec", command="ss -ltnp 'sport = :8080'")]},
             {"role": "tool", "content": "[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)"},
             {"role": "assistant", "content": "8080 端口被 **node** 占用。"},
             {"role": "user", "content": "再把它结束掉"},
@@ -80,7 +80,7 @@ CASES = [
         "messages": [
             {"role": "system", "content": SYS},
             {"role": "user", "content": "count files"},
-            {"role": "assistant", "content": "", "tool_calls": [call("run_command", command="ls | wc -l", timeout_sec=30), call("run_command", command="echo <done> && printf 'a\\nb'")]},
+            {"role": "assistant", "content": "", "tool_calls": [call("exec", command="ls | wc -l", timeout_sec=30), call("exec", command="echo <done> && printf 'a\\nb'")]},
             {"role": "tool", "content": "3"},
             {"role": "tool", "content": "<done>\na\nb"},
         ],

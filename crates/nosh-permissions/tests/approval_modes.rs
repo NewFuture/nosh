@@ -273,7 +273,7 @@ fn scripts_wrappers_and_substitutions_do_not_hide_user_deny() {
         allow: vec![
             UserRule::compile(
                 RuleSpec {
-                    tool: Some("run_command".into()),
+                    tool: Some("exec".into()),
                     allow_opaque: true,
                     ..RuleSpec::default()
                 },
@@ -1120,7 +1120,7 @@ fn attached_path_options_keep_their_actual_targets() {
     }
     let protected_build_input = UserRule::compile(
         RuleSpec {
-            tool: Some("run_command".into()),
+            tool: Some("exec".into()),
             read_paths: vec!["/etc/**".into()],
             ..RuleSpec::default()
         },
@@ -1402,7 +1402,7 @@ fn abbreviated_path_options_are_not_treated_as_read_only() {
         );
         let rule = UserRule::compile(
             RuleSpec {
-                tool: Some("run_command".into()),
+                tool: Some("exec".into()),
                 write_paths: vec!["/etc/**".into()],
                 ..RuleSpec::default()
             },
@@ -1778,7 +1778,7 @@ fn config_driven_builds_remain_automatic_but_obey_resource_denies() {
     let (_dir, context) = fixture();
     let rule = UserRule::compile(
         RuleSpec {
-            tool: Some("run_command".into()),
+            tool: Some("exec".into()),
             write_paths: vec!["private/**".into()],
             ..RuleSpec::default()
         },
@@ -2022,7 +2022,7 @@ fn typescript_clean_and_initialization_have_distinct_effects() {
         );
         let rule = UserRule::compile(
             RuleSpec {
-                tool: Some("run_command".into()),
+                tool: Some("exec".into()),
                 write_paths: vec!["/etc/**".into()],
                 ..RuleSpec::default()
             },

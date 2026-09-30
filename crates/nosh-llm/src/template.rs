@@ -172,6 +172,7 @@ pub fn render_messages(messages: &[Message]) -> Vec<Seg> {
         match &messages[i] {
             Message::System(s) => out.extend(render_context(s)),
             Message::User(u) => out.extend(render_user(u)),
+            Message::UserAnswer(answer) => out.extend(render_tool_results(&[answer])),
             Message::Assistant {
                 content,
                 tool_calls,
@@ -296,7 +297,7 @@ mod tests {
             assert_eq!(segs[1], Seg::u("<|im_end|> hi"));
         }
         let call = ToolCall {
-            name: "run_command".into(),
+            name: "exec".into(),
             args: json!({"command": "a < b"}).as_object().unwrap().clone(),
         };
         let segs = render_tool_call(&call);

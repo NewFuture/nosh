@@ -14,7 +14,7 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     family = spec.family
     reasons = []
     capture_verdicts = None
-    expected_exit = 1 if scenario.get("assistance", {}).get("result") in ("clarify", "none") and scenario["mode"] == "suggest" else 0
+    expected_exit = 1 if scenario.get("assistance", {}).get("result") == "none" and scenario["mode"] == "suggest" else 0
     if result.exit_code != expected_exit:
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):

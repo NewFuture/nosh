@@ -27,7 +27,7 @@ fn resolved() -> nosh_hub::ResolvedModel {
 
 fn run_tool() -> ToolSpec {
     ToolSpec {
-        name: "run_command".into(),
+        name: "exec".into(),
         description: "Run a bash command in the user's shell session and return its output.".into(),
         parameters: json!({
             "type": "object",
@@ -118,7 +118,7 @@ fn named_tool_choice_returns_one_call_without_prose() {
             .is_err()
     );
     engine
-        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("run_command".into()))
+        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("exec".into()))
         .unwrap();
     let output = engine
         .step(
@@ -131,7 +131,7 @@ fn named_tool_choice_returns_one_call_without_prose() {
     assert!(output.text.is_empty());
     assert!(output.errors.is_empty(), "{:?}", output.errors);
     assert_eq!(output.tool_calls.len(), 1);
-    assert_eq!(output.tool_calls[0].name, "run_command");
+    assert_eq!(output.tool_calls[0].name, "exec");
     engine.close(sid);
 }
 
@@ -224,7 +224,7 @@ fn produces_parseable_tool_call() {
     );
     assert!(o.errors.is_empty(), "{:?}", o.errors);
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].name, "run_command");
+    assert_eq!(calls[0].name, "exec");
     assert!(calls[0].str_arg("command").unwrap().contains("ls"));
 }
 

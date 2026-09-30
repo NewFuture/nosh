@@ -14,7 +14,7 @@ class CheckSpec:
     approval: str = "deny"
     citation: bool = False
     custom_state: bool = False
-    assist_result: Literal["command", "clarify", "none"] | None = None
+    assist_result: Literal["command", "none"] | None = None
     assist_intent: Literal["generate", "fix", "next"] | None = None
 
 
@@ -49,7 +49,6 @@ CHECK_SPECS = {
     "captured-citation": CheckSpec("diagnostic-failure", "capture", citation=True),
     "assist-archive": CheckSpec("logs", "assist", assist_result="command"),
     "assist-none": CheckSpec("logs", "assist", assist_result="none"),
-    "assist-clarify": CheckSpec("logs", "assist", assist_result="clarify"),
     "assist-next-review": CheckSpec("review-workflow", "assist", assist_result="command", assist_intent="next"),
     "assist-resume-archive": CheckSpec("partial-archive", "assist", custom_state=True,
                                      assist_result="command", assist_intent="fix"),

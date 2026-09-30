@@ -38,6 +38,7 @@ class ContractTests(unittest.TestCase):
         for name in suite.BUILTIN_SUITES:
             with self.subTest(name=name):
                 expanded = suite.load_suite(name)
+                self.assertEqual(expanded["dataset_revision"], 16)
                 self.assertEqual(expanded, suite.load_suite(runtime.HERE / "suites" / f"{name}.json"))
                 before = copy.deepcopy(expanded)
                 self.assertEqual(suite.validate_suite(expanded), before)

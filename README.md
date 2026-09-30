@@ -102,9 +102,9 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。
 
-普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。
+普通 Agent 的操作工具为 `exec`、`read_file` 和 `grep`，有可用交互终端时另提供 `ask_user(question, choices?)`，支持选择或自由回答并在原会话继续。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `exec` 调用 `ls` 等命令。管道附件模式不开放命令执行；提问通过控制终端进行，不读取管道 stdin。
 
-`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的独立短对话，可以按需查询命令身份、帮助和项目文件；通过 `finish` 提交完整 shell program、必要澄清或无建议。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝混合终态、Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
+`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的独立短对话，通过 `command_help(name, query?)`、`read_file`、`grep` 查询缺失信息，可交互时用 `ask_user` 补齐必要选择。Generate/Fix/Next 都直接返回完整 shell program 或精确 `[None]`，不使用 `finish`；没有交互终端且缺少必要选择时不猜测命令。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝说明／Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
 
 用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，空白草稿用 F2 接受，回车才执行；继续输入会取消并丢弃旧建议。没有现成候选时，空白 F2 不新增模型请求。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断，`ai next` 显式请求后续建议。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留显式入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
 

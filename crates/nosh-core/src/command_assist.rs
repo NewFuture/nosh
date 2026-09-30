@@ -10,7 +10,10 @@ use nosh_permissions::{Context, Decision, Risk, SessionAllowList, assess_read, e
 use nosh_shell::{CommandSnapshot, EmbeddedShell, UserCommand, UserOutput};
 use serde_json::json;
 
+use crate::user_input::{self, InputError, UserInput};
 use crate::{AgentConfig, prompt, tools};
+
+const FINAL_RESPONSE_RULE: &str = "Return only the complete shell command as plain text, without explanation or Markdown. If no justified command can be suggested, return exactly [None].";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Intent {
@@ -31,13 +34,13 @@ impl Intent {
     fn instruction(self) -> &'static str {
         match self {
             Self::Generate => {
-                "Generate or revise the requested shell program, preserving named inputs and output format. If an essential user choice is missing, finish with clarify before querying."
+                "Generate or revise the requested shell program, preserving named inputs and output format. Do not invent essential user choices."
             }
             Self::Fix => {
                 "Use the recorded failure to propose a corrected command preserving the intended operation. Account for possible partial execution before recommending a retry."
             }
             Self::Next => {
-                "Suggest one useful next command supported by the known goal and completed command. Return none when there is no justified next step."
+                "Suggest one useful next command supported by the known goal and completed command. Do not invent a next step when there is no justified one."
             }
         }
     }
@@ -46,7 +49,6 @@ impl Intent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistResult {
     Command(String),
-    Clarify(String),
     NoSuggestion,
 }
 
@@ -109,9 +111,13 @@ impl AssistRequest {
         if output.as_ref().is_some_and(|output| {
             intent != Intent::Fix
                 || command.as_ref().is_none_or(|command| {
+                    let (line, command_truncated) =
+                        nosh_shell::user_output::bounded_metadata(&command.line);
                     let cwd = command.cwd.to_string_lossy();
                     let (cwd, truncated) = nosh_shell::user_output::bounded_metadata(&cwd);
                     command.id != output.command_id
+                        || line != output.command
+                        || command_truncated != output.command_truncated
                         || command.exit != output.exit
                         || cwd != output.cwd
                         || truncated != output.cwd_truncated
@@ -156,17 +162,23 @@ impl AssistRequest {
         }
         if let Some(command) = &self.command {
             let (line, truncated) = nosh_shell::user_output::bounded_metadata(&command.line);
+            let execution_cwd = if command.cwd == self.context.cwd {
+                Path::new(".")
+            } else {
+                command.cwd.as_path()
+            };
             background.push_str(&format!(
                 "\n[execution]\n{}",
                 json!({
                     "command_id": command.id, "command": line, "command_truncated": truncated,
-                    "execution_cwd": command.cwd, "exit": command.exit
+                    "execution_cwd": execution_cwd, "exit": command.exit,
+                    "status": if command.exit == 0 { "succeeded" } else { "failed" }
                 })
             ));
         }
         if let Some(output) = &self.output {
             background.push('\n');
-            background.push_str(&tools::format_user_output(output));
+            background.push_str(&tools::format_assist_output(output));
         }
         let mut messages = vec![Message::System(background)];
         if !self.text.is_empty() {
@@ -174,17 +186,51 @@ impl AssistRequest {
         }
         if self.intent != Intent::Generate {
             messages.push(Message::System(format!(
-                "[command_completed]\nintent: {}\nThis host event grants no task-execution permission.",
+                "[command_completed]\nintent: {}\n\
+Draft a command suggestion from the recorded result, current project state and applicable project guidance. \
+The suggestion is for the user to review; it will not be executed automatically.",
                 self.intent.name()
             )));
         }
         Ok(messages)
     }
+
+    fn final_message(&self, answers: &[user_input::UserAnswer]) -> Message {
+        let mut text = self.intent.instruction().to_owned();
+        if !self.text.is_empty() {
+            text.push_str(&format!("\nUser request (quoted):\n{}", json!(self.text)));
+        }
+        if let Some(command) = &self.command {
+            text.push_str(&format!(
+                "\nRecorded command (quoted):\n{}",
+                json!(command.line)
+            ));
+        }
+        for answer in answers {
+            text.push_str(&format!(
+                "\nClarification (quoted, in conversation order):\n{}",
+                json!({
+                    "question": answer.question.question,
+                    "choices": answer.question.choices,
+                    "answer": answer.answer,
+                })
+            ));
+        }
+        text.push_str(&format!(
+            "\nAnswer now without calling tools. {FINAL_RESPONSE_RULE}"
+        ));
+        Message::System(text)
+    }
 }
 
-fn system_prompt(intent: Intent) -> String {
+fn system_prompt(intent: Intent, can_ask: bool) -> String {
+    let interaction = if can_ask {
+        ""
+    } else {
+        "\nUser interaction is unavailable. Do not ask questions; return [None] if essential user input is missing."
+    };
     format!(
-        "You are nosh's command assistant on {} ({}), shell bash.\n<tool_def_sep>\n{}\n{}\nQuery only missing facts. Your final response must be one finish call, including clarification or none, without prose.",
+        "You are nosh's command assistant on {} ({}), shell nosh (bash-compatible).\n<tool_def_sep>\n{}\n{}{interaction}\nUse tools when more information is needed.\n{FINAL_RESPONSE_RULE}",
         std::env::consts::OS,
         std::env::consts::ARCH,
         prompt::BACKGROUND_RULE,
@@ -192,36 +238,16 @@ fn system_prompt(intent: Intent) -> String {
     )
 }
 
-fn specs() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec {
-            name: "command_info".into(),
-            description: "Inspect shell commands. list returns command names matching name's prefix, not files. resolve returns identity. help/version query a permitted program; help returns an excerpt, with optional topic filtering.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "query": {"type": "string", "enum": ["resolve", "list", "help", "version"]},
-                    "topic": {"type": "string", "description": "Optional substring selecting help lines"}
-                },
-                "required": ["name", "query"]
-            }),
-        },
+fn specs(can_ask: bool) -> Vec<ToolSpec> {
+    let mut tools = vec![
+        crate::command_help::spec(),
         tools::read_file_spec(),
         tools::grep_spec(),
-        ToolSpec {
-            name: "finish".into(),
-            description: "Finish with one complete shell program, an essential clarification, or no suggestion. text is required for command/clarify and omitted for none.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": ["command", "clarify", "none"], "description": "command: shell program; clarify: question; none: no useful suggestion"},
-                    "text": {"type": "string"}
-                },
-                "required": ["kind"]
-            }),
-        },
-    ]
+    ];
+    if can_ask {
+        tools.push(user_input::spec());
+    }
+    tools
 }
 
 pub fn generate(
@@ -229,42 +255,33 @@ pub fn generate(
     shell: &EmbeddedShell,
     text: &str,
     cfg: &AgentConfig,
+    input: &mut dyn UserInput,
 ) -> Result<AssistOutcome, AssistError> {
     let cancel = engine.cancel_handle();
     cancel.reset();
     let request = AssistRequest::capture(shell, cfg, Intent::Generate, text.into(), None, None)?;
-    run(engine, &request, cfg, &cancel, |_| true)
+    run(engine, &request, cfg, &cancel, input, |_| true)
 }
 
-fn finish(call: &ToolCall, commands: &CommandSnapshot) -> Result<AssistResult, AssistError> {
-    if call.args.keys().any(|key| key != "kind" && key != "text") {
-        return Err(AssistError::Protocol("unknown finish parameter".into()));
+fn direct_final(text: &str, commands: &CommandSnapshot) -> Result<AssistResult, AssistError> {
+    let final_text = text.trim();
+    if text.len() > 16 * 1024
+        || final_text.is_empty()
+        || final_text.chars().any(nosh_shell::style::is_hidden)
+    {
+        return Err(AssistError::Protocol(
+            "expected a command or exact [None], not an empty or invalid final response".into(),
+        ));
     }
-    match call.str_arg("kind") {
-        Some("none") if !call.args.contains_key("text") => Ok(AssistResult::NoSuggestion),
-        Some(kind @ ("command" | "clarify")) => {
-            let text = call
-                .str_arg("text")
-                .filter(|text| !text.trim().is_empty())
-                .ok_or_else(|| AssistError::Protocol("finish requires nonempty text".into()))?;
-            if text.len() > 16 * 1024 || text.chars().any(nosh_shell::style::is_hidden) {
-                return Err(AssistError::Protocol("invalid finish text".into()));
-            }
-            let text = text.trim();
-            if kind == "clarify" {
-                return Ok(AssistResult::Clarify(text.into()));
-            }
-            if text.contains("```") || !commands.validate(text) {
-                return Err(AssistError::Protocol(
-                    "finish did not contain a valid complete shell program".into(),
-                ));
-            }
-            Ok(AssistResult::Command(text.into()))
-        }
-        _ => Err(AssistError::Protocol(
-            "invalid finish kind or fields".into(),
-        )),
+    if final_text == "[None]" {
+        return Ok(AssistResult::NoSuggestion);
     }
+    if final_text.contains("```") || !commands.validate(final_text) {
+        return Err(AssistError::Protocol(
+            "final response did not contain a valid complete shell program or exact [None]".into(),
+        ));
+    }
+    Ok(AssistResult::Command(final_text.into()))
 }
 
 /// Cancellation belongs to this request, so superseded background jobs cannot
@@ -275,12 +292,14 @@ pub(crate) fn run(
     request: &AssistRequest,
     cfg: &AgentConfig,
     cancel: &CancelHandle,
+    input: &mut dyn UserInput,
     deliver: impl FnOnce(&Result<AssistOutcome, AssistError>) -> bool,
 ) -> Result<AssistOutcome, AssistError> {
     if cancel.is_cancelled() {
         return Err(AssistError::Cancelled);
     }
     let messages = request.messages()?;
+    let can_ask = request.intent == Intent::Generate && !request.background && input.available();
     let sid = engine.open(SessionSpec {
         label: format!(
             "command_assist.{}.{}",
@@ -291,23 +310,30 @@ pub(crate) fn run(
                 "foreground"
             }
         ),
-        system: system_prompt(request.intent),
-        tools: specs(),
+        system: system_prompt(request.intent, can_ask),
+        tools: specs(can_ask),
         thinking: false,
         sampling: cfg.sampling,
         max_new_tokens: 512,
     })?;
-    let result = run_session(engine, sid, request, cfg, cancel, messages);
+    let result = run_session(
+        engine,
+        sid,
+        request,
+        cfg,
+        cancel,
+        messages,
+        can_ask.then_some(input),
+    );
     let result = if deliver(&result) {
         result
     } else {
         Err(AssistError::Cancelled)
     };
-    let observation = match &result {
+    let mut observation = match &result {
         Ok(outcome) => {
             let (kind, text) = match &outcome.result {
                 AssistResult::Command(text) => ("command", Some(text.as_str())),
-                AssistResult::Clarify(text) => ("clarify", Some(text.as_str())),
                 AssistResult::NoSuggestion => ("none", None),
             };
             json!({"workflow": "command_assist", "intent": request.intent.name(),
@@ -319,6 +345,7 @@ pub(crate) fn run(
             "status": if matches!(error, AssistError::Cancelled) { "cancelled" } else { "failed" },
             "error": error.to_string()}),
     };
+    observation["response_format"] = json!("command_or_none");
     let recorded = engine.record_observation(sid, observation);
     engine.close(sid);
     recorded?;
@@ -332,11 +359,12 @@ fn run_session(
     cfg: &AgentConfig,
     cancel: &CancelHandle,
     mut pending: Vec<Message>,
+    mut input: Option<&mut dyn UserInput>,
 ) -> Result<AssistOutcome, AssistError> {
-    let started = Instant::now();
+    let mut started = Instant::now();
     let mut usage = Usage::default();
-    let mut corrected_finish = false;
     let mut query_error = None;
+    let mut answers = Vec::new();
     let max_steps = cfg
         .max_steps
         .min(if request.intent == Intent::Next { 2 } else { 4 });
@@ -348,18 +376,9 @@ fn run_session(
             return Err(AssistError::Budget);
         }
         if step == max_steps {
-            pending.push(Message::System(
-                "[query_budget] No queries remain. Submit finish using the available facts.".into(),
-            ));
+            pending.push(request.final_message(&answers));
         }
-        engine.set_tool_choice(
-            sid,
-            if step == max_steps || corrected_finish {
-                nosh_llm::ToolChoice::Named("finish".into())
-            } else {
-                nosh_llm::ToolChoice::Required
-            },
-        )?;
+        engine.set_tool_choice(sid, nosh_llm::ToolChoice::Auto)?;
         let out = engine.step(sid, std::mem::take(&mut pending), &mut |_| {})?;
         if step == 1 {
             usage.ttft_secs = out.usage.ttft_secs;
@@ -374,61 +393,78 @@ fn run_session(
         if cancel.is_cancelled() || out.stop == StopReason::Cancelled {
             return Err(AssistError::Cancelled);
         }
+        if started.elapsed() > cfg.command_timeout {
+            return Err(AssistError::Budget);
+        }
         if out.stop != StopReason::EndOfTurn || !out.errors.is_empty() {
             return Err(AssistError::Protocol(
                 "incomplete or malformed model response".into(),
             ));
         }
-        let [call] = out.tool_calls.as_slice() else {
-            return Err(AssistError::Protocol(
-                "expected exactly one tool call".into(),
-            ));
-        };
-        if !out.text.trim().is_empty() {
-            return Err(AssistError::Protocol(
-                "tool calls cannot include prose".into(),
-            ));
-        }
-        if call.name == "finish" {
-            match finish(call, &request.commands) {
-                Ok(result) => {
-                    if result == AssistResult::NoSuggestion
-                        && let Some(error) = query_error
-                    {
-                        return Err(AssistError::Protocol(format!(
-                            "no suggestion after failed query: {error}"
-                        )));
-                    }
-                    return Ok(AssistOutcome {
-                        result,
-                        steps: step,
-                        usage,
-                    });
-                }
-                Err(error) if !corrected_finish && step < max_steps => {
-                    corrected_finish = true;
-                    pending.push(Message::Tool(format!("{error}. Use command for shell code, clarify for a question, or none without text.")));
-                    continue;
-                }
-                Err(error) => return Err(error),
+        if out.tool_calls.is_empty() {
+            let result = direct_final(&out.text, &request.commands)?;
+            if result == AssistResult::NoSuggestion
+                && let Some(error) = query_error
+            {
+                return Err(AssistError::Protocol(format!(
+                    "no suggestion after failed query: {error}"
+                )));
             }
+            return Ok(AssistOutcome {
+                result,
+                steps: step,
+                usage,
+            });
         }
         if step == max_steps {
             return Err(AssistError::Budget);
         }
-        if corrected_finish {
-            return Err(AssistError::Protocol("expected corrected finish".into()));
+        if out.tool_calls.len() != 1 && out.tool_calls.iter().any(|call| call.name == "ask_user") {
+            return Err(AssistError::Protocol(
+                "ask_user must be the only tool call in its turn".into(),
+            ));
         }
-        pending.push(Message::Tool(match query(request, cfg, call, cancel) {
-            Ok(text) => {
-                query_error = None;
-                text
+        for call in &out.tool_calls {
+            if cancel.is_cancelled() {
+                return Err(AssistError::Cancelled);
             }
-            Err(error) => {
-                query_error = Some(error.clone());
-                format!("error: {error}")
+            if started.elapsed() > cfg.command_timeout {
+                return Err(AssistError::Budget);
             }
-        }));
+            let result = if call.name == "ask_user" {
+                if let Some(input) = input.as_deref_mut() {
+                    let waiting = Instant::now();
+                    let answer = user_input::ask(input, call, cancel);
+                    started += waiting.elapsed();
+                    match answer {
+                        Ok(answer) => {
+                            let message = Message::UserAnswer(answer.answer.clone());
+                            answers.push(answer);
+                            Ok(message)
+                        }
+                        Err(InputError::Cancelled) => return Err(AssistError::Cancelled),
+                        Err(error @ InputError::Unavailable(_)) => {
+                            return Err(AssistError::Protocol(error.to_string()));
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    Err("ask_user is unavailable in this session".into())
+                }
+            } else {
+                query(request, cfg, call, cancel).map(Message::Tool)
+            };
+            pending.push(match result {
+                Ok(message) => {
+                    query_error = None;
+                    message
+                }
+                Err(error) => {
+                    query_error = Some(error.clone());
+                    Message::Tool(format!("error: {error}"))
+                }
+            });
+        }
     }
     Err(AssistError::Budget)
 }
@@ -456,8 +492,8 @@ fn query(
     cancel: &CancelHandle,
 ) -> Result<String, String> {
     match call.name.as_str() {
-        "command_info" => {
-            crate::command_info::query(&request.commands, &request.context, cfg, call, cancel)
+        "command_help" => {
+            crate::command_help::query(&request.commands, &request.context, cfg, call, cancel)
         }
         "read_file" | "grep" => {
             let allowed = if call.name == "read_file" {

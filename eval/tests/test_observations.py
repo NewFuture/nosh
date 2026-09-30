@@ -30,12 +30,13 @@ class ObservationTests(unittest.TestCase):
                 {"ev": "engine", "info": {"load_s": 1.5}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 4}, "label": "command_assist.generate.foreground"},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "input"}]},
-                {"ev": "step_end", "sid": 1, "text": "", "errors": [], "stop": "end_of_turn",
-                 "tool_calls": [{"name": "finish", "args": {"kind": "command", "text": command}}],
+                {"ev": "step_end", "sid": 1, "text": command, "errors": [], "stop": "end_of_turn",
+                 "tool_calls": [],
                  "usage": {"ttft_s": 0.125}},
                 {"ev": "observation", "sid": 1, "value": {
                     "workflow": "command_assist", "intent": "generate", "background": False,
-                    "command_id": None, "status": "completed", "kind": "command", "text": command}},
+                    "command_id": None, "status": "completed", "kind": "command", "text": command,
+                    "response_format": "command_or_none"}},
             ]
             trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             result = driver.Result(stdout="tar -czf logs.tar.gz logs\n", exit_code=0, total_s=9)
@@ -65,7 +66,7 @@ class ObservationTests(unittest.TestCase):
 
     def test_ascii_completion_uses_native_answers_and_usage(self):
         text = (
-            "| Let me inspect.\n| * list_dir  SAFE\n|   file.py\n"
+            "| Let me inspect.\n| * read_file  SAFE\n|   file.py\n"
             "| Actual final answer.\n| * a Markdown bullet\n| + another bullet\n| > a quote\n"
             "| + 2 steps | 1.0 s\n| stats: ttft 99.00s\n"
         )
@@ -257,7 +258,7 @@ class ObservationTests(unittest.TestCase):
                                 for note in observed["metric_notes"]))
             for change in (
                 {"stop": "max_tokens"},
-                {"tool_calls": [{"name": "run_command", "args": {"command": "true"}}]},
+                {"tool_calls": [{"name": "exec", "args": {"command": "true"}}]},
                 {"errors": ["bad call"]},
             ):
                 broken = [dict(event) for event in events]

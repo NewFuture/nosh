@@ -7,7 +7,7 @@ fn mutating_needs_approval_and_denial_reason_reaches_model() {
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
     let engine = MockChatEngine::new(vec![
-        vec![call("run_command", json!({"command": "touch created.txt"}))],
+        vec![call("exec", json!({"command": "touch created.txt"}))],
         vec![text("OK, I will not create it.")],
     ]);
     let received = engine.received();
@@ -35,10 +35,15 @@ fn mutating_needs_approval_and_denial_reason_reaches_model() {
     assert_eq!(out.status, TaskStatus::Incomplete);
     let results = tool_results(&received.lock().unwrap());
     assert!(results[0].contains("[denied by user]") && results[0].contains("not now"));
+    assert!(results[0].contains("User reason: not now"));
+    assert!(results[0].contains("Approval request:"));
+    for reason in &approval.seen[0].reasons {
+        assert!(results[0].contains(reason), "{results:?}");
+    }
 
     // Approved this time: the file is created in the shared session's cwd.
     let engine = MockChatEngine::new(vec![
-        vec![call("run_command", json!({"command": "touch created.txt"}))],
+        vec![call("exec", json!({"command": "touch created.txt"}))],
         vec![text("Created.")],
     ]);
     let mut a = agent(
@@ -60,6 +65,47 @@ fn mutating_needs_approval_and_denial_reason_reaches_model() {
 }
 
 #[test]
+fn denial_without_user_reason_reports_the_approval_trigger_without_inventing_a_reason() {
+    let _g = setup();
+    let dir = tmpdir("deny-cwd");
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", dir.display()));
+    let before = sh.cwd();
+    let engine = MockChatEngine::new(vec![
+        vec![call("exec", json!({"command": "cd . && ls"}))],
+        vec![text("The command was not run.")],
+    ]);
+    let received = engine.received();
+    let mut agent = agent(
+        engine,
+        AgentConfig {
+            mode: ApprovalMode::Confirm,
+            ..AgentConfig::default()
+        },
+    );
+    let mut approval = Scripted::new([ApprovalResponse::Deny { reason: None }]);
+    let outcome = agent.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "inspect"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(approval.seen.len(), 1);
+    assert_eq!(outcome.commands_run, 0);
+    assert_eq!(outcome.denied, 1);
+    assert_eq!(sh.cwd(), before);
+    let results = tool_results(&received.lock().unwrap());
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("[denied by user]"));
+    assert!(results[0].contains("no command was run"));
+    assert!(results[0].contains("Approval request:"));
+    assert!(results[0].contains("changes directory"));
+    assert!(!results[0].contains("User reason:"));
+    assert!(results[0].contains("Do not retry or bypass this decision"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn dangerous_requires_strong_confirmation_and_edit_is_reassessed() {
     let _g = setup();
     let dir = tmpdir("danger");
@@ -67,7 +113,7 @@ fn dangerous_requires_strong_confirmation_and_edit_is_reassessed() {
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
     let engine = MockChatEngine::new(vec![
-        vec![call("run_command", json!({"command": "rm -rf build"}))],
+        vec![call("exec", json!({"command": "rm -rf build"}))],
         vec![text("Listed instead.")],
     ]);
     let received = engine.received();
@@ -100,10 +146,10 @@ fn session_protection_blocks_exec_and_exit() {
     let mut sh = shell();
     let engine = MockChatEngine::new(vec![
         vec![
-            call("run_command", json!({"command": "exec bash"})),
-            call("run_command", json!({"command": "echo skipped"})),
+            call("exec", json!({"command": "exec bash"})),
+            call("exec", json!({"command": "echo skipped"})),
         ],
-        vec![call("run_command", json!({"command": "exit 3"}))],
+        vec![call("exec", json!({"command": "exit 3"}))],
         vec![text("I cannot do that.")],
     ]);
     let received = engine.received();
@@ -146,7 +192,7 @@ fn no_terminal_denies_unless_auto_allows() {
     sh.set_workspace(dir.clone());
     let turns = || {
         vec![
-            vec![call("run_command", json!({"command": "mkdir made"}))],
+            vec![call("exec", json!({"command": "mkdir made"}))],
             vec![text("done")],
         ]
     };
@@ -197,10 +243,7 @@ fn reads_through_dotdot_or_symlinks_still_ask() {
             json!({"path": format!("{up}etc/hostname")}),
         )],
         vec![call("read_file", json!({"path": "host"}))],
-        vec![call(
-            "run_command",
-            json!({"command": "rm -rf ~/x #\u{202e} sl"}),
-        )],
+        vec![call("exec", json!({"command": "rm -rf ~/x #\u{202e} sl"}))],
         vec![text("ok")],
     ]);
     let received = engine.received();
@@ -423,20 +466,17 @@ fn unavailable_tools_are_rejected_before_approval_or_execution() {
     let dir = tmpdir("tool-catalog");
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
-    for (set, names) in [
-        (ToolSet::Full, "run_command, read_file, grep"),
-        (ToolSet::ReadOnly, "read_file, grep"),
+    for (set, name, names) in [
+        (ToolSet::Full, "list_dir", "exec, read_file, grep"),
+        (ToolSet::Full, "run_command", "exec, read_file, grep"),
+        (ToolSet::ReadOnly, "exec", "read_file, grep"),
     ] {
-        let name = if set == ToolSet::Full {
-            "list_dir"
-        } else {
-            "run_command"
-        };
         let engine = MockChatEngine::new(vec![
             vec![call(name, json!({"command": "touch should-not-exist"}))],
             vec![text("No command was run.")],
         ]);
         let received = engine.received();
+        let specs = engine.specs();
         let mut agent = Agent::new(Box::new(engine), AgentConfig::default(), env(), set);
         let mut approval = Scripted::new([]);
         let out = agent.run_task(
@@ -448,6 +488,13 @@ fn unavailable_tools_are_rejected_before_approval_or_execution() {
         assert_eq!(out.commands_run, 0);
         assert!(approval.seen.is_empty());
         assert!(!dir.join("should-not-exist").exists());
+        let specs = specs.lock().unwrap();
+        if set == ToolSet::ReadOnly {
+            assert!(specs[0].system.contains("read-only: use read_file, grep"));
+            assert!(!specs[0].system.contains("Available:"));
+        } else {
+            assert!(specs[0].system.contains("Available:"));
+        }
         assert_eq!(
             tool_results(&received.lock().unwrap()),
             [format!(
@@ -475,7 +522,7 @@ fn nosh_settings_and_state_are_protected_where_they_live() {
             json!({"path": relative_home.join("config.toml").display().to_string()}),
         )],
         vec![call(
-            "run_command",
+            "exec",
             json!({"command": format!(
                 "echo x >> {}",
                 relative_home.join("state/history.jsonl").display()

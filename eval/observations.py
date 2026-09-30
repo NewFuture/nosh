@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 
 from . import driver
@@ -77,7 +77,16 @@ def assistance_observations(events: list[dict]) -> list[dict]:
                 if message.get("role") == "system":
                     records = re.findall(r"(?m)^\[execution\]\n([^\n]+)", message.get("text", ""))
                     if records:
-                        executions[key] = json.loads(records[-1])
+                        execution = json.loads(records[-1])
+                        if isinstance(execution, dict) and execution.get("execution_cwd") == ".":
+                            cwd = re.match(r"^\[context\]\ncwd: ([^\n]+)(?:\n|$)", message["text"])
+                            current = cwd[1] if cwd else None
+                            if current is not None and current.startswith('"'):
+                                current = json.loads(current)
+                            if not isinstance(current, str) or not PurePosixPath(current).is_absolute():
+                                raise ValueError("relative execution cwd requires an absolute context cwd")
+                            execution = dict(execution, execution_cwd=current)
+                        executions[key] = execution
         elif event.get("ev") == "step_end":
             responses[key] = event
         if event.get("ev") != "observation":
@@ -91,6 +100,8 @@ def assistance_observations(events: list[dict]) -> list[dict]:
                 or type(value.get("background")) is not bool
                 or value.get("status") not in ("completed", "cancelled", "failed")):
             raise ValueError("invalid assistance provenance")
+        if value.get("response_format") != "command_or_none":
+            raise ValueError("invalid assistance response format")
         command_id = value.get("command_id")
         execution = None
         if value["intent"] == "generate":
@@ -104,22 +115,27 @@ def assistance_observations(events: list[dict]) -> list[dict]:
                     or type(execution.get("exit")) is not int
                     or (execution["exit"] == 0) != (value["intent"] == "next")):
                 raise ValueError("assistance result does not match its execution")
+            if ("status" in execution
+                    and execution["status"] != ("succeeded" if execution["exit"] == 0 else "failed")):
+                raise ValueError("execution status contradicts its exit code")
         if value["status"] == "completed":
             kind, text = value.get("kind"), value.get("text")
-            if (kind not in ("command", "clarify", "none")
+            if (kind not in ("command", "none")
                     or (kind == "none" and text is not None)
                     or (kind != "none" and (not isinstance(text, str) or not text.strip()))):
                 raise ValueError("invalid accepted assistance result")
             response = responses.get(key, {})
             calls = response.get("tool_calls", [])
+            raw = response.get("text")
             if (response.get("stop") != "end_of_turn" or response.get("errors") != []
-                    or response.get("text", "").strip() or len(calls) != 1
-                    or calls[0].get("name") != "finish"):
-                raise ValueError("accepted assistance has no matching finish")
-            args = calls[0].get("args", {})
-            if (args.get("kind") != kind or set(args) != ({"kind"} if kind == "none" else {"kind", "text"})
-                    or (kind != "none" and (not isinstance(args.get("text"), str) or args["text"].strip() != text))):
-                raise ValueError("accepted assistance differs from the generated finish")
+                    or calls != [] or not isinstance(raw, str)):
+                raise ValueError("accepted assistance has no matching direct final response")
+            final = raw.strip()
+            if ((kind == "none" and final != "[None]")
+                    or (kind == "command" and (not final or final == "[None]" or final != text))):
+                raise ValueError("accepted assistance differs from the generated final response")
+        elif "kind" in value or "text" in value:
+            raise ValueError("failed or cancelled assistance cannot contain an accepted result")
         completed.add(key)
         results.append(dict(value, execution=execution))
     return results
@@ -128,11 +144,13 @@ def assistance_observations(events: list[dict]) -> list[dict]:
 def execution_evidence(events: list[dict]) -> list[dict]:
     executions = []
     pending: dict[tuple, list[dict]] = {}
+    steps: dict[tuple, int] = {}
     for event in events:
         if event["ev"] not in ("step_start", "step_end"):
             continue
         key = session_key(event)
         if event["ev"] == "step_start":
+            steps[key] = steps.get(key, 0) + 1
             if not isinstance(event.get("messages"), list):
                 raise ValueError("trace step is missing its messages")
             waiting = pending.get(key, [])
@@ -146,7 +164,7 @@ def execution_evidence(events: list[dict]) -> list[dict]:
                 text = message["text"]
                 header = re.match(r"^\[exit_code=(-?\d+) duration=[\d.]+s truncated=(yes|no)([^\]]*)\]\n", text)
                 execution.update(result=text, state="returned")
-                if execution["call"]["name"] == "run_command":
+                if execution["call"]["name"] == "exec":
                     execution["state"] = "executed" if header else "not_executed"
                     if header:
                         execution.update(exit_code=int(header[1]), truncated=header[2] == "yes",
@@ -159,13 +177,36 @@ def execution_evidence(events: list[dict]) -> list[dict]:
             for call in event["tool_calls"]:
                 if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
                     raise ValueError("invalid observed tool call")
-                if call["name"] == "finish":
-                    continue
                 execution = {"call": call, "result": None, "state": "unobserved", "exit_code": None}
+                if call["name"] == "ask_user":
+                    execution.update(engine=key[0], sid=key[1], step=steps.get(key, 0))
                 executions.append(execution)
                 waiting.append(execution)
             pending[key] = waiting
     return executions
+
+
+def question_evidence(result: driver.Result, executions: list[dict]) -> list[dict]:
+    observed = {
+        (item.get("engine"), item.get("sid"), item.get("step")): item
+        for item in executions if item["call"]["name"] == "ask_user"
+    }
+    seen = set()
+    for question in result.questions:
+        key = (question.get("engine"), question.get("sid"), question.get("step"))
+        actual = observed.get(key)
+        if (key in seen or actual is None or actual["call"] != question.get("call")
+                or question.get("state") not in ("answered", "cancelled")
+                or type(question.get("input_index")) is not int or question["input_index"] < 0):
+            raise ValueError("user question does not match its native call")
+        seen.add(key)
+        if question["state"] == "answered":
+            if (not isinstance(question.get("answer"), str) or actual["state"] != "returned"
+                    or actual["result"] != question["answer"]):
+                raise ValueError("scripted answer was not returned to the original model session")
+        elif question.get("answer") is not None:
+            raise ValueError("cancelled question cannot contain an answer")
+    return list(result.questions)
 
 
 def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
@@ -220,6 +261,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
     executions = None
     deadline_state = None
     assistance = []
+    questions = []
     engines = []
     if scenario["check"] != "typos":
         if not trace.is_file():
@@ -264,12 +306,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
                 deadline_state = "during_generation"
             elif len(starts) == len(ends) and not pending:
                 last = ends[-1]
-                accepted_finish = any(
-                    e.get("ev") == "observation" and e.get("sid") == last.get("sid")
-                    and e.get("engine") == last.get("engine")
-                    and e.get("value", {}).get("status") == "completed" for e in events
-                )
-                if (last.get("stop") != "end_of_turn" or (last.get("tool_calls") != [] and not accepted_finish)
+                if (last.get("stop") != "end_of_turn" or last.get("tool_calls") != []
                         or last.get("errors") != []):
                     raise ValueError("timeout was not after a completed final generation")
                 deadline_state = "after_generation"
@@ -286,6 +323,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
                     or not finite_number(usage.get("ttft_s")) or usage["ttft_s"] < 0):
                 raise ValueError("invalid generated text or step usage in trace")
         executions = execution_evidence(events)
+        questions = question_evidence(result, executions)
         assistance = assistance_observations(events)
         expected_assistance = scenario.get("assistance")
         assist_session = any(isinstance(e.get("label"), str) and e["label"].startswith("command_assist.")
@@ -357,5 +395,5 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             raise ValueError("CLI agent answer differs from the native final response")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
             "engines": engines,
-            "executions": executions, "sampling": sampling, "generated_answers": generated,
+            "executions": executions, "questions": questions, "sampling": sampling, "generated_answers": generated,
             "assistance": assistance, "deadline_state": deadline_state, "metric_notes": notes}

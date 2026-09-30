@@ -277,9 +277,9 @@ impl UserRule {
     pub fn compile(spec: RuleSpec, source: impl Into<String>) -> Result<Self, String> {
         let source = source.into();
         let fail = |why: &str| format!("{source}: {why}");
-        let tool = spec.tool.as_deref().unwrap_or("run_command");
-        if !matches!(tool, "run_command" | "read_file" | "grep") {
-            return Err(fail("tool must be run_command, read_file or grep"));
+        let tool = spec.tool.as_deref().unwrap_or("exec");
+        if !matches!(tool, "exec" | "read_file" | "grep") {
+            return Err(fail("tool must be exec, read_file or grep"));
         }
         if spec.command_prefix.is_some() && spec.command_exact.is_some() {
             return Err(fail(
@@ -287,15 +287,15 @@ impl UserRule {
             ));
         }
         let selector = spec.command_prefix.as_ref().or(spec.command_exact.as_ref());
-        if selector.is_some() && tool != "run_command" {
-            return Err(fail("command selectors require run_command"));
+        if selector.is_some() && tool != "exec" {
+            return Err(fail("command selectors require exec"));
         }
-        if tool == "run_command" && spec.path.is_some() {
+        if tool == "exec" && spec.path.is_some() {
             return Err(fail(
                 "use read_paths/write_paths for command effects, not path",
             ));
         }
-        if tool != "run_command"
+        if tool != "exec"
             && (!spec.variables.is_empty()
                 || !spec.hosts.is_empty()
                 || spec.allow_opaque
@@ -303,7 +303,7 @@ impl UserRule {
                 || !spec.write_paths.is_empty())
         {
             return Err(fail(
-                "read_paths, write_paths, variables, hosts and allow_opaque apply only to run_command; use path for read tools",
+                "read_paths, write_paths, variables, hosts and allow_opaque apply only to exec; use path for read tools",
             ));
         }
         if selector.is_none() && spec.tool.is_none() {
@@ -396,7 +396,7 @@ impl UserRule {
         deny: bool,
         paths: &PathResolver,
     ) -> bool {
-        if op.tool != self.spec.tool.as_deref().unwrap_or("run_command") {
+        if op.tool != self.spec.tool.as_deref().unwrap_or("exec") {
             return false;
         }
         if let Some(cwd) = &self.spec.cwd {
@@ -527,7 +527,7 @@ impl UserRule {
     }
 
     fn allows_payload(&self, op: &Operation, ctx: &Context, paths: &PathResolver) -> bool {
-        op.tool == self.spec.tool.as_deref().unwrap_or("run_command")
+        op.tool == self.spec.tool.as_deref().unwrap_or("exec")
             && self.effect_scope(op, ctx, true, paths)
     }
 
@@ -595,7 +595,7 @@ impl UserRule {
         // Scope-only rules must not accidentally approve unrelated commands.
         if !payload
             && self.argv.is_none()
-            && op.tool == "run_command"
+            && op.tool == "exec"
             && !op.argv.is_empty()
             && (!self.spec.variables.is_empty()
                 || !self.reads.is_empty()

@@ -36,19 +36,19 @@ class WorkflowTests(unittest.TestCase):
                 "status": "completed", "intent": assist["intent"], "kind": assist["result"],
                 "background": assist["automatic"], "execution": None,
             }]
-            if self.scenario["mode"] == "suggest" and assist["result"] in ("clarify", "none"):
+            if self.scenario["mode"] == "suggest" and assist["result"] == "none":
                 self.result.exit_code = 1
 
     def test_workflow_plan_reuses_control_and_fits_the_hosted_budget(self):
         plan = suite.load_suite("workflows")
-        self.assertEqual(plan["dataset_revision"], 13)
+        self.assertEqual(plan["dataset_revision"], 16)
         self.assertEqual(len(plan["scenarios"]), 8)
         self.assertEqual(plan["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(campaign.validate_budget(plan, 2, 60, 16200), 4800)
         control = next(s for s in suite.load_suite("command-assist")["scenarios"] if s["id"] == "generate-archive")
         self.assertEqual(self.scenarios["generate-archive"], control)
         original = suite.load_suite("regression")
-        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (12, 27))
+        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (16, 27))
 
     def test_assistance_checks_reject_incompatible_intents_and_results(self):
         for sid in ("next-review-after-tests", "fix-partially-completed-archive"):
@@ -144,7 +144,7 @@ class WorkflowTests(unittest.TestCase):
         self.result.approvals = [{"command": command, "allowed": False}]
         self.metrics["confirmations"] = 1
         self.evidence["executions"] = [{
-            "call": {"name": "run_command", "args": {"command": command}},
+            "call": {"name": "exec", "args": {"command": command}},
             "state": "not_executed", "exit_code": None, "result": "[denied] user declined",
         }]
         verdict = self.grade("The request was declined. No files were renamed.")
@@ -193,10 +193,10 @@ class WorkflowTests(unittest.TestCase):
             self.evidence[key] = []
             self.assertFalse(self.grade(answer).passed, key)
         self.evidence = copy.deepcopy(good)
-        self.evidence["inputs"][0]["tools"].append({"name": "run_command"})
+        self.evidence["inputs"][0]["tools"].append({"name": "exec"})
         self.assertFalse(self.grade(answer).passed)
         self.evidence = copy.deepcopy(good)
-        self.evidence["tool_calls"].append({"name": "run_command", "args": {"command": "cat config/storage.ini"}})
+        self.evidence["tool_calls"].append({"name": "exec", "args": {"command": "cat config/storage.ini"}})
         self.assertFalse(self.grade(answer).passed)
         self.evidence = good
         self.assertFalse(self.grade(answer.replace("release-team", "operations")).passed)
@@ -279,6 +279,11 @@ class WorkflowTests(unittest.TestCase):
             f"staging_eu 的 endpoint 是 [存储地址]({endpoint})，负责团队为 [{owner}](config/storage.ini)。",
             f"staging_eu 的 endpoint 是 <{endpoint}>，负责团队为 {owner}。",
             f"staging_eu 的 endpoint 是 {endpoint}，负责团队为 __{owner}__（来自 config/storage.ini）。",
+            f"staging_eu 的 endpoint 为 `{endpoint}`，对应 owner 团队为 `{owner}`。",
+            f"staging_eu 的 endpoint 为 {endpoint}，对应的 owner 为 {owner}。",
+            f"查询当前项目配置，结果如下：\nstaging_eu endpoint: {endpoint}, corresponding owner: {owner}.",
+            f"查询当前项目配置，结果如下：\nstaging_eu endpoint: {endpoint}, and the corresponding owner: {owner}.",
+            answer + f"\n依据：config/storage.ini 中 backup_east 段配置的 endpoint 为 `{endpoint}`，对应 owner 团队为 `{owner}`。",
         ):
             with self.subTest(answer=valid):
                 verdict = self.grade(valid)
@@ -309,6 +314,12 @@ class WorkflowTests(unittest.TestCase):
             f"不是 {owner}。",
             f"不是 {endpoint}。",
             f"endpoint: {endpoint}.invented.invalid",
+            f"endpoint: {endpoint}，对应",
+            f"endpoint: {endpoint}/对应，对应 owner: {owner}",
+            f"endpoint: {endpoint}，storage.internal，对应 owner: {owner}",
+            f"endpoint: {endpoint}，对应 owner: platform-engineering",
+            f"endpoint: {endpoint}, corresponding",
+            f"endpoint: {endpoint}, storage.internal, corresponding owner: {owner}",
         ):
             with self.subTest(extra=extra):
                 verdict = self.grade(answer + "\n" + extra)
@@ -392,7 +403,8 @@ class WorkflowTests(unittest.TestCase):
     def test_natural_ambiguity_and_complete_request_are_paired_without_copying_control(self):
         self.prepare("generate-natural-clarification")
         self.assertNotIn("Ask", self.scenario["input"])
-        self.assertTrue(self.grade("Which source directory and destination filename should I use?").passed)
+        self.assertTrue(self.grade("").passed)
+        self.assertFalse(self.grade("Which source directory and destination filename should I use?").passed)
         self.assertFalse(self.grade("Use logs and logs.tar.gz.").passed)
         self.prepare("generate-archive")
         self.assertTrue(self.grade("tar -czf logs.tar.gz logs").passed)

@@ -26,10 +26,7 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
             // This bounded wait makes the first result arrive after invalidation.
             std::thread::sleep(Duration::from_millis(150));
         }
-        vec![call(
-            "finish",
-            json!({"kind":"command","text":format!("echo candidate-{round}")}),
-        )]
+        vec![text(format!("echo candidate-{round}"))]
     });
     let specs = model.specs();
     let loads = Arc::new(AtomicUsize::new(0));
@@ -97,19 +94,23 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
 }
 
 #[test]
-fn generate_and_ctrl_g_use_finish_without_target_execution() {
+fn generate_and_ctrl_g_use_direct_final_without_target_execution() {
     use nosh_shell::AiHandler;
     let _g = setup();
     let mut sh = shell();
     let dir = tmpdir("suggest");
     sh.run_user_line(&format!("cd {}", dir.display()));
     for response in ["touch suggested", "for f in *.txt; do\n  echo \"$f\"\ndone"] {
-        let mut engine = MockChatEngine::new(vec![vec![call(
-            "finish",
-            json!({"kind": "command", "text": response}),
-        )]]);
+        let mut engine = MockChatEngine::new(vec![vec![text(response)]]);
         let specs = engine.specs();
-        let result = generate(&mut engine, &sh, "suggest", &AgentConfig::default()).unwrap();
+        let result = generate(
+            &mut engine,
+            &sh,
+            "suggest",
+            &AgentConfig::default(),
+            &mut NoUserInput,
+        )
+        .unwrap();
         assert_eq!(result.result, AssistResult::Command(response.into()));
         assert!(!dir.join("suggested").exists());
         assert_eq!(
@@ -118,14 +119,11 @@ fn generate_and_ctrl_g_use_finish_without_target_execution() {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            ["command_info", "read_file", "grep", "finish"]
+            ["command_help", "read_file", "grep"]
         );
         assert_eq!(specs.lock().unwrap()[0].sampling.temperature, 1.0);
     }
-    let mut engine = Some(MockChatEngine::new(vec![vec![call(
-        "finish",
-        json!({"kind": "command", "text": "touch suggested"}),
-    )]]));
+    let mut engine = Some(MockChatEngine::new(vec![vec![text("touch suggested")]]));
     let mut ai = ShellAi::new(
         Box::new(move |_| {
             Ok(nosh_core::LoadedEngine {
@@ -142,4 +140,45 @@ fn generate_and_ctrl_g_use_finish_without_target_execution() {
     );
     assert!(!dir.join("suggested").exists());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generate_uses_focused_help_not_command_discovery() {
+    let _guard = setup();
+    let directory = tmpdir("command-help-results");
+    std::fs::write(directory.join("evidence"), "unchanged").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", directory.display()));
+    let mut engine = MockChatEngine::new(vec![
+        vec![call(
+            "command_help",
+            json!({"name": "ls", "query": "--help"}),
+        )],
+        vec![text("echo ok")],
+    ]);
+    let received = engine.received();
+    let output = generate(
+        &mut engine,
+        &sh,
+        "Print ok.",
+        &AgentConfig::default(),
+        &mut NoUserInput,
+    )
+    .unwrap();
+    assert_eq!(output.result, AssistResult::Command("echo ok".into()));
+    let results = tool_results(&received.lock().unwrap());
+    assert_eq!(results.len(), 1);
+    assert!(results[0].starts_with("[command_help]\n"));
+    let result: serde_json::Value =
+        serde_json::from_str(results[0].lines().nth(1).unwrap()).unwrap();
+    assert_eq!(result["name"], "ls");
+    assert_eq!(result["query"], "--help");
+    assert_eq!(result["argument"], "--help");
+    assert!(result.get("topic").is_none());
+    assert!(result.get("command_names").is_none());
+    assert_eq!(
+        std::fs::read_to_string(directory.join("evidence")).unwrap(),
+        "unchanged"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }

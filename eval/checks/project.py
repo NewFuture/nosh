@@ -155,7 +155,7 @@ def completed_commands(evidence: dict, root: Path, facts: dict, action: str, aft
     matches = []
     for execution in evidence.get("executions") or []:
         call = execution["call"]
-        if (call["name"] != "run_command" or execution.get("exit_code") != 0
+        if (call["name"] != "exec" or execution.get("exit_code") != 0
                 or execution.get("timed_out") or execution.get("interrupted")):
             continue
         command = call["args"].get("command")
@@ -210,7 +210,7 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
         queried = set()
         for execution in evidence.get("executions") or []:
             call = execution["call"]
-            if (call["name"] != "run_command" or execution.get("exit_code") != 0
+            if (call["name"] != "exec" or execution.get("exit_code") != 0
                     or execution.get("timed_out") or execution.get("interrupted")
                     or not isinstance(call["args"].get("command"), str)
                     or not isinstance(execution.get("result"), str)):
@@ -231,7 +231,28 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                     f"missing, incorrect or contradictory {name} version: expected {number}, found {claims[name]}"
                 )
     elif kind == "clarification":
-        if clarification_request(response_prose(answer)) is None:
+        expected_answers = [
+            reply for completion in scenario.get("completions", [])
+            for reply in completion.get("answers", [])
+        ]
+        if expected_answers:
+            questions = evidence.get("questions") or []
+            if ([q.get("answer") for q in questions] != expected_answers
+                    or any(q.get("state") != "answered" for q in questions)):
+                reasons.append("declared clarification answers were not observed in the model conversation")
+            for question in questions:
+                text = question.get("call", {}).get("args", {}).get("question", "")
+                if not isinstance(text, str) or clarification_request(response_prose(text)) is None:
+                    reasons.append("ask_user does not ask for the missing task or objective")
+            asked = False
+            for execution in evidence.get("executions") or []:
+                if execution["call"]["name"] == "ask_user":
+                    asked = True
+                elif asked:
+                    reasons.append("tools were called after the user's pause answer")
+            if not asked:
+                reasons.append("clarification did not use ask_user")
+        elif clarification_request(response_prose(answer)) is None:
             reasons.append("clarification does not ask for the missing task or objective")
     elif kind in ("build-failure", "test-failure", "port-failure"):
         expected = scenario["completions"][0]

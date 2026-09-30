@@ -489,7 +489,7 @@ impl Analyzer<'_> {
         let previous = self.operation;
         self.operation = Some(self.report.operations.len());
         self.report.operations.push(Operation {
-            tool: "run_command".into(),
+            tool: "exec".into(),
             parent: if self.redirecting {
                 previous.and_then(|i| self.report.operations[i].parent)
             } else {
@@ -562,7 +562,7 @@ impl Analyzer<'_> {
             self.report.operations[i].paths.push(access);
         } else {
             self.report.operations.push(Operation {
-                tool: "run_command".into(),
+                tool: "exec".into(),
                 cwd: self.cwd.clone(),
                 paths: vec![access],
                 ..Operation::default()
@@ -2043,7 +2043,7 @@ impl Analyzer<'_> {
             "exit" | "logout" if self.child => self.add(Risk::Safe, "ends the child shell"),
             "exec" => self.add(
                 Risk::Forbidden,
-                "agent may not use exec (it replaces the shell session)",
+                "shell builtin exec is forbidden (it replaces the shell session)",
             ),
             "exit" | "logout" => self.add(Risk::Forbidden, "agent may not exit the shell session"),
             "sudo" => self.sudo(&args, name_end),

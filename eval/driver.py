@@ -38,28 +38,72 @@ class DriverError(RuntimeError):
     pass
 
 
-class AssistanceTrace:
-    """Read each appended JSONL record once, including split UTF-8 writes."""
+class InteractionTrace:
+    """Incrementally track completed assistance and questions awaiting terminal input."""
 
     def __init__(self, path: str | None):
         self.path = Path(path) if path else None
         self.offset = 0
         self.pending = b""
-        self.results: list[dict] = []
+        self.assistance: list[dict] = []
+        self.pending_questions: dict[tuple[int, int], dict] = {}
+        self._interactive: set[tuple[int, int]] = set()
+        self._steps: dict[tuple[int, int], int] = {}
 
-    def read(self) -> list[dict]:
+    def observe(self, event: dict) -> None:
+        kind = event.get("ev")
+        if kind not in ("observation", "open", "step_start", "step_end", "step_error", "close"):
+            return
+        key = (event.get("engine"), event.get("sid"))
+        if any(type(value) is not int or not 0 <= value < 2**64 for value in key):
+            raise DriverError("invalid engine/session identity in interaction trace")
+        if kind == "observation":
+            value = event.get("value")
+            if not isinstance(value, dict):
+                raise DriverError("invalid host observation")
+            if value.get("workflow") == "command_assist":
+                self.assistance.append(value)
+            return
+        if kind == "open":
+            tools = event.get("tools", [])
+            if not isinstance(tools, list):
+                raise DriverError("invalid native tool definitions")
+            if any(isinstance(tool, dict) and tool.get("name") == "ask_user"
+                   for tool in tools):
+                self._interactive.add(key)
+        elif kind == "step_start":
+            self._steps[key] = self._steps.get(key, 0) + 1
+            self.pending_questions.pop(key, None)
+        elif kind in ("close", "step_error"):
+            self.pending_questions.pop(key, None)
+            if kind == "close":
+                self._interactive.discard(key)
+                self._steps.pop(key, None)
+        elif kind == "step_end":
+            self.pending_questions.pop(key, None)
+            calls = event.get("tool_calls")
+            if (key in self._interactive and key in self._steps and event.get("stop") in ("end_of_turn", "max_tokens")
+                    and event.get("errors") == [] and isinstance(calls, list) and len(calls) == 1
+                    and isinstance(calls[0], dict) and calls[0].get("name") == "ask_user"
+                    and isinstance(calls[0].get("args"), dict)
+                    and isinstance(calls[0]["args"].get("question"), str)):
+                self.pending_questions[key] = {
+                    "engine": key[0], "sid": key[1], "step": self._steps[key], "call": calls[0],
+                }
+
+    def refresh(self) -> None:
         if self.path is None:
-            return self.results
+            return
         try:
             with self.path.open("rb") as stream:
                 if os.fstat(stream.fileno()).st_size < self.offset:
-                    raise DriverError("engine trace was truncated while observing assistance")
+                    raise DriverError("engine trace was truncated while observing interactions")
                 stream.seek(self.offset)
                 appended = stream.read()
         except FileNotFoundError:
             if self.offset:
-                raise DriverError("engine trace disappeared while observing assistance")
-            return self.results
+                raise DriverError("engine trace disappeared while observing interactions")
+            return
         self.offset += len(appended)
         self.pending += appended
         complete, separator, pending = self.pending.rpartition(b"\n")
@@ -72,13 +116,7 @@ class AssistanceTrace:
                     raise DriverError(f"invalid engine trace record: {error}") from error
                 if not isinstance(event, dict):
                     raise DriverError("engine trace record must be an object")
-                if event.get("ev") == "observation":
-                    value = event.get("value")
-                    if not isinstance(value, dict):
-                        raise DriverError("invalid host observation")
-                    if value.get("workflow") == "command_assist":
-                        self.results.append(value)
-        return self.results
+                self.observe(event)
 
 
 class Screen:
@@ -197,6 +235,7 @@ class Result:
     total_s: float = 0
     peak_rss_mib: float | None = None
     approvals: list[dict] = field(default_factory=list)
+    questions: list[dict] = field(default_factory=list)
     turns: list[dict] = field(default_factory=list)
     pwd: str | None = None
     error: str | None = None
@@ -403,7 +442,8 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     approval_offset = 0
     denial_pending = False
     phase = "initial_prompt"
-    trace = AssistanceTrace(env.get("NOSH_EVAL_TRACE"))
+    trace = InteractionTrace(env.get("NOSH_EVAL_TRACE"))
+    answered = set()
 
     def prompt():
         return child.screen.line().startswith(PROMPT.rstrip())
@@ -450,28 +490,63 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             contract = contracts[i]
             phase = contract["kind"]
             start = len(result.transcript)
-            assist_before = len(trace.read()) if contract["kind"] == "assist" else 0
+            trace.refresh()
+            assist_before = len(trace.assistance)
             child.send(b"\x15" + line.encode() + b"\r")
             correction = (scenario.get("corrections") or [])[i] if scenario.get("corrections") else None
+            answers = contract.get("answers", [])
+            answer_index = 0
+
+            def interactions():
+                nonlocal answer_index
+                trace.refresh()
+                if child.screen.line().strip() in ("answer>", "回答>"):
+                    if trace.path is None:
+                        raise DriverError("user question requires a native trace")
+                    waiting = list(trace.pending_questions.values())
+                    if not waiting:
+                        return
+                    if len(waiting) != 1:
+                        raise DriverError("ambiguous native user question")
+                    question = waiting[0]
+                    identity = (question["engine"], question["sid"], question["step"])
+                    if identity in answered:
+                        return
+                    answered.add(identity)
+                    if answer_index < len(answers) and result.failure is None:
+                        answer = answers[answer_index]
+                        answer_index += 1
+                        state = "answered"
+                        child.send(answer.encode("utf-8") + b"\r")
+                    else:
+                        answer, state = None, "cancelled"
+                        result.failure = f"input {i + 1}: unexpected ask_user without a scripted answer"
+                        child.send(b"\x03")
+                    result.questions.append(dict(question, input_index=i, answer=answer, state=state))
+                    return
+                approvals()
 
             def completed():
                 text = plain(result.transcript[start:])
                 if contract["kind"] == "assist":
-                    return len(trace.read()) > assist_before and prompt()
+                    trace.refresh()
+                    return len(trace.assistance) > assist_before and prompt()
                 if correction:
                     return "press Enter to run" in text and child.screen.line().startswith(PROMPT + correction)
                 returned = idle_prompt() and "\n" + PROMPT.rstrip() in text
                 agent_done = bool(SUMMARY.search(text)) and bool(STATS.search(text)) and idle_prompt()
                 return returned or agent_done or ("press Enter to run" in text and prompt())
 
-            child.until(completed, deadline, f"completion of input {i + 1}", approvals)
+            child.until(completed, deadline, f"completion of input {i + 1}", interactions)
+            if result.failure is None and answer_index != len(answers):
+                result.failure = f"input {i + 1}: expected {len(answers)} user questions, answered {answer_index}"
             output = plain(result.transcript[start:])
             hint = SHELL_EXIT.search(output)
             result.turns.append({"input": line, "output": output, "kind": contract["kind"],
                                  "exit_code": int(hint[1]) if hint else None,
                                  "edit_line": child.screen.line() if correction else None})
             if contract["kind"] == "assist":
-                result.turns[-1]["assistance"] = trace.read()[-1]
+                result.turns[-1]["assistance"] = trace.assistance[-1]
             if contract["kind"] == "shell":
                 if not hint or int(hint[1]) != contract["exit_code"] or SUMMARY.search(output):
                     result.failure = f"input {i + 1}: expected shell exit {contract['exit_code']}, did not observe it"

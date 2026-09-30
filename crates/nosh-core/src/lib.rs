@@ -5,13 +5,14 @@ pub mod agent;
 pub mod approval;
 mod assist_worker;
 pub mod command_assist;
-mod command_info;
+mod command_help;
 mod guidance;
 pub mod handler;
 mod project;
 pub mod prompt;
 pub mod tools;
 pub mod ui;
+pub mod user_input;
 
 pub use agent::{Agent, AgentConfig, TaskOutcome, TaskStatus};
 pub use approval::{

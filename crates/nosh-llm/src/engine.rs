@@ -62,6 +62,8 @@ pub enum Message {
         tool_calls: Vec<ToolCall>,
     },
     Tool(String),
+    /// A standalone tool reply supplied by the user; never compacted as tool output.
+    UserAnswer(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

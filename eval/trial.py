@@ -72,7 +72,8 @@ def run_trial(args, meta: dict, scenario: dict, seed: int, repeat: int,
                     data = subprocess.check_output(scenario["stdin_command"], cwd=root, env=env, timeout=5)
                 flags = ["-a", "--json"] if scenario["mode"] == "agent" else ["-s"]
                 result = driver.run_cli(argv + flags + [scenario["input"]], root, env, timeout, data)
-        row.update(approvals=result.approvals, turns=result.turns, exit_code=result.exit_code, facts=facts)
+        row.update(approvals=result.approvals, questions=result.questions,
+                   turns=result.turns, exit_code=result.exit_code, facts=facts)
         row["metrics"].update(total_s=result.total_s, peak_rss_mib=result.peak_rss_mib,
                               confirmations=len(result.approvals))
         after = fixtures.snapshot(root)

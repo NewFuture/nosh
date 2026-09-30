@@ -385,7 +385,7 @@ mod tests {
     fn tools() -> Vec<ToolSpec> {
         vec![
             ToolSpec {
-                name: "run_command".into(),
+                name: "exec".into(),
                 description: "run".into(),
                 parameters: json!({
                     "type": "object",
@@ -410,11 +410,11 @@ mod tests {
     #[test]
     fn parses_basic_call() {
         let c = parse_call(
-            r#"<function name="run_command"><param name="command">ls -la</param><param name="timeout_sec"> 30 </param></function>"#,
+            r#"<function name="exec"><param name="command">ls -la</param><param name="timeout_sec"> 30 </param></function>"#,
             &tools(),
         )
         .unwrap();
-        assert_eq!(c.name, "run_command");
+        assert_eq!(c.name, "exec");
         assert_eq!(c.str_arg("command"), Some("ls -la"));
         assert_eq!(c.int_arg("timeout_sec"), Some(30));
     }
@@ -422,13 +422,13 @@ mod tests {
     #[test]
     fn parses_cdata_and_entities() {
         let c = parse_call(
-            "<function name=\"run_command\"><param name=\"command\"><![CDATA[echo <x> && printf 'a\nb']]></param></function>",
+            "<function name=\"exec\"><param name=\"command\"><![CDATA[echo <x> && printf 'a\nb']]></param></function>",
             &tools(),
         )
         .unwrap();
         assert_eq!(c.str_arg("command"), Some("echo <x> && printf 'a\nb'"));
         let c = parse_call(
-            r#"<function name="run_command"><param name="command">grep -c &quot;a&amp;b&quot; f &lt; in &#x41;&#66;</param></function>"#,
+            r#"<function name="exec"><param name="command">grep -c &quot;a&amp;b&quot; f &lt; in &#x41;&#66;</param></function>"#,
             &tools(),
         )
         .unwrap();
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn cdata_may_contain_param_close() {
         let c = parse_call(
-            "<function name=\"run_command\"><param name=\"command\"><![CDATA[echo '</param>']]></param></function>",
+            "<function name=\"exec\"><param name=\"command\"><![CDATA[echo '</param>']]></param></function>",
             &tools(),
         )
         .unwrap();
@@ -455,14 +455,14 @@ mod tests {
         assert_eq!(c.args["all"], json!(true));
 
         let e = parse_call(
-            r#"<function name="run_command"><param name="timeout_sec">5</param></function>"#,
+            r#"<function name="exec"><param name="timeout_sec">5</param></function>"#,
             &tools(),
         )
         .unwrap_err();
         assert_eq!(e.kind, CallErrorKind::MissingParam);
 
         let e = parse_call(
-            r#"<function name="run_command"><param name="command">x</param><param name="timeout_sec">soon</param></function>"#,
+            r#"<function name="exec"><param name="command">x</param><param name="timeout_sec">soon</param></function>"#,
             &tools(),
         )
         .unwrap_err();
@@ -473,7 +473,7 @@ mod tests {
         let timeout = |v: &str| {
             parse_call(
                 &format!(
-                    r#"<function name="run_command"><param name="command">x</param><param name="timeout_sec">{v}</param></function>"#
+                    r#"<function name="exec"><param name="command">x</param><param name="timeout_sec">{v}</param></function>"#
                 ),
                 &tools(),
             )
@@ -494,12 +494,11 @@ mod tests {
         assert_eq!(e.kind, CallErrorKind::UnknownTool);
         assert_eq!(e.tool.as_deref(), Some("rm_rf"));
 
-        let e =
-            parse_call(r#"<function name="run_command">junk</function>"#, &tools()).unwrap_err();
+        let e = parse_call(r#"<function name="exec">junk</function>"#, &tools()).unwrap_err();
         assert_eq!(e.kind, CallErrorKind::Malformed);
 
         let e = parse_call(
-            r#"<function name="run_command"><param name="command">ls</function>"#,
+            r#"<function name="exec"><param name="command">ls</function>"#,
             &tools(),
         )
         .unwrap_err();
@@ -520,9 +519,9 @@ mod tests {
     #[test]
     fn host_prefilled_tool_opening_is_parsed_with_generated_arguments() {
         let prefix = crate::template::concat(&crate::template::tool_choice_prefix(
-            &crate::ToolChoice::Named("run_command".into()),
+            &crate::ToolChoice::Named("exec".into()),
         ));
-        assert_eq!(prefix, "<function name=\"run_command\">");
+        assert_eq!(prefix, "<function name=\"exec\">");
         assert!(crate::template::tool_choice_prefix(&crate::ToolChoice::Auto).is_empty());
         let mut parser = StreamParser::new(tools(), false);
         assert!(parser.push_bytes(FUNCTION_OPEN, b"").is_empty());
@@ -556,7 +555,7 @@ mod tests {
                 (TXT, " check."),
                 (TXT, "\n"),
                 (FUNCTION_OPEN, ""),
-                (TXT, " name=\"run_command\">"),
+                (TXT, " name=\"exec\">"),
                 (PARAM_OPEN, ""),
                 (TXT, " name=\"command\">"),
                 (TXT, "ls"),
@@ -597,7 +596,7 @@ mod tests {
                 (THINK_CLOSE, ""),
                 (TXT, "ok"),
                 (FUNCTION_OPEN, ""),
-                (TXT, " name=\"run_command\">"),
+                (TXT, " name=\"exec\">"),
                 (PARAM_OPEN, ""),
                 (TXT, " name=\"command\">ls"),
             ],
@@ -607,7 +606,7 @@ mod tests {
         match &out[2] {
             Parsed::Call(Err(e)) => {
                 assert_eq!(e.kind, CallErrorKind::Truncated);
-                assert_eq!(e.tool.as_deref(), Some("run_command"));
+                assert_eq!(e.tool.as_deref(), Some("exec"));
             }
             other => panic!("{other:?}"),
         }

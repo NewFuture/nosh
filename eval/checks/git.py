@@ -243,7 +243,9 @@ def git_judgment(kind: str, answer: str, facts: dict, root: Path, evidence: dict
         for clause in re.split(r"[。！？!?；;\n，,]", prose):
             counts = re.findall(r"(?<![\d.])(\d+)\s*(?:个|条|次)?\s*(?:提交|commits?\b|记录)", clause, re.I)
             counts.extend(re.findall(
-                r"(?:提交|commits?)\s*[（(]\s*(?:共|total(?:\s+of)?\s*:?)?\s*(\d+)\s*(?:个|条|次)?\s*[）)]",
+                r"(?:提交|commits?)\s*[（(]\s*"
+                r"(?:(?:共|最近|最新|last|latest|(?:most\s+)?recent|total(?:\s+of)?)\s*:?\s*)?"
+                r"(\d+)\s*(?:个|条|次)?\s*[）)]",
                 clause, re.I,
             ))
             displayed = bool(re.search(

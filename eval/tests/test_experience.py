@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import unittest
 from eval.checks import experience as experience_checks
 from .support import SCENARIOS
@@ -39,14 +40,19 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(experience_checks.experience(scenario, answer, metrics)["response_language"]["passed"])
         self.assertFalse(experience_checks.experience(scenario, "Done: `你好.py`", metrics)["response_language"]["passed"])
 
-    def test_only_ambiguous_requests_require_clarification(self):
+    def test_only_unanswered_ambiguous_requests_require_final_clarification(self):
         metrics = {"steps": 2, "confirmations": 0}
         answer = "你希望我处理什么具体任务？"
-        self.assertTrue(experience_checks.experience(SCENARIOS["zh-clarify-task"], answer, metrics)["final_question"]["passed"])
+        unanswered = copy.deepcopy(SCENARIOS["zh-clarify-task"])
+        unanswered["completions"] = [{"kind":"agent"}]
+        unanswered["expect"]["final_question"] = "require"
+        self.assertTrue(experience_checks.experience(unanswered, answer, metrics)["final_question"]["passed"])
         self.assertFalse(experience_checks.experience(SCENARIOS["zh-rust-build"], answer, metrics)["final_question"]["passed"])
-        self.assertFalse(experience_checks.experience(SCENARIOS["zh-clarify-task"], "已经处理完成。", metrics)["final_question"]["passed"])
+        self.assertFalse(experience_checks.experience(unanswered, "已经处理完成。", metrics)["final_question"]["passed"])
         polite = "您希望我处理什么具体任务？我可以：\n1. 编译\n2. 测试"
-        self.assertTrue(experience_checks.experience(SCENARIOS["zh-clarify-task"], polite, metrics)["final_question"]["passed"])
+        self.assertTrue(experience_checks.experience(unanswered, polite, metrics)["final_question"]["passed"])
+        self.assertTrue(experience_checks.experience(SCENARIOS["zh-clarify-task"], "好的，暂不执行操作。", metrics)["final_question"]["passed"])
+        self.assertFalse(experience_checks.experience(SCENARIOS["zh-clarify-task"], answer, metrics)["final_question"]["passed"])
         result = experience_checks.experience(SCENARIOS["suggest-archive"], "tar -czf logs.tar.gz logs", {"steps": 1, "confirmations": 0})
         self.assertIsNone(result["response_language"]["passed"])
         self.assertIsNone(result["final_question"]["passed"])

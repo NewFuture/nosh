@@ -130,12 +130,15 @@ fn serve(
         if state.agent.is_none() {
             let loaded = (state.loader)(LoadMode::Background).map_err(AssistError::Protocol)?;
             state.description = Some(loaded.description);
-            state.agent = Some(Agent::new(
-                loaded.engine,
-                job.cfg.clone(),
-                Environment::from_snapshot(&job.request.commands, &job.request.context),
-                ToolSet::Full,
-            ));
+            state.agent = Some(
+                Agent::new(
+                    loaded.engine,
+                    job.cfg.clone(),
+                    Environment::from_snapshot(&job.request.commands, &job.request.context),
+                    ToolSet::Full,
+                )
+                .with_user_input(Box::new(crate::user_input::TerminalUserInput)),
+            );
         }
         if job.cancel.is_cancelled() {
             return Err(AssistError::Cancelled);
@@ -157,6 +160,7 @@ fn serve(
             &job.request,
             &job.cfg,
             &job.cancel,
+            &mut crate::user_input::NoUserInput,
             |result| {
                 let presentation = result
                     .as_ref()
@@ -167,7 +171,6 @@ fn serve(
                             intent: job.request.intent.name().into(),
                             program: program.clone(),
                         }),
-                        AssistResult::Clarify(text) => Some(Assistance::Message(text.clone())),
                         AssistResult::NoSuggestion => None,
                     });
                 display.publish(job.version, presentation)

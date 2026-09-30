@@ -270,6 +270,10 @@ class ProjectTests(unittest.TestCase):
     def test_readonly_inspection_does_not_disqualify_needed_clarification(self):
         self.prepare("zh-clarify-task")
         self.command("ls")
-        self.assertTrue(self.grade("你希望我完成什么具体任务？").passed)
+        call = {"name":"ask_user", "args":{"question":"你希望我完成什么具体任务？"}}
+        reply = self.scenario["completions"][0]["answers"][0]
+        self.evidence["executions"].append({"call":call, "state":"returned", "result":reply})
+        self.evidence["questions"] = [{"call":call, "state":"answered", "answer":reply}]
+        self.assertTrue(self.grade("好的，已停止处理。").passed)
         (self.root / "maths.py").write_text("changed\n")
-        self.assertFalse(self.grade("你希望我完成什么具体任务？").passed)
+        self.assertFalse(self.grade("好的，已停止处理。").passed)

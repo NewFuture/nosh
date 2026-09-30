@@ -94,6 +94,7 @@ fn message(m: &Message) -> Value {
         Message::System(s) => json!({"role": "system", "text": s}),
         Message::User(s) => json!({"role": "user", "text": s}),
         Message::Tool(s) => json!({"role": "tool", "text": s}),
+        Message::UserAnswer(s) => json!({"role": "tool", "source": "user", "text": s}),
         Message::Assistant {
             content,
             tool_calls,
@@ -219,6 +220,14 @@ mod tests {
     use nosh_llm::{MockChatEngine, SamplingParams, mock};
     use std::io::Cursor;
 
+    #[test]
+    fn user_answer_trace_preserves_tool_result_order_and_user_provenance() {
+        assert_eq!(
+            message(&Message::UserAnswer("keep backups".into())),
+            json!({"role":"tool","source":"user","text":"keep backups"})
+        );
+    }
+
     fn spec() -> SessionSpec {
         SessionSpec {
             label: "test".into(),
@@ -237,7 +246,7 @@ mod tests {
     fn forwards_messages_events_usage_and_session_operations() {
         let mock = MockChatEngine::new(vec![vec![
             mock::text("hello"),
-            mock::call("run_command", json!({"command": "echo ok"})),
+            mock::call("exec", json!({"command": "echo ok"})),
         ]]);
         let received = mock.received();
         let specs = mock.specs();

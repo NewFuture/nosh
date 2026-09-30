@@ -12,7 +12,7 @@ Agent 发送 **System 背景 + User 原始请求**，包含 context、最近命�
 
 Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
 
-CommandAssist 共用项目／文档采集器，但使用独立的最小背景：Generate 附真实请求，Fix/Next 附明确的宿主执行事件，没有用户文本时不伪造请求。它不带入 Agent 全部历史或最近三条命令。Fix 复用匹配的终端证据；Next 不自动附成功输出。详见 [CommandAssist](COMMAND-ASSIST.md)。
+CommandAssist 共用项目／文档采集器，但使用独立的最小背景：Generate 附真实请求，Fix/Next 附明确的宿主执行事件和候选生成请求，没有用户文本时不伪造请求。它不带入 Agent 全部历史或最近三条命令。Fix 复用匹配的终端证据，并以单一执行记录去重命令／目录／退出码；Next 不自动附成功输出。详见 [CommandAssist](COMMAND-ASSIST.md)。
 
 用户终端输出仅由失败诊断入口按命令 ID 配对后放入背景；普通请求不自动携带。`[user_output]` 保留独立的归属、完整性和 4,096 字节正文预算，同一对话去重；详见[输出采集设计](OUTPUT-CAPTURE.md)。其 JSON 元数据是证据协议，不替代标签化项目 context。
 
@@ -24,10 +24,12 @@ CommandAssist 共用项目／文档采集器，但使用独立的最小背景：
 |---|---|
 | cwd、项目类型／名称、脚本名、包管理器 | cwd 只出现一次；相同根省略，祖先根用相对路径；推断的 `manager_hint` 不证明已安装 |
 | 执行约束 | Rust edition／继承、有效 workspace、Python 要求、Node 模块类型；不展开普通包版本或完整依赖表 |
-| Git、语言、venv、真实失败 | head 为分支或短 SHA；dirty 仅指已跟踪变化；失败保留命令与退出码 |
+| Git、语言、venv、真实失败 | head 为分支或短 SHA；已跟踪改动用明确的存在／无／未知表述，不把退出成功或无已跟踪改动说成整个工作区干净；失败保留命令与退出码 |
 | 缺失与告警 | 未识别 manifest、无 Git、未知、受保护、不可读分别表达；未识别不等于目录为空或输入不存在 |
 
 固定的 `git status` 是普通的本地状态查询，Git 可在内部检查／哈希已跟踪文件，context 只保留 `dirty`，不携带正文。不会仅因工作区存在受保护文件而新增整仓库拦截；现有用户配置不变，查询失败则如实标为未知。
+
+内部 `dirty` 仍是布尔／空值；模型视图分别显示 `uncommitted tracked changes present`、`no uncommitted tracked changes`、`tracked-change status unknown`。这些描述不涉及未跟踪文件，也不把未知状态补成无改动；适用项目指引仍保留原文，而不是替模型编造下一步任务。
 
 模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
 

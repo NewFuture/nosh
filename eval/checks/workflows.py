@@ -116,6 +116,12 @@ def config_claims(answer, facts):
         pending = None
         for index, match in enumerate(labels):
             value = line[match.end():labels[index + 1].start() if index + 1 < len(labels) else len(line)]
+            if index + 1 < len(labels):
+                # A connective introducing the next field is not an extra value.
+                value = re.sub(
+                    r"[，,；;]\s*(?:对应(?:的)?|(?:and\s+)?(?:the\s+)?corresponding)\s*$",
+                    "", value, flags=re.I,
+                )
             value = re.split(r"[。!?！？}]|(?<=\.)\s+", value, maxsplit=1)[0]
             if not value.strip(" \t:：=*-"):
                 pending = match.lastgroup
@@ -180,7 +186,7 @@ def denied_rename_judgment(answer, facts, root, result, evidence):
         return ["no declined, valid rename request was observed"]
     executions = (evidence or {}).get("executions") or []
     if not any(
-        item.get("state") == "not_executed" and item["call"]["name"] == "run_command"
+        item.get("state") == "not_executed" and item["call"]["name"] == "exec"
         and any(item["call"]["args"].get("command") == refusal["command"] for refusal in denied)
         for item in executions
     ):

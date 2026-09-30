@@ -611,11 +611,34 @@ fn display_value(value: &Value) -> String {
     }
 }
 
+fn display_git(value: &Value) -> String {
+    let Some(fields) = value.as_object() else {
+        return display_value(value);
+    };
+    fields
+        .iter()
+        .map(|(key, value)| {
+            if key == "dirty" {
+                match value.as_bool() {
+                    Some(true) => "uncommitted tracked changes present".into(),
+                    Some(false) => "no uncommitted tracked changes".into(),
+                    None => "tracked-change status unknown".into(),
+                }
+            } else {
+                format!("{key}={}", display_value(value))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub(crate) fn render_context(value: &Value) -> String {
     let fields = value.as_object().expect("project context is an object");
     let mut text = String::from("[context]");
     for (key, value) in fields {
-        if matches!(key.as_str(), "project" | "warnings")
+        if key == "git" {
+            text.push_str(&format!("\ngit: {}", display_git(value)));
+        } else if matches!(key.as_str(), "project" | "warnings")
             && let Some(values) = value.as_array()
         {
             let label = if key == "warnings" { "warning" } else { key };
@@ -790,9 +813,28 @@ mod tests {
         let rendered = render_context(&value);
         assert!(rendered.contains("\nproject: rust; name=app; edition=2024; workspace=true"));
         assert!(rendered.contains("\nproject: node; scripts=build, test; manager=pnpm@10"));
-        assert!(rendered.contains("\ngit: head=main; dirty=unknown; root=.."));
+        assert!(rendered.contains("\ngit: head=main; tracked-change status unknown; root=.."));
         assert!(rendered.contains(r#"\nnot another field""#));
         assert!(!rendered.contains("\nnot another field"));
+    }
+
+    #[test]
+    fn git_facts_distinguish_tracked_changes_from_unknown_or_clean_claims() {
+        for (dirty, description) in [
+            (json!(true), "uncommitted tracked changes present"),
+            (json!(false), "no uncommitted tracked changes"),
+            (Value::Null, "tracked-change status unknown"),
+        ] {
+            let context = json!({"cwd": "/work", "git": {"head": "main", "dirty": dirty}});
+            let rendered = render_context(&context);
+            assert!(
+                rendered.contains(&format!("git: head=main; {description}")),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("dirty="));
+            assert!(!rendered.contains("clean"));
+            assert_eq!(context["git"]["dirty"], dirty);
+        }
     }
 
     #[cfg(unix)]

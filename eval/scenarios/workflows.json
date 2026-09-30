@@ -76,14 +76,14 @@
   },
   {
     "id": "generate-natural-clarification",
-    "title": "Notice unspecified archive operands without being told to ask a question",
+    "title": "Noninteractive generation declines unspecified archive operands",
     "mode": "suggest",
     "fixture": "logs",
     "input": "Archive that directory and overwrite the previous backup.",
-    "assistance": {"intent": "generate", "result": "clarify", "automatic": false},
+    "assistance": {"intent": "generate", "result": "none", "automatic": false},
     "group": "command-assist",
     "approval": "deny",
-    "check": "assist-clarify",
+    "check": "assist-none",
     "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
   }
 ]

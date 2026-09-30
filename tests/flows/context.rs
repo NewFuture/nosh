@@ -68,7 +68,7 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
     let engine = MockChatEngine::with_responder(move |history| match history.last() {
         Some(Message::User(text)) if text == "change project" => {
             vec![call(
-                "run_command",
+                "exec",
                 json!({"command": format!("cd {}", destination.display())}),
             )]
         }
@@ -193,19 +193,13 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
     };
     check(&received.lock().unwrap());
 
-    let mut engine = MockChatEngine::new(vec![vec![call(
-        "finish",
-        json!({"kind": "command", "text": "echo ok"}),
-    )]]);
+    let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let received = engine.received();
-    let suggestion = generate(&mut engine, &sh, "suggest", &cfg).unwrap();
+    let suggestion = generate(&mut engine, &sh, "suggest", &cfg, &mut NoUserInput).unwrap();
     assert_eq!(suggestion.result, AssistResult::Command("echo ok".into()));
     check(&received.lock().unwrap());
 
-    let engine = MockChatEngine::new(vec![vec![call(
-        "finish",
-        json!({"kind": "command", "text": "echo ok"}),
-    )]]);
+    let engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let received = engine.received();
     let mut engine = Some(engine);
     let mut ai = ShellAi::new(
@@ -387,7 +381,7 @@ fn suggestions_do_not_guess_when_agents_guidance_cannot_be_loaded() {
     sh.run_user_line(&format!("cd {}", root.display()));
     let mut engine = MockChatEngine::new(vec![vec![text("echo should-not-be-generated")]]);
     let specs = engine.specs();
-    let result = generate(&mut engine, &sh, "suggest", &cfg);
+    let result = generate(&mut engine, &sh, "suggest", &cfg, &mut NoUserInput);
     let error = result.unwrap_err().to_string();
     assert!(error.contains("AGENTS.md guidance is incomplete"));
     assert!(!error.contains("protected instruction content"));
@@ -452,12 +446,9 @@ fn readme_references_refresh_and_remain_optional_for_suggestions() {
             protected,
             ..AgentConfig::default()
         };
-        let mut engine = MockChatEngine::new(vec![vec![call(
-            "finish",
-            json!({"kind": "command", "text": "echo ok"}),
-        )]]);
+        let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
         let received = engine.received();
-        let result = generate(&mut engine, &sh, "suggest", &cfg).unwrap();
+        let result = generate(&mut engine, &sh, "suggest", &cfg, &mut NoUserInput).unwrap();
         assert_eq!(result.result, AssistResult::Command("echo ok".into()));
         let received = received.lock().unwrap();
         let Message::System(message) = &received[0][0] else {

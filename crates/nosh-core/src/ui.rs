@@ -404,8 +404,8 @@ impl AgentUi for TermUi {
         );
         for (i, l) in detail.split('\n').enumerate() {
             let p = match (i, tool) {
-                (0, "run_command") => "$ ",
-                (_, "run_command") => "  ",
+                (0, "exec") => "$ ",
+                (_, "exec") => "  ",
                 _ => "",
             };
             eprintln!("{}   {p}{}", self.bar, style::visible(l));

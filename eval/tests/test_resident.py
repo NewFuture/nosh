@@ -421,7 +421,7 @@ class ProductionProxyTests(unittest.TestCase):
             "touch denied.txt",
         ]
         turns = [turn for command in commands for turn in (
-            {"calls": [{"name": "run_command", "args": {"command": command}}]}, {"text": "Complete."})]
+            {"calls": [{"name": "exec", "args": {"command": command}}]}, {"text": "Complete."})]
         with ScriptedWorker(self.socket, turns) as server:
             for number in range(3):
                 root, home, trace, env, argv = self.case(number, number)
@@ -449,10 +449,10 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertEqual(len(starts), 3)
             self.assertTrue(all(r["sid"] == 1 for r in starts))
 
-    def test_native_query_and_finish_command_assist_are_preserved(self):
+    def test_native_query_and_direct_final_command_assist_are_preserved(self):
         command = "tar -czf logs.tar.gz logs"
-        turns = [{"calls": [{"name": "command_info", "args": {"name": "tar", "query": "help"}}]},
-                 {"calls": [{"name": "finish", "args": {"kind": "command", "text": command}}]}]
+        turns = [{"calls": [{"name": "command_help", "args": {"name": "tar", "query": "gz"}}]},
+                 {"text": command}]
         with ScriptedWorker(self.socket, turns) as server:
             root, _, trace, env, argv = self.case(0, 0)
             (root / "logs").mkdir()
@@ -463,13 +463,17 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertFalse((root / "logs.tar.gz").exists())
             specs = [r["spec"] for r in server.requests if r["op"] == "open"]
             self.assertEqual(specs[-1]["label"], "command_assist.generate.foreground")
-            self.assertEqual([t["name"] for t in specs[-1]["tools"]], ["command_info", "read_file", "grep", "finish"])
+            self.assertEqual([t["name"] for t in specs[-1]["tools"]], ["command_help", "read_file", "grep"])
             self.assertEqual([r["choice"] for r in server.requests if r["op"] == "choice"],
-                             [{"type": "required"}, {"type": "required"}])
+                             [{"type": "auto"}, {"type": "auto"}])
             tool_results = [message["Tool"] for r in server.requests if r["op"] == "step"
                             for message in r["append"] if "Tool" in message]
             self.assertEqual(len(tool_results), 1)
-            self.assertRegex(tool_results[0], r"^\[query program=.+/tar exit=0 truncated=")
+            header, metadata, body = tool_results[0].split("\n", 2)
+            self.assertEqual(header, "[command_help]")
+            self.assertEqual(json.loads(metadata)["exit_code"], 0)
+            self.assertEqual(json.loads(metadata)["query"], "gz")
+            self.assertIn("gzip", body)
 
     def test_unavailable_worker_is_not_a_local_fallback(self):
         root, _, _, env, argv = self.case(0, 0)
@@ -479,7 +483,8 @@ class ProductionProxyTests(unittest.TestCase):
         self.assertNotIn("failed to load", result.stderr)
 
     def test_trial_pipeline_preserves_native_clarification_grading(self):
-        turns = [{"text": "你希望我具体处理什么任务？"}]
+        turns = [{"calls": [{"name": "ask_user", "args": {"question": "你希望我具体处理什么任务？"}}]},
+                 {"text": "已停止本次任务，未执行任何操作。"}]
         config = {"model": "minicpm5-2b:q4_k_m", "weights": str(self.weights),
                   "tokenizer": str(self.base / "tokenizer.json"), "device": "cpu",
                   "context_length": 8192, "kv_dtype": "F16", "prefill_chunk": 512, "prepack_weights": True,
@@ -491,8 +496,11 @@ class ProductionProxyTests(unittest.TestCase):
             row = trial.run_trial(SimpleNamespace(threads=1, device="cpu"), {"settings": {"timeout_s": 15}},
                                   scenario, 0, 0, workspace, self.base / "report",
                                   Path(BINARY).resolve(), self.weights, worker=worker)
+            answers = [message["UserAnswer"] for request in server.requests if request["op"] == "step"
+                       for message in request["append"] if "UserAnswer" in message]
+            self.assertEqual(answers, scenario["completions"][0]["answers"])
         self.assertEqual(row["status"], "pass", row["reasons"])
         self.assertEqual(row["metrics"]["load_s"], 0)
         self.assertEqual(row["engines"][0]["worker_config"], config)
-        self.assertEqual(row["metrics"]["steps"], 1)
+        self.assertEqual(row["metrics"]["steps"], 2)
         self.assertFalse((self.base / "work" / scenario["id"]).exists())

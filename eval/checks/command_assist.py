@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from pathlib import Path
+import json
 import re
 import shlex
 import shutil
@@ -9,8 +10,6 @@ import subprocess
 import tarfile
 import tempfile
 from ..approval import shell_parts
-from .common import response_prose
-from .experience import clarification_request
 from .workflows import next_review_judgment
 
 
@@ -188,59 +187,44 @@ def resume_archive_judgment(scenario, answer, facts, root, after, evidence):
                              source="archive", destination="backups/reports.tar.gz")
 
 
-def requested_archive_fields(answer: str) -> set[str]:
-    fields = set()
-    aliases = {
-        "source": r"\b(?:source(?:\s+(?:directory|folder|path))?|directory|folder)\b|源目录|输入目录|目录|文件夹|源",
-        "destination": r"\b(?:(?:destination|output)(?:\s+(?:file\s*name|file|path))?|file\s*name)\b|目标文件名|输出文件名|文件名|目标",
-    }
-    prose = response_prose(answer, keep_inline=True, keep_paths=True)
-    for sentence in re.split(r"(?<=[。！？!?；;])|\n|(?<=\.)\s+", prose):
-        request = clarification_request(sentence, archive=True)
-        if request is None:
-            continue
-        heads = list(re.finditer(
-            r"\b(?:what|which|specify|describe|clarify|provide|share|tell me|let me know)\b", request, re.I,
-        ))
-        if heads:
-            candidates = []
-            for index, head in enumerate(heads):
-                target = request[head.end():heads[index + 1].start() if index + 1 < len(heads) else len(request)]
-                target = re.sub(
-                    r"^\s*(?:should|can|could|would)\s+I\s+(?:use|choose)\s+(?:for|as)\s+", "", target, flags=re.I,
-                )
-                target = re.sub(r"^\s*(?:is|are|should|can|could|would|will|must)\s+", "", target, flags=re.I)
-                candidates.extend(re.split(r"\band\b|,", target, flags=re.I))
-            for candidate in candidates:
-                noun_phrase = re.split(
-                    r"\b(?:should|shall|would|do|does|is|are|be|will|can|could|using|save)\b",
-                    candidate, maxsplit=1, flags=re.I,
-                )[0].strip(" ?")
-                for name, pattern in aliases.items():
-                    match = re.search(pattern, noun_phrase, re.I)
-                    if match:
-                        remainder = noun_phrase[match.end():]
-                        tail = "" if remainder == "." else remainder.strip()
-                        if not tail or re.fullmatch(
-                            r"to (?:archive|compress|package|back up)"
-                            r"|for (?:(?:the|an?) )?(?:archive|archiving|compression|packaging|backup)",
-                            tail, re.I,
-                        ):
-                            fields.add(name)
-        else:
-            for clause in re.split(r"[，,]", request):
-                mentions = sorted(
-                    ((match, name) for name, pattern in aliases.items()
-                     for match in re.finditer(pattern, clause, re.I)), key=lambda item: item[0].start(),
-                )
-                for index, (match, name) in enumerate(mentions):
-                    end = mentions[index + 1][0].start() if index + 1 < len(mentions) else len(clause)
-                    tail = clause[match.end():end]
-                    question = re.search(r"什么|哪(?:个|些|里)", tail)
-                    bare = re.fullmatch(r"[\s?？。.!！]*|(?:\s*(?:和|及|以及|还有|与|、|and)\s*)+", tail, re.I)
-                    if question or bare:
-                        fields.add(name)
-    return fields
+def successful_tar_help(item):
+    call = item["call"]
+    args = call["args"]
+    name = args.get("name")
+    if (call["name"] != "command_help" or not set(args) <= {"name", "query"}
+            or not isinstance(name, str) or Path(name).name != "tar"
+            or item.get("state") != "returned" or not isinstance(item.get("result"), str)):
+        return False
+    result = item["result"]
+    lines = result.split("\n", 2)
+    if len(lines) != 3 or lines[0] != "[command_help]":
+        return False
+    try:
+        header = json.loads(lines[1])
+    except json.JSONDecodeError:
+        return False
+    query = args.get("query")
+    if query is not None and (not isinstance(query, str) or not query.strip()):
+        return False
+    return (
+        isinstance(header, dict) and header.get("name") == name
+        and isinstance(header.get("program"), str) and Path(header["program"]).name == "tar"
+        and isinstance(header.get("executable"), str) and Path(header["executable"]).is_absolute()
+        and header.get("argument") == "--help"
+        and header.get("subcommands") == []
+        and type(header.get("exit_code")) is int and header["exit_code"] == 0
+        and header.get("signal") is None and header.get("capture_complete") is True
+        and "query" in header and header["query"] == (query.strip() if query is not None else None)
+        and (header.get("matched_blocks") is None if query is None else
+             type(header.get("matched_blocks")) is int and header["matched_blocks"] > 0)
+        and isinstance(header.get("excerpt_truncated"), bool)
+        and all(type(header.get(key)) is int and header[key] >= 0
+                for key in ("stdout_bytes", "stderr_bytes"))
+        and header["stdout_bytes"] + header["stderr_bytes"] > 0
+        and ((lines[2].startswith("[stdout]\n") and header["stdout_bytes"] > 0)
+             or (lines[2].startswith("[stderr]\n") and header["stderr_bytes"] > 0))
+        and bool(lines[2].partition("\n")[2].strip())
+    )
 
 
 def assistance_judgment(scenario, answer, facts, root, after, evidence):
@@ -255,17 +239,14 @@ def assistance_judgment(scenario, answer, facts, root, after, evidence):
         if (actual.get("status") != "completed" or actual.get("intent") != expected["intent"]
                 or actual.get("kind") != expected["result"] or actual.get("background") != expected["automatic"]):
             reasons.append("assistance result does not match the declared intent and result")
-    if any(call["name"] not in ("command_info", "read_file", "grep", "finish")
+    allowed_tools = {"command_help", "read_file", "grep"}
+    if expected["intent"] == "generate" and not expected["automatic"]:
+        allowed_tools.add("ask_user")
+    if any(call["name"] not in allowed_tools
            for call in (evidence or {}).get("tool_calls") or []):
         reasons.append("assistance attempted an unavailable task-execution tool")
     if expected.get("require_query") and not any(
-            item["call"]["name"] == "command_info"
-            and item["call"]["args"].get("query") == "help"
-            and isinstance(item["call"]["args"].get("name"), str)
-            and Path(item["call"]["args"]["name"]).name == "tar"
-            and item.get("state") == "returned"
-            and isinstance(item.get("result"), str)
-            and re.match(r"^\[query program=(?:[^\n]*/)?tar exit=0 truncated=(?:true|false)(?: topic=[^\n]*)?\]\n", item["result"])
+            successful_tar_help(item)
             for item in (evidence or {}).get("executions") or []):
         reasons.append("installed command help was not successfully queried")
     if kind == "assist-archive":
@@ -276,8 +257,5 @@ def assistance_judgment(scenario, answer, facts, root, after, evidence):
         reasons.extend(next_review_judgment(scenario, answer, facts, root, after, evidence))
     elif kind == "assist-none" and answer:
         reasons.append("no-suggestion result must not contain a command or prose")
-    elif kind == "assist-clarify":
-        if requested_archive_fields(answer) != {"source", "destination"}:
-            reasons.append("clarification does not request the source and destination")
 
     return reasons

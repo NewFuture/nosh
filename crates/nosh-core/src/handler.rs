@@ -79,12 +79,15 @@ impl ShellAi {
             match (state.loader)(LoadMode::Foreground) {
                 Ok(l) => {
                     state.description = Some(l.description);
-                    state.agent = Some(Agent::new(
-                        l.engine,
-                        self.cfg.clone(),
-                        Environment::detect(shell),
-                        ToolSet::Full,
-                    ));
+                    state.agent = Some(
+                        Agent::new(
+                            l.engine,
+                            self.cfg.clone(),
+                            Environment::detect(shell),
+                            ToolSet::Full,
+                        )
+                        .with_user_input(Box::new(crate::user_input::TerminalUserInput)),
+                    );
                 }
                 Err(e) => {
                     eprintln!("{}", style::red(&format!("nosh: {e}")));
@@ -153,15 +156,18 @@ impl ShellAi {
         }
         let cancel = agent.engine_mut().cancel_handle();
         cancel.reset();
-        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel, |_| true) {
+        match crate::command_assist::run(
+            agent.engine_mut(),
+            &request,
+            &cfg,
+            &cancel,
+            &mut crate::user_input::TerminalUserInput,
+            |_| true,
+        ) {
             Ok(outcome) => {
                 let mut ui = TermUi::new(false);
                 let prefill = match outcome.result {
                     AssistResult::Command(program) => Some(program),
-                    AssistResult::Clarify(question) => {
-                        ui.text(&question);
-                        None
-                    }
                     AssistResult::NoSuggestion => None,
                 };
                 let u = outcome.usage;
