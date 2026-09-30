@@ -243,6 +243,25 @@ mod tests {
     }
 
     #[test]
+    fn none_tool_choice_is_forwarded_and_recorded_without_rewriting_it() {
+        let mock = MockChatEngine::new(vec![]);
+        let choices = mock.tool_choices();
+        let mut engine = TracedEngine::new(Box::new(mock), Cursor::new(Vec::new()));
+        let sid = engine.open(spec()).unwrap();
+        engine
+            .set_tool_choice(sid, nosh_llm::ToolChoice::None)
+            .unwrap();
+        assert_eq!(
+            choices.lock().unwrap().as_slice(),
+            [(sid, nosh_llm::ToolChoice::None)]
+        );
+        let data = String::from_utf8(engine.writer.into_inner()).unwrap();
+        let row: Value = serde_json::from_str(data.lines().last().unwrap()).unwrap();
+        assert_eq!(row["ev"], "tool_choice");
+        assert_eq!(row["choice"], json!({"type":"none"}));
+    }
+
+    #[test]
     fn forwards_messages_events_usage_and_session_operations() {
         let mock = MockChatEngine::new(vec![vec![
             mock::text("hello"),

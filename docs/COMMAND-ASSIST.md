@@ -31,9 +31,9 @@ Assistant：最终命令文本或 [None]
 
 所有命令辅助和普通 Agent 使用同一套官方工具模板，允许自然最终回复；不维护单调用模板模式。初始前缀和工具集合在会话内保持稳定。
 
-Generate/Fix/Next 均使用 `ToolChoice::Auto`，不注册 `finish`，不预填工具调用开头。生成参数和最终程序仍须经解析与宿主校验，不保证语义正确。执行事件不伪造 User 请求，也不代表用户授权。
+Generate/Fix/Next 的查询阶段使用 `ToolChoice::Auto`，终答阶段使用 `ToolChoice::None`，不注册 `finish`，不预填工具调用开头。`None` 在 `LocalChatEngine` 每次采样前把现有 `FUNCTION_OPEN` 控制 token 的 logit 设为负无穷，阻止流式解析器进入工具调用状态；不是仅靠提示要求“不调用工具”。初始工具定义、会话历史与采样参数不变，该选择仅作用于下一步，其他会话保持原行为。普通文本仍可能写出 XML、工具名或说明，必须通过原有完整程序校验，不能据此宣称语义正确。执行事件不伪造 User 请求，也不代表用户授权。
 
-主 instructions 与最后一步复用同一条输出规则：`Return only the complete shell command as plain text, without explanation or Markdown. If no justified command can be suggested, return exactly [None].` 最后一步重申当前意图，用 JSON 字符串引用原始请求（存在才添加）及已完成命令（Fix/Next），并按发生顺序引用真实、成功的澄清问答，包括选项和完整回答。不概括或裁剪用户要求，不重贴项目背景或查询结果，也不为自动事件虚构用户请求；完整回显计入现有上下文预算。随后要求 `Answer now without calling tools.` 并复用输出规则，不再使用 `[query_budget]`、含糊的 “final response” 或 “Fulfill this request”。这是提示与宿主预算约束，不是解码层禁用工具；末轮若仍输出工具调用，宿主拒绝且不执行。
+主 instructions 与终答阶段复用同一条输出规则：`Return only the complete shell command as plain text, without explanation or Markdown. If no justified command can be suggested, return exactly [None].` 终答阶段重申当前意图，用 JSON 字符串引用原始请求（存在才添加）及已完成命令（Fix/Next），并按发生顺序引用真实、成功的澄清问答，包括选项和完整回答。不概括或裁剪用户要求，不重贴项目背景或查询结果，也不为自动事件虚构用户请求；完整回显计入现有上下文预算。随后要求 `Answer now without calling tools.` 并复用输出规则，不再使用 `[query_budget]`、含糊的 “final response” 或 “Fulfill this request”。终答阶段同时启用上述解码约束；若其他引擎仍返回工具调用，宿主拒绝且不执行。
 
 `SessionSpec.label` 仅供宿主观测区分 `agent` 与 `command_assist.<intent>.<foreground|background>`，不编码进模型输入。没有新增分类模型调用。
 
@@ -90,9 +90,9 @@ Fix 只接受匹配 command ID、命令正文及截断标记、退出码与执�
 |---|---|
 | 一个完整 shell program | 校验后显示／预填，仍不自动执行 |
 | 精确 `[None]`（允许首尾空白） | 无建议，不显示标记、不伪造命令 |
-| 空回复、说明、Markdown、错误格式 | 明确失败，不推断为澄清或无建议，也不从散文中提取代码 |
+| 空回复、说明、Markdown、错误格式 | 剩余预算允许时仅转入一次终答纠正；仍无效则明确失败，不推断为澄清或无建议，也不从散文中提取代码 |
 
-查询回合可以带说明文字或多个受限查询；说明只保留在会话／trace，不展示为候选或执行。每个查询仍单独检查权限、取消和期限。最终回合不允许再执行查询；预算、解析错误、取消和超时不会变成 `[None]`。无效最终回复直接失败，不增加额外纠错轮次。
+查询回合可以带说明文字或多个受限查询；说明只保留在会话／trace，不展示为候选或执行。每个查询仍单独检查权限、取消和期限。合法早期终答立即返回，不增加模型调用。早期正常结束、没有工具调用但正文校验失败时，将拒绝原因作为 System 反馈保留在同一会话，在原预算内仅用下一步进入终答阶段；这是对“无效正文立即失败”行为的调整，不是无限重试。最后预算步也进入相同终答阶段，不允许再执行查询或提问。终答仍无效、解析错误、截断、取消、超时和预算耗尽均明确失败；宿主不改写命令或把错误替换为 `[None]`。模型在纠正步骤自行返回 `[None]` 时仍受最后一次查询失败的防掩盖检查。
 
 ### Generate：可交互澄清
 

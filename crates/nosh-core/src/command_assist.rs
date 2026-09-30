@@ -365,6 +365,7 @@ fn run_session(
     let mut usage = Usage::default();
     let mut query_error = None;
     let mut answers = Vec::new();
+    let mut final_response = false;
     let max_steps = cfg
         .max_steps
         .min(if request.intent == Intent::Next { 2 } else { 4 });
@@ -375,10 +376,18 @@ fn run_session(
         if started.elapsed() > cfg.command_timeout {
             return Err(AssistError::Budget);
         }
-        if step == max_steps {
+        final_response |= step == max_steps;
+        if final_response {
             pending.push(request.final_message(&answers));
         }
-        engine.set_tool_choice(sid, nosh_llm::ToolChoice::Auto)?;
+        engine.set_tool_choice(
+            sid,
+            if final_response {
+                nosh_llm::ToolChoice::None
+            } else {
+                nosh_llm::ToolChoice::Auto
+            },
+        )?;
         let out = engine.step(sid, std::mem::take(&mut pending), &mut |_| {})?;
         if step == 1 {
             usage.ttft_secs = out.usage.ttft_secs;
@@ -402,7 +411,17 @@ fn run_session(
             ));
         }
         if out.tool_calls.is_empty() {
-            let result = direct_final(&out.text, &request.commands)?;
+            let result = match direct_final(&out.text, &request.commands) {
+                Ok(result) => result,
+                Err(error) if !final_response => {
+                    pending.push(Message::System(format!(
+                        "Previous response rejected: {error}"
+                    )));
+                    final_response = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if result == AssistResult::NoSuggestion
                 && let Some(error) = query_error
             {
@@ -418,6 +437,11 @@ fn run_session(
         }
         if step == max_steps {
             return Err(AssistError::Budget);
+        }
+        if final_response {
+            return Err(AssistError::Protocol(
+                "tool calls are not allowed in the final response".into(),
+            ));
         }
         if out.tool_calls.len() != 1 && out.tool_calls.iter().any(|call| call.name == "ask_user") {
             return Err(AssistError::Protocol(

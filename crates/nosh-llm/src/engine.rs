@@ -188,6 +188,8 @@ pub struct SessionSpec {
 pub enum ToolChoice {
     #[default]
     Auto,
+    /// Disable tool-call decoding for this step without changing the conversation.
+    None,
     Required,
     Named(String),
 }
@@ -217,7 +219,8 @@ impl CancelHandle {
 pub trait ChatEngine: Send {
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError>;
 
-    /// One-step decoding policy; non-Auto choices return one tool call, not prose.
+    /// One-step decoding policy, reset to Auto after the next step.
+    /// None disables tool calls; Required/Named return one call, not prose.
     fn set_tool_choice(&mut self, _sid: SessionId, _choice: ToolChoice) -> Result<(), LlmError> {
         Err(LlmError::Config(
             "engine does not support tool choice".into(),

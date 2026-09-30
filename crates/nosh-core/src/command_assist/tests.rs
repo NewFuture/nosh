@@ -59,6 +59,7 @@ fn generate_direct_final_is_strict_and_never_executes_the_program() {
         let mut engine = MockChatEngine::new(vec![vec![text(program)]]);
         let outcome = generate(&mut engine, &shell, "generate", &AgentConfig::default()).unwrap();
         assert_eq!(outcome.result, AssistResult::Command(program.into()));
+        assert_eq!(outcome.steps, 1);
         assert!(!dir.path().join("not-created").exists());
     }
     for reply in [
@@ -357,13 +358,191 @@ fn generate_query_turns_allow_narration_and_read_only_batches() {
 }
 
 #[test]
-fn invalid_generate_final_does_not_add_a_correction_round() {
+fn early_invalid_text_gets_one_bounded_final_turn_for_every_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shell = shell(dir.path());
+    let cfg = AgentConfig::default();
+    for intent in [Intent::Generate, Intent::Fix, Intent::Next] {
+        shell.run_user_line(if intent == Intent::Fix {
+            "sh -c 'exit 7'"
+        } else {
+            "true"
+        });
+        let request = AssistRequest::capture(
+            &shell,
+            &cfg,
+            intent,
+            "Suggest a complete program".into(),
+            (intent != Intent::Generate).then(|| shell.recent_commands().last().unwrap().clone()),
+            None,
+        )
+        .unwrap();
+        for (draft, final_text) in [
+            ("Which directory?", "[None]"),
+            ("`command_help`", "printf '%s\\n' ready"),
+            ("```sh\nls .\n```", "ls ."),
+            ("echo '", "for f in *.txt; do\n cat \"$f\"\ndone"),
+            ("Here is a command.", "if test -d src; then\n ls src\nfi"),
+            ("", "touch not-created"),
+        ] {
+            let mut engine = MockChatEngine::new(vec![vec![text(draft)], vec![text(final_text)]]);
+            let received = engine.received();
+            let choices = engine.tool_choices();
+            let outcome = run(
+                &mut engine,
+                &request,
+                &cfg,
+                &CancelHandle::default(),
+                |_| true,
+            )
+            .unwrap();
+            assert_eq!(outcome.steps, 2);
+            assert_eq!(
+                outcome.result,
+                direct_final(final_text, &request.commands).unwrap()
+            );
+            assert_eq!(
+                outcome.usage.completion_tokens,
+                draft.len() / 4 + final_text.len() / 4 + 2
+            );
+            assert_eq!(
+                choices.lock().unwrap().as_slice(),
+                [
+                    (1, nosh_llm::ToolChoice::Auto),
+                    (1, nosh_llm::ToolChoice::None)
+                ]
+            );
+            let received = received.lock().unwrap();
+            assert_eq!(received.len(), 2);
+            assert!(
+                matches!(&received[1][0], Message::System(error) if error.contains("Previous response rejected:"))
+            );
+            assert_eq!(received[1].last(), Some(&request.final_message(&[])));
+            assert!(!dir.path().join("not-created").exists());
+        }
+    }
+}
+
+#[test]
+fn invalid_terminal_text_is_not_retried_or_replaced_with_none() {
     let dir = tempfile::tempdir().unwrap();
     let shell = shell(dir.path());
-    let mut engine = MockChatEngine::new(vec![vec![text("echo '")], vec![text("echo ok")]]);
-    let received = engine.received();
-    assert!(generate(&mut engine, &shell, "generate", &AgentConfig::default()).is_err());
-    assert_eq!(received.lock().unwrap().len(), 1);
+    for limit in [0, 1, 2, 4, 8] {
+        let cfg = AgentConfig {
+            max_steps: limit,
+            ..AgentConfig::default()
+        };
+        let mut engine = MockChatEngine::new(vec![
+            vec![text("Which directory?")],
+            vec![text("```sh\nls .\n```")],
+            vec![text("[None]")],
+        ]);
+        let received = engine.received();
+        let observations = engine.observations();
+        let result = generate(&mut engine, &shell, "suggest", &cfg);
+        if limit == 0 {
+            assert!(matches!(result, Err(AssistError::Budget)));
+        } else {
+            assert!(matches!(result, Err(AssistError::Protocol(_))));
+        }
+        assert_eq!(received.lock().unwrap().len(), limit.min(2));
+        let observations = observations.lock().unwrap();
+        assert_eq!(observations[0].1["status"], "failed");
+        assert!(observations[0].1.get("kind").is_none());
+    }
+}
+
+#[test]
+fn early_finalization_never_dispatches_tools_even_when_budget_remains() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = shell(dir.path());
+    for name in ["read_file", "exec", "ask_user"] {
+        let mut engine = MockChatEngine::new(vec![
+            vec![text("Which directory?")],
+            vec![call(name, json!({}))],
+            vec![text("[None]")],
+        ]);
+        let received = engine.received();
+        let error = generate(&mut engine, &shell, "suggest", &AgentConfig::default()).unwrap_err();
+        assert!(error.to_string().contains("tool calls are not allowed"));
+        assert_eq!(received.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn query_errors_survive_early_finalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = shell(dir.path());
+    let mut engine = MockChatEngine::new(vec![
+        vec![call("read_file", json!({"path":"missing"}))],
+        vec![text("Cannot read it.")],
+        vec![text("[None]")],
+    ]);
+    let choices = engine.tool_choices();
+    let error = generate(&mut engine, &shell, "suggest", &AgentConfig::default()).unwrap_err();
+    assert!(error.to_string().contains("failed query"));
+    assert_eq!(
+        choices.lock().unwrap().as_slice(),
+        [
+            (1, nosh_llm::ToolChoice::Auto),
+            (1, nosh_llm::ToolChoice::Auto),
+            (1, nosh_llm::ToolChoice::None),
+        ]
+    );
+}
+
+#[test]
+fn early_finalization_preserves_parser_cancellation_and_timeout_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = shell(dir.path());
+    for failure in ["parse", "cancel", "timeout"] {
+        let cancel = CancelHandle::default();
+        let model_cancel = cancel.clone();
+        let mut engine = MockChatEngine::with_responder(move |history| {
+            if !history.iter().any(|message| matches!(
+                message, Message::System(text) if text.starts_with("Previous response rejected:")
+            )) {
+                return vec![text("Which directory?")];
+            }
+            match failure {
+                "parse" => vec![
+                    text("[None]"),
+                    nosh_llm::mock::bad_call(nosh_llm::CallErrorKind::Malformed, "invalid call"),
+                ],
+                "cancel" => {
+                    model_cancel.cancel();
+                    vec![text("[None]")]
+                }
+                "timeout" => {
+                    std::thread::sleep(Duration::from_millis(1200));
+                    vec![text("[None]")]
+                }
+                _ => unreachable!(),
+            }
+        });
+        let cfg = AgentConfig {
+            command_timeout: if failure == "timeout" {
+                Duration::from_secs(1)
+            } else {
+                AgentConfig::default().command_timeout
+            },
+            ..AgentConfig::default()
+        };
+        let request =
+            AssistRequest::capture(&shell, &cfg, Intent::Generate, "suggest".into(), None, None)
+                .unwrap();
+        let observations = engine.observations();
+        let received = engine.received();
+        let result = run(&mut engine, &request, &cfg, &cancel, |_| true);
+        match failure {
+            "parse" => assert!(matches!(result, Err(AssistError::Protocol(_)))),
+            "cancel" => assert!(matches!(result, Err(AssistError::Cancelled))),
+            "timeout" => assert!(matches!(result, Err(AssistError::Budget))),
+            _ => unreachable!(),
+        }
+        assert_eq!(received.lock().unwrap().len(), 2, "{failure}");
+        assert!(observations.lock().unwrap()[0].1.get("kind").is_none());
+    }
 }
 
 #[test]
@@ -446,6 +625,7 @@ fn fix_and_next_use_direct_final_without_finish_or_execution() {
             )
             .unwrap();
             assert_eq!(outcome.result, expected);
+            assert_eq!(outcome.steps, 1);
             assert!(!dir.path().join("not-created").exists());
             let specs = specs.lock().unwrap();
             assert_eq!(
@@ -458,12 +638,9 @@ fn fix_and_next_use_direct_final_without_finish_or_execution() {
             );
             assert!(specs[0].system.contains("return exactly [None]"));
             assert!(!specs[0].system.contains("finish"));
-            assert!(
-                choices
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .all(|(_, choice)| *choice == nosh_llm::ToolChoice::Auto)
+            assert_eq!(
+                choices.lock().unwrap().as_slice(),
+                [(1, nosh_llm::ToolChoice::Auto)]
             );
             assert_eq!(
                 observations.lock().unwrap()[0].1["response_format"],
@@ -498,6 +675,8 @@ fn direct_final_rejects_empty_prose_and_wrong_markers_without_clarifying() {
         "Here is a command:\necho ready",
         "```bash\necho ready\n```",
         "echo \u{202e}hidden",
+        "<function name=\"read_file\"><param name=\"path\">note.txt</param></function>",
+        "`command_help`",
     ] {
         let mut engine = MockChatEngine::new(vec![vec![text(reply)]]);
         let observations = engine.observations();
@@ -516,6 +695,132 @@ fn direct_final_rejects_empty_prose_and_wrong_markers_without_clarifying() {
         assert_eq!(observations[0].1["status"], "failed");
         assert!(observations[0].1.get("kind").is_none());
     }
+}
+
+#[test]
+fn early_finalization_retains_interactive_answers_without_execution_authority() {
+    use crate::user_input::tests::ScriptedInput;
+
+    let dir = tempfile::tempdir().unwrap();
+    let shell = shell(dir.path());
+    let answer = format!(
+        "{} Only suggest; never execute.",
+        "keep existing files; ".repeat(40)
+    );
+    let mut input = ScriptedInput::new([]);
+    input.answers.push_back(Ok(answer.clone()));
+    let mut engine = MockChatEngine::new(vec![
+        vec![call(
+            "ask_user",
+            json!({"question":"What should be preserved?","choices":["existing files","nothing"]}),
+        )],
+        vec![text("Here is the suggestion.")],
+        vec![text("touch not-created")],
+    ]);
+    let received = engine.received();
+    let specs = engine.specs();
+    let choices = engine.tool_choices();
+    let outcome = super::generate(
+        &mut engine,
+        &shell,
+        "Suggest a command.",
+        &AgentConfig::default(),
+        &mut input,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.result,
+        AssistResult::Command("touch not-created".into())
+    );
+    assert_eq!(outcome.steps, 3);
+    assert_eq!(input.seen.len(), 1);
+    assert!(!dir.path().join("not-created").exists());
+    let specs = specs.lock().unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].tools, super::specs(true));
+    let received = received.lock().unwrap();
+    assert_eq!(received[1], [Message::UserAnswer(answer.clone())]);
+    let Message::System(reminder) = received[2].last().unwrap() else {
+        panic!("missing final contract");
+    };
+    assert!(
+        reminder.contains(
+            &json!({
+                "question":"What should be preserved?",
+                "choices":["existing files","nothing"],
+                "answer":answer,
+            })
+            .to_string()
+        )
+    );
+    assert_eq!(
+        choices.lock().unwrap().as_slice(),
+        [
+            (1, nosh_llm::ToolChoice::Auto),
+            (1, nosh_llm::ToolChoice::Auto),
+            (1, nosh_llm::ToolChoice::None),
+        ]
+    );
+}
+
+#[test]
+fn fix_finalization_keeps_partial_execution_evidence_without_retrying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shell = shell(dir.path());
+    shell.run_user_line("printf completed > phase-one && sh -c 'exit 7'");
+    let command = shell.recent_commands().last().unwrap().clone();
+    let mut output = shell.last_user_output().unwrap().clone();
+    output.state = nosh_shell::OutputState::Captured;
+    output.text = "phase one completed; phase two failed".into();
+    let cfg = AgentConfig::default();
+    let request = AssistRequest::capture(
+        &shell,
+        &cfg,
+        Intent::Fix,
+        String::new(),
+        Some(command),
+        Some(output),
+    )
+    .unwrap();
+    let mut engine = MockChatEngine::new(vec![
+        vec![call("read_file", json!({"path":"phase-one"}))],
+        vec![text("Retry the remaining phase.")],
+        vec![text("printf retried > phase-two")],
+    ]);
+    let received = engine.received();
+    let result = run(
+        &mut engine,
+        &request,
+        &cfg,
+        &CancelHandle::default(),
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(result.steps, 3);
+    assert_eq!(
+        result.result,
+        AssistResult::Command("printf retried > phase-two".into())
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("phase-one")).unwrap(),
+        "completed"
+    );
+    assert!(!dir.path().join("phase-two").exists());
+    let received = received.lock().unwrap();
+    assert!(
+        received
+            .iter()
+            .flatten()
+            .all(|message| !matches!(message, Message::User(_)))
+    );
+    assert!(
+        matches!(&received[0][0], Message::System(context) if context.contains("phase one completed; phase two failed"))
+    );
+    assert!(matches!(&received[1][0], Message::Tool(result) if result.contains("completed")));
+    assert_eq!(received[2].last(), Some(&request.final_message(&[])));
+    assert!(
+        matches!(received[2].last(), Some(Message::System(reminder)) if reminder.contains("possible partial execution"))
+    );
 }
 
 #[test]
@@ -563,12 +868,12 @@ fn direct_query_turns_keep_narration_and_allow_bounded_read_only_batches() {
         matches!(&received[1][1], Message::Tool(body) if body.contains("evidence.txt") && body.contains("observed"))
     );
     assert!(received[1].last() == Some(&request.final_message(&[])));
-    assert!(
-        choices
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(_, choice)| *choice == nosh_llm::ToolChoice::Auto)
+    assert_eq!(
+        choices.lock().unwrap().as_slice(),
+        [
+            (1, nosh_llm::ToolChoice::Auto),
+            (1, nosh_llm::ToolChoice::None)
+        ]
     );
 }
 
@@ -604,6 +909,7 @@ fn final_round_reuses_the_output_instruction_for_every_intent_and_budget() {
             let mut engine = MockChatEngine::new(replies);
             let specs = engine.specs();
             let received = engine.received();
+            let choices = engine.tool_choices();
             let result = run(
                 &mut engine,
                 &request,
@@ -617,10 +923,20 @@ fn final_round_reuses_the_output_instruction_for_every_intent_and_budget() {
             let specs = specs.lock().unwrap();
             assert!(specs[0].system.ends_with(FINAL_RESPONSE_RULE));
             assert!(specs[0].tools.iter().all(|tool| tool.name != "exec"));
+            assert_eq!(specs[0].max_new_tokens, 512);
             let received = received.lock().unwrap();
+            let choices = choices.lock().unwrap();
             let reminder = request.final_message(&[]);
             for (index, messages) in received.iter().enumerate() {
                 assert_eq!(messages.contains(&reminder), index + 1 == steps);
+                assert_eq!(
+                    choices[index].1,
+                    if index + 1 == steps {
+                        nosh_llm::ToolChoice::None
+                    } else {
+                        nosh_llm::ToolChoice::Auto
+                    }
+                );
             }
         }
     }
