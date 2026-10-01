@@ -89,6 +89,12 @@ struct Shared {
 
 struct Lifetime(Arc<Shared>);
 
+struct SupervisorStartup {
+    launcher: WorkerCommand,
+    index: SharedIndex,
+    attempted: AtomicBool,
+}
+
 impl Drop for Lifetime {
     fn drop(&mut self) {
         self.0.stopped.store(true, Ordering::Release);
@@ -115,6 +121,7 @@ impl Drop for Lifetime {
 pub struct InputAssist {
     shared: Arc<Shared>,
     _lifetime: Arc<Lifetime>,
+    startup: Option<Arc<SupervisorStartup>>,
 }
 
 impl InputAssist {
@@ -149,21 +156,38 @@ impl InputAssist {
         let this = Self {
             _lifetime: Arc::new(Lifetime(shared.clone())),
             shared,
+            startup: launcher.map(|launcher| {
+                Arc::new(SupervisorStartup {
+                    launcher,
+                    index,
+                    attempted: AtomicBool::new(false),
+                })
+            }),
         };
-        if let Some(launcher) = launcher {
-            let shared = this.shared.clone();
-            if let Err(error) = std::thread::Builder::new()
-                .name("nosh-input-assist".into())
-                .spawn(move || supervise(shared, launcher, index))
-            {
-                this.shared
-                    .publish(|p| p.syntax_error = Some(short_error(error)));
-            }
-        } else {
+        if this.startup.is_none() {
             this.shared
                 .publish(|p| p.syntax_error = Some("no input worker entry point".into()));
         }
         this
+    }
+
+    fn start_supervisor(&self) {
+        let Some(startup) = &self.startup else {
+            return;
+        };
+        if startup.attempted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let shared = self.shared.clone();
+        let launcher = startup.launcher.clone();
+        let index = startup.index.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("nosh-input-assist".into())
+            .spawn(move || supervise(shared, launcher, index))
+        {
+            self.shared
+                .publish(|p| p.syntax_error = Some(short_error(error)));
+        }
     }
 
     pub(crate) fn prepare(&self, context: Result<Context, String>) {
@@ -171,13 +195,14 @@ impl InputAssist {
         self.shared.session.fetch_add(1, Ordering::AcqRel);
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.context_ok.store(false, Ordering::Release);
-        match self.shared.mailbox.try_lock() {
+        let installed = match self.shared.mailbox.try_lock() {
             Ok(mut mailbox) => match context {
                 Ok(context) => {
                     mailbox.context = Some(Arc::new(context));
                     mailbox.latest = None;
                     self.set_display("");
                     self.shared.context_ok.store(true, Ordering::Release);
+                    true
                 }
                 Err(error) => {
                     mailbox.context = None;
@@ -187,12 +212,19 @@ impl InputAssist {
                         tr!("输入分析暂不可用", "Input analysis unavailable"),
                         style::visible_text(&error)
                     ));
+                    false
                 }
             },
-            Err(_) => self.set_display(tr!(
-                "输入分析暂不可用：会话快照忙",
-                "Input analysis unavailable: session snapshot busy"
-            )),
+            Err(_) => {
+                self.set_display(tr!(
+                    "输入分析暂不可用：会话快照忙",
+                    "Input analysis unavailable: session snapshot busy"
+                ));
+                false
+            }
+        };
+        if installed {
+            self.start_supervisor();
         }
         self.shared.wake.notify_one();
     }
@@ -1432,6 +1464,102 @@ mod tests {
             cache: RefCell::new(RenderCache::default()),
         };
         (fixture, assist, highlighter)
+    }
+
+    #[test]
+    fn startup_keeps_initial_context_when_the_first_request_is_contended() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        let assist = InputAssist::new(
+            Some(launcher("input_assist::tests::worker_probe")),
+            Arc::new(Mutex::new(None)),
+            Arc::new(|| {}),
+            80,
+        );
+        // Only the assist and its lifetime own Shared before a valid snapshot.
+        assert_eq!(Arc::strong_count(&assist.shared), 2);
+        assist.prepare(Err("snapshot unavailable".into()));
+        assert_eq!(Arc::strong_count(&assist.shared), 2);
+        assert!(!assist.shared.context_ok.load(Ordering::Acquire));
+        assert!(
+            assist
+                .feedback("")
+                .is_some_and(|feedback| feedback.state == State::Unavailable)
+        );
+
+        assist.prepare(Ok(context.clone()));
+        assert!(assist.shared.context_ok.load(Ordering::Acquire));
+        let highlighter = InputHighlighter {
+            assist: assist.clone(),
+            cache: RefCell::new(RenderCache::default()),
+        };
+        let mailbox = assist.shared.mailbox.lock().unwrap();
+        assert_eq!(mailbox.context.as_deref(), Some(&context));
+        assert_eq!(highlighter.highlight("echo ok", 7).raw_string(), "echo ok");
+        assert!(highlighter.cache.borrow().input.is_none());
+        assert!(assist.shared.context_ok.load(Ordering::Acquire));
+        assert_eq!(mailbox.context.as_deref(), Some(&context));
+        drop(mailbox);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert_eq!(highlighter.highlight("echo ok", 7).raw_string(), "echo ok");
+            if highlighter.cache.borrow().input.is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "initial context was permanently lost"
+            );
+            std::thread::yield_now();
+        }
+        let input = highlighter.cache.borrow().input.clone().unwrap();
+        assert_eq!(input.context.as_ref(), &context);
+        assert_eq!(input.version.session, 2);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            highlighter.highlight("echo ok", 7);
+            if assist
+                .shared
+                .publication
+                .lock()
+                .unwrap()
+                .analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.version == input.version)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "first input was not analyzed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn cloned_assists_share_a_single_supervisor_start_attempt() {
+        let fixture = Fixture::new();
+        let assist = InputAssist::new(
+            Some(launcher("input_assist::tests::worker_probe")),
+            Arc::new(Mutex::new(None)),
+            Arc::new(|| {}),
+            80,
+        );
+        let other = assist.clone();
+        assert!(Arc::ptr_eq(
+            assist.startup.as_ref().unwrap(),
+            other.startup.as_ref().unwrap()
+        ));
+        assert_eq!(Arc::strong_count(&assist.shared), 3);
+        other.prepare(Ok(fixture.context()));
+        let mailbox = assist.shared.mailbox.lock().unwrap();
+        assert!(assist.shared.context_ok.load(Ordering::Acquire));
+        assert!(mailbox.context.is_some());
+        assert_eq!(Arc::strong_count(&assist.shared), 4);
+        for _ in 0..10 {
+            assist.start_supervisor();
+            other.start_supervisor();
+        }
+        assert_eq!(Arc::strong_count(&assist.shared), 4);
     }
 
     #[test]
