@@ -44,9 +44,12 @@ jobs:
       EVAL_TRIAL_TIMEOUT_S: '60'
       EVAL_SUITE: ${{ inputs.suite || 'regression' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.14.7'
       - name: validate the hosted campaign budget
         run: |
           python3 - <<'PY'
@@ -65,9 +68,13 @@ jobs:
                 "at least 90 minutes reserved for non-trial work.")
           PY
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          toolchain: '1.98.1'
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '26.10.0'
+      - name: current npm
+        run: npm install --global npm@12.1.0 --ignore-scripts --no-audit --no-fund
       - name: freeze selected source and record the environment
         env:
           REQUESTED_REF: ${{ inputs.source_ref }}
@@ -98,7 +105,18 @@ jobs:
             lscpu
             free -m
           } > "$EVAL_ARTIFACTS/environment.txt"
-      - uses: Swatinem/rust-cache@v2
+      - name: materialize selected source dependencies before Cargo metadata
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from eval.runtime import prepare_source_dependencies
+          data = prepare_source_dependencies(Path(os.environ["EVAL_SOURCE"]))
+          print("Selected source dependency provenance:", json.dumps(data, sort_keys=True))
+          (Path(os.environ["EVAL_ARTIFACTS"]) / "source-dependencies.json").write_text(
+              json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: ${{ runner.temp }}/nosh-evaluation-source -> ${{ github.workspace }}/target/evaluation-source
           key: evaluation-clean-source-release
@@ -120,20 +138,27 @@ jobs:
           import json, os, subprocess
           from pathlib import Path
           from eval import fixtures
+          from eval.runtime import source_dependency_provenance, verify_source_archive
+          verify_source_archive(Path(os.environ["EVAL_SOURCE"]),
+                                Path(os.environ["RUNNER_TEMP"]) / "evaluation-source.tar")
+          dependencies = json.loads((Path(os.environ["EVAL_ARTIFACTS"]) / "source-dependencies.json").read_text())
+          if source_dependency_provenance(Path(os.environ["EVAL_SOURCE"])) != dependencies:
+              raise SystemExit("prepared dependency source changed during the build")
           data = {
               "schema_version": 1,
               "source_revision": os.environ["EVAL_SOURCE_REVISION"],
               "source_ref": os.environ["EVAL_SOURCE_REF"],
               "source_clean": True,
               "source_archive_sha256": fixtures.file_hash(Path(os.environ["RUNNER_TEMP"]) / "evaluation-source.tar"),
+              "source_dependencies": dependencies,
               "binary_sha256": fixtures.file_hash(Path(os.environ["EVAL_BINARY"])),
               "build_cwd": os.environ["EVAL_SOURCE"],
               "command": ["env", "-u", "RUSTFLAGS", "-u", "CARGO_ENCODED_RUSTFLAGS", "-u", "CARGO_BUILD_TARGET",
                           "cargo", "build", "--release", "--locked", "-p", "nosh-cli", "--bin", "nosh",
                           "--target-dir", str(Path(os.environ["GITHUB_WORKSPACE"]) / "target" / "evaluation-source")],
               "cargo_build_jobs": 2,
-              "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
-              "cargo": subprocess.check_output(["cargo", "--version"], text=True).strip(),
+              "rustc": subprocess.check_output(["rustc", "-Vv"], cwd=os.environ["EVAL_SOURCE"], text=True),
+              "cargo": subprocess.check_output(["cargo", "--version"], cwd=os.environ["EVAL_SOURCE"], text=True).strip(),
               "build_started_at": os.environ["EVAL_BUILD_STARTED"],
               "build_finished_at": datetime.now(timezone.utc).isoformat(),
               "workflow_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
@@ -141,7 +166,7 @@ jobs:
           path = Path(os.environ["EVAL_ARTIFACTS"]) / "build-info.json"
           path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
           PY
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/nosh-evaluation-model/models
           key: evaluation-model-${{ env.EVAL_SOURCE_REVISION }}
@@ -152,19 +177,20 @@ jobs:
           "$EVAL_BINARY" model verify minicpm5-2b:q4_k_m
       - name: prepare the pinned checkpoint artifact client
         timeout-minutes: 5
-        run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@2.3.2
+        run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@6.2.1
       - name: collect the complete serial campaign
         id: campaign
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const fs = require('node:fs');
             const path = require('node:path');
             const {spawn, execFile} = require('node:child_process');
             const {promisify} = require('node:util');
+            const {pathToFileURL} = require('node:url');
             const execute = promisify(execFile);
-            const {DefaultArtifactClient} = require(path.join(
-              process.env.RUNNER_TEMP, 'evaluation-artifact-client/node_modules/@actions/artifact'));
+            const {DefaultArtifactClient} = await import(pathToFileURL(path.join(
+              process.env.RUNNER_TEMP, 'evaluation-artifact-client/node_modules/@actions/artifact/lib/artifact.js')).href);
             const artifacts = new DefaultArtifactClient();
             const root = process.env.EVAL_ARTIFACTS;
             const log = fs.createWriteStream(path.join(root, 'campaign.log'));
@@ -273,12 +299,13 @@ jobs:
           if not complete:
               raise SystemExit("incomplete campaign; inspect the preserved artifacts")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: evaluation-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/evaluation-artifacts/build-info.json
+            target/evaluation-artifacts/source-dependencies.json
             target/evaluation-artifacts/environment.txt
             target/evaluation-artifacts/exit-code.txt
             target/evaluation-artifacts/provenance.json

@@ -1,0 +1,1862 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 57ab8a04c8c181cbef32eaed78c834e348519fbd..7a0b3abca813b80f8e6b4ebdd35c384284ddafcd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4,18 +4,18 @@ version = 4
+ 
+ [[package]]
+ name = "aho-corasick"
+-version = "1.1.4"
++version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
++checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+ dependencies = [
+  "memchr",
+ ]
+ 
+ [[package]]
+ name = "android_system_properties"
+-version = "0.1.5"
++version = "0.1.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
++checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+ dependencies = [
+  "libc",
+ ]
+@@ -46,9 +46,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+ 
+ [[package]]
+ name = "bitflags"
+-version = "2.13.1"
++version = "2.13.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
++checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+ dependencies = [
+  "serde_core",
+ ]
+@@ -61,9 +61,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+ 
+ [[package]]
+ name = "cc"
+-version = "1.3.0"
++version = "1.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
++checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
+ dependencies = [
+  "find-msvc-tools",
+  "shlex",
+@@ -71,9 +71,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "cfg-if"
+-version = "1.0.4"
++version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
++checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+ 
+ [[package]]
+ name = "chrono"
+@@ -211,9 +211,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "error-code"
+-version = "3.3.2"
++version = "3.4.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
++checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
+ 
+ [[package]]
+ name = "fallible-iterator"
+@@ -235,9 +235,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+ 
+ [[package]]
+ name = "find-msvc-tools"
+-version = "0.1.9"
++version = "0.1.14"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
++checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+ 
+ [[package]]
+ name = "fixedbitset"
+@@ -259,21 +259,21 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+ 
+ [[package]]
+ name = "futures-core"
+-version = "0.3.33"
++version = "0.3.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
++checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+ 
+ [[package]]
+ name = "futures-task"
+-version = "0.3.33"
++version = "0.3.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
++checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+ 
+ [[package]]
+ name = "futures-util"
+-version = "0.3.33"
++version = "0.3.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
++checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+ dependencies = [
+  "futures-core",
+  "futures-task",
+@@ -337,9 +337,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "hashlink"
+-version = "0.12.1"
++version = "0.12.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
++checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+ dependencies = [
+  "hashbrown 0.17.1",
+ ]
+@@ -376,9 +376,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "indexmap"
+-version = "2.14.0"
++version = "2.14.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
++checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+ dependencies = [
+  "equivalent",
+  "hashbrown 0.17.1",
+@@ -392,9 +392,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+ 
+ [[package]]
+ name = "js-sys"
+-version = "0.3.103"
++version = "0.3.106"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
++checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
+ dependencies = [
+  "cfg-if",
+  "futures-util",
+@@ -409,9 +409,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+ 
+ [[package]]
+ name = "libsqlite3-sys"
+-version = "0.38.1"
++version = "0.38.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
++checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+ dependencies = [
+  "cc",
+  "pkg-config",
+@@ -441,9 +441,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "log"
+-version = "0.4.33"
++version = "0.4.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
++checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+ 
+ [[package]]
+ name = "memchr"
+@@ -453,9 +453,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+ 
+ [[package]]
+ name = "mio"
+-version = "1.2.2"
++version = "1.2.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
++checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+ dependencies = [
+  "libc",
+  "log",
+@@ -627,9 +627,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+ 
+ [[package]]
+ name = "pkg-config"
+-version = "0.3.33"
++version = "0.3.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
++checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+ 
+ [[package]]
+ name = "pretty_assertions"
+@@ -718,9 +718,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "regex-automata"
+-version = "0.4.16"
++version = "0.4.18"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
++checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+ dependencies = [
+  "aho-corasick",
+  "memchr",
+@@ -777,9 +777,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rusqlite"
+-version = "0.40.1"
++version = "0.40.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
++checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+ dependencies = [
+  "bitflags",
+  "fallible-iterator",
+@@ -801,9 +801,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rustix"
+-version = "1.1.4"
++version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
++checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+ dependencies = [
+  "bitflags",
+  "errno",
+@@ -857,7 +857,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn 3.0.3",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -918,9 +918,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+ 
+ [[package]]
+ name = "smallvec"
+-version = "1.15.2"
++version = "1.16.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
++checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+ 
+ [[package]]
+ name = "sqlite-wasm-rs"
+@@ -977,9 +977,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "syn"
+-version = "3.0.3"
++version = "3.0.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
++checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -1001,22 +1001,22 @@ dependencies = [
+ 
+ [[package]]
+ name = "thiserror"
+-version = "2.0.19"
++version = "2.0.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
++checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+ dependencies = [
+  "thiserror-impl",
+ ]
+ 
+ [[package]]
+ name = "thiserror-impl"
+-version = "2.0.19"
++version = "2.0.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
++checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn 3.0.3",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -1032,9 +1032,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "unicode-ident"
+-version = "1.0.24"
++version = "1.0.26"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
++checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+ 
+ [[package]]
+ name = "unicode-segmentation"
+@@ -1071,9 +1071,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+ 
+ [[package]]
+ name = "wasm-bindgen"
+-version = "0.2.126"
++version = "0.2.129"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
++checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
+ dependencies = [
+  "cfg-if",
+  "once_cell",
+@@ -1084,9 +1084,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen-macro"
+-version = "0.2.126"
++version = "0.2.129"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
++checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
+ dependencies = [
+  "quote",
+  "wasm-bindgen-macro-support",
+@@ -1094,31 +1094,31 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen-macro-support"
+-version = "0.2.126"
++version = "0.2.129"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
++checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
+ dependencies = [
+  "bumpalo",
+  "proc-macro2",
+  "quote",
+- "syn 2.0.119",
++ "syn 3.0.6",
+  "wasm-bindgen-shared",
+ ]
+ 
+ [[package]]
+ name = "wasm-bindgen-shared"
+-version = "0.2.126"
++version = "0.2.129"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
++checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
+ dependencies = [
+  "unicode-ident",
+ ]
+ 
+ [[package]]
+ name = "wayland-backend"
+-version = "0.3.15"
++version = "0.3.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2857dd20b54e916ec7253b3d6b4d5c4d7d4ca2c33c2e11c6c76a99bd8744755d"
++checksum = "38a91b4eaddff87b1cd1074985e3713da4af2c49742d1b356b2c01670a67a078"
+ dependencies = [
+  "cc",
+  "downcast-rs",
+@@ -1129,9 +1129,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wayland-client"
+-version = "0.31.14"
++version = "0.31.15"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "645c7c96bb74690c3189b5c9cb4ca1627062bb23693a4fad9d8c3de958260144"
++checksum = "e3c36a0f861ad76d0901f2800b46321410d9f73f2ea88aac0650d86c32688073"
+ dependencies = [
+  "bitflags",
+  "rustix",
+@@ -1350,9 +1350,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+ 
+ [[package]]
+ name = "wl-clipboard-rs"
+-version = "0.9.3"
++version = "0.9.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e9651471a32e87d96ef3a127715382b2d11cc7c8bb9822ded8a7cc94072eb0a3"
++checksum = "4d7888ccd4896447b2d14d3a9350a85df2aeb6f181e2e7a31349d104ac46cac1"
+ dependencies = [
+  "libc",
+  "log",
+diff --git a/NOSH_PATCH.md b/NOSH_PATCH.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8598cd9b29bd0e8d7ae05b363a915a889eaddbd3
+--- /dev/null
++++ b/NOSH_PATCH.md
+@@ -0,0 +1,48 @@
++# nosh Reedline adaptation
++
++Base: upstream Reedline **0.52.0**, MIT licensed, Git commit
++`61d430801c86455bdec5946bbfb09fec211275e3`.
++The corresponding published archive SHA256 is
++`3798f88894590a7acdc9a25936605efbde199641f31e8d99248fce72e535638a`.
++The package requires Rust 1.95; nosh builds with the repository-pinned Rust 1.98.1.
++
++This replaces the 0.51 fixed-footer adaptation. There is no reserved footer,
++scrolling-region lease, second input reader, or alternate-screen frontend.
++
++## Renderer repair
++
++`painting/display.rs`, `painting/painter.rs`, `painting/mod.rs` and the mouse
++snapshot wiring in `engine.rs` import the isolated, verified 0.52 repair.
++It tracks painted physical rows and temporarily archived owned prefixes during
++resize, clips long input by physical rows and graphemes, maps mouse positions
++through that viewport, and retains complete submitted/cancelled transcripts.
++The imported repair's portable patch SHA256 is
++`5dc972065b9b2a3486613eb439d6af9cfb0c022c5b8c4f6fb5bb4bb6aa6e08c5`.
++
++That repair passed the recorded WSL, Windows and tmux visible-screen/input
++cases. It does **not** guarantee zero draft fragments in tmux native history.
++The historical fixture is not proof that the nosh integration passes.
++
++## Host integration
++
++- `Prompt::update_context` receives borrowed buffer and interaction facts
++  (including the current selection) before painting and hint generation.
++  Its default is a no-op. The host composes ordinary prompt
++  text; this interface neither paints nor reserves any terminal rows.
++- `with_menu_submit_protection(true)` keeps nosh's 0.51 submit boundary:
++  Enter in an active empty/provisional menu closes it without executing the
++  buffer. The upstream default and explicit `MenuAccept` remain unchanged.
++
++These additions are separate from the geometry repair. Their regressions are
++kept with the implementation; none of these changes is an upstream release.
++
++The main repository stores `patches/reedline/nosh.patch` against the Git
++checkout, including the compatible standalone test lockfile. Git's native
++manifest is retained. Its published original manifest is identical, and the
++library source matches the release after CRLF-to-LF normalization.
++Edit the generated `.nosh/reedline` copy, not the upstream submodule.
++Use `cargo run --manifest-path tools/source/Cargo.toml --locked -- export`
++from the nosh root to regenerate and replay-check the patch. Run the library
++suite with `external_printer` plus nosh's terminal/capture regressions.
++The complete preparation, upgrade and archive workflow is documented in
++`docs/REEDLINE-MAINTENANCE.md` in the nosh repository.
+diff --git a/README.md b/README.md
+index 3ba6144e7b74f6dd6fe9029b11523b651e4f98cf..52a379ba9f5cd3eec9d5ec6f9fe7010de9ddd427 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,11 @@
+ # A feature-rich line editor - powering Nushell
+ 
++> nosh's vendored adaptation of the published 0.52.0 crate, not an upstream release.
++> The renderer repair, read-only prompt context, opt-in menu submit protection,
++> provenance and remaining native-history limitation are documented in
++> [NOSH_PATCH.md](NOSH_PATCH.md). The normal prompt owns the information row;
++> no fixed footer or second terminal input loop is introduced.
++
+ ![GitHub](https://img.shields.io/github/license/nushell/reedline)
+ [![Crates.io](https://img.shields.io/crates/v/reedline)](https://crates.io/crates/reedline)
+ [![docs.rs](https://img.shields.io/docsrs/reedline)](https://docs.rs/reedline/)
+diff --git a/src/engine.rs b/src/engine.rs
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57cb036baed 100644
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -37,7 +37,8 @@ use {
+         utils::text_manipulation,
+         AbbrExpandContext, AutoPairAction, AutoPairContext, AutoPairs, EditCommand,
+         ExampleHighlighter, Highlighter, LineBuffer, Menu, MenuEvent, MouseButton, Prompt,
+-        PromptHistorySearch, ReedlineMenu, Signal, UndoBehavior, ValidationResult, Validator,
++        PromptContext, PromptHistorySearch, PromptInteraction, ReedlineMenu, Signal, UndoBehavior,
++        ValidationResult, Validator,
+     },
+     crossterm::{
+         cursor::{SetCursorStyle, Show},
+@@ -169,6 +170,7 @@ pub struct Reedline {
+     // Provides the tab completions
+     completer: Box<dyn Completer + Send>,
+     quick_completions: bool,
++    protect_menu_submit: bool,
+     partial_completions: bool,
+     persistent_menus: bool,
+     // Completions owed to a menu activation the completer could not answer in time
+@@ -374,6 +376,7 @@ impl Reedline {
+             standby_edit_modes: Vec::new(),
+             completer,
+             quick_completions: false,
++            protect_menu_submit: false,
+             partial_completions: false,
+             persistent_menus: false,
+             deferred_menu_completion: None,
+@@ -513,6 +516,14 @@ impl Reedline {
+         self
+     }
+ 
++    /// Keep a submit key from executing a line when an active menu has no
++    /// acceptable value. Such a key closes the menu instead (0.51 behavior).
++    /// Explicit `MenuAccept` retains its ordinary applicability semantics.
++    pub fn with_menu_submit_protection(mut self, enabled: bool) -> Self {
++        self.protect_menu_submit = enabled;
++        self
++    }
++
+     /// Control whether the cursor crosses line boundaries on left/right motions
+     /// in a block caret (vi normal/visual mode). When `true` (the default), `l`
+     /// at the end of a line moves to the next line's first character and `h` at
+@@ -2375,6 +2386,37 @@ impl Reedline {
+         }
+     }
+ 
++    fn update_prompt_context(&self, prompt: &dyn Prompt) {
++        let navigation = (self.input_mode == InputMode::HistorySearch)
++            .then(|| self.history_cursor.get_navigation());
++        let interaction = if let Some(navigation) = &navigation {
++            match navigation {
++                HistoryNavigationQuery::SubstringSearch(term) => PromptInteraction::HistorySearch {
++                    term,
++                    has_match: self.history_cursor.string_at_cursor().is_some(),
++                },
++                _ => PromptInteraction::Editing,
++            }
++        } else if let Some(menu) = self.menus.iter().find(|menu| menu.is_active()) {
++            PromptInteraction::Menu {
++                name: menu.name(),
++                count: menu.get_values().len(),
++                provisional: menu.results_are_provisional(),
++            }
++        } else {
++            PromptInteraction::Editing
++        };
++        prompt.update_context(PromptContext {
++            buffer: self.editor.get_buffer(),
++            cursor: self.editor.insertion_point(),
++            selection: self.editor.get_selection(),
++            columns: self.painter.screen_width(),
++            rows: self.painter.screen_height(),
++            edit_mode: self.prompt_edit_mode(),
++            interaction,
++        });
++    }
++
+     /// Expands an abbreviation at the word before the cursor, if any exists
+     ///
+     /// Calls [`Highlighter::should_expand_abbr`] with [`AbbrExpandContext::WordAbbreviation`]
+@@ -2658,6 +2700,7 @@ impl Reedline {
+     /// Overwrites the prompt indicator and highlights the search string
+     /// separately from the result buffer.
+     fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
++        self.update_prompt_context(prompt);
+         let use_ansi_coloring = self.effective_ansi_coloring();
+         let navigation = self.history_cursor.get_navigation();
+ 
+@@ -2735,6 +2778,7 @@ impl Reedline {
+             }
+         }
+ 
++        self.update_prompt_context(prompt);
+         let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
+             cursor_position_in_buffer,
+             prompt,
+@@ -2804,6 +2848,23 @@ impl Reedline {
+             }
+         }
+ 
++        // A synchronous provider can change menu facts during working-detail
++        // updates. Compose all prompt components from those final facts.
++        self.update_prompt_context(prompt);
++        lines = PromptLines::new(
++            prompt,
++            self.prompt_edit_mode(),
++            None,
++            &before_cursor,
++            &after_cursor,
++            &hint,
++        );
++        for menu in self.menus.iter_mut().filter(|menu| menu.is_active()) {
++            if menu.is_visible() {
++                lines.prompt_indicator = menu.indicator().to_owned().into();
++            }
++            menu.set_cursor_pos(lines.cursor_pos(self.painter.screen_width()));
++        }
+         let menu = self.menus.iter().find(|menu| menu.is_visible());
+ 
+         self.painter.repaint_buffer(
+@@ -2819,10 +2880,14 @@ impl Reedline {
+             if let Some(layout) = &self.painter.last_layout {
+                 let buffer = self.editor.get_buffer();
+                 let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
+-                self.last_render_snapshot = Some(
+-                    self.painter
+-                        .render_snapshot(&lines, menu, raw_before, raw_after, layout),
+-                );
++                self.last_render_snapshot = Some(self.painter.render_snapshot(
++                    &lines,
++                    menu,
++                    raw_before,
++                    raw_after,
++                    layout,
++                    &prompt.render_prompt_multiline_indicator(),
++                ));
+             }
+         } else {
+             self.last_render_snapshot = None;
+@@ -2917,10 +2982,15 @@ impl Reedline {
+     /// Offer an open menu first refusal on a keypress that would otherwise
+     /// submit, and report whether it took it.
+     fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
+-        Ok(matches!(
++        let protected = self.protect_menu_submit && self.menus.iter().any(|menu| menu.is_active());
++        let accepted = matches!(
+             self.handle_editor_event(prompt, ReedlineEvent::MenuAccept)?,
+             EventStatus::Handled
+-        ))
++        );
++        if protected && !accepted {
++            self.deactivate_menus();
++        }
++        Ok(accepted || protected)
+     }
+ 
+     /// Close an active menu when a typed character ends the word it was opened
+@@ -4310,6 +4380,8 @@ mod tests {
+             large_buffer_extra_rows_after_prompt: None,
+             large_buffer_offset: None,
+             right_prompt: None,
++            viewport_start_row: None,
++            multiline_indicator: String::new(),
+         });
+ 
+         let result = reedline.handle_event(
+@@ -6467,6 +6539,118 @@ mod tests {
+         );
+     }
+ 
++    #[rstest]
++    #[case::enter(ReedlineEvent::Enter)]
++    #[case::submit(ReedlineEvent::Submit)]
++    #[case::submit_or_newline(ReedlineEvent::SubmitOrNewline)]
++    fn protected_menu_submit_closes_empty_menu_without_execution(#[case] event: ReedlineEvent) {
++        let mut editor = engine_with_active_menu(false, false).with_menu_submit_protection(true);
++        editor.painter.force_prompt_anchored_for_test(0);
++        let prompt = DefaultPrompt::default();
++        editor
++            .handle_event(
++                &prompt,
++                ReedlineEvent::Edit(vec![EditCommand::InsertChar('z')]),
++            )
++            .unwrap();
++        apply_menu_maintenance(&mut editor);
++        assert!(matches!(
++            editor.handle_event(&prompt, event).unwrap(),
++            EventStatus::Handled
++        ));
++        assert!(!menu_is_active(&editor));
++        assert_eq!(editor.current_buffer_contents(), "thz");
++    }
++
++    #[test]
++    fn protected_menu_submit_does_not_accept_a_provisional_span() {
++        let (mut editor, _) = activate_menu_over(
++            Box::new(DeferredCompleter::stale("console", "co", &["crates"])),
++            "cr",
++            true,
++            false,
++        );
++        editor = editor.with_menu_submit_protection(true);
++        assert!(matches!(
++            editor
++                .handle_event(&DefaultPrompt::default(), ReedlineEvent::Enter)
++                .unwrap(),
++            EventStatus::Handled
++        ));
++        assert_eq!(editor.current_buffer_contents(), "cr");
++        assert!(!menu_is_active(&editor));
++    }
++
++    #[test]
++    fn prompt_context_reports_actual_menu_and_editing_without_painting() {
++        type Snapshot = (String, usize, String, Option<(usize, usize)>);
++        #[derive(Default)]
++        struct Observe(std::sync::Mutex<Vec<Snapshot>>);
++        impl Prompt for Observe {
++            fn update_context(&self, context: PromptContext<'_>) {
++                let interaction = match context.interaction {
++                    PromptInteraction::Menu {
++                        name,
++                        count,
++                        provisional,
++                    } => format!("{name}:{count}:{provisional}"),
++                    PromptInteraction::Editing => "editing".into(),
++                    PromptInteraction::HistorySearch { term, has_match } => {
++                        format!("search:{term}:{has_match}")
++                    }
++                };
++                self.0.lock().unwrap().push((
++                    context.buffer.into(),
++                    context.cursor,
++                    interaction,
++                    context.selection,
++                ));
++            }
++            fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
++                "".into()
++            }
++            fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
++                "".into()
++            }
++            fn render_prompt_indicator(&self, _: PromptEditMode) -> std::borrow::Cow<'_, str> {
++                "> ".into()
++            }
++            fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
++                "> ".into()
++            }
++            fn render_prompt_history_search_indicator(
++                &self,
++                _: PromptHistorySearch,
++            ) -> std::borrow::Cow<'_, str> {
++                "? ".into()
++            }
++        }
++        let mut editor = engine_with_active_menu(false, false);
++        apply_menu_maintenance(&mut editor);
++        let prompt = Observe::default();
++        editor.update_prompt_context(&prompt);
++        editor.handle_event(&prompt, ReedlineEvent::Esc).unwrap();
++        editor.update_prompt_context(&prompt);
++        editor.run_edit_commands(&[
++            EditCommand::MoveToPosition {
++                position: 0,
++                select: false,
++            },
++            EditCommand::MoveToPosition {
++                position: 2,
++                select: true,
++            },
++        ]);
++        editor.update_prompt_context(&prompt);
++        let values = prompt.0.lock().unwrap();
++        assert_eq!(
++            values[0],
++            ("th".into(), 2, "completion_menu:2:false".into(), None)
++        );
++        assert_eq!(values[1], ("th".into(), 2, "editing".into(), None));
++        assert_eq!(values[2], ("th".into(), 2, "editing".into(), Some((0, 2))));
++    }
++
+     /// A menu whose filtered suggestions are empty has nothing to accept:
+     /// Enter must close it and submit the line, not be swallowed.
+     #[test]
+diff --git a/src/lib.rs b/src/lib.rs
+index 2cb3662efdf8a8a764d0213a664db8120469e339..dd5a2f13c4a9a1bd80c35f9e71d8971a7315765a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -306,11 +306,12 @@ pub use history::{
+ mod prompt;
+ pub use prompt::PromptHelixMode;
+ pub use prompt::{
+-    DefaultPrompt, DefaultPromptSegment, Prompt, PromptEditMode, PromptEditModeDiscriminants,
+-    PromptHistorySearch, PromptHistorySearchStatus, PromptViMode, DEFAULT_INDICATOR_COLOR,
+-    DEFAULT_INSERT_PROMPT_INDICATOR, DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR,
+-    DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_INDICATOR, DEFAULT_PROMPT_MULTILINE_COLOR,
+-    DEFAULT_PROMPT_RIGHT_COLOR, DEFAULT_SELECT_PROMPT_INDICATOR,
++    DefaultPrompt, DefaultPromptSegment, Prompt, PromptContext, PromptEditMode,
++    PromptEditModeDiscriminants, PromptHistorySearch, PromptHistorySearchStatus, PromptInteraction,
++    PromptViMode, DEFAULT_INDICATOR_COLOR, DEFAULT_INSERT_PROMPT_INDICATOR,
++    DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR, DEFAULT_PROMPT_COLOR,
++    DEFAULT_PROMPT_INDICATOR, DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
++    DEFAULT_SELECT_PROMPT_INDICATOR,
+ };
+ 
+ mod edit_mode;
+diff --git a/src/painting/display.rs b/src/painting/display.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6dff957490
+--- /dev/null
++++ b/src/painting/display.rs
+@@ -0,0 +1,361 @@
++use super::utils::{
++    advance_grapheme, estimate_required_lines, line_width, resolve_wrap, strip_ansi, wrap_position,
++};
++use std::cell::Cell;
++use std::io::{self, Write};
++use std::ops::Range;
++use std::rc::Rc;
++use unicode_segmentation::UnicodeSegmentation;
++
++#[derive(Debug)]
++struct MappedBytes {
++    source_end: Rc<Cell<usize>>,
++    bytes: Vec<u8>,
++    ends: Vec<usize>,
++}
++
++impl Write for MappedBytes {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        self.bytes.extend_from_slice(bytes);
++        self.ends.resize(self.bytes.len(), self.source_end.get());
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++fn style_controls(text: &str) -> String {
++    let bytes = text.as_bytes();
++    let mut output = String::new();
++    let mut index = 0;
++    while index + 1 < bytes.len() {
++        if bytes[index] != 0x1b {
++            index += 1;
++            continue;
++        }
++        if bytes[index + 1] == b'[' {
++            let Some(end) = bytes[index + 2..]
++                .iter()
++                .position(|byte| (0x40..=0x7e).contains(byte))
++            else {
++                break;
++            };
++            let end = index + end + 3;
++            if bytes[end - 1] == b'm' {
++                output.push_str(&text[index..end]);
++            }
++            index = end;
++        } else if bytes[index + 1] == b']' {
++            let mut end = index + 2;
++            while end < bytes.len()
++                && bytes[end] != 7
++                && !(bytes[end] == 0x1b && bytes.get(end + 1) == Some(&b'\\'))
++            {
++                end += 1;
++            }
++            if end == bytes.len() {
++                break;
++            }
++            end += if bytes[end] == 7 { 1 } else { 2 };
++            if text[index + 2..].starts_with("8;") {
++                output.push_str(&text[index..end]);
++            }
++            index = end;
++        } else {
++            index += 2;
++        }
++    }
++    output
++}
++
++/// Clip by terminal rows without splitting a grapheme or dropping its ANSI style.
++pub(crate) fn clip_display_rows(
++    text: &str,
++    position: &mut (u16, u16),
++    columns: u16,
++    rows: Range<u16>,
++) -> String {
++    let source_end = Rc::new(Cell::new(0));
++    let mut parser = strip_ansi_escapes::Writer::new(MappedBytes {
++        source_end: source_end.clone(),
++        bytes: Vec::new(),
++        ends: Vec::new(),
++    });
++    // Reuse the ANSI parser rather than guessing where CSI/OSC sequences end.
++    for (index, byte) in text.as_bytes().iter().enumerate() {
++        source_end.set(index + 1);
++        parser
++            .write_all(std::slice::from_ref(byte))
++            .expect("memory writer");
++        parser.flush().expect("memory writer");
++    }
++    let mapped = parser.into_inner().expect("memory writer");
++    let plain = String::from_utf8(mapped.bytes).expect("ANSI parser emits UTF-8");
++    let mut selected = None::<Range<usize>>;
++    for (index, grapheme) in plain.grapheme_indices(true) {
++        let old_row = position.0;
++        let (at, width) = advance_grapheme(*position, grapheme, columns.max(1));
++        *position = (at.0, at.1.saturating_add(width));
++        let visible = if grapheme == "\n" {
++            rows.contains(&old_row) && rows.contains(&at.0)
++        } else {
++            rows.contains(&at.0)
++        };
++        if visible {
++            let start = mapped.ends[index] - grapheme.chars().next().unwrap().len_utf8();
++            let end = mapped.ends[index + grapheme.len() - 1];
++            match &mut selected {
++                Some(range) => range.end = end,
++                None => selected = Some(start..end),
++            }
++        }
++    }
++    let mut output = String::new();
++    let mut previous = 0;
++    for (index, character) in plain.char_indices() {
++        let end = mapped.ends[index];
++        let start = end - character.len_utf8();
++        let visible = selected
++            .as_ref()
++            .is_some_and(|range| range.contains(&start));
++        let controls = &text[previous..start];
++        // Hidden rows contribute style, not prompt markers or cursor movement.
++        output.push_str(&if visible {
++            controls.replace(['\r', '\t'], "")
++        } else {
++            style_controls(controls)
++        });
++        if visible {
++            if character == '\n' {
++                output.push('\r');
++            }
++            output.push(character);
++        }
++        previous = end;
++    }
++    output.push_str(&style_controls(&text[previous..]));
++    output
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct PhysicalRow {
++    text: String,
++    wraps: bool,
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct RenderedInput {
++    pub(crate) rows: Vec<PhysicalRow>,
++    pub(crate) cursor: (u16, u16),
++}
++
++impl RenderedInput {
++    pub(crate) fn overlay(&mut self, row: u16, column: u16, text: &str) {
++        for (offset, line) in strip_ansi(text).split('\n').enumerate() {
++            let row = usize::from(row) + offset;
++            while self.rows.len() <= row {
++                self.rows.push(PhysicalRow {
++                    text: String::new(),
++                    wraps: false,
++                });
++            }
++            let column = if offset == 0 { usize::from(column) } else { 0 };
++            let end = column + line_width(line);
++            let mut prefix = String::new();
++            let mut suffix = String::new();
++            let mut cells = 0;
++            let mut suffix_start = None;
++            for grapheme in self.rows[row].text.graphemes(true) {
++                let width = line_width(grapheme);
++                if cells + width <= column {
++                    prefix.push_str(grapheme);
++                } else if cells >= end {
++                    suffix_start.get_or_insert(cells);
++                    suffix.push_str(grapheme);
++                }
++                cells += width;
++            }
++            prefix.push_str(&" ".repeat(column.saturating_sub(line_width(&prefix))));
++            prefix.push_str(line);
++            if let Some(start) = suffix_start {
++                prefix.push_str(&" ".repeat(start.saturating_sub(end)));
++            }
++            prefix.push_str(&suffix);
++            self.rows[row].text = prefix;
++        }
++    }
++
++    pub(crate) fn with_prefix(mut self, prefix: &[PhysicalRow]) -> Self {
++        self.cursor.1 = self
++            .cursor
++            .1
++            .saturating_add(prefix.len().min(u16::MAX as usize) as u16);
++        self.rows.splice(0..0, prefix.iter().cloned());
++        self
++    }
++
++    pub(crate) fn reflowed(&self, columns: u16) -> Self {
++        let mut groups = vec![String::new()];
++        for (index, row) in self.rows.iter().enumerate() {
++            groups.last_mut().unwrap().push_str(&row.text);
++            if !row.wraps && index + 1 != self.rows.len() {
++                groups.push(String::new());
++            }
++        }
++        Self::new(&groups.join("\r\n"), self.reflow_cursor(columns), columns)
++    }
++
++    pub(crate) fn new(text: &str, cursor: (u16, u16), columns: u16) -> Self {
++        let mut rows = vec![PhysicalRow {
++            text: String::new(),
++            wraps: false,
++        }];
++        let mut position = (0, 0);
++        for grapheme in strip_ansi(text).graphemes(true) {
++            let (at, width) = advance_grapheme(position, grapheme, columns.max(1));
++            if at.0 != position.0 && grapheme != "\n" {
++                rows[position.0 as usize].wraps = true;
++            }
++            while rows.len() <= usize::from(at.0) {
++                rows.push(PhysicalRow {
++                    text: String::new(),
++                    wraps: false,
++                });
++            }
++            if grapheme != "\n" {
++                rows[at.0 as usize].text.push_str(grapheme);
++            }
++            position = (at.0, at.1.saturating_add(width));
++        }
++        // An absolute margin cursor can occupy a separate, empty hard row.
++        while rows.len() <= usize::from(cursor.1) {
++            rows.push(PhysicalRow {
++                text: String::new(),
++                wraps: false,
++            });
++        }
++        Self { rows, cursor }
++    }
++
++    pub(crate) fn reflow_cursor(&self, columns: u16) -> (u16, u16) {
++        let mut group = String::new();
++        let mut base_row = 0u16;
++        for (index, row) in self.rows.iter().enumerate() {
++            if index == usize::from(self.cursor.1) {
++                let mut offset = 0usize;
++                for grapheme in row.text.graphemes(true) {
++                    if offset >= usize::from(self.cursor.0) {
++                        break;
++                    }
++                    group.push_str(grapheme);
++                    offset += line_width(grapheme);
++                }
++                group.push_str(&" ".repeat(usize::from(self.cursor.0).saturating_sub(offset)));
++                let (column, line) = wrap_position([group.as_str()], columns.max(1))
++                    .map(|end| resolve_wrap(end, columns.max(1)))
++                    .unwrap_or((0, 0));
++                return (column, base_row.saturating_add(line));
++            }
++            group.push_str(&row.text);
++            if !row.wraps {
++                base_row = base_row.saturating_add(
++                    estimate_required_lines(&group, columns.max(1))
++                        .max(1)
++                        .min(u16::MAX as usize) as u16,
++                );
++                group.clear();
++            }
++        }
++        (0, base_row)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn clip_long_line_by_physical_rows() {
++        let text = "0123456789".repeat(100);
++        let mut position = (0, 0);
++        assert_eq!(
++            clip_display_rows(&text, &mut position, 10, 3..5),
++            "01234567890123456789"
++        );
++        assert_eq!(position, (99, 10));
++    }
++
++    #[test]
++    fn clipping_preserves_style_and_wide_graphemes() {
++        let mut position = (0, 0);
++        let output = clip_display_rows("\x1b[31mab中e\u{301}文z\x1b[0m", &mut position, 5, 1..2);
++        assert_eq!(strip_ansi(&output), "文z");
++        assert!(output.starts_with("\x1b[31m"));
++        assert!(output.ends_with("\x1b[0m"));
++    }
++
++    #[test]
++    fn clipping_does_not_emit_a_newline_past_the_viewport() {
++        let mut position = (0, 0);
++        assert_eq!(
++            clip_display_rows("first\r\nsecond\r\nthird", &mut position, 80, 0..2),
++            "first\r\nsecond"
++        );
++    }
++
++    #[test]
++    fn clipping_osc_links_retains_complete_control_sequences() {
++        let mut position = (0, 0);
++        let text = "\x1b]8;;https://example.test\x1b\\abcdefgh\x1b]8;;\x1b\\";
++        let output = clip_display_rows(text, &mut position, 4, 1..2);
++        assert_eq!(strip_ansi(&output), "efgh");
++        assert!(output.starts_with("\x1b]8;;https://example.test\x1b\\"));
++        assert!(output.ends_with("\x1b]8;;\x1b\\"));
++    }
++
++    #[test]
++    fn hidden_prompt_markers_are_not_replayed_as_styles() {
++        let mut position = (0, 0);
++        let text = "\x1b]133;A\x07\x1b[31mfirst\n\x1b]133;B\x07second\x1b[0m";
++        let output = clip_display_rows(text, &mut position, 80, 1..2);
++        assert!(!output.contains("133;A"));
++        assert!(output.contains("133;B"));
++        assert!(output.contains("\x1b[31m"));
++        assert_eq!(strip_ansi(&output), "second");
++    }
++
++    #[test]
++    fn full_margin_cursor_is_not_the_text_end_after_resize() {
++        let painted = RenderedInput::new(&format!("status\r\n{}", "x".repeat(80)), (0, 2), 80);
++        assert_eq!(painted.reflow_cursor(48), (0, 3));
++        let painted = RenderedInput::new(&format!("status\r\n{}", "x".repeat(80)), (75, 1), 80);
++        assert_eq!(painted.reflow_cursor(48), (27, 2));
++    }
++
++    #[test]
++    fn reflow_keeps_hard_newline_separate_from_wrapped_continuation() {
++        let painted = RenderedInput::new("abcdefghijkl", (2, 1), 10);
++        assert_eq!(painted.reflow_cursor(20), (12, 0));
++        let painted = RenderedInput::new("abcdefghij\r\nkl", (2, 1), 10);
++        assert_eq!(painted.reflow_cursor(20), (2, 1));
++    }
++
++    #[test]
++    fn archived_prompt_prefix_is_still_owned_when_it_reappears() {
++        let old = RenderedInput::new(&format!("status\r\n{}", "x".repeat(160)), (75, 2), 80);
++        let narrow = old.reflowed(48);
++        assert_eq!(narrow.cursor, (11, 4));
++        let repainted = RenderedInput::new(&format!("status\r\n{}", "x".repeat(160)), (11, 4), 48)
++            .with_prefix(&narrow.rows[..1]);
++        assert_eq!(repainted.reflow_cursor(80), (75, 3));
++    }
++
++    #[test]
++    fn right_prompt_cells_participate_in_reflow() {
++        let mut painted = RenderedInput::new("status\r\nrl> input", (9, 1), 80);
++        painted.overlay(0, 78, "RP");
++        assert_eq!(painted.reflow_cursor(48), (9, 2));
++    }
++}
+diff --git a/src/painting/mod.rs b/src/painting/mod.rs
+index 18f5d97769db082bdee6083c761e6483f30785f0..a29dadeed55a91dc12e5fa03874aeaae55147954 100644
+--- a/src/painting/mod.rs
++++ b/src/painting/mod.rs
+@@ -1,3 +1,4 @@
++mod display;
+ mod painter;
+ mod prompt_lines;
+ mod styled_text;
+diff --git a/src/painting/painter.rs b/src/painting/painter.rs
+index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d4ba58e97 100644
+--- a/src/painting/painter.rs
++++ b/src/painting/painter.rs
+@@ -1,3 +1,4 @@
++use super::display::{clip_display_rows, PhysicalRow, RenderedInput};
+ use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
+ use crate::{CursorConfig, PromptEditMode};
+ 
+@@ -26,6 +27,7 @@ use {crate::LineBuffer, crossterm::cursor::MoveUp};
+ 
+ // Returns a string that skips N number of lines with the next offset of lines
+ // An offset of 0 would return only one line after skipping the required lines
++#[cfg(test)]
+ fn skip_buffer_lines(string: &str, skip: usize, offset: Option<usize>) -> &str {
+     let (index, limit) = skip_buffer_lines_range(string, skip, offset);
+ 
+@@ -219,6 +221,8 @@ pub struct RenderSnapshot {
+     pub large_buffer_extra_rows_after_prompt: Option<usize>,
+     pub large_buffer_offset: Option<usize>,
+     pub right_prompt: Option<RightPromptBounds>,
++    pub viewport_start_row: Option<u16>,
++    pub multiline_indicator: String,
+ }
+ 
+ #[derive(Debug, PartialEq, Eq)]
+@@ -369,6 +373,9 @@ pub struct Painter {
+     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
+     /// Layout computed during the last paint cycle.
+     pub(crate) last_layout: Option<PromptLayout>,
++    rendered_input: Option<RenderedInput>,
++    archived_input: Vec<PhysicalRow>,
++    full_input: Option<(String, String)>,
+ }
+ 
+ impl Painter {
+@@ -387,6 +394,9 @@ impl Painter {
+             exit_right_prompt: None,
+             semantic_markers: None,
+             last_layout: None,
++            rendered_input: None,
++            archived_input: Vec::new(),
++            full_input: None,
+         }
+     }
+ 
+@@ -466,13 +476,16 @@ impl Painter {
+ 
+         // Large buffer extra rows computation
+         let (extra_rows, extra_rows_after_prompt) = if self.large_buffer {
+-            let prompt_rows_after_first = lines.prompt_height(screen_width) as usize - 1;
+-            let prompt_indicator_lines = lines.prompt_indicator.lines().count();
+-            let before_cursor_lines = lines.before_cursor.lines().count();
+-            let total_lines_before =
+-                prompt_rows_after_first + prompt_indicator_lines + before_cursor_lines - 1;
+-            let extra = total_lines_before.saturating_sub(screen_height as usize);
+-            (extra, extra.saturating_sub(prompt_rows_after_first))
++            let available = screen_height
++                .saturating_sub(menu.map_or(0, |menu| menu.min_rows()))
++                .max(1);
++            let extra = lines
++                .distance_from_prompt(screen_width)
++                .saturating_sub(available - 1) as usize;
++            (
++                extra,
++                extra.saturating_sub(lines.prompt_height(screen_width).saturating_sub(1) as usize),
++            )
+         } else {
+             (0, 0)
+         };
+@@ -502,7 +515,9 @@ impl Painter {
+ 
+         // Menu start row
+         let menu_start_row = menu.map(|menu| {
+-            let cursor_distance = lines.distance_from_prompt(screen_width);
++            let cursor_distance = lines
++                .distance_from_prompt(screen_width)
++                .saturating_sub(extra_rows as u16);
+             if cursor_distance >= screen_height.saturating_sub(1) {
+                 screen_height.saturating_sub(menu.min_rows())
+             } else {
+@@ -666,6 +681,8 @@ impl Painter {
+         let new_row = match prompt_selector {
+             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
+             PromptRowSelector::MakeNewPrompt { new_row } => {
++                self.rendered_input = None;
++                self.archived_input.clear();
+                 // If we are on the last line and would move beyond the last line, we need to make
+                 // room for the prompt.
+                 // Otherwise printing the prompt would scroll off the stored prompt
+@@ -695,6 +712,8 @@ impl Painter {
+     /// cursor (e.g. `$EDITOR`).
+     pub(crate) fn invalidate_prompt_start_row(&mut self) {
+         self.prompt_start_row.invalidate();
++        self.rendered_input = None;
++        self.archived_input.clear();
+     }
+ 
+     /// Main painter for the prompt and buffer
+@@ -771,7 +790,13 @@ impl Painter {
+         self.large_buffer = required_lines >= screen_height;
+ 
+         // Moving the start position of the cursor based on the size of the required lines
+-        if self.large_buffer || anchor_uninitialized {
++        if self.large_buffer {
++            let preceding_rows = self.prompt_start_row.last_known_row();
++            if preceding_rows > 0 {
++                self.queue_universal_scroll(preceding_rows)?;
++            }
++            self.prompt_start_row.mark_verified(0);
++        } else if anchor_uninitialized {
+             for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
+                 self.stdout.queue(Print(&coerce_crlf("\n")))?;
+             }
+@@ -797,7 +822,12 @@ impl Painter {
+             self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
+         };
+ 
+-        self.exit_right_prompt = layout.right_prompt.map(|rp| {
++        let exit_right = if self.large_buffer && self.prompt_height <= screen_height {
++            self.compute_right_prompt(lines, 0)
++        } else {
++            layout.right_prompt
++        };
++        self.exit_right_prompt = exit_right.map(|rp| {
+             let text = coerce_crlf(&lines.prompt_str_right);
+             let text = if use_ansi_coloring {
+                 format!("{}{}", prompt.get_prompt_right_color().prefix(), text)
+@@ -806,6 +836,38 @@ impl Painter {
+             };
+             (text, rp)
+         });
++        if let (Some(rendered), Some(right)) = (&mut self.rendered_input, layout.right_prompt) {
++            let row = right
++                .row
++                .saturating_sub(self.prompt_start_row.last_known_row())
++                .saturating_add(self.archived_input.len().min(u16::MAX as usize) as u16);
++            rendered.overlay(row, right.start_col, &lines.prompt_str_right);
++        }
++
++        self.full_input = self.large_buffer.then(|| {
++            let mut prefix = String::new();
++            if let Some(markers) = &self.semantic_markers {
++                prefix.push_str(&markers.prompt_start(PromptKind::Primary));
++            }
++            if use_ansi_coloring {
++                prefix.push_str(&prompt.get_prompt_color().prefix().to_string());
++            }
++            prefix.push_str(&coerce_crlf(&lines.prompt_str_left));
++            if use_ansi_coloring {
++                prefix.push_str(&prompt.get_indicator_color().prefix().to_string());
++            }
++            prefix.push_str(&coerce_crlf(&lines.prompt_indicator));
++            if use_ansi_coloring {
++                prefix.push_str("\x1b[0m");
++            }
++            if let Some(markers) = &self.semantic_markers {
++                prefix.push_str(&markers.command_input_start());
++            }
++            (
++                prefix,
++                format!("{}{}", lines.before_cursor, lines.after_cursor),
++            )
++        });
+ 
+         self.last_layout = Some(layout);
+ 
+@@ -848,6 +910,7 @@ impl Painter {
+         raw_before: &str,
+         raw_after: &str,
+         layout: &PromptLayout,
++        multiline_indicator: &str,
+     ) -> RenderSnapshot {
+         let large_buffer_extra_rows_after_prompt = if self.large_buffer {
+             Some(layout.extra_rows_after_prompt)
+@@ -872,6 +935,8 @@ impl Painter {
+             large_buffer_extra_rows_after_prompt,
+             large_buffer_offset,
+             right_prompt: layout.right_prompt,
++            viewport_start_row: self.large_buffer.then_some(layout.extra_rows as u16),
++            multiline_indicator: multiline_indicator.to_owned(),
+         }
+     }
+ 
+@@ -913,6 +978,46 @@ impl Painter {
+             }
+         }
+ 
++        if let Some(top) = snapshot.viewport_start_row {
++            let (col, prompt_row) = wrap_position(
++                [
++                    snapshot.prompt_str_left.as_str(),
++                    &snapshot.prompt_indicator,
++                ],
++                snapshot.screen_width,
++            )?;
++            let mut position = (prompt_row, col);
++            let target_row = top.saturating_add(row.saturating_sub(snapshot.prompt_start_row));
++            let buffer = format!("{}{}", snapshot.before_cursor, snapshot.after_cursor);
++            for (index, grapheme) in buffer.grapheme_indices(true) {
++                let newline = grapheme == "\n" || grapheme == "\r\n";
++                let (at, width) = advance_grapheme(
++                    position,
++                    if newline { "\n" } else { grapheme },
++                    snapshot.screen_width.max(1),
++                );
++                if width > 0
++                    && at.0 == target_row
++                    && column >= at.1
++                    && column < at.1.saturating_add(width)
++                {
++                    return Some(index);
++                }
++                position = (at.0, at.1.saturating_add(width));
++                if newline {
++                    for indicator in
++                        super::utils::strip_ansi(&snapshot.multiline_indicator).graphemes(true)
++                    {
++                        let (at, width) =
++                            advance_grapheme(position, indicator, snapshot.screen_width.max(1));
++                        position = (at.0, at.1.saturating_add(width));
++                    }
++                }
++            }
++            let end = resolve_wrap((position.1, position.0), snapshot.screen_width.max(1));
++            return (end.1 == target_row && column >= end.0).then_some(buffer.len());
++        }
++
+         // Convert the absolute screen row to a row relative to the prompt start.
+         let screen_width = snapshot.screen_width;
+         let target_row = row.saturating_sub(snapshot.prompt_start_row);
+@@ -1206,6 +1311,32 @@ impl Painter {
+             self.stdout.queue(Print(&lines.hint))?;
+         }
+ 
++        let text = format!(
++            "{}{}{}{}{}",
++            lines.prompt_str_left,
++            lines.prompt_indicator,
++            lines.before_cursor,
++            lines.after_cursor,
++            if menu.is_none() {
++                lines.hint.as_ref()
++            } else {
++                ""
++            }
++        );
++        let cursor = wrap_position(
++            [
++                &*lines.prompt_str_left,
++                &lines.prompt_indicator,
++                &lines.before_cursor,
++            ],
++            self.screen_width(),
++        )
++        .map(|end| resolve_wrap(end, self.screen_width().max(1)))
++        .unwrap_or((0, 0));
++        self.rendered_input = Some(
++            RenderedInput::new(&text, cursor, self.screen_width())
++                .with_prefix(&self.archived_input),
++        );
+         Ok(cursor_row)
+     }
+ 
+@@ -1219,11 +1350,42 @@ impl Painter {
+     ) -> Result<Option<u16>> {
+         let screen_width = self.screen_width();
+         let screen_height = self.screen_height();
+-        let cursor_distance = lines.distance_from_prompt(screen_width);
+-        let remaining_lines = screen_height.saturating_sub(cursor_distance);
+-
+         let extra_rows = layout.extra_rows;
+-        let extra_rows_after_prompt = layout.extra_rows_after_prompt;
++        let top = extra_rows as u16;
++        let cursor_distance = lines.distance_from_prompt(screen_width).saturating_sub(top);
++        let bottom = top.saturating_add(screen_height);
++        let mut position = (0, 0);
++        let prompt_skipped = clip_display_rows(
++            &lines.prompt_str_left,
++            &mut position,
++            screen_width,
++            top..bottom,
++        );
++        let indicator_skipped = clip_display_rows(
++            &lines.prompt_indicator,
++            &mut position,
++            screen_width,
++            top..bottom,
++        );
++        let before_cursor_skipped = clip_display_rows(
++            &lines.before_cursor,
++            &mut position,
++            screen_width,
++            top..bottom,
++        );
++        let cursor = resolve_wrap((position.1, position.0), screen_width.max(1));
++        let after_bottom = if menu.is_some() {
++            top.saturating_add(cursor_distance).saturating_add(1)
++        } else {
++            bottom
++        };
++        let after_cursor_skipped = clip_display_rows(
++            &lines.after_cursor,
++            &mut position,
++            screen_width,
++            top..after_bottom,
++        );
++        let hint_skipped = clip_display_rows(&lines.hint, &mut position, screen_width, top..bottom);
+ 
+         // Emit prompt start marker (OSC 133;A;k=i for primary prompt) only if prompt is visible
+         if extra_rows == 0 {
+@@ -1239,15 +1401,7 @@ impl Painter {
+                 .queue(Print(prompt.get_prompt_color().prefix()))?;
+         }
+ 
+-        // In case the prompt is made out of multiple lines, the prompt is split by
+-        // lines and only the required ones are printed.
+-        //
+-        // Sliced rather than run through `skip_buffer_lines`, whose trailing-newline
+-        // trim would drop the newline that puts the indicator on the row below.
+-        let (prompt_start, prompt_end) =
+-            skip_buffer_lines_range(&lines.prompt_str_left, extra_rows, None);
+-        let prompt_skipped = &lines.prompt_str_left[prompt_start..prompt_end];
+-        self.stdout.queue(Print(&coerce_crlf(prompt_skipped)))?;
++        self.stdout.queue(Print(&prompt_skipped))?;
+ 
+         if extra_rows == 0 {
+             if use_ansi_coloring {
+@@ -1256,16 +1410,14 @@ impl Painter {
+             }
+ 
+             // Judged from the *skipped* prompt, which is what reached the screen.
+-            self.print_right_prompt(lines, layout, [prompt_skipped])?;
++            self.print_right_prompt(lines, layout, [prompt_skipped.as_str()])?;
+         }
+ 
+         if use_ansi_coloring {
+             self.stdout
+                 .queue(Print(prompt.get_indicator_color().prefix()))?;
+         }
+-        let indicator_skipped =
+-            skip_buffer_lines(&lines.prompt_indicator, extra_rows_after_prompt, None);
+-        self.stdout.queue(Print(&coerce_crlf(indicator_skipped)))?;
++        self.stdout.queue(Print(&indicator_skipped))?;
+ 
+         // Emit command input start marker (OSC 133;B) after prompt indicator
+         if let Some(markers) = &self.semantic_markers {
+@@ -1276,45 +1428,37 @@ impl Painter {
+             self.stdout.queue(ResetColor)?;
+         }
+ 
+-        // Selecting the lines before the cursor that will be printed
+-        let before_cursor_skipped = skip_buffer_lines(
+-            &lines.before_cursor,
+-            extra_rows_after_prompt,
+-            layout.large_buffer_offset,
+-        );
+-        self.stdout.queue(Print(before_cursor_skipped))?;
++        self.stdout.queue(Print(&before_cursor_skipped))?;
+         if !self.term_is_dumb {
+             self.stdout.queue(SavePosition)?;
+         }
+ 
+         // Computed from the *skipped* text, which is what reached the screen.
+-        let cursor_row =
+-            self.margin_cursor_row([prompt_skipped, indicator_skipped, before_cursor_skipped]);
++        let cursor_row = self.margin_cursor_row([
++            prompt_skipped.as_str(),
++            &indicator_skipped,
++            &before_cursor_skipped,
++        ]);
+ 
++        self.stdout.queue(Print(&after_cursor_skipped))?;
+         if let Some(menu) = menu {
+-            // TODO: Also solve the difficult problem of displaying (parts of)
+-            // the content after the cursor with the completion menu
+-            // This only shows the rest of the line the cursor is on
+-            if let Some(newline) = lines.after_cursor.find('\n') {
+-                self.stdout.queue(Print(&lines.after_cursor[0..newline]))?;
+-            } else {
+-                self.stdout.queue(Print(&lines.after_cursor))?;
+-            }
+             self.print_menu(menu, use_ansi_coloring, layout)?;
+         } else {
+-            // Selecting lines for the hint
+-            // The -1 subtraction is done because the remaining lines consider the line where the
+-            // cursor is located as a remaining line. That has to be removed to get the correct offset
+-            // for the after-cursor and hint lines
+-            let offset = remaining_lines.saturating_sub(1) as usize;
+-            // Selecting lines after the cursor
+-            let after_cursor_skipped = skip_buffer_lines(&lines.after_cursor, 0, Some(offset));
+-            self.stdout.queue(Print(after_cursor_skipped))?;
+-            // Hint lines
+-            let hint_skipped = skip_buffer_lines(&lines.hint, 0, Some(offset));
+-            self.stdout.queue(Print(hint_skipped))?;
++            self.stdout.queue(Print(&hint_skipped))?;
+         }
+ 
++        let text = format!(
++            "{prompt_skipped}{indicator_skipped}{before_cursor_skipped}{after_cursor_skipped}{}",
++            if menu.is_none() { &hint_skipped } else { "" }
++        );
++        self.rendered_input = Some(
++            RenderedInput::new(
++                &text,
++                (cursor.0, cursor.1.saturating_sub(top)),
++                screen_width,
++            )
++            .with_prefix(&self.archived_input),
++        );
+         Ok(cursor_row)
+     }
+ 
+@@ -1324,7 +1468,7 @@ impl Painter {
+         let term = var_os("TERM");
+         self.term_is_dumb = term_is_dumb(term.as_deref());
+ 
+-        self.invalidate_prompt_start_row();
++        self.prompt_start_row.invalidate();
+ 
+         // `cursor::position()` is blocking and can time out, but a
+         // resize happens infrequently enough that we accept the cost.
+@@ -1339,8 +1483,20 @@ impl Painter {
+         // paint takes this row as verified and never asks again, which leaves
+         // this read as the only proof of the height until the next reported
+         // size.
+-        if let Ok(Some((_, cursor_row))) = self.measure_cursor_position() {
+-            self.prompt_start_row = PromptStartRow::Resized { cursor_row };
++        if let Ok(Some((column, cursor_row))) = self.measure_cursor_position() {
++            self.prompt_start_row = match &self.rendered_input {
++                Some(rendered) => {
++                    let reflowed = rendered.reflowed(width);
++                    let (mapped_column, mut distance) = reflowed.cursor;
++                    if mapped_column == 0 && column == width.saturating_sub(1) && distance > 0 {
++                        distance -= 1;
++                    }
++                    let hidden = distance.saturating_sub(cursor_row) as usize;
++                    self.archived_input = reflowed.rows[..hidden.min(reflowed.rows.len())].to_vec();
++                    PromptStartRow::Verified(cursor_row.saturating_sub(distance))
++                }
++                None => PromptStartRow::Resized { cursor_row },
++            };
+         }
+     }
+ 
+@@ -1391,6 +1547,22 @@ impl Painter {
+     /// cursor survives, leaving a rejected command on screen as the record of
+     /// what was aborted (#1143).
+     pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
++        if let Some((prefix, buffer)) = self.full_input.take() {
++            // Only submission/cancellation commits the complete off-screen draft.
++            self.clear_from_anchor(self.prompt_start_row.last_known_row())?;
++            self.stdout.queue(Print(&prefix))?;
++            if let Some((text, rp)) = &self.exit_right_prompt {
++                self.stdout
++                    .queue(SavePosition)?
++                    .queue(MoveTo(rp.start_col, rp.row))?
++                    .queue(Print(text))?
++                    .queue(SetAttribute(Attribute::Reset))?
++                    .queue(ResetColor)?
++                    .queue(RestorePosition)?;
++            }
++            self.stdout.queue(Print(buffer))?;
++            return self.print_crlf();
++        }
+         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
+         if let Some(after_cursor) = &self.after_cursor_lines {
+             self.stdout.queue(Print(after_cursor))?;
+@@ -2138,6 +2310,8 @@ mod tests {
+             large_buffer_extra_rows_after_prompt: None,
+             large_buffer_offset: None,
+             right_prompt: None,
++            viewport_start_row: None,
++            multiline_indicator: String::new(),
+         }
+     }
+ 
+@@ -2160,6 +2334,131 @@ mod tests {
+         assert_eq!(painter.screen_to_buffer_offset(&snapshot, 10, 0), Some(2));
+     }
+ 
++    #[test]
++    fn long_viewport_mouse_coordinates_use_physical_rows() {
++        let mut snapshot = base_snapshot();
++        snapshot.large_buffer = true;
++        snapshot.before_cursor = "x".repeat(70);
++        snapshot.viewport_start_row = Some(3);
++        let painter = Painter::new(W::sink());
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 0, 0), Some(58));
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 5, 0), Some(63));
++    }
++
++    #[test]
++    fn long_viewport_mouse_coordinates_include_continuation_prompt() {
++        let mut snapshot = base_snapshot();
++        snapshot.large_buffer = true;
++        snapshot.before_cursor = "a\n中x".into();
++        snapshot.viewport_start_row = Some(1);
++        snapshot.multiline_indicator = ".. ".into();
++        let painter = Painter::new(W::sink());
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 0, 0), None);
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 3, 0), Some(2));
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 4, 0), Some(2));
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 5, 0), Some(5));
++    }
++
++    #[test]
++    fn long_input_home_clips_tail_but_submission_commits_it() {
++        let mut painter = Painter::new(W::capture());
++        painter.terminal_size = (20, 5);
++        painter.term_is_dumb = false;
++        painter.prompt_start_row.mark_verified(2);
++        let text = format!("BEGIN{}END", "x".repeat(500));
++        let lines = make_lines("status\r\n", "rl> ", "", "", &text);
++        painter
++            .repaint_buffer(
++                &TestPrompt,
++                &lines,
++                PromptEditMode::Default,
++                None,
++                false,
++                &None,
++            )
++            .unwrap();
++        let painted = String::from_utf8_lossy(painter.stdout.captured());
++        assert!(
++            painted.contains("\x1b[5;1H\r\n\r\n"),
++            "preserve output above the editor by scrolling it normally"
++        );
++        assert!(painted.contains("BEGIN"));
++        assert!(
++            !painted.contains("END"),
++            "off-screen tail must not push the beginning away"
++        );
++        let before = painter.stdout.captured().len();
++        painter.move_cursor_to_end().unwrap();
++        let submitted = super::super::utils::strip_ansi(&String::from_utf8_lossy(
++            &painter.stdout.captured()[before..],
++        ));
++        assert!(submitted.contains(&format!("status\nrl> {text}")));
++    }
++
++    #[test]
++    fn repainting_an_existing_long_view_does_not_scroll_again() {
++        let mut painter = Painter::new(W::capture());
++        painter.terminal_size = (20, 5);
++        painter.term_is_dumb = false;
++        painter.prompt_start_row.mark_verified(1);
++        let text = "x".repeat(500);
++        let end = make_lines("status\r\n", "rl> ", "", &text, "");
++        painter
++            .repaint_buffer(
++                &TestPrompt,
++                &end,
++                PromptEditMode::Default,
++                None,
++                false,
++                &None,
++            )
++            .unwrap();
++        let before = painter.stdout.captured().len();
++        let home = make_lines("status\r\n", "rl> ", "", "", &text);
++        painter
++            .repaint_buffer(
++                &TestPrompt,
++                &home,
++                PromptEditMode::Default,
++                None,
++                false,
++                &None,
++            )
++            .unwrap();
++        let painted = String::from_utf8_lossy(&painter.stdout.captured()[before..]);
++        assert!(
++            !painted.contains("\x1b[5;1H"),
++            "no artificial scroll on Home"
++        );
++        assert!(painted.contains("status\r\nrl> "));
++    }
++
++    #[test]
++    fn full_commit_retains_right_prompt_even_when_viewport_hid_it() {
++        let mut painter = Painter::new(W::capture());
++        painter.terminal_size = (20, 5);
++        painter.term_is_dumb = false;
++        painter.prompt_start_row.mark_verified(1);
++        let text = "x".repeat(500);
++        let lines = make_lines("status\r\nrl", "> ", "RP", &text, "");
++        painter
++            .repaint_buffer(
++                &TestPrompt,
++                &lines,
++                PromptEditMode::Default,
++                None,
++                false,
++                &None,
++            )
++            .unwrap();
++        assert!(painter.last_layout.as_ref().unwrap().right_prompt.is_none());
++        let before = painter.stdout.captured().len();
++        painter.move_cursor_to_end().unwrap();
++        let committed = String::from_utf8_lossy(&painter.stdout.captured()[before..]);
++        assert!(committed.contains("RP"));
++        assert!(committed.contains(&text));
++    }
++
+     #[test]
+     fn test_wrapped_line_mapping() {
+         let mut snapshot = base_snapshot();
+@@ -3005,19 +3304,13 @@ mod tests {
+ 
+     #[test]
+     fn test_layout_large_buffer_extra_rows() {
+-        // Screen is 5 lines tall, buffer content exceeds it.
+-        // prompt_height(TEST_PROMPT) - 1 = 0
+-        // prompt_indicator_lines("") = 0
+-        // before_cursor has 7 lines
+-        // total_lines_before = 0 + 0 + 7 - 1 = 6
+-        // extra_rows = 6 - 5 = 1
+-        // extra_rows_after_prompt = 1 - 0 = 1
++        // Seven rows through the caret need two skipped rows in a five-row view.
+         let painter = make_painter(20, 5, true);
+         let lines = make_lines(TEST_PROMPT, "", "", "l1\nl2\nl3\nl4\nl5\nl6\nl7", "");
+         let layout = painter.compute_layout(&lines, None);
+ 
+-        assert_eq!(layout.extra_rows, 1);
+-        assert_eq!(layout.extra_rows_after_prompt, 1);
++        assert_eq!(layout.extra_rows, 2);
++        assert_eq!(layout.extra_rows_after_prompt, 2);
+         assert_eq!(layout.first_buffer_col, 0); // scrolled, so col 0
+     }
+ 
+diff --git a/src/prompt/base.rs b/src/prompt/base.rs
+index 7a480103f101f3e06b112f9a51f4690abb8a4dda..1040c3c4cddebe41268f3c293d46fcb61b9df19b 100644
+--- a/src/prompt/base.rs
++++ b/src/prompt/base.rs
+@@ -261,11 +261,57 @@ impl IntoDiscriminant for PromptEditMode {
+     }
+ }
+ 
++/// Read-only interaction facts for the prompt being painted.
++#[derive(Debug, Clone, Copy)]
++pub enum PromptInteraction<'a> {
++    /// Ordinary buffer editing.
++    Editing,
++    /// The active menu, including an opening or provisional menu.
++    Menu {
++        /// Registered menu name.
++        name: &'a str,
++        /// Currently available values, not an estimated total.
++        count: usize,
++        /// Values cannot yet be accepted for the current buffer.
++        provisional: bool,
++    },
++    /// Reverse history search.
++    HistorySearch {
++        /// Current query.
++        term: &'a str,
++        /// Whether an actual result is available to accept.
++        has_match: bool,
++    },
++}
++
++/// A snapshot supplied before rendering the prompt's components.
++#[derive(Debug)]
++pub struct PromptContext<'a> {
++    /// Full editable buffer, excluding hints.
++    pub buffer: &'a str,
++    /// Byte offset of the insertion point.
++    pub cursor: usize,
++    /// Current selection as a byte range, if any.
++    pub selection: Option<(usize, usize)>,
++    /// Physical terminal columns.
++    pub columns: u16,
++    /// Physical terminal rows.
++    pub rows: u16,
++    /// Actual edit mode.
++    pub edit_mode: PromptEditMode,
++    /// Current interaction.
++    pub interaction: PromptInteraction<'a>,
++}
++
+ /// API to provide a custom prompt.
+ ///
+ /// Implementors have to provide [`str`]-based content which will be
+ /// displayed before the `LineBuffer` is drawn.
+ pub trait Prompt: Send {
++    /// Update cached prompt text from existing facts only. Called on the input
++    /// owner before painting; implementations must not read input or write output.
++    fn update_context(&self, _context: PromptContext<'_>) {}
++
+     /// Provide content of the left full prompt
+     fn render_prompt_left(&self) -> Cow<'_, str>;
+     /// Provide content of the right full prompt
+diff --git a/src/prompt/mod.rs b/src/prompt/mod.rs
+index 8ee197edc984e0e97e52dfd6eb6b063305faa00c..f7ad3fdece9489ad5c669c7f7e79f9ac31c27b6b 100644
+--- a/src/prompt/mod.rs
++++ b/src/prompt/mod.rs
+@@ -3,9 +3,9 @@ mod default;
+ 
+ pub use base::PromptHelixMode;
+ pub use base::{
+-    Prompt, PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch,
+-    PromptHistorySearchStatus, PromptViMode, DEFAULT_INDICATOR_COLOR, DEFAULT_PROMPT_COLOR,
+-    DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
++    Prompt, PromptContext, PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch,
++    PromptHistorySearchStatus, PromptInteraction, PromptViMode, DEFAULT_INDICATOR_COLOR,
++    DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
+ };
+ 
+ pub use default::{

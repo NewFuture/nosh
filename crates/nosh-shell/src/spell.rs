@@ -123,6 +123,32 @@ pub fn best_match<'a>(word: &str, candidates: &'a [String]) -> Option<&'a str> {
     ranked_matches(word, candidates).into_iter().next()
 }
 
+/// Conservative display candidate; adoption still requires a confirmed local lookup.
+pub(crate) fn confident_match<'a>(word: &str, candidates: &'a [String]) -> Option<&'a str> {
+    if !word.is_ascii() || !(2..=32).contains(&word.len()) {
+        return None;
+    }
+    let ranked = ranked_matches(word, candidates);
+    let transposed = |candidate: &&str| {
+        let a = word.as_bytes();
+        let b = candidate.as_bytes();
+        a.len() == b.len()
+            && (0..a.len() - 1).any(|i| {
+                a[..i] == b[..i] && a[i] == b[i + 1] && a[i + 1] == b[i] && a[i + 2..] == b[i + 2..]
+            })
+    };
+    let mut swaps = ranked.iter().copied().filter(transposed);
+    if let Some(candidate) = swaps.next() {
+        return swaps.next().is_none().then_some(candidate);
+    }
+    let mut nearest = ranked
+        .into_iter()
+        .filter(|candidate| osa_distance(word, candidate) == 1);
+    let candidate = nearest.next()?;
+    (word.len() >= 3 && nearest.next().is_none() && COMMON.contains(&candidate))
+        .then_some(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +176,24 @@ mod tests {
         assert_eq!(best_match("pyhton3", &c), Some("python3"));
         assert_eq!(best_match("帮我看看", &c), None);
         assert_eq!(best_match("zzzzzz", &c), None);
+    }
+
+    #[test]
+    fn display_candidates_require_clear_single_edit_evidence() {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            confident_match("gti", &names(&["git", "gtk", "gio"])),
+            Some("git")
+        );
+        assert_eq!(confident_match("gti", &names(&["git", "tgi"])), None);
+        assert_eq!(confident_match("caz", &names(&["cat", "cap"])), None);
+        assert_eq!(confident_match("gitt", &names(&["git"])), Some("git"));
+        assert_eq!(confident_match("pythno33", &names(&["python3"])), None);
+        assert_eq!(confident_match("中文", &names(&["git"])), None);
     }
 }

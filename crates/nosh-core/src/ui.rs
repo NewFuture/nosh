@@ -318,6 +318,13 @@ impl AgentUi for TermUi {
                 approval_label(mode),
                 activity.label()
             );
+            if activity == Activity::Thinking {
+                eprintln!(
+                    "{} {}",
+                    self.bar,
+                    style::dim(tr!("Ctrl+C 结束任务", "Ctrl+C cancel task"))
+                );
+            }
         }
     }
 
@@ -363,6 +370,16 @@ impl AgentUi for TermUi {
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
+        if tool == "run_command" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            eprintln!(
+                "{} {}",
+                self.bar,
+                style::dim(tr!(
+                    "Ctrl+C 中断命令；再次结束任务",
+                    "Ctrl+C interrupt command; again abort task"
+                ))
+            );
+        }
         let label = label
             .replace(" · ", self.stderr.glyph(" · ", " | "))
             .replace('\n', "\\n");

@@ -1,6 +1,7 @@
 //! Interactive REPL: the reedline editor plus the per-line pipeline of §4.2.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -10,8 +11,8 @@ use nosh_hub::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
     ColumnarMenu, CompletionResult, EditCommand, Emacs, KeyCode, KeyModifiers, MenuBuilder, Prompt,
-    PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Suggestion, ValidationResult,
+    PromptContext, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, Suggestion, ValidationResult,
 };
 
 use crate::UserOutput;
@@ -118,6 +119,7 @@ impl OnFailure {
 
 #[derive(Debug, Clone)]
 pub struct ReplConfig {
+    pub status_bar: crate::status::Config,
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
     pub command_assist: bool,
@@ -128,6 +130,7 @@ pub struct ReplConfig {
 impl Default for ReplConfig {
     fn default() -> Self {
         Self {
+            status_bar: Default::default(),
             trigger: Default::default(),
             on_failure: Default::default(),
             command_assist: true,
@@ -525,9 +528,30 @@ fn builtin_help(name: &str) -> String {
     s
 }
 
-const SUGGEST_COMMAND: &str = "__nosh_suggest__";
+pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
+
+#[derive(Clone, Default)]
+struct EditorState {
+    completion: Arc<Mutex<Option<crate::status::Completion>>>,
+    bindings: crate::status::Bindings,
+}
+
+struct RenderedPrompt {
+    left: String,
+    right: String,
+    inline: bool,
+}
 
 struct ReplPrompt {
+    status_enabled: bool,
+    status_feedback: bool,
+    environment: Option<(String, Option<String>)>,
+    approval: String,
+    note: Option<String>,
+    latest_command: Option<u64>,
+    failed_exit: Option<i32>,
+    editor: EditorState,
+    rendered: RefCell<Option<RenderedPrompt>>,
     left: String,
     indicator: String,
     indicator_color: Color,
@@ -542,10 +566,13 @@ impl ReplPrompt {
     fn build(shell: &EmbeddedShell, badge: &Badge) -> Self {
         let (left, custom) = shell.prompt();
         let ok = shell.last_exit_status() == 0;
+        let environment = (!custom).then(|| (left.clone(), git_branch(&shell.cwd())));
         let (left, indicator) = if custom {
             (left, String::new())
         } else {
-            let branch = git_branch(&shell.cwd())
+            let branch = environment
+                .as_ref()
+                .and_then(|(_, branch)| branch.as_ref())
                 .map(|b| format!(" ({b})"))
                 .unwrap_or_default();
             (
@@ -565,6 +592,15 @@ impl ReplPrompt {
             right.push_str(n);
         }
         Self {
+            status_enabled: false,
+            status_feedback: false,
+            environment,
+            approval: badge.mode.clone(),
+            note: badge.note.clone(),
+            latest_command: shell.recent_commands().last().map(|command| command.id),
+            failed_exit: None,
+            editor: EditorState::default(),
+            rendered: RefCell::new(None),
             left,
             indicator,
             indicator_color: if ok { Color::Green } else { Color::Red },
@@ -582,7 +618,127 @@ impl ReplPrompt {
 }
 
 impl Prompt for ReplPrompt {
+    fn update_context(&self, context: PromptContext<'_>) {
+        let mut feedback = self
+            .input_assist
+            .as_ref()
+            .and_then(|assist| assist.feedback(context.buffer));
+        let assistance = self
+            .command_assist
+            .as_ref()
+            .and_then(|assist| assist.result());
+        let completion = self.editor.completion.try_lock();
+        let unavailable = completion
+            .as_ref()
+            .err()
+            .map(|_| crate::status::Completion {
+                input: context.buffer.to_owned(),
+                cursor: context.cursor,
+                error: Some(tr!("补全状态暂不可用", "Completion state unavailable").into()),
+                count: 0,
+            });
+        let completion = match &completion {
+            Ok(snapshot) => snapshot.as_ref().filter(|snapshot| {
+                snapshot.input == context.buffer && snapshot.cursor == context.cursor
+            }),
+            Err(_) => unavailable.as_ref(),
+        };
+        let compose = |feedback: Option<&input_assist::Feedback>| {
+            if !self.status_enabled {
+                return crate::status::Layout::default();
+            }
+            crate::status::compose(crate::status::Context {
+                editor: &context,
+                environment: self
+                    .environment
+                    .as_ref()
+                    .map(|(cwd, branch)| (cwd.as_str(), branch.as_deref())),
+                feedback,
+                completion,
+                assistance: assistance.as_ref(),
+                latest_command: self.latest_command,
+                failed_exit: self.failed_exit,
+                approval: &self.approval,
+                note: self.note.as_deref(),
+                bindings: &self.editor.bindings,
+                color: style::stdout().color,
+                color_depth: crate::status::color_depth(),
+                unicode: style::stdout().unicode,
+            })
+        };
+        let mut layout = compose(feedback.as_ref());
+        if let Some(assist) = &self.input_assist {
+            assist.set_correction_enabled(self.status_enabled);
+            if !assist.present_correction(&context, layout.correction_included)
+                && layout.correction_included
+            {
+                if let Some(feedback) = &mut feedback {
+                    feedback.correction = None;
+                }
+                layout = compose(feedback.as_ref());
+            }
+        }
+        let inline = !layout.text.is_empty();
+        let (left, right) = if inline {
+            let base = if self.environment.is_some() {
+                ""
+            } else {
+                &self.left
+            };
+            (
+                format!("{}\n{base}", layout.text),
+                if layout.note_included {
+                    String::new()
+                } else {
+                    self.note.clone().unwrap_or_default()
+                },
+            )
+        } else {
+            let mut left = if self.left.starts_with('\n') {
+                format!(" {}", self.left)
+            } else {
+                self.left.clone()
+            };
+            let command_status = crate::assist_display::status_text(assistance.as_ref());
+            if !command_status.is_empty() {
+                left = format!("{}\n{left}", style::stdout().paint("2", &command_status));
+            }
+            let status =
+                if let Some(error) = completion.and_then(|snapshot| snapshot.error.as_ref()) {
+                    crate::status::plain(error)
+                } else if self.status_feedback {
+                    feedback
+                        .as_ref()
+                        .map(|feedback| feedback.text.clone())
+                        .unwrap_or_default()
+                } else {
+                    self.input_assist
+                        .as_ref()
+                        .map(|assist| assist.status())
+                        .unwrap_or_default()
+                };
+            if !status.is_empty() {
+                let status = style::clip_line(
+                    &status,
+                    usize::from(context.columns.saturating_sub(1)),
+                    0,
+                    "...",
+                );
+                left = format!("{}\n{left}", style::stdout().paint("2", &status));
+            }
+            (left, self.right.clone())
+        };
+        *self.rendered.borrow_mut() = Some(RenderedPrompt {
+            left,
+            right,
+            inline,
+        });
+    }
+
     fn render_prompt_left(&self) -> Cow<'_, str> {
+        if let Some(rendered) = self.rendered.borrow().as_ref() {
+            return Cow::Owned(rendered.left.clone());
+        }
         let left: Cow<'_, str> = if self.left.starts_with('\n') {
             format!(" {}", self.left).into()
         } else {
@@ -608,6 +764,9 @@ impl Prompt for ReplPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
+        if let Some(rendered) = self.rendered.borrow().as_ref() {
+            return Cow::Owned(rendered.right.clone());
+        }
         self.right.as_str().into()
     }
 
@@ -620,6 +779,14 @@ impl Prompt for ReplPrompt {
     }
 
     fn render_prompt_history_search_indicator(&self, hs: PromptHistorySearch) -> Cow<'_, str> {
+        if self
+            .rendered
+            .borrow()
+            .as_ref()
+            .is_some_and(|rendered| rendered.inline)
+        {
+            return "? ".into();
+        }
         match hs.status {
             PromptHistorySearchStatus::Passing if hs.term.is_empty() => {
                 "(reverse-i-search) ".into()
@@ -681,6 +848,7 @@ struct ShellCompleter {
     rt: Arc<tokio::runtime::Runtime>,
     shell: Arc<Mutex<BrushShell>>,
     input_assist: Option<input_assist::InputAssist>,
+    state: Arc<Mutex<Option<crate::status::Completion>>>,
 }
 
 impl ShellCompleter {
@@ -699,8 +867,22 @@ impl reedline::Completer for ShellCompleter {
         if let Some(assist) = &self.input_assist {
             assist.after_completion(&self.shell);
         }
-        let Ok(c) = completion else {
-            return CompletionResult::fresh(Vec::new());
+        let c = match completion {
+            Ok(completion) => completion,
+            Err(error) => {
+                *self.state.lock().unwrap_or_else(|error| error.into_inner()) =
+                    Some(crate::status::Completion {
+                        input: line.to_owned(),
+                        cursor: pos,
+                        error: Some(format!(
+                            "{}: {}",
+                            tr!("补全暂不可用", "completion unavailable"),
+                            style::visible_text(&error.to_string())
+                        )),
+                        count: 0,
+                    });
+                return CompletionResult::fresh(Vec::new());
+            }
         };
         let quote = open_quote(line, pos);
         let at_end = pos == line.len();
@@ -719,6 +901,13 @@ impl reedline::Completer for ShellCompleter {
                 &c.options,
             ));
         }
+        *self.state.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some(crate::status::Completion {
+                input: line.to_owned(),
+                cursor: pos,
+                error: None,
+                count: out.len(),
+            });
         CompletionResult::fresh(out)
     }
 }
@@ -847,7 +1036,7 @@ fn build_editor(
     shell: &EmbeddedShell,
     cfg: &ReplConfig,
     command_assist: Option<crate::AssistDisplay>,
-) -> (Reedline, Option<input_assist::InputAssist>) {
+) -> (Reedline, Option<input_assist::InputAssist>, EditorState) {
     let (rt, sh) = shell.shared();
     let mut kb = reedline::default_emacs_keybindings();
     kb.add_binding(
@@ -876,6 +1065,13 @@ fn build_editor(
             ReedlineEvent::ExecuteHostCommand(SUGGEST_COMMAND.into()),
         );
     }
+    let mut state = EditorState {
+        completion: Default::default(),
+        bindings: crate::status::Bindings::from_editor(&kb),
+    };
+    if cfg.input_assist.enabled {
+        state.bindings.enable_correction(&kb);
+    }
     let menu = ColumnarMenu::default()
         .with_name("completion_menu")
         .with_marker("")
@@ -891,12 +1087,12 @@ fn build_editor(
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_quick_completions(true)
+        .with_menu_submit_protection(true)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
         .with_validator(Box::new(LineValidator {
             shell: sh.clone(),
             prefix: cfg.trigger.ai_prefix.clone(),
         }))
-        .with_hinter(Box::new(hinter))
         .with_highlighter(Box::new(NoHighlight));
     let assist = cfg.input_assist.enabled.then(|| {
         let repaint = editor.repaint_signal();
@@ -908,10 +1104,15 @@ fn build_editor(
             columns,
         )
     });
+    editor = editor.with_hinter(match &assist {
+        Some(assist) => assist.hinter(hinter),
+        None => Box::new(hinter),
+    });
     editor = editor.with_completer(Box::new(ShellCompleter {
         rt,
         shell: sh,
         input_assist: assist.clone(),
+        state: state.completion.clone(),
     }));
     let edit_mode: Box<dyn reedline::EditMode> = if let Some(assist) = &assist {
         editor = editor.with_highlighter(assist.highlighter());
@@ -929,7 +1130,7 @@ fn build_editor(
     } else {
         editor.with_edit_mode(edit_mode)
     };
-    (editor, assist)
+    (editor, assist, state)
 }
 
 struct NoHighlight;
@@ -995,12 +1196,13 @@ fn read_plain_prompt(
 pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -> i32 {
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
-    let (mut editor, input_assist) = if style::stdout().ansi && std::io::stdin().is_terminal() {
-        let (editor, assist) = build_editor(shell, &cfg, ai.assistance());
-        (Some(editor), assist)
-    } else {
-        (None, None)
-    };
+    let (mut editor, input_assist, editor_state) =
+        if style::stdout().ansi && std::io::stdin().is_terminal() {
+            let (editor, assist, state) = build_editor(shell, &cfg, ai.assistance());
+            (Some(editor), assist, state)
+        } else {
+            (None, None, EditorState::default())
+        };
     if input_assist.is_none() || (cfg.input_assist.enabled && cfg.input_assist.worker.is_none()) {
         shell.warm_command_names();
     }
@@ -1009,11 +1211,24 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         prefix: cfg.trigger.ai_prefix.clone(),
     };
     let mut pipeline = Pipeline::new(cfg);
+    let status_supported = pipeline.cfg.status_bar.enabled && crate::status::supported();
     let mut ui = TermUi;
     let mut prefill: Option<String> = None;
     let code = loop {
         shell.pre_prompt();
         let mut prompt = ReplPrompt::build(shell, &ai.badge());
+        prompt.status_enabled = status_supported && !shell.has_running_jobs();
+        prompt.status_feedback = pipeline.cfg.status_bar.enabled;
+        prompt.editor = editor_state.clone();
+        *editor_state
+            .completion
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        prompt.failed_exit = pipeline.last_failure().map(|command| command.exit);
+        if !pipeline.cfg.trigger.ai_enabled {
+            prompt.approval.clear();
+            prompt.right = prompt.note.clone().unwrap_or_default();
+        }
         prompt.command_assist = ai.assistance();
         if let Some(assist) = &input_assist {
             assist.prepare(
@@ -1099,6 +1314,187 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_prompt(custom: bool) -> ReplPrompt {
+        let mut keys = reedline::default_emacs_keybindings();
+        keys.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::Menu("completion_menu".into()),
+        );
+        keys.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('g'),
+            ReedlineEvent::ExecuteHostCommand(SUGGEST_COMMAND.into()),
+        );
+        ReplPrompt {
+            status_enabled: true,
+            status_feedback: true,
+            environment: (!custom).then(|| ("~/project".into(), Some("main".into()))),
+            approval: "Approval: Auto".into(),
+            note: None,
+            latest_command: None,
+            failed_exit: None,
+            editor: EditorState {
+                completion: Default::default(),
+                bindings: crate::status::Bindings::from_editor(&keys),
+            },
+            rendered: RefCell::new(None),
+            left: if custom {
+                "\x1b[32mcustom\x1b[0m\n$ ".into()
+            } else {
+                "~/project (main) ".into()
+            },
+            indicator: if custom { "".into() } else { "> ".into() },
+            indicator_color: Color::Red,
+            right: "Approval: Auto".into(),
+            right_color: Color::DarkGray,
+            continuation: "PS2> ".into(),
+            input_assist: None,
+            command_assist: None,
+        }
+    }
+
+    fn prompt_context(columns: u16, rows: u16) -> PromptContext<'static> {
+        PromptContext {
+            buffer: "echo ok",
+            cursor: 7,
+            selection: None,
+            columns,
+            rows,
+            edit_mode: PromptEditMode::Emacs,
+            interaction: reedline::PromptInteraction::Editing,
+        }
+    }
+
+    #[test]
+    fn inline_prompt_moves_only_default_environment_and_preserves_indicators() {
+        for custom in [false, true] {
+            let prompt = status_prompt(custom);
+            prompt.update_context(prompt_context(180, 24));
+            let left = prompt.render_prompt_left();
+            if custom {
+                assert!(left.ends_with("\x1b[32mcustom\x1b[0m\n$ "), "{left}");
+                assert!(!left.contains("~/project"));
+            } else {
+                assert!(left.ends_with('\n'), "{left}");
+                assert_eq!(left.matches("~/project").count(), 1, "{left}");
+            }
+            assert!(prompt.render_prompt_right().is_empty());
+            assert_eq!(prompt.get_indicator_color(), Color::Red);
+            assert_eq!(prompt.render_prompt_multiline_indicator(), "PS2> ");
+        }
+    }
+
+    #[test]
+    fn decoration_disabled_or_unusable_restores_original_prompt() {
+        for custom in [false, true] {
+            let mut prompt = status_prompt(custom);
+            prompt.status_enabled = false;
+            prompt.update_context(prompt_context(100, 24));
+            assert_eq!(prompt.render_prompt_left(), prompt.left);
+            assert_eq!(prompt.render_prompt_right(), prompt.right);
+            prompt.status_enabled = true;
+            prompt.update_context(prompt_context(100, 2));
+            assert_eq!(prompt.render_prompt_left(), prompt.left);
+            assert_eq!(prompt.render_prompt_right(), prompt.right);
+        }
+    }
+
+    #[test]
+    fn omitted_mode_does_not_return_as_a_right_badge() {
+        let prompt = status_prompt(false);
+        prompt.update_context(prompt_context(35, 24));
+        assert!(!prompt.render_prompt_left().contains("Approval:"));
+        assert!(prompt.render_prompt_right().is_empty());
+    }
+
+    #[test]
+    fn unrendered_note_is_not_lost_with_the_mode() {
+        let mut prompt = status_prompt(false);
+        prompt.note = Some("important context ".repeat(16));
+        prompt.update_context(prompt_context(55, 24));
+        assert_eq!(
+            prompt.render_prompt_right(),
+            prompt.note.as_deref().unwrap()
+        );
+    }
+
+    #[test]
+    fn command_assistance_shares_one_status_row_and_keeps_acceptance_explicit() {
+        let mut prompt = status_prompt(false);
+        let display = crate::AssistDisplay::default();
+        let version = display.invalidate();
+        assert!(display.publish(
+            version,
+            Some(crate::Assistance::Command {
+                command_id: 19,
+                intent: "next".into(),
+                program: "printf safe".into(),
+            })
+        ));
+        prompt.command_assist = Some(display.clone());
+        prompt.latest_command = Some(19);
+        let mut context = prompt_context(180, 24);
+        context.buffer = "";
+        context.cursor = 0;
+        prompt.update_context(context);
+        let left = prompt.render_prompt_left();
+        assert!(
+            left.contains("next: printf safe") && left.contains("Ctrl+G"),
+            "{left}"
+        );
+        assert_eq!(left.matches('\n').count(), 1);
+        display.invalidate();
+        let mut context = prompt_context(180, 24);
+        context.buffer = "";
+        context.cursor = 0;
+        prompt.update_context(context);
+        assert!(!prompt.render_prompt_left().contains("printf safe"));
+        assert!(!prompt.render_prompt_left().contains("Ctrl+G"));
+    }
+
+    #[test]
+    fn stable_status_stays_above_input_across_feedback_and_interaction_changes() {
+        let mut prompt = status_prompt(false);
+        for width in [32, 48, 80, 120, 160] {
+            let mut expected_environment = None;
+            for (index, buffer) in ["", "echo", "gti status", "git status", ""]
+                .into_iter()
+                .enumerate()
+            {
+                *prompt.editor.completion.lock().unwrap() =
+                    (index == 2).then(|| crate::status::Completion {
+                        input: buffer.into(),
+                        cursor: buffer.len(),
+                        error: Some("completion failed ".repeat(40)),
+                        count: 0,
+                    });
+                prompt.approval = if index % 2 == 0 {
+                    "Approval: Auto".into()
+                } else {
+                    String::new()
+                };
+                let mut context = prompt_context(width, 24);
+                context.buffer = buffer;
+                context.cursor = buffer.len();
+                prompt.update_context(context);
+                let left = style::strip_ansi(&prompt.render_prompt_left());
+                assert_eq!(left.matches('\n').count(), 1, "{width}/{index}: {left:?}");
+                assert!(left.ends_with('\n') && !left.ends_with(&prompt.left));
+                assert_eq!(
+                    style::width(left.lines().next().unwrap()),
+                    usize::from(width - 1)
+                );
+                let environment_column = left.find("~/project");
+                if let Some(previous) = expected_environment {
+                    assert_eq!(previous, environment_column);
+                }
+                expected_environment = Some(environment_column);
+                assert!(prompt.render_prompt_right().is_empty());
+            }
+        }
+    }
 
     #[test]
     fn unquoting() {

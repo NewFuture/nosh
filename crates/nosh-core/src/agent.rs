@@ -671,6 +671,7 @@ impl Agent {
         &mut self,
         tool: &str,
         detail: &str,
+        cwd: &std::path::Path,
         report: &RiskReport,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
@@ -701,6 +702,7 @@ impl Agent {
                 let req = ApprovalRequest {
                     tool: tool.into(),
                     command: detail.into(),
+                    cwd: cwd.to_path_buf(),
                     risk: if strong {
                         report.risk().max(Risk::Dangerous)
                     } else {
@@ -780,7 +782,8 @@ impl Agent {
                 return Exec::Result(format!("error: invalid command syntax: {error}"));
             }
             let shown = report.rewritten.as_deref().unwrap_or(&command);
-            let label = match self.authorize("run_command", shown, &report, approval, ui) {
+            let label = match self.authorize("run_command", shown, &ctx.cwd, &report, approval, ui)
+            {
                 Authorization::Allowed {
                     label,
                     manual,
@@ -928,6 +931,7 @@ impl Agent {
             Ok(value) => value,
             Err(error) => return error,
         };
+        ui.state(self.cfg.mode, Activity::Running);
         ui.tool_start(&call.name, &path.display().to_string(), Some(risk), &label);
         let root_protected = matches!(
             classify_path_real(&path, &ctx, true).0,
@@ -1012,7 +1016,7 @@ impl Agent {
     ) -> Result<(Risk, String, bool), Exec> {
         let report = assess_read(&call.name, path, None, ctx);
         let detail = format!("{} {}", call.name, path.display());
-        match self.authorize(&call.name, &detail, &report, approval, ui) {
+        match self.authorize(&call.name, &detail, &ctx.cwd, &report, approval, ui) {
             Authorization::Allowed { label, manual, .. } => Ok((report.risk(), label, manual)),
             Authorization::Denied(reason) => Err(Exec::Denied(reason)),
             Authorization::Edit(_) => unreachable!("read approvals cannot edit calls"),

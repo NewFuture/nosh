@@ -2,12 +2,12 @@
 resolver = "3"
 members = ["crates/*", "tests"]
 default-members = ["crates/*", "tests"]
-exclude = ["third_party"]
+exclude = ["third_party", ".nosh", "tools/source"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.98.1"
 license = "Apache-2.0"
 repository = "https://github.com/NewFuture/nosh"
 publish = false
@@ -20,7 +20,7 @@ nosh-llm = { path = "crates/nosh-llm" }
 nosh-hub = { path = "crates/nosh-hub" }
 
 anyhow = "1.0.104"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"
@@ -32,20 +32,21 @@ libc = "0.2"
 brush-core = "0.5.0"
 brush-parser = "0.4.0"
 brush-builtins = "0.2.0"
-reedline = "0.51.0"
+reedline = { version = "=0.52.0", path = ".nosh/reedline" }
 crossterm = "0.29.0"
 nu-ansi-term = "0.50.3"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
-vte = "0.14.1"
-signal-hook = "0.3.18"
+# Keep the bounded, zero-sized OSC buffer rather than std's growable buffer.
+vte = { version = "0.15.0", default-features = false }
+signal-hook = "0.4.4"
 filedescriptor = "0.8.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "signal", "time", "macros", "sync"] }
 
 # inference: pinned candle main rev (runtime AVX2/AVX-512 dispatch, tokenizers 0.23 + fancy-regex);
 # candle-core itself comes from third_party/candle-core (same rev plus one patch, see [patch] below)
-candle-core = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
-candle-nn = { git = "https://github.com/huggingface/candle", rev = "9b1be4a321ef265f13d2c30be4f2037109c51d14" }
+candle-core = { git = "https://github.com/huggingface/candle", rev = "5ba5d5b468b5b1df40e82dd3d556987bedeea041" }
+candle-nn = { git = "https://github.com/huggingface/candle", rev = "5ba5d5b468b5b1df40e82dd3d556987bedeea041" }
 gemm = "0.19.0"
 half = "2.7.1"
 memchr = "2.8.3"
@@ -61,7 +62,7 @@ indicatif = "0.18.6"
 ignore = "0.4.33"
 globset = "0.4.20"
 grep-regex = "0.1.14"
-grep-searcher = "0.1.16"
+grep-searcher = "0.1.17"
 
 # tests
 tempfile = "3.27.0"

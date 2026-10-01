@@ -6,13 +6,32 @@ use std::time::{Duration, Instant};
 
 use nosh_hub::tr;
 use nu_ansi_term::{Color, Style};
-use reedline::{EditMode, Emacs, Highlighter, ReedlineEvent, ReedlineRawEvent, StyledText};
+use reedline::{
+    EditMode, Emacs, Highlighter, Hinter, History, PromptContext, PromptInteraction, ReedlineEvent,
+    ReedlineRawEvent, StyledText,
+};
 
 use super::worker::{ChildHandle, Kind, Worker, kill_child};
 use super::*;
 use crate::style;
 
 const MISSING_COMMAND_IDLE: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone)]
+pub(crate) struct Feedback {
+    pub text: String,
+    pub compact: String,
+    pub state: State,
+    pub correction: Option<Correction>,
+}
+
+#[derive(Default)]
+struct FeedbackSnapshot {
+    input: Option<Arc<Input>>,
+    generation: u64,
+    session: u64,
+    value: Option<Feedback>,
+}
 
 #[derive(Default)]
 struct Mailbox {
@@ -27,6 +46,22 @@ struct Publication {
     syntax_error: Option<String>,
     lookup_error: Option<String>,
     serial: u64,
+    correction: Option<Correction>,
+}
+
+struct CorrectionSnapshot {
+    input: Arc<Input>,
+    proposal: Correction,
+    epoch: u64,
+}
+
+impl CorrectionSnapshot {
+    fn current(&self, shared: &Shared) -> bool {
+        shared.current(self.input.version)
+            && shared.correction_enabled.load(Ordering::Acquire)
+            && self.epoch == shared.edit_epoch.load(Ordering::Acquire)
+            && self.proposal.matches(&self.input)
+    }
 }
 
 struct Shared {
@@ -34,6 +69,10 @@ struct Shared {
     wake: Condvar,
     publication: Mutex<Publication>,
     display: Mutex<String>,
+    feedback: Mutex<FeedbackSnapshot>,
+    correction: Mutex<Option<CorrectionSnapshot>>,
+    correction_enabled: AtomicBool,
+    edit_epoch: AtomicU64,
     started: Instant,
     delayed_session: AtomicU64,
     delayed_input: AtomicU64,
@@ -90,6 +129,10 @@ impl InputAssist {
             wake: Condvar::new(),
             publication: Mutex::new(Publication::default()),
             display: Mutex::new(String::new()),
+            feedback: Mutex::new(FeedbackSnapshot::default()),
+            correction: Mutex::new(None),
+            correction_enabled: AtomicBool::new(false),
+            edit_epoch: AtomicU64::new(0),
             started: Instant::now(),
             delayed_session: AtomicU64::new(0),
             delayed_input: AtomicU64::new(0),
@@ -167,6 +210,66 @@ impl InputAssist {
         Box::new(InputHighlighter {
             assist: self.clone(),
             cache: RefCell::new(RenderCache::default()),
+        })
+    }
+
+    pub(crate) fn hinter(&self, inner: reedline::DefaultHinter) -> Box<dyn Hinter> {
+        Box::new(CorrectionHinter {
+            assist: self.clone(),
+            inner,
+            hidden: false,
+        })
+    }
+
+    pub(crate) fn set_correction_enabled(&self, enabled: bool) {
+        if self
+            .shared
+            .correction_enabled
+            .swap(enabled, Ordering::AcqRel)
+            != enabled
+        {
+            self.shared.edit_epoch.fetch_add(1, Ordering::AcqRel);
+            self.shared.wake.notify_one();
+        }
+    }
+
+    pub(crate) fn present_correction(&self, context: &PromptContext<'_>, presented: bool) -> bool {
+        let ready = if presented
+            && context.cursor == context.buffer.len()
+            && context.selection.is_none()
+            && matches!(context.interaction, PromptInteraction::Editing)
+        {
+            self.shared.feedback.try_lock().ok().and_then(|snapshot| {
+                let input = snapshot.input.as_ref()?;
+                let proposal = snapshot.value.as_ref()?.correction.as_ref()?;
+                (input.text == context.buffer
+                    && proposal.matches(input)
+                    && self.shared.current(input.version))
+                .then(|| CorrectionSnapshot {
+                    input: input.clone(),
+                    proposal: proposal.clone(),
+                    epoch: self.shared.edit_epoch.load(Ordering::Acquire),
+                })
+            })
+        } else {
+            None
+        };
+        if let Ok(mut view) = self.shared.correction.try_lock() {
+            *view = ready;
+            view.is_some()
+        } else {
+            self.shared.edit_epoch.fetch_add(1, Ordering::AcqRel);
+            false
+        }
+    }
+
+    fn correction_matches(&self, line: &str, cursor: usize) -> bool {
+        self.shared.correction.try_lock().ok().is_some_and(|view| {
+            view.as_ref().is_some_and(|snapshot| {
+                snapshot.current(&self.shared)
+                    && snapshot.input.text == line
+                    && cursor == line.len()
+            })
         })
     }
 
@@ -252,7 +355,63 @@ impl InputAssist {
         )
     }
 
+    pub(crate) fn feedback(&self, line: &str) -> Option<Feedback> {
+        if !self.shared.show_status.load(Ordering::Acquire) {
+            return None;
+        }
+        let Ok(snapshot) = self.shared.feedback.try_lock() else {
+            return Some(Feedback {
+                text: tr!(
+                    "诊断暂不可用：状态忙",
+                    "Diagnostics unavailable: status busy"
+                )
+                .into(),
+                compact: tr!("诊断状态忙", "Diagnostic status busy").into(),
+                state: State::Unavailable,
+                correction: None,
+            });
+        };
+        if snapshot.session != self.shared.session.load(Ordering::Acquire)
+            || snapshot.generation != self.shared.generation.load(Ordering::Acquire)
+            || snapshot
+                .input
+                .as_ref()
+                .is_some_and(|input| input.text != line)
+        {
+            return None;
+        }
+        snapshot.value.clone()
+    }
+
+    fn set_feedback(&self, input: Option<Arc<Input>>, value: Option<Feedback>) {
+        if let Ok(mut snapshot) = self.shared.feedback.try_lock() {
+            *snapshot = FeedbackSnapshot {
+                input,
+                generation: self.shared.generation.load(Ordering::Acquire),
+                session: self.shared.session.load(Ordering::Acquire),
+                value,
+            };
+        }
+    }
+
     fn set_display(&self, text: &str) {
+        self.set_display_state(text, State::Unavailable);
+    }
+
+    fn set_display_state(&self, text: &str, state: State) {
+        self.set_feedback(
+            None,
+            (!text.is_empty()).then(|| Feedback {
+                text: crate::status::plain(text),
+                compact: style::clip_line(&crate::status::plain(text), 28, 0, "..."),
+                state,
+                correction: None,
+            }),
+        );
+        self.set_legacy_display(text);
+    }
+
+    fn set_legacy_display(&self, text: &str) {
         if let Ok(mut status) = self.shared.display.try_lock() {
             if status.as_str() == text {
                 return;
@@ -323,6 +482,7 @@ struct RenderCache {
     spans: Vec<Span>,
     findings: Vec<Finding>,
     requested: Option<Instant>,
+    correction: Option<Correction>,
 }
 
 struct InputHighlighter {
@@ -358,13 +518,17 @@ impl Highlighter for InputHighlighter {
             cache.input = self.assist.request(line);
             cache.spans.clear();
             cache.findings.clear();
+            cache.correction = None;
             cache.serial = u64::MAX;
             cache.requested = Some(Instant::now());
             if cache.input.is_none() {
-                self.assist.set_display(tr!(
-                    "输入分析查询中：队列忙",
-                    "Input analysis pending: mailbox busy"
-                ));
+                self.assist.set_display_state(
+                    tr!(
+                        "输入分析查询中：队列忙",
+                        "Input analysis pending: mailbox busy"
+                    ),
+                    State::Pending,
+                );
                 (self.assist.shared.repaint)();
                 return plain(line);
             }
@@ -381,6 +545,7 @@ impl Highlighter for InputHighlighter {
             .map(|p| p.clone());
         if publication.is_none() {
             cache.findings = vec![unavailable("diagnostic publication busy")];
+            cache.correction = None;
             cache.serial = u64::MAX;
         }
         if let Some(publication) = publication
@@ -388,6 +553,9 @@ impl Highlighter for InputHighlighter {
         {
             cache.serial = publication.serial;
             cache.findings.clear();
+            cache.correction = publication
+                .correction
+                .filter(|proposal| proposal.matches(&input));
             let analysis = publication
                 .analysis
                 .as_ref()
@@ -453,6 +621,7 @@ impl Highlighter for InputHighlighter {
                 .is_some_and(|t| t.elapsed() > INDEX_TIMEOUT * 3)
         {
             cache.findings = vec![unavailable("diagnostic worker is not responding")];
+            cache.correction = None;
         }
         let missing_commands: Vec<&Finding> = cache
             .findings
@@ -472,7 +641,12 @@ impl Highlighter for InputHighlighter {
                 .delay_repaint_until(input.version, requested + MISSING_COMMAND_IDLE);
         }
         self.assist
-            .set_display(&status_text(&cache.findings, cursor));
+            .set_legacy_display(&status_text(&cache.findings, cursor));
+        self.assist.set_feedback(
+            cache.input.clone(),
+            primary_finding(&cache.findings, cursor, reveal_missing_commands)
+                .map(|finding| finding_feedback(finding, &input, cache.correction.as_ref())),
+        );
         if cache.spans.is_empty() {
             return plain(line);
         }
@@ -505,8 +679,27 @@ struct InputEditMode {
 }
 
 impl EditMode for InputEditMode {
-    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
-        let event = self.inner.parse_event(event);
+    fn parse_event(&mut self, raw: ReedlineRawEvent) -> ReedlineEvent {
+        let raw: crossterm::event::Event = raw.into();
+        let right = matches!(&raw, crossterm::event::Event::Key(key)
+            if key.code == crossterm::event::KeyCode::Right && key.modifiers.is_empty());
+        let event = self
+            .inner
+            .parse_event(ReedlineRawEvent::try_from(raw).expect("normalized raw event"));
+        let correction = if right && right_navigation(&event) {
+            self.shared.correction.try_lock().ok().and_then(|mut view| {
+                view.take()
+                    .filter(|snapshot| snapshot.current(&self.shared))
+                    .map(|snapshot| snapshot.proposal.edit())
+            })
+        } else {
+            None
+        };
+        // Reedline parses a whole key batch before running it. Any earlier key
+        // invalidates the painted adoption snapshot, even without a repaint.
+        if !matches!(event, ReedlineEvent::Repaint) {
+            self.shared.edit_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         if let ReedlineEvent::Resize(columns, _) = &event {
             self.shared
                 .columns
@@ -516,11 +709,51 @@ impl EditMode for InputEditMode {
             self.shared.show_status.store(false, Ordering::Release);
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
         }
-        event
+        correction.unwrap_or(event)
     }
 
     fn edit_mode(&self) -> reedline::PromptEditMode {
         self.inner.edit_mode()
+    }
+}
+
+struct CorrectionHinter {
+    assist: InputAssist,
+    inner: reedline::DefaultHinter,
+    hidden: bool,
+}
+
+impl Hinter for CorrectionHinter {
+    fn handle(
+        &mut self,
+        line: &str,
+        pos: usize,
+        history: &dyn History,
+        color: bool,
+        cwd: &str,
+    ) -> String {
+        self.hidden = self.assist.correction_matches(line, pos);
+        if self.hidden {
+            String::new()
+        } else {
+            self.inner.handle(line, pos, history, color, cwd)
+        }
+    }
+
+    fn complete_hint(&self) -> String {
+        if self.hidden {
+            String::new()
+        } else {
+            self.inner.complete_hint()
+        }
+    }
+
+    fn next_hint_token(&self) -> String {
+        if self.hidden {
+            String::new()
+        } else {
+            self.inner.next_hint_token()
+        }
     }
 }
 
@@ -578,9 +811,15 @@ fn pending() -> Finding {
 }
 
 fn status_text(findings: &[Finding], cursor: usize) -> String {
-    let finding = findings
+    primary_finding(findings, cursor, false)
+        .map(finding_text)
+        .unwrap_or_default()
+}
+
+fn primary_finding(findings: &[Finding], cursor: usize, include_missing: bool) -> Option<&Finding> {
+    findings
         .iter()
-        .filter(|finding| !matches!(finding.reason, Reason::MissingCommand))
+        .filter(|finding| include_missing || !matches!(finding.reason, Reason::MissingCommand))
         .min_by_key(|finding| {
             let priority = match finding.state {
                 State::Error => 0,
@@ -591,10 +830,94 @@ fn status_text(findings: &[Finding], cursor: usize) -> String {
                 State::Known => 5,
             };
             (priority, !finding.range.contains(&cursor))
-        });
-    let Some(finding) = finding else {
-        return String::new();
+        })
+}
+
+fn finding_feedback(finding: &Finding, input: &Input, correction: Option<&Correction>) -> Feedback {
+    let correction = correction.filter(|proposal| {
+        proposal.matches(input)
+            && proposal.range == finding.range
+            && matches!(finding.reason, Reason::MissingCommand)
+    });
+    if let Some(proposal) = correction {
+        return Feedback {
+            text: format!(
+                "{} {}{} {} {}",
+                tr!("未找到", "Unknown"),
+                proposal.from,
+                tr!("，", ";"),
+                tr!("建议", "try"),
+                proposal.to
+            ),
+            compact: format!(
+                "{} {} {}",
+                proposal.from,
+                style::stdout().glyph("→", "->"),
+                proposal.to
+            ),
+            state: State::Error,
+            correction: Some(proposal.clone()),
+        };
+    }
+    let text = if matches!(finding.reason, Reason::MissingCommand) {
+        format!(
+            "{}: {}",
+            tr!("未找到命令", "No executable command"),
+            crate::status::plain(input.text.get(finding.range.clone()).unwrap_or_default())
+        )
+    } else {
+        crate::status::plain(&finding_text(finding))
     };
+    let compact = match &finding.reason {
+        Reason::MissingCommand => tr!("无此命令", "No cmd").into(),
+        Reason::MissingPath => tr!("路径不存在", "Path absent").into(),
+        Reason::NotExecutable => tr!("路径不可执行", "Path not executable").into(),
+        Reason::AccessDenied(_) => tr!("路径无法访问", "Path inaccessible").into(),
+        Reason::NotDirectory => tr!("目标不是目录", "Not a directory").into(),
+        Reason::DirectoryOutput => tr!("不能输出到目录", "Output is a directory").into(),
+        Reason::Pending => tr!("查询中", "Query pending").into(),
+        Reason::Limit => tr!("诊断资源超限", "Diagnostic limit").into(),
+        Reason::NewTarget => tr!("输出尚未检查", "Output unchecked").into(),
+        Reason::Dynamic => tr!("需要运行时解析", "Runtime resolution needed").into(),
+        Reason::Snapshot => tr!("前序命令可能改变快照", "Snapshot may change").into(),
+        Reason::Ai => tr!("AI 输入，尚未执行", "AI input, not executed").into(),
+        Reason::Abbreviation => tr!("可用缩写，尚未展开", "Abbreviation, not expanded").into(),
+        Reason::Syntax(reason) => style::clip_line(
+            &format!("{}: {}", tr!("错误", "Error"), crate::status::plain(reason)),
+            28,
+            0,
+            "...",
+        ),
+        Reason::Incomplete(reason) => style::clip_line(
+            &format!(
+                "{}: {}",
+                tr!("待完成", "Incomplete"),
+                crate::status::plain(reason)
+            ),
+            28,
+            0,
+            "...",
+        ),
+        Reason::Worker(reason) | Reason::Io(reason) => style::clip_line(
+            &format!(
+                "{}: {}",
+                tr!("不可用", "Unavailable"),
+                crate::status::plain(reason)
+            ),
+            28,
+            0,
+            "...",
+        ),
+    };
+    Feedback {
+        text,
+        compact,
+        state: finding.state,
+        correction: None,
+    }
+}
+
+fn finding_text(finding: &Finding) -> String {
     let label = match finding.state {
         State::Known => tr!("输入", "Input"),
         State::Error => tr!("输入错误", "Input error"),
@@ -756,12 +1079,22 @@ impl Slot {
     }
 }
 
+struct ResolvedLookup {
+    input: Arc<Input>,
+    queries: Vec<Query>,
+    observations: Arc<Vec<Observation>>,
+}
+
 fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
     let mut syntax = Slot::default();
     let mut lookup = Slot::default();
     let mut next_syntax = None;
     let mut next_lookup = None;
     let mut next_index = None;
+    let mut next_correction = None;
+    let mut resolved: Option<ResolvedLookup> = None;
+    let mut seen: Option<(Version, Instant)> = None;
+    let mut correction_attempt = None;
     let mut session = 0;
     let mut publication = Publication::default();
     let mut dirty = false;
@@ -779,6 +1112,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                 next_syntax = None;
                 next_lookup = None;
                 next_index = None;
+                next_correction = None;
+                resolved = None;
                 syntax.cancel();
                 lookup.cancel();
             } else {
@@ -798,6 +1133,11 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                     }
                 }
                 if let Some(input) = latest {
+                    seen = Some((input.version, Instant::now()));
+                    correction_attempt = None;
+                    resolved = None;
+                    next_correction = None;
+                    publication.correction = None;
                     next_syntax = Some(input);
                     next_lookup = None;
                 }
@@ -821,6 +1161,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                 {
                     if shared.current(input.version) {
                         publication.lookup = None;
+                        resolved = None;
+                        publication.correction = None;
                         next_lookup = None;
                         if !analysis.queries.is_empty() {
                             next_lookup = Some((input, analysis.queries.clone()));
@@ -867,7 +1209,24 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                             dirty = true;
                             continue;
                         }
-                        publication.lookup = Some((version, Arc::new(observations), stats));
+                        let observations = Arc::new(observations);
+                        resolved = Some(ResolvedLookup {
+                            input,
+                            queries,
+                            observations: observations.clone(),
+                        });
+                        publication.lookup = Some((version, observations, stats));
+                        publication.serial += 1;
+                        dirty = true;
+                    }
+                }
+                (
+                    Kind::Lookup,
+                    Some(Request::Correction { input, proposal }),
+                    Response::Correction { version, accepted },
+                ) if version == input.version && proposal.matches(&input) => {
+                    if shared.current(version) {
+                        publication.correction = accepted.then_some(proposal);
                         publication.serial += 1;
                         dirty = true;
                     }
@@ -892,6 +1251,24 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                 }
                 (_, _, Response::Failed(error)) => slot.fail(error, session),
                 _ => slot.fail("invalid or mismatched worker response".into(), session),
+            }
+        }
+        if shared.correction_enabled.load(Ordering::Acquire)
+            && let Some(ResolvedLookup {
+                input,
+                queries,
+                observations,
+            }) = &resolved
+            && shared.current(input.version)
+            && correction_attempt != Some(input.version)
+            && seen.is_some_and(|(version, since)| {
+                version == input.version && since.elapsed() >= MISSING_COMMAND_IDLE
+            })
+            && let Some(cached) = index.try_lock().ok().and_then(|cache| cache.clone())
+        {
+            correction_attempt = Some(input.version);
+            if let Some(proposal) = Correction::propose(input, queries, observations, &cached) {
+                next_correction = Some((input.clone(), proposal));
             }
         }
         if syntax.ready()
@@ -919,6 +1296,15 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                     Kind::Lookup,
                     session,
                 );
+            } else if let Some((input, proposal)) = next_correction.take()
+                && shared.current(input.version)
+            {
+                lookup.start(
+                    Request::Correction { input, proposal },
+                    &launcher,
+                    Kind::Lookup,
+                    session,
+                );
             }
         }
         if let Ok(mut children) = shared.children.try_lock() {
@@ -930,6 +1316,9 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
         if publication.syntax_error != syntax.error || publication.lookup_error != lookup.error {
             publication.syntax_error.clone_from(&syntax.error);
             publication.lookup_error.clone_from(&lookup.error);
+            if syntax.error.is_some() || lookup.error.is_some() {
+                publication.correction = None;
+            }
             publication.serial += 1;
             dirty = true;
         }
@@ -980,6 +1369,16 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
         };
         if let Some(delay) = delayed {
             interval = interval.min(delay);
+        }
+        if let Some((version, since)) = seen
+            && shared.current(version)
+            && correction_attempt != Some(version)
+            && shared.correction_enabled.load(Ordering::Acquire)
+        {
+            let delay = (since + MISSING_COMMAND_IDLE).saturating_duration_since(Instant::now());
+            if !delay.is_zero() {
+                interval = interval.min(delay);
+            }
         }
         if let Ok(mailbox) = shared.mailbox.try_lock() {
             if mailbox.latest.is_some() || shared.stopped.load(Ordering::Acquire) {
@@ -1047,6 +1446,262 @@ mod tests {
             }
         }
         assert_eq!(assist.shared.generation.load(Ordering::Acquire), generation);
+    }
+
+    fn key(
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> ReedlineRawEvent {
+        ReedlineRawEvent::try_from(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(code, modifiers),
+        ))
+        .unwrap()
+    }
+
+    fn correction_context(buffer: &str) -> PromptContext<'_> {
+        PromptContext {
+            buffer,
+            cursor: buffer.len(),
+            selection: None,
+            columns: 160,
+            rows: 24,
+            edit_mode: reedline::PromptEditMode::Emacs,
+            interaction: PromptInteraction::Editing,
+        }
+    }
+
+    fn ready_correction(text: &str) -> (Fixture, InputAssist, InputHighlighter) {
+        let (fixture, assist, highlighter) = editor();
+        assist.set_correction_enabled(true);
+        highlighter.highlight(text, text.len());
+        let input = highlighter.cache.borrow().input.clone().unwrap();
+        let analysis = analysis::analyze(&input);
+        let mut lookup = lookup::Lookup::default();
+        let observations = lookup.run(&input, &analysis.queries);
+        let index = Index {
+            cwd: input.context.cwd.clone(),
+            path: input.context.path.clone(),
+            complete: true,
+            reason: None,
+            names: Arc::new(vec!["git".into()]),
+        };
+        let proposal =
+            Correction::propose(&input, &analysis.queries, &observations, &index).unwrap();
+        assert!(lookup.confirm_correction(&input, &proposal));
+        assist.shared.publish(|p| {
+            p.syntax_error = None;
+            p.analysis = Some(Arc::new(analysis));
+            p.lookup = Some((input.version, Arc::new(observations), lookup.stats()));
+            p.correction = Some(proposal);
+        });
+        highlighter.cache.borrow_mut().requested = Some(Instant::now() - MISSING_COMMAND_IDLE);
+        highlighter.highlight(text, text.len());
+        assert!(assist.feedback(text).unwrap().correction.is_some());
+        (fixture, assist, highlighter)
+    }
+
+    #[test]
+    fn correction_adoption_is_one_undoable_edit_and_never_a_host_command() {
+        let text = "gti status -- '中文 e\u{301} 👩\u{200d}💻' && echo 'tail'";
+        let (_fixture, assist, _highlighter) = ready_correction(text);
+        assert!(assist.present_correction(&correction_context(text), true));
+        let mut mode = assist.edit_mode(Emacs::default());
+        let event = mode.parse_event(key(
+            crossterm::event::KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let ReedlineEvent::Edit(commands) = event else {
+            panic!("adoption must only edit the draft")
+        };
+        let mut editor = reedline::Reedline::create();
+        editor.run_edit_commands(&[reedline::EditCommand::InsertString(text.into())]);
+        editor.run_edit_commands(&commands);
+        assert_eq!(
+            editor.current_buffer_contents(),
+            text.replacen("gti", "git", 1)
+        );
+        editor.run_edit_commands(&[reedline::EditCommand::Undo]);
+        assert_eq!(editor.current_buffer_contents(), text);
+    }
+
+    #[test]
+    fn earlier_keys_in_a_batch_disable_the_painted_correction_snapshot() {
+        use crossterm::event::{KeyCode as K, KeyModifiers as M};
+        for first in [
+            key(K::Char('x'), M::NONE),
+            key(K::Left, M::NONE),
+            key(K::Left, M::SHIFT),
+            key(K::Tab, M::NONE),
+            key(K::Char('r'), M::CONTROL),
+            ReedlineRawEvent::try_from(crossterm::event::Event::Paste("new input".into())).unwrap(),
+            ReedlineRawEvent::try_from(crossterm::event::Event::Resize(60, 24)).unwrap(),
+        ] {
+            let (_fixture, assist, _highlighter) = ready_correction("gti status");
+            assert!(assist.present_correction(&correction_context("gti status"), true));
+            let mut mode = assist.edit_mode(Emacs::default());
+            mode.parse_event(first);
+            assert!(right_navigation(&mode.parse_event(key(K::Right, M::NONE))));
+        }
+    }
+
+    #[test]
+    fn line_middle_selection_menu_search_and_unpresented_correction_keep_right_navigation() {
+        use crossterm::event::{KeyCode as K, KeyModifiers as M};
+        let (_fixture, assist, _highlighter) = ready_correction("gti status");
+        let mut mode = assist.edit_mode(Emacs::default());
+        for case in 0..5 {
+            let mut context = correction_context("gti status");
+            match case {
+                0 => context.cursor = 2,
+                1 => context.selection = Some((0, 3)),
+                2 => {
+                    context.interaction = PromptInteraction::Menu {
+                        name: "completion_menu",
+                        count: 1,
+                        provisional: false,
+                    }
+                }
+                3 => {
+                    context.interaction = PromptInteraction::HistorySearch {
+                        term: "gti",
+                        has_match: true,
+                    }
+                }
+                _ => {}
+            }
+            assert!(!assist.present_correction(&context, case != 4));
+            assert!(right_navigation(&mode.parse_event(key(K::Right, M::NONE))));
+        }
+    }
+
+    #[test]
+    fn local_correction_and_visible_history_hint_never_share_right() {
+        let text = "gti status";
+        let (_fixture, assist, _highlighter) = ready_correction(text);
+        let mut history = reedline::FileBackedHistory::new(8).unwrap();
+        history
+            .save(reedline::HistoryItem::from_command_line(
+                "gti status old-history",
+            ))
+            .unwrap();
+        let mut hinter = assist.hinter(reedline::DefaultHinter::default());
+        assert!(
+            hinter
+                .handle(text, text.len(), &history, false, "")
+                .contains("old-history")
+        );
+        assert!(assist.present_correction(&correction_context(text), true));
+        assert_eq!(hinter.handle(text, text.len(), &history, false, ""), "");
+        assert_eq!(hinter.complete_hint(), "");
+        assist.present_correction(&correction_context(text), false);
+        assert!(
+            hinter
+                .handle(text, text.len(), &history, false, "")
+                .contains("old-history")
+        );
+        assert!(hinter.complete_hint().contains("old-history"));
+    }
+
+    #[test]
+    fn late_old_candidate_cannot_replace_a_new_draft_or_session() {
+        let (_fixture, assist, highlighter) = ready_correction("gti status");
+        let old = assist.shared.publication.lock().unwrap().clone();
+        assert!(assist.present_correction(&correction_context("gti status"), true));
+        highlighter.highlight("gti new-params", 14);
+        assist.shared.publish(|p| *p = old);
+        highlighter.highlight("gti new-params", 14);
+        assert!(
+            assist
+                .feedback("gti new-params")
+                .is_none_or(|feedback| feedback.correction.is_none())
+        );
+        assert!(!assist.present_correction(&correction_context("gti new-params"), true));
+        assist.suspend();
+        assert!(!assist.present_correction(&correction_context("gti status"), true));
+    }
+
+    #[test]
+    fn real_owned_worker_confirms_local_correction_with_ai_disabled() {
+        let fixture = Fixture::new();
+        let mut context = fixture.context();
+        context.ai_enabled = false;
+        let assist = InputAssist::new(
+            Some(launcher("input_assist::tests::worker_probe")),
+            Arc::new(Mutex::new(None)),
+            Arc::new(|| {}),
+            160,
+        );
+        assist.prepare(Ok(context));
+        assist.set_correction_enabled(true);
+        let highlighter = assist.highlighter();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            highlighter.highlight("gti status", 10);
+            if assist
+                .feedback("gti status")
+                .is_some_and(|feedback| feedback.correction.is_some())
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owned worker never confirmed the local candidate"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(assist.present_correction(&correction_context("gti status"), true));
+    }
+
+    #[test]
+    fn typed_feedback_waits_for_missing_command_delay_and_rejects_stale_input() {
+        let (_, assist, highlighter) = editor();
+        let text = "missing_command_for_feedback";
+        highlighter.highlight(text, text.len());
+        let input = highlighter.cache.borrow().input.clone().unwrap();
+        let mut analysis = analysis::analyze(&input);
+        analysis.queries.clear();
+        analysis.findings = vec![Finding {
+            range: 0..text.len(),
+            state: State::Error,
+            reason: Reason::MissingCommand,
+        }];
+        assist.shared.publish(|publication| {
+            publication.syntax_error = None;
+            publication.analysis = Some(Arc::new(analysis));
+        });
+        highlighter.highlight(text, text.len());
+        assert!(assist.feedback(text).is_none());
+        highlighter.cache.borrow_mut().requested = Some(Instant::now() - MISSING_COMMAND_IDLE);
+        highlighter.highlight(text, text.len());
+        let feedback = assist.feedback(text).unwrap();
+        assert_eq!(feedback.state, State::Error);
+        assert!(!feedback.text.is_empty() && !feedback.compact.is_empty());
+        assert!(
+            assist.status().is_empty(),
+            "disabled status keeps its original feedback contract"
+        );
+        assert!(assist.feedback("different input").is_none());
+        assist.suspend();
+        assert!(assist.feedback(text).is_none());
+    }
+
+    #[test]
+    fn search_hides_feedback_and_editing_restores_it_without_a_new_prompt() {
+        let (_, assist, highlighter) = editor();
+        highlighter.highlight("echo '", 6);
+        assert!(assist.feedback("echo '").is_some());
+        let mut mode = assist.edit_mode(Emacs::default());
+        let raw = ReedlineRawEvent::try_from(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('r'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ))
+        .unwrap();
+        mode.parse_event(raw);
+        assert!(assist.feedback("echo '").is_none());
+        highlighter.highlight("echo '", 6);
+        assert!(assist.feedback("echo '").is_some());
     }
 
     #[test]

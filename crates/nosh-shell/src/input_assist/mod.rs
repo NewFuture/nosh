@@ -1,8 +1,9 @@
-//! Display-only input analysis. Parser and filesystem work belongs to owned workers,
-//! never the editor thread or the live shell.
+//! Owned input diagnostics and explicit local draft correction. Parser and
+//! filesystem work stays outside the editor thread and never executes a draft.
 
 mod allocation;
 mod analysis;
+mod correction;
 mod editor;
 mod lookup;
 #[cfg(test)]
@@ -19,6 +20,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub use allocation::WorkerAllocator;
+pub(crate) use correction::{Correction, right_navigation};
+pub(crate) use editor::Feedback;
 pub use editor::InputAssist;
 pub(crate) use lookup::scan_index;
 
@@ -291,6 +294,10 @@ pub(crate) enum Request {
         session: u64,
         context: Arc<Context>,
     },
+    Correction {
+        input: Arc<Input>,
+        proposal: Correction,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +309,10 @@ pub(crate) enum Response {
         stats: LookupStats,
     },
     Index(Index),
+    Correction {
+        version: Version,
+        accepted: bool,
+    },
     Failed(String),
 }
 

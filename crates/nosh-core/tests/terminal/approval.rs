@@ -40,6 +40,24 @@ fn built_in_prohibition_requires_yes_and_never_offers_a_session_grant() {
     assert_eq!(out.trim(), "Approve");
     assert!(err.contains("Approval: Confirm"));
     assert!(err.contains("Awaiting approval"));
+    assert!(err.contains("Directory: /fixture/approval-cwd"), "{err}");
     assert!(err.contains("type yes"));
     assert!(!err.contains("[a]"));
+}
+
+#[test]
+fn execution_directory_cannot_insert_extra_approval_lines() {
+    let (out, err) = Probe {
+        mode: "approval-card-path",
+        stderr_tty: true,
+        keys: Some(b"yes\r"),
+        ..Default::default()
+    }
+    .run();
+    assert_eq!(out.trim(), "Approve");
+    assert!(
+        err.contains("Directory: /fixture/line\\nwith\\ttab"),
+        "{err}"
+    );
+    assert!(!err.contains("/fixture/line\nwith"), "{err}");
 }

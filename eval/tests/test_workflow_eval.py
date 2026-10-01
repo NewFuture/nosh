@@ -1,8 +1,11 @@
 import copy
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
+import tomllib
 import unittest
+from unittest import mock
 
 from eval import campaign, fixtures, report, runtime
 
@@ -42,6 +45,81 @@ class SourceSelectionTests(unittest.TestCase):
         for revision in ("HEAD", "main~1", "-bad", "A" * 40, "a" * 39):
             with self.subTest(revision=revision), self.assertRaises(ValueError):
                 runtime.resolve_source_revision("main", revision, self.checkout)
+
+
+class BuildToolchainTests(unittest.TestCase):
+    def test_compiler_pin_matches_workspace_and_ci(self):
+        toolchain = tomllib.loads(runtime.ROOT.joinpath("rust-toolchain.toml").read_text())
+        version = toolchain["toolchain"]["channel"]
+        workspace = tomllib.loads(runtime.ROOT.joinpath("Cargo.toml").read_text())
+        self.assertEqual(workspace["workspace"]["package"]["rust-version"], version)
+        self.assertEqual(set(toolchain["toolchain"]["components"]), {"clippy", "rustfmt"})
+        for name in ("ci.yml", "eval.yml", "arm64-memory.yml"):
+            workflow = runtime.ROOT.joinpath(".github", "workflows", name).read_text()
+            self.assertIn(f"toolchain: '{version}'", workflow, name)
+        self.assertFalse(workspace["workspace"]["dependencies"]["vte"]["default-features"])
+
+    def test_artifact_client_is_loaded_as_esm_and_provenance_uses_build_cwd(self):
+        workflow = runtime.ROOT.joinpath(".github", "workflows", "eval.yml").read_text()
+        self.assertIn("@actions/artifact@6.2.1", workflow)
+        self.assertIn("await import(pathToFileURL", workflow)
+        self.assertIn("node_modules/@actions/artifact/lib/artifact.js", workflow)
+        self.assertIn('["rustc", "-Vv"], cwd=os.environ["EVAL_SOURCE"]', workflow)
+        self.assertIn('["cargo", "--version"], cwd=os.environ["EVAL_SOURCE"]', workflow)
+        self.assertNotIn("const {DefaultArtifactClient} = require(", workflow)
+        self.assertIn("npm install --global npm@12.1.0", workflow)
+
+    def test_materialization_precedes_cache_metadata_and_covers_provenance(self):
+        for name in ("ci.yml", "arm64-memory.yml"):
+            workflow = runtime.ROOT.joinpath(".github", "workflows", name).read_text()
+            for job in workflow.split("runs-on:")[1:]:
+                self.assertLess(job.index("-- prepare --offline"), job.index("Swatinem/rust-cache"))
+        workflow = runtime.ROOT.joinpath(".github", "workflows", "eval.yml").read_text()
+        self.assertLess(workflow.index("git archive"), workflow.index("prepare_source_dependencies"))
+        self.assertLess(workflow.index("prepare_source_dependencies"), workflow.index("Swatinem/rust-cache"))
+        self.assertIn("source-dependencies.json", workflow)
+        self.assertIn("prepared dependency source changed during the build", workflow)
+        self.assertIn('"source_dependencies": dependencies', workflow)
+        self.assertIn("verify_source_archive(Path", workflow)
+
+    def test_selected_archive_controls_materialization_and_legacy_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text('[workspace.dependencies]\nreedline = "0.51.0"\n')
+            self.assertEqual(runtime.prepare_source_dependencies(root),
+                             {"schema_version": 1, "layout": "legacy", "managed_sources": {}})
+            manifest.write_text('[workspace.dependencies]\nreedline = {path=".nosh/reedline"}\n')
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                runtime.prepare_source_dependencies(root)
+            pin = root / "patches" / "reedline" / "source.toml"
+            pin.parent.mkdir(parents=True)
+            pin.write_text('repository = "official"\nrevision = "' + "a" * 40 + '"\n')
+            tool = root / "tools" / "source" / "Cargo.toml"
+            tool.parent.mkdir(parents=True)
+            tool.write_text("[package]\n")
+            with mock.patch.object(runtime.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "prepare")) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runtime.prepare_source_dependencies(root)
+                self.assertEqual(run.call_args.args[0][3], str(tool))
+                self.assertEqual(run.call_args.kwargs["cwd"], root)
+
+    def test_archive_verification_detects_cache_or_build_rewriting_locked_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            lock = root / "Cargo.lock"
+            lock.write_text("pinned dependency graph\n")
+            archive = Path(directory) / "source.tar"
+            with tarfile.open(archive, "w") as saved:
+                saved.add(lock, arcname="Cargo.lock")
+            runtime.verify_source_archive(root, archive)
+            (root / ".nosh").mkdir()
+            (root / ".nosh" / "generated").write_text("separately verified dependency\n")
+            runtime.verify_source_archive(root, archive)
+            lock.write_text("silently re-resolved dependency graph\n")
+            with self.assertRaisesRegex(ValueError, "Cargo.lock"):
+                runtime.verify_source_archive(root, archive)
 
 
 class CampaignCompletenessTests(unittest.TestCase):

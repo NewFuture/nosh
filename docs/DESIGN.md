@@ -16,6 +16,7 @@
 | 本文 | 设计意图、当前实现边界、后续方案与验收标准 |
 | [三档审批模式](APPROVAL-MODES.md) | 当前三档矩阵、用户规则、默认自动、构建便利取舍和标识 / 状态边界 |
 | [输出采集](OUTPUT-CAPTURE.md) | 最近用户命令输出的使用时机、上下文污染边界、PTY 协议、状态、隐私和验收 |
+| [提示符上方状态行](STATUS-BAR.md) | #36 四区信息条、字段与状态 case、实际键义、验证矩阵及已知宿主限制 |
 | [Project context](PROJECT-CONTEXT.md) | 动态上下文、项目文档与缓存边界 |
 | [LLM tools](LLM-TOOLS.md) | 工具集合、模式与执行契约 |
 | [CommandAssist](COMMAND-ASSIST.md) | Generate/Fix/Next、最小指令、查询与 finish、后台完成事件 |
@@ -901,7 +902,8 @@ nosh --offline --no-download
 
 ### 9.1 nosh shell 界面
 
-- **提示符**：沿用用户的 `PS1` 或默认 cwd 提示符，右侧显示状态与审批模式/YOLO 标记。接入 Reedline 的历史、建议、补全、续行校验和默认启用的输入辅助；诊断单独显示在输入行上方，不覆盖原文、历史建议或审批标记。
+- **提示符基础路径**：未启用信息条时，沿用用户的 `PS1` 或默认 cwd 提示符，右侧显示原状态与审批模式/YOLO 标记；接入 Reedline 的历史、建议、补全、续行校验及输入辅助。启用信息条后按下一项合并，不叠加重复行或模式标识。
+- **#36 信息条**：上方信息条按环境、状态、操作提示、模式附注四区合成一行；默认目录/分支移入环境区，操作提示区只读地显示真实“按键＋动作”，审批模式为末尾弱信息，空区不占位。输入行保留原符号及退出码配色，自定义 PS1/PS2 不拆改；关闭时恢复原默认提示符。状态区同时消费版本化 InputAssist 和 CommandAssist，不增加分析或模型请求。字段、状态 case、键义及验证范围见 [状态行设计](STATUS-BAR.md)，下方旧界面示意不是新布局验收。
 - **AI 输出块**：AI 的输出以带左侧竖线的块插入回滚区。
   - agent 命令的输出显示在一个高度有限的实时区域里（默认 8 行）；
   - 结束后折叠成首尾预览加一个编号，可以用 `ai out <编号>` 查看全文；
@@ -912,7 +914,7 @@ nosh --offline --no-download
   - 预览按实际 stderr 终端的列宽裁剪，不拆开字素簇；Tab 按八列制表位展开，窄窗口与缩放不沿用固定最小宽度。短输入框以完整字素簇退格并重画有界单行；长提示单独显示，避免回绕擦除错误。
   - 思考与回答切换时在各自的输出流结束行，回答中的 CRLF 支持跨块归一化。普通文本允许 ZWJ/ZWNJ，命令审批仍使用严格的隐藏字符显示；双向控制符始终可见。
 
-**审批标识**：提示符 / badge 显示 `审批: 询问`、`审批: 自动` 或 `审批: YOLO`，缺省为 `审批: 自动`；“等待你批准 / 正在执行 / 待你处理”等状态独立展示，不与输入编辑模式混用。动作、结果、拒绝和错误保持可见。沿用 `ai mode`，具体快捷键与新的切换 UX 另行设计，见[审批标识与状态](APPROVAL-MODES.md#5-ui-标识与实时状态)。非交互与机器输出不插入常驻装饰。
+**审批标识**：信息条的可省略末尾附注或原提示符 / badge 显示 `审批: 询问`、`审批: 自动` 或 `审批: YOLO`，缺省为 `审批: 自动`；“等待你批准 / 正在执行 / 待你处理”等状态独立展示，不与输入编辑模式混用。动作、结果、拒绝和错误保持可见。沿用 `ai mode`，具体快捷键与新的切换 UX 另行设计，见[审批标识与状态](APPROVAL-MODES.md#5-ui-标识与实时状态)。非交互与机器输出不插入常驻装饰。
 
 默认 Auto 的界面示意（不是实测记录）：
 
@@ -1063,6 +1065,7 @@ on_failure = "hint"           # 执行失败时：hint | auto | off
 capture_output = "last"      # last（默认）| off；仅交互 shell，最多 4,096 字节终端输出尾部
 input_assist = true           # 交互输入提示、语法高亮与有界后台诊断
 command_assist = true         # 用户命令完成后：成功 Next，失败 Fix；均不自动执行
+status_bar = true             # 提示符上方四区信息条；关闭后保留原提示符和反馈，详见 STATUS-BAR.md
 nl_guard = "destructive"      # 破坏性命令安全网：destructive | off
 builtin_name = "ai"
 suggest_key = "ctrl-g"        # 当前固定支持 Ctrl+G，不支持自定义按键
@@ -1159,7 +1162,8 @@ nosh/
 | 运行时 | `tokio`（驱动 brush 的异步 API）；推理在进程内调用 |
 
 - **“纯 Rust”的边界**：nosh 运行时以 Rust 实现，不自研推理框架；允许 TLS 依赖中的 ring 使用少量汇编和 C。`eval/` 使用 Python 3.11+，只用于开发评测，运行 nosh 不需要 Python。
-- **构建**：Rust ≥ 1.89；release 为 `lto = "fat"`、`codegen-units = 1`、`panic = "unwind"`、`strip = true`。构建入口见 README，补丁维护按 [NOSH_PATCH.md](../third_party/candle-core/NOSH_PATCH.md) 执行。
+- **构建**：`rust-toolchain.toml` 与 workspace 固定 Rust 1.98.1（2026-09-30 核对的最新 stable），CI 使用同一编译器；release 为 `lto = "fat"`、`codegen-units = 1`、`panic = "unwind"`、`strip = true`。构建入口见 README；Candle 与 Reedline 的本地补丁分别见 [Candle 说明](../third_party/candle-core/NOSH_PATCH.md)和 [Reedline 维护说明](REEDLINE-MAINTENANCE.md)。
+- **依赖与 CI 基线（2026-09-30）**：直接 crates.io 依赖核对最新稳定版，锁文件更新兼容的传递依赖；Candle 固定到 `5ba5d5b468b5b1df40e82dd3d556987bedeea041` 并保留内存优化补丁。CI 的 Python/Node/npm 固定为 3.14.7 / 26.10.0 / 12.1.0，Actions 使用当日最新稳定版本；评测 artifact SDK 为 ESM 的 6.2.1。不强制改写第三方 crate 的跨大版本依赖约束；可选 CUDA 链路的 `crypto-common 0.1.7` 精确依赖 `generic-array = 0.14.7`，因此未强换为 0.14.9。VTE 0.15 显式关闭默认 `std`，保留零容量 OSC 缓冲，避免升级引入无界解析内存。
 
 ### 12.2 后续工程与分发
 

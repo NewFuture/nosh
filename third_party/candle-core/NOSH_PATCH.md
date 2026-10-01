@@ -1,7 +1,7 @@
 # Vendored candle-core (nosh patch)
 
 This directory is `candle-core` from [huggingface/candle](https://github.com/huggingface/candle)
-at rev `9b1be4a321ef265f13d2c30be4f2037109c51d14` (crate version 0.11.0, the rev nosh pins),
+at rev `5ba5d5b468b5b1df40e82dd3d556987bedeea041` (crate version 0.11.0, the rev nosh pins),
 plus a small patch (the prepack below and one upstream bug fix). The root `Cargo.toml` uses it through
 `[patch."https://github.com/huggingface/candle"]`, so `candle-nn` from the same rev links
 against it too. License: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).

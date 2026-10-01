@@ -118,6 +118,13 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
             (Kind::Lookup, Request::Index { context, .. }) => {
                 Response::Index(lookup::scan_index(&context.cwd, context.path.as_deref()))
             }
+            (Kind::Lookup, Request::Correction { input, proposal }) => {
+                let accepted = lookup.confirm_correction(&input, &proposal);
+                Response::Correction {
+                    version: input.version,
+                    accepted,
+                }
+            }
             _ => return Err(invalid("request sent to the wrong worker")),
         };
         let retire = allocation::recycle();
@@ -131,9 +138,9 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
 
 fn validate_request(request: &Request) -> io::Result<()> {
     let (context, input) = match request {
-        Request::Analyze(input) | Request::Lookup { input, .. } => {
-            (&input.context, Some(input.as_ref()))
-        }
+        Request::Analyze(input)
+        | Request::Lookup { input, .. }
+        | Request::Correction { input, .. } => (&input.context, Some(input.as_ref())),
         Request::Index { context, .. } => (context, None),
     };
     write_json(context, &mut io::sink(), MAX_CONTEXT)?;
@@ -154,6 +161,11 @@ fn validate_request(request: &Request) -> io::Result<()> {
             }))
     {
         return Err(invalid("query limit or invalid query span"));
+    }
+    if let Request::Correction { input, proposal } = request
+        && !proposal.matches(input)
+    {
+        return Err(invalid("invalid correction proposal"));
     }
     Ok(())
 }
@@ -413,7 +425,7 @@ impl Worker {
         }
         self.timeout = match request {
             Request::Analyze(_) => SYNTAX_TIMEOUT,
-            Request::Lookup { .. } => LOOKUP_TIMEOUT,
+            Request::Lookup { .. } | Request::Correction { .. } => LOOKUP_TIMEOUT,
             Request::Index { .. } => INDEX_TIMEOUT,
         };
         self.outgoing = frame(request)?;

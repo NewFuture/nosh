@@ -113,15 +113,24 @@ fn tool_labels_follow_the_destination_without_rewriting_command_text() {
             assert!(out.is_empty());
             let text = style::strip_ansi(&err);
             let lines: Vec<_> = text.lines().collect();
-            assert_eq!(lines.len(), TOOL_LABELS.len() * 2);
+            let stride = if stderr_tty { 3 } else { 2 };
+            assert_eq!(lines.len(), TOOL_LABELS.len() * stride);
             let (bar, marker, separator) = if unicode {
                 ("\u{2503}", "\u{2699}", " \u{b7} ")
             } else {
                 ("|", "*", " | ")
             };
             for (i, (_, label)) in TOOL_LABELS.iter().enumerate() {
+                let start = stride * i;
+                if stderr_tty {
+                    assert_eq!(
+                        lines[start],
+                        format!("{bar} Ctrl+C interrupt command; again abort task")
+                    );
+                }
+                let header = start + usize::from(stderr_tty);
                 assert_eq!(
-                    lines[2 * i],
+                    lines[header],
                     format!(
                         "{bar} {marker} run_command  {}",
                         label.replace(" \u{b7} ", separator)
@@ -129,9 +138,12 @@ fn tool_labels_follow_the_destination_without_rewriting_command_text() {
                     "{terminal} {locale:?} tty={stderr_tty} NO_COLOR={no_color:?}"
                 );
                 if !unicode {
-                    assert!(lines[2 * i].is_ascii());
+                    assert!(lines[header].is_ascii());
                 }
-                assert_eq!(lines[2 * i + 1], format!("{bar}   $ echo \u{4e2d}\u{6587}"));
+                assert_eq!(
+                    lines[header + 1],
+                    format!("{bar}   $ echo \u{4e2d}\u{6587}")
+                );
             }
         }
     }
