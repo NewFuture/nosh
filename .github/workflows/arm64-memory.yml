@@ -22,9 +22,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        with:
+          toolchain: '1.98.1'
+      - name: prepare patched sources before Cargo metadata
+        run: cargo run --manifest-path tools/source/Cargo.toml --locked -- prepare --offline
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: arm64-memory-release
       - name: isolated model store and artifacts
@@ -38,7 +44,7 @@ jobs:
             lscpu
             echo "release profile; CANDLE_NUM_THREADS=2; RAYON_NUM_THREADS=1"
           } > target/arm64-memory/environment.txt
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/nosh-arm64/models
           key: arm64-memory-model-${{ hashFiles('assets/registry.toml') }}
@@ -78,7 +84,7 @@ jobs:
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: arm64-memory-${{ github.sha }}

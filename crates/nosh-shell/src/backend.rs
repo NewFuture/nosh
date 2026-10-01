@@ -596,6 +596,14 @@ impl EmbeddedShell {
         let _ = self.lock().add_to_history(line);
     }
 
+    pub(crate) fn has_running_jobs(&self) -> bool {
+        self.lock()
+            .jobs()
+            .jobs
+            .iter()
+            .any(|job| !matches!(job.state, brush_core::jobs::JobState::Stopped))
+    }
+
     /// Runs a user command in the foreground (terminal handed to it).
     pub fn run_user_line(&mut self, line: &str) -> UserRun {
         self.run_line(line, None)

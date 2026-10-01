@@ -6,7 +6,33 @@ pub(super) fn terminal_probe() {
     };
     print!("{BEGIN}");
     eprint!("{BEGIN}");
+    let original_stdout = if mode.starts_with("repl-inline") {
+        std::io::stdout().flush().unwrap();
+        // SAFETY: preserve the harness framing stream, then give the editor one TTY.
+        let saved = unsafe { libc::dup(1) };
+        assert!(saved >= 0);
+        assert_eq!(unsafe { libc::dup2(2, 1) }, 1);
+        Some(saved)
+    } else {
+        None
+    };
     match mode.as_str() {
+        "status-stages" => {
+            let mut ui = TermUi::new(false);
+            ui.state(
+                nosh_permissions::ApprovalMode::Auto,
+                nosh_core::ui::Activity::Thinking,
+            );
+            ui.text("answer\n");
+            ui.state(
+                nosh_permissions::ApprovalMode::Auto,
+                nosh_core::ui::Activity::Running,
+            );
+            ui.tool_start("run_command", "true", Some(Risk::Safe), "SAFE");
+            ui.output("original tool output\n", false);
+            ui.tool_end("exit 0");
+            ui.pause();
+        }
         "text" => {
             let mut ui = TermUi::new(true);
             ui.show_think = true;
@@ -41,13 +67,18 @@ pub(super) fn terminal_probe() {
                 ui.state(mode, nosh_core::ui::Activity::NeedsUser);
             }
         }
-        "approval-card" => {
+        "approval-card" | "approval-card-path" => {
             let mut approval = nosh_core::TerminalApproval::default();
             let answer = nosh_core::ApprovalChannel::request(
                 &mut approval,
                 &nosh_core::ApprovalRequest {
                     tool: "run_command".into(),
                     command: "fixture-prohibited-operation".into(),
+                    cwd: std::path::PathBuf::from(if mode == "approval-card-path" {
+                        "/fixture/line\nwith\ttab"
+                    } else {
+                        "/fixture/approval-cwd"
+                    }),
                     risk: Risk::Forbidden,
                     reasons: vec!["built-in prohibition".into()],
                     strong: true,
@@ -105,7 +136,7 @@ pub(super) fn terminal_probe() {
                 ui.tool_start("run_command", "echo \u{4e2d}\u{6587}", Some(risk), label);
             }
         }
-        "repl-assist" => {
+        "repl-assist" | "repl-inline-assist" => {
             let directory = tempfile::tempdir().unwrap();
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
@@ -144,13 +175,33 @@ pub(super) fn terminal_probe() {
                 std::env::var("NOSH_TERMINAL_INITIAL").as_deref() == Ok("execute")
             );
         }
-        "repl" | "repl-blocked" => {
+        "repl"
+        | "repl-blocked"
+        | "repl-inline"
+        | "repl-inline-off"
+        | "repl-inline-correct-execute"
+        | "repl-inline-theme" => {
+            let directory = tempfile::tempdir().unwrap();
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
+                working_dir: mode
+                    .starts_with("repl-inline")
+                    .then(|| directory.path().to_path_buf()),
                 ..nosh_shell::ShellOptions::default()
             })
             .unwrap();
-            shell.run_user_line("PATH=/usr/bin:/bin; PS1='probe> '");
+            if mode.starts_with("repl-inline") {
+                std::fs::create_dir(directory.path().join(".git")).unwrap();
+                std::fs::write(directory.path().join(".git/HEAD"), "ref: refs/heads/main\n")
+                    .unwrap();
+                std::fs::write(directory.path().join("candidate_one"), "").unwrap();
+                std::fs::write(directory.path().join("candidate_two"), "").unwrap();
+                shell.run_user_line("PATH=/usr/bin:/bin; unset PS1; PS2='continue> '");
+                shell.run_user_line("git() { printf '%s\\n' executed >> correction_executed; }");
+                shell.add_history("touch history_accepted");
+            } else {
+                shell.run_user_line("PATH=/usr/bin:/bin; PS1='probe> '");
+            }
             let worker = nosh_shell::input_assist::WorkerCommand {
                 program: std::env::current_exe().unwrap(),
                 args: vec![
@@ -164,6 +215,10 @@ pub(super) fn terminal_probe() {
                 ],
             };
             let config = nosh_shell::ReplConfig {
+                status_bar: nosh_shell::status::Config {
+                    enabled: mode != "repl-inline-off",
+                    ..Default::default()
+                },
                 trigger: nosh_shell::TriggerConfig {
                     ai_enabled: false,
                     ..Default::default()
@@ -174,12 +229,74 @@ pub(super) fn terminal_probe() {
                 },
                 ..Default::default()
             };
+            let theme_updates = (mode == "repl-inline-theme").then(|| {
+                let themes = config.status_bar.theme.clone();
+                let home = std::path::PathBuf::from(std::env::var_os("NOSH_HOME").unwrap());
+                thread::spawn(move || {
+                    for revision in 1..=3 {
+                        let marker = home.join(format!("theme-request-{revision}"));
+                        let deadline = Instant::now() + Duration::from_secs(8);
+                        while !marker.exists() {
+                            assert!(
+                                Instant::now() < deadline,
+                                "theme fixture never received update {revision}"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        let theme = if revision == 3 {
+                            nosh_shell::status::Theme::default()
+                        } else {
+                            nosh_shell::status::Theme {
+                                environment: nosh_shell::status::ColorPair::new(
+                                    [238, 243, 248],
+                                    if revision == 1 {
+                                        [30, 64, 83]
+                                    } else {
+                                        [41, 54, 70]
+                                    },
+                                    231,
+                                    if revision == 1 { 24 } else { 25 },
+                                )
+                                .unwrap(),
+                                ..Default::default()
+                            }
+                        };
+                        assert!(themes.replace(theme));
+                    }
+                })
+            });
             assert_eq!(
                 nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, config),
                 if mode == "repl-blocked" { 130 } else { 0 }
             );
+            if let Some(updates) = theme_updates {
+                updates.join().unwrap();
+            }
+            if mode.starts_with("repl-inline") {
+                assert!(
+                    !directory.path().join("history_accepted").exists(),
+                    "history acceptance executed input"
+                );
+                let executions =
+                    match std::fs::read_to_string(directory.path().join("correction_executed")) {
+                        Ok(text) => text.lines().count(),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                        Err(error) => panic!("cannot inspect correction execution count: {error}"),
+                    };
+                assert_eq!(
+                    executions,
+                    usize::from(mode == "repl-inline-correct-execute"),
+                    "correction adoption executed a command"
+                );
+            }
         }
         _ => panic!("unknown probe"),
+    }
+    if let Some(saved) = original_stdout {
+        std::io::stdout().flush().unwrap();
+        assert_eq!(unsafe { libc::dup2(saved, 1) }, 1);
+        assert_eq!(unsafe { libc::close(saved) }, 0);
+        assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
     }
     println!("{END}");
     eprintln!("{END}");

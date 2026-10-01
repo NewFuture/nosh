@@ -79,16 +79,20 @@ impl AssistDisplay {
     }
 
     pub(crate) fn status(&self) -> String {
-        match self.result() {
-            Some(Assistance::Command {
-                intent, program, ..
-            }) => format!(
-                "{intent}: {}  (Ctrl+G)",
-                crate::style::clip_line(&crate::style::visible_text(&program), 100, 0, "...")
-            ),
-            Some(Assistance::Message(text)) => crate::style::visible_text(&text).into_owned(),
-            None => String::new(),
-        }
+        status_text(self.result().as_ref())
+    }
+}
+
+pub(crate) fn status_text(result: Option<&Assistance>) -> String {
+    match result {
+        Some(Assistance::Command {
+            intent, program, ..
+        }) => format!(
+            "{intent}: {}  (Ctrl+G)",
+            crate::style::clip_line(&crate::style::visible_text(program), 100, 0, "...")
+        ),
+        Some(Assistance::Message(text)) => crate::style::visible_text(text).into_owned(),
+        None => String::new(),
     }
 }
 

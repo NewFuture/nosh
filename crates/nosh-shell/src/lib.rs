@@ -12,6 +12,7 @@ pub mod procs;
 pub mod pty;
 pub mod repl;
 pub mod spell;
+pub mod status;
 pub mod style;
 mod suggestion;
 pub mod term;

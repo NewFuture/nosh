@@ -20,11 +20,14 @@ nosh -s "解压 foo.tar.zst 到 /tmp"     # 只输出命令
 ## 构建与运行（Linux）
 
 ```bash
-cargo build --release                  # 需要 Rust ≥ 1.89
+cargo source prepare
+cargo build --release                  # rust-toolchain.toml 固定 Rust 1.98.1
 ./target/release/nosh model pull       # 下载并校验模型（约 1.57 GB），之后可离线
 ./target/release/nosh doctor           # 检查 CPU、内存、模型、下载源
 ./target/release/nosh                  # 启动 shell；--norc 跳过 ~/.bashrc，--safe 同时关闭 AI
 ```
+
+首次 clone、切换依赖版本或补丁后，先准备 Reedline 修补源再运行 Cargo/IDE；重复准备不会覆盖未导出的本地修改。普通 Rust 构建不要求 Python、Node 或 npm。离线准备、同仓联调、补丁导出与升级见 [Reedline 维护说明](docs/REEDLINE-MAINTENANCE.md)。
 
 常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
 
@@ -38,7 +41,7 @@ AI 任务默认显示 **`审批: 自动`**；可用 `ai mode confirm|auto|yolo` 
 
 正常交互终端默认启用 `input_assist`，无需插件或模型；`--safe` / `NOSH_DISABLE_AI=1` 不会关闭这项输入辅助。命令、字符串、变量、操作符和注释按结构显示；待完成、查询中和暂不可用等状态会在输入行上方提示。配置的 AI 前缀和 `ai` 入口保留原有语义，不把自然语言正文当作 Bash 脚本诊断。
 
-未识别命令默认不显示长错误文案；停止输入约 1 秒后只用红色删除线标记命令词，`NO_COLOR` / `CLICOLOR=0` 下暂不显示该提示。PATH 中被确认无搜索权限的目录会按快照缓存，并继续查找其他目录；所有候选均缺失或不可执行时，可以判定当前用户没有可执行命令，但不宣称文件不存在。真正的 I/O 故障、未检查完或动态行为才保留未知／暂不可用。详细原因和无颜色 fallback 后续会与补全/状态栏统一展示；当前不会修改系统 PATH 或要求提权。
+未识别命令停止输入约 1 秒后用红色删除线标记命令词；配置启用状态栏时，也会在已有反馈区提供文字原因，因此 `NO_COLOR` / `CLICOLOR=0` 下仍可取得含义。PATH 中被确认无搜索权限的目录会按快照缓存，并继续查找其他目录；所有候选均缺失或不可执行时，可以判定当前用户没有可执行命令，但不宣称文件不存在。真正的 I/O 故障、未检查完或动态行为才保留未知／暂不可用。状态栏复用这些已有事实提供摘要和无颜色反馈；不会修改系统 PATH 或要求提权。
 
 路径下划线表示当前快照中存在，不代表可读写或已经批准执行。普通参数不存在不报文件错误；`echo hello > new.txt` 允许新目标，`touch input; cat < input` 不把执行前缺失误报为执行必失败。动态命令名、条件定义或无法确定的展开保持未知。
 
@@ -49,7 +52,7 @@ AI 任务默认显示 **`审批: 自动`**；可用 `ai mode confirm|auto|yolo` 
 input_assist = false
 ```
 
-语法分析和文件查询由两个有界辅助进程隔离；超时或超出预算会明确降级，而不是等待查询完成或无限重启。`NO_COLOR` 关闭输入样式；未识别命令的无颜色提示留给后续状态栏/补全统一体验。基本终端和非 TTY 不启用实时输入提示。数据流、判定规则、资源边界、恢复条件及可复现对照见 [实时输入解析设计](docs/INPUT-ASSIST.md)。
+语法分析和文件查询由两个有界辅助进程隔离；超时或超出预算会明确降级，而不是等待查询完成或无限重启。`NO_COLOR` 关闭输入样式，不关闭已启用的状态栏文字反馈。基本终端和非 TTY 不启用实时输入提示。数据流、判定规则、资源边界、恢复条件及可复现对照见 [实时输入解析设计](docs/INPUT-ASSIST.md)。
 
 ## 可选 NVIDIA CUDA 推理
 
@@ -89,6 +92,12 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 `nvidia-smi` 捕获到 nosh 的实际 GPU PID，峰值 95% 利用率、2210 MiB 显存。主机推理线程为 4、实际 nice 为 19，另有 CPU 28 线程评估并行运行，**不是无干扰 CPU/GPU 受控对照**。同构建五场景 smoke 原样得到 **2 pass／3 fail／0 error**：本地纠错与 Next 无建议通过；Agent 文件事实／预算及 Generate、Fix 的 finish 字段校验失败，未重抽或改判。四个载模场景均原生记录 `cuda:0`／`F16`；这证明 GPU 入口连通，不代表模型任务质量全通过。
 
 ## 命令建议与终端交接
+
+交互 shell 使用**提示符上方、随输入内容流移动的单行信息条**，分为环境、状态、操作提示、模式附注四区：分别承载默认目录/分支、当前输入反馈或命令辅助、只读的“按键＋动作”和实际模式，审批模式仅在有余量时作为末尾弱提示。空区不占位，输入行只保留原提示符符号和草稿；自定义 PS1/PS2 不拆改、不重复注入目录/分支。长路径不能挤掉关键诊断和必要操作，长输入允许整行自然滚出可见区；提交后保留当时的提示符快照。AI、审批和下载沿用各自的正文或进度区，前台程序接管时停止提示符刷新，不预留屏底区域。
+
+实现使用固定基版的 Reedline 0.52.0 及局部渲染修补，不再包含固定底栏写入或按宿主名称设置的旧禁用表。`[shell] status_bar = false` 可关闭信息条，默认目录/分支回到原提示符；基础终端、非交互、不同输出 TTY 或已知后台 job 写入时沿用原显示路径。**tmux 的未提交草稿历史残留仍未解决，不保证所有宿主上的严格历史门禁通过**；功能 case、验证范围和兼容边界见[状态行设计](docs/STATUS-BAR.md)。
+
+嵌入宿主可通过 `ReplConfig.status_bar.theme` 注入和替换语义配色；默认外观保持不变，更新只请求现有编辑器重绘。当前没有用户主题切换命令或主题库，接口示例与后续 [#45](https://github.com/NewFuture/nosh/issues/45) 的范围见[主题扩展说明](docs/STATUS-BAR.md#32-内部主题注入与更新入口)。
 
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。
 
@@ -151,4 +160,4 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 
 ## 许可
 
-Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。
+Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。Reedline 上游及派生补丁采用 MIT；固定上游的 `LICENSE` 随源准备保留，来源与维护方式见 [Reedline 说明](docs/REEDLINE-MAINTENANCE.md)。

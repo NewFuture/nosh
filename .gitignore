@@ -1,4 +1,6 @@
 /target
+/.nosh/
+/tools/source/target/
 **/*.rs.bk
 *.gguf
 *.partial

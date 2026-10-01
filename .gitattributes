@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.gguf binary
+
+# Preserve unified-diff prefixes and verbatim upstream Markdown formatting.
+*.patch whitespace=-blank-at-eol,-blank-at-eof

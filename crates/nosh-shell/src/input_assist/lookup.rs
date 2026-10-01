@@ -139,6 +139,19 @@ impl Lookup {
         }
     }
 
+    pub(super) fn confirm_correction(&mut self, input: &Input, proposal: &Correction) -> bool {
+        proposal.matches(input)
+            && (input.context.builtins.contains(&proposal.to)
+                || input.context.aliases.contains(&proposal.to)
+                || input.context.functions.contains(&proposal.to)
+                || self
+                    .run(input, &[proposal.query(&input.context)])
+                    .iter()
+                    .any(|observation| {
+                        observation.finding.is_none() && observation.role == Some(Role::External)
+                    }))
+    }
+
     fn one(&mut self, context: &Context, query: &Query) -> Observation {
         let result = match &query.kind {
             QueryKind::Command {

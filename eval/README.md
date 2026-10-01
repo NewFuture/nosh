@@ -13,7 +13,7 @@
 
 ## 本地运行
 
-需要 Linux/WSL（内核 5.3+，支持 pidfd）、Python 3.11+、构建好的 nosh、已下载的模型，以及 `git`、`bash`、`python3`、`tar`、`ss`。Rust 夹具另需 Cargo/rustc/`cc`，Node 夹具另需 Node.js 22+/npm；按选定场景检查工具。没有第三方 Python 依赖，项目夹具也不需要下载依赖。
+需要 Linux/WSL（内核 5.3+，支持 pidfd）、Python 3.11+、构建好的 nosh、已下载的模型，以及 `git`、`bash`、`python3`、`tar`、`ss`。Rust 夹具另需 Cargo/rustc/`cc`，Node 夹具另需 Node.js 22+/npm；按选定场景检查工具。当前 CI 固定 Python 3.14.7、Node 26.10.0、npm 12.1.0 和 Rust 1.98.1（2026-09-30 稳定基线），无模型测试在这些版本上通过。没有第三方 Python 依赖，项目夹具也不需要下载依赖。
 
 在 Linux/WSL 仓库根目录执行：
 
@@ -127,6 +127,8 @@ gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
 工作流的 `suite` 可选 `regression`（默认）、`command-assist`、`smoke`、`workflows`，对应 `eval/suites/` 中的清单。
 
 新工作流首次使用前需合入默认分支。`source_ref` 默认 `main`，也可显式指定本仓库的待验收分支；`source_revision` 必须是该分支可达的完整 SHA，留空则在作业开始固定该分支。分支名与 SHA 均校验，不接受 Git 表达式代替固定版本。工作流归档干净源码构建，显式下载并校验模型，在同一个 Ubuntu runner 上以 **threads 2 / Rayon 1 / nice 10** 串行双跑。
+
+Git 归档不包含子模块内容。工作流在 Rust cache/Cargo metadata 之前，运行**被选中归档自身**的源准备工具，按固定上游提交和同仓补丁物化 Reedline。`source-dependencies.json` 及 build-info 的 `source_dependencies` 记录上游、补丁、修补树和固定时间戳源码归档哈希；构建后再次严格校验，并逐文件核对原 Git 归档，防止 metadata/cache 步骤悄悄改写锁文件。旧源码布局明确记录为 `legacy`（仅指依赖来源布局，不是旧评测协议）；托管布局缺少准备工具或补丁则报错，不能回退到原版依赖。详见 [维护说明](../docs/REEDLINE-MAINTENANCE.md)。
 
 Hosted 工作流显式使用 **每次试验 60 秒**期限，本地默认仍为 **240 秒**。270 个试验即使全部耗尽期限，试验时间也为 270 分钟，六小时 job 留有 90 分钟用于构建、夹具、检查点和上传；构建前还会按实际场景、seed、重复次数检查预算，至少预留 90 分钟非试验时间，超出直接报错。准备阶段另设超时，不把正常的最坏评测计划留给 job 强制截断。
 

@@ -10,6 +10,9 @@ static INPUT_WORKER_ALLOCATOR: nosh_shell::input_assist::WorkerAllocator =
 #[path = "terminal/support.rs"]
 mod support;
 
+#[path = "terminal/screen.rs"]
+mod screen;
+
 #[path = "terminal/display.rs"]
 mod display;
 
@@ -21,6 +24,9 @@ mod input;
 
 #[path = "terminal/command_assist.rs"]
 mod command_assist;
+
+#[path = "terminal/status.rs"]
+mod status;
 
 #[path = "terminal/probes.rs"]
 mod probes;

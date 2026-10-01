@@ -12,6 +12,8 @@ use nosh_shell::{style, term};
 pub struct ApprovalRequest {
     pub tool: String,
     pub command: String,
+    /// Actual execution context, not inferred from the command or prompt.
+    pub cwd: std::path::PathBuf,
     pub risk: Risk,
     pub reasons: Vec<String>,
     /// Dangerous: the user must type `yes`.
@@ -125,6 +127,14 @@ impl TerminalApproval {
             "{b} {} | {}",
             crate::ui::approval_label(req.mode),
             tr!("等待你批准", "Awaiting approval")
+        );
+        let _ = writeln!(
+            err,
+            "{b} {}: {}",
+            tr!("目录", "Directory"),
+            style::visible(&req.cwd.to_string_lossy())
+                .replace('\n', "\\n")
+                .replace('\t', "\\t")
         );
         let _ = writeln!(
             err,

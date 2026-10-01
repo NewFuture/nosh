@@ -294,6 +294,10 @@ fn run_shell(
     shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);
     let repl_cfg = nosh_shell::ReplConfig {
+        status_bar: nosh_shell::status::Config {
+            enabled: cfg.status_bar,
+            ..Default::default()
+        },
         trigger: nosh_shell::TriggerConfig {
             ai_prefix: cfg.ai_prefix.clone(),
             builtin_name: cfg.builtin_name.clone(),

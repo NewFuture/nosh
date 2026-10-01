@@ -1,4 +1,4 @@
-// nosh patch: vendored from huggingface/candle rev 9b1be4a321ef265f13d2c30be4f2037109c51d14
+// nosh patch: vendored from huggingface/candle rev 5ba5d5b468b5b1df40e82dd3d556987bedeea041
 // with `QTensor::prepack_and_release_storage` added (search "nosh patch");
 // see third_party/candle-core/NOSH_PATCH.md for what changed and when to drop it.
 use crate::{

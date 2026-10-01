@@ -88,6 +88,8 @@ Fix 只接受匹配 command ID、退出码与执行目录的证据，区分缺�
 
 正常 reedline 终端在提示符上方显示候选，Ctrl+G 接受；接受时再次核对 command ID 和活 shell 的静态校验。基本终端只在输入仍为空时用新行显示结果并重画提示符，Ctrl+G 接受已校验的候选；用户开始输入后取消旧任务，不把后台正文插入已有输入。
 
+启用四区信息条时，后台候选/说明合并进状态区，实际可用的 Ctrl+G 采用动作进入操作提示区，不叠加另一行。非空白草稿仍走 Generate；空白且没有可用候选时，存在最近失败才提示显式 Fix。布局只读取既有 `AssistDisplay` 结果，不新增模型请求；关闭信息条保留原提示路径。
+
 ## 评测
 
 Agent 回归与命令辅助分别使用 `eval/suites/regression.json` 和 `eval/suites/command-assist.json`，从 `eval/scenarios/` 引用唯一场景定义。`smoke.json` 仅选择既有场景的 seed 0 小集合，不替代正式基线。Agent 回归显式关闭自动辅助以隔离任务统计；CommandAssist 专项分别覆盖生成、帮助查询、澄清、自动失败修复和成功后无建议，自动场景保持真实完成事件。

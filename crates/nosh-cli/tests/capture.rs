@@ -9,14 +9,14 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn probe(mode: &str, unavailable: bool) {
+fn probe(mode: &str, unavailable: bool, ansi: bool, status_bar: bool, multiplexer: bool) {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
         if mode == "default" {
-            String::new()
+            format!("[shell]\nstatus_bar = {status_bar}\n")
         } else {
-            format!("[shell]\ncapture_output = \"{mode}\"\n")
+            format!("[shell]\ncapture_output = \"{mode}\"\nstatus_bar = {status_bar}\n")
         },
     )
     .unwrap();
@@ -55,7 +55,11 @@ fn probe(mode: &str, unavailable: bool) {
         .env("HOME", home.path())
         .env("NOSH_HOME", home.path())
         .env("NOSH_DISABLE_AI", "1")
-        .env("TERM", "dumb")
+        .env("TERM", if ansi { "xterm-256color" } else { "dumb" })
+        .env("NOSH_LANG", "en")
+        .env_remove("TMUX")
+        .env_remove("STY")
+        .env_remove("TERM_PROGRAM")
         .env("LC_ALL", "C.UTF-8")
         .env("PS1", "CAPTURE_PROMPT> ")
         .env("RAYON_NUM_THREADS", "7")
@@ -64,6 +68,9 @@ fn probe(mode: &str, unavailable: bool) {
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
         .stderr(slave);
+    if multiplexer {
+        command.env("TMUX", "inline-test,1,0");
+    }
     // SAFETY: child setup consists only of async-signal-safe syscalls.
     unsafe {
         command.pre_exec(move || {
@@ -90,6 +97,7 @@ fn probe(mode: &str, unavailable: bool) {
     let mut submitted = false;
     let mut shell_pid = None;
     let mut exit_sent = false;
+    let mut cursor_queries = 0;
     loop {
         if Instant::now() > deadline {
             let _ = child.kill();
@@ -115,7 +123,16 @@ fn probe(mode: &str, unavailable: bool) {
             Err(error) => panic!("{error}"),
         }
         assert!(output.len() < 64 * 1024, "unexpected CLI output volume");
-        let text = String::from_utf8_lossy(&output);
+        let queries = output
+            .windows(4)
+            .filter(|bytes| *bytes == b"\x1b[6n")
+            .count();
+        while cursor_queries < queries {
+            master.write_all(b"\x1b[1;1R").unwrap();
+            cursor_queries += 1;
+        }
+        let raw = String::from_utf8_lossy(&output);
+        let text = nosh_shell::style::strip_ansi(&raw);
         if !submitted && text.contains("CAPTURE_PROMPT> ") {
             master.write_all(b"printf 'CAPTURE_PID=%s INTERNAL=%s THREADS=%s\\n' \"$$\" \"${NOSH_INTERNAL_PTY_FD-unset}\" \"$RAYON_NUM_THREADS\"\r").unwrap();
             submitted = true;
@@ -148,6 +165,17 @@ fn probe(mode: &str, unavailable: bool) {
     }
     let status = child.wait().unwrap();
     let text = String::from_utf8_lossy(&output);
+    for sequence in [
+        "\x1b[1;23r",
+        "\x1b[24;1H",
+        "\x1b[r",
+        "\x1b[?1049h",
+        "\x1b[3J",
+    ] {
+        assert!(!text.contains(sequence), "{sequence:?}: {text}");
+    }
+    assert_eq!(text.contains("Ctrl+R"), ansi && status_bar, "{text}");
+    assert!(!text.contains("fixed status bar unavailable"), "{text}");
     assert!(status.success(), "{status}: {text}");
     let shell_pid = shell_pid.unwrap_or_else(|| panic!("missing shell identity: {text}"));
     assert_eq!(shell_pid != pid, mode != "off" && !unavailable, "{text}");
@@ -170,8 +198,16 @@ fn probe(mode: &str, unavailable: bool) {
 
 #[test]
 fn capture_setting_selects_the_session_relay_and_preserves_rc_and_environment() {
-    probe("off", false);
-    probe("last", false);
-    probe("default", false);
-    probe("default", true);
+    probe("off", false, false, true, false);
+    probe("last", false, false, true, false);
+    probe("default", false, false, true, false);
+    probe("default", true, false, true, false);
+}
+
+#[test]
+fn inline_status_does_not_reserve_rows_or_create_a_capture_pty() {
+    probe("off", false, true, true, false);
+    probe("last", false, true, true, false);
+    probe("last", false, true, false, false);
+    probe("last", false, true, true, true);
 }

@@ -1,7 +1,7 @@
 # Vendored candle-core with one nosh patch; see NOSH_PATCH.md.
 #
 # Source: https://github.com/huggingface/candle, candle-core at rev
-# 9b1be4a321ef265f13d2c30be4f2037109c51d14 (0.11.0). This manifest is the one
+# 5ba5d5b468b5b1df40e82dd3d556987bedeea041 (0.11.0). This manifest is the one
 # `cargo package` generates for that rev, without the example, test and bench
 # targets (their files are not vendored). The workspace uses it through
 # `[patch."https://github.com/huggingface/candle"]`, so candle-nn from the same
@@ -78,7 +78,7 @@ version = "0.11.0"
 optional = true
 
 [dependencies.cudarc]
-version = "0.19.8"
+version = "0.19.10"
 features = [
     "std",
     "cublas",

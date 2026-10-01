@@ -5,6 +5,7 @@ pub(super) use std::io::{Read, Write};
 pub(super) use std::os::fd::{AsRawFd, FromRawFd};
 pub(super) use std::os::unix::process::CommandExt;
 pub(super) use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant};
@@ -83,14 +84,50 @@ pub(super) fn resize(fd: i32, columns: u16) {
     );
 }
 
-pub(super) fn read_output(mut reader: impl Read, observed: Arc<Mutex<Vec<u8>>>) -> String {
+#[derive(Clone)]
+struct ScreenTracking {
+    columns: Arc<AtomicUsize>,
+    replies: Arc<Mutex<Vec<Vec<u8>>>>,
+    acknowledged_columns: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Default)]
+struct ScreenObservation {
+    frames: Vec<super::screen::Frame>,
+    printed: Vec<super::screen::Printed>,
+}
+
+fn read_output(
+    mut reader: impl Read,
+    observed: Arc<Mutex<Vec<u8>>>,
+    tracking: Option<ScreenTracking>,
+) -> (String, ScreenObservation) {
     let mut bytes = Vec::new();
     let mut chunk = [0; 8192];
+    let mut screen = tracking.as_ref().map(|tracking| {
+        super::screen::Screen::new(
+            tracking.columns.load(Ordering::Acquire),
+            tracking.replies.clone(),
+            tracking.acknowledged_columns.clone(),
+        )
+    });
+    let mut parser = vte::Parser::<0>::new_with_size();
+    let mut columns = tracking
+        .as_ref()
+        .map_or(0, |tracking| tracking.columns.load(Ordering::Acquire));
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&chunk[..n]);
+                if let (Some(screen), Some(tracking)) = (&mut screen, &tracking) {
+                    let current = tracking.columns.load(Ordering::Acquire);
+                    if current != columns {
+                        screen.resize(current);
+                        columns = current;
+                    }
+                    parser.advance(screen, &chunk[..n]);
+                }
                 let mut observed = observed.lock().unwrap();
                 assert!(
                     observed.len() + n < 32 * 1024 * 1024,
@@ -106,7 +143,14 @@ pub(super) fn read_output(mut reader: impl Read, observed: Arc<Mutex<Vec<u8>>>) 
             }
         }
     }
-    String::from_utf8(bytes).unwrap().replace("\r\n", "\n")
+    let observation = screen.map_or_else(ScreenObservation::default, |screen| ScreenObservation {
+        frames: screen.frames,
+        printed: screen.printed,
+    });
+    (
+        String::from_utf8(bytes).unwrap().replace("\r\n", "\n"),
+        observation,
+    )
 }
 
 pub(super) fn framed(output: &str) -> String {
@@ -125,6 +169,8 @@ pub(super) type KeyStep<'a> = (&'a str, &'a [u8]);
 pub(super) struct ProbeTimings {
     pub(super) startup: Duration,
     pub(super) input: Vec<Duration>,
+    pub(super) frames: Vec<super::screen::Frame>,
+    pub(super) printed: Vec<super::screen::Printed>,
 }
 
 pub(super) struct Probe<'a> {
@@ -132,6 +178,8 @@ pub(super) struct Probe<'a> {
     pub(super) terminal: Option<&'a str>,
     pub(super) locale: Option<&'a str>,
     pub(super) no_color: &'a str,
+    pub(super) clicolor: Option<&'a str>,
+    pub(super) colorterm: Option<&'a str>,
     pub(super) stdout_tty: bool,
     pub(super) stderr_tty: bool,
     pub(super) stdin_pipe: bool,
@@ -140,6 +188,8 @@ pub(super) struct Probe<'a> {
     pub(super) keys: Option<&'a [u8]>,
     pub(super) steps: &'a [KeyStep<'a>],
     pub(super) input_assist: bool,
+    pub(super) track_frames: bool,
+    pub(super) resizes: &'a [(usize, u16)],
 }
 
 impl Default for Probe<'_> {
@@ -149,6 +199,8 @@ impl Default for Probe<'_> {
             terminal: Some("xterm-256color"),
             locale: Some("C.UTF-8"),
             no_color: "",
+            clicolor: None,
+            colorterm: None,
             stdout_tty: false,
             stderr_tty: false,
             stdin_pipe: false,
@@ -157,6 +209,8 @@ impl Default for Probe<'_> {
             keys: None,
             steps: &[],
             input_assist: true,
+            track_frames: false,
+            resizes: &[],
         }
     }
 }
@@ -168,6 +222,10 @@ impl Probe<'_> {
     }
 
     pub(super) fn run_with_timings(self) -> (String, String, ProbeTimings) {
+        assert!(
+            self.resizes.is_empty() || self.track_frames,
+            "resize testing requires screen acknowledgement"
+        );
         let home = tempfile::tempdir().unwrap();
         let stdout = self.stdout_tty.then(|| Pty::new(80));
         let stderr = self.stderr_tty.then(|| Pty::new(self.columns));
@@ -189,7 +247,12 @@ impl Probe<'_> {
             .env("NOSH_HOME", home.path())
             .env("HOME", home.path())
             .env_remove("CLICOLOR")
+            .env_remove("COLORTERM")
+            .env_remove("WT_SESSION")
             .env_remove("NOSH_STATS")
+            .env_remove("TMUX")
+            .env_remove("STY")
+            .env_remove("TERM_PROGRAM")
             .stdin(if self.stdin_pipe {
                 Stdio::piped()
             } else {
@@ -205,6 +268,12 @@ impl Probe<'_> {
                     .as_ref()
                     .map_or_else(Stdio::piped, |t| t.slave.try_clone().unwrap().into()),
             );
+        if let Some(clicolor) = self.clicolor {
+            command.env("CLICOLOR", clicolor);
+        }
+        if let Some(colorterm) = self.colorterm {
+            command.env("COLORTERM", colorterm);
+        }
         match self.terminal {
             Some(term) => {
                 command.env("TERM", term);
@@ -259,8 +328,14 @@ impl Probe<'_> {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let out_observed = observed.clone();
         let err_observed = observed.clone();
-        let out = thread::spawn(move || read_output(out, out_observed));
-        let err = thread::spawn(move || read_output(err, err_observed));
+        let tracking = self.track_frames.then(|| ScreenTracking {
+            columns: Arc::new(AtomicUsize::new(usize::from(self.columns))),
+            replies: Arc::new(Mutex::new(Vec::new())),
+            acknowledged_columns: Arc::new(AtomicUsize::new(0)),
+        });
+        let err_tracking = tracking.clone();
+        let out = thread::spawn(move || read_output(out, out_observed, None));
+        let err = thread::spawn(move || read_output(err, err_observed, err_tracking));
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut keys = self.keys;
         let mut steps = self.steps.iter();
@@ -273,24 +348,34 @@ impl Probe<'_> {
         let marker = blocked_input_marker(child.id());
         let mut terminal_scan = 0;
         let mut cursor_replies = 0;
+        let mut step_index = 0;
+        let mut theme_revision = 0;
+        let mut resize_requested = None;
         let needs_cursor_reply = self.mode.starts_with("repl")
             && self
                 .terminal
                 .is_some_and(|t| !matches!(t, "" | "dumb" | "unknown"));
         let status = loop {
             if let Some(input) = input.as_mut() {
-                let requests = {
-                    let bytes = observed.lock().unwrap();
-                    let requests = bytes[terminal_scan..]
-                        .windows(4)
-                        .filter(|s| *s == b"\x1b[6n")
-                        .count();
-                    terminal_scan = bytes.len().saturating_sub(3);
-                    requests
-                };
-                for _ in 0..requests {
-                    input.write_all(b"\x1b[1;1R").unwrap();
-                    cursor_replies += 1;
+                if let Some(tracking) = &tracking {
+                    for reply in std::mem::take(&mut *tracking.replies.lock().unwrap()) {
+                        input.write_all(&reply).unwrap();
+                        cursor_replies += 1;
+                    }
+                } else {
+                    let requests = {
+                        let bytes = observed.lock().unwrap();
+                        let requests = bytes[terminal_scan..]
+                            .windows(4)
+                            .filter(|s| *s == b"\x1b[6n")
+                            .count();
+                        terminal_scan = bytes.len().saturating_sub(3);
+                        requests
+                    };
+                    for _ in 0..requests {
+                        input.write_all(b"\x1b[1;1R").unwrap();
+                        cursor_replies += 1;
+                    }
                 }
             }
             if (keys.is_some() || next.is_some()) && (!needs_cursor_reply || cursor_replies > 0) {
@@ -306,7 +391,9 @@ impl Probe<'_> {
                         sent = Instant::now();
                         input.write_all(bytes).unwrap();
                     } else if let Some((needle, bytes)) = next {
-                        let ready = if *needle == "@worker-blocked" {
+                        let ready = if resize_requested == Some(step_index) {
+                            true
+                        } else if *needle == "@worker-blocked" {
                             marker.exists()
                         } else {
                             String::from_utf8_lossy(&observed.lock().unwrap()[observed_start..])
@@ -320,8 +407,37 @@ impl Probe<'_> {
                             }
                             observed_start = observed.lock().unwrap().len();
                             sent = Instant::now();
-                            input.write_all(bytes).unwrap();
+                            if let Some((_, columns)) =
+                                self.resizes.iter().find(|(index, _)| *index == step_index)
+                            {
+                                let tracking = tracking.as_ref().expect("resizes require tracking");
+                                if resize_requested != Some(step_index) {
+                                    tracking
+                                        .columns
+                                        .store(usize::from(*columns), Ordering::Release);
+                                    resize(input.as_raw_fd(), *columns);
+                                    resize_requested = Some(step_index);
+                                }
+                                if tracking.acknowledged_columns.load(Ordering::Acquire)
+                                    != usize::from(*columns)
+                                {
+                                    thread::sleep(Duration::from_millis(5));
+                                    continue;
+                                }
+                            }
+                            if *bytes == b"@theme-switch" {
+                                assert_eq!(self.mode, "repl-inline-theme");
+                                theme_revision += 1;
+                                std::fs::write(
+                                    home.path().join(format!("theme-request-{theme_revision}")),
+                                    "",
+                                )
+                                .unwrap();
+                            } else {
+                                input.write_all(bytes).unwrap();
+                            }
                             next = steps.next();
+                            step_index += 1;
                         }
                     }
                 }
@@ -335,17 +451,19 @@ impl Probe<'_> {
                 if marker.exists() {
                     std::fs::remove_file(&marker).unwrap();
                 }
+                let (out, _) = out.join().unwrap();
+                let (err, observation) = err.join().unwrap();
                 panic!(
-                    "terminal probe timed out: {:?} {:?}",
-                    out.join(),
-                    err.join()
+                    "terminal probe timed out: {out:?} {err:?}; observed {} frames, last cursor {:?}",
+                    observation.frames.len(),
+                    observation.frames.last().map(|frame| frame.cursor)
                 );
             }
             thread::sleep(Duration::from_millis(5));
         };
         let exited = Instant::now();
-        let out = out.join().unwrap();
-        let err = err.join().unwrap();
+        let (out, _) = out.join().unwrap();
+        let (err, observation) = err.join().unwrap();
         if let Some(blocked_at) = blocked_at {
             std::fs::remove_file(marker).unwrap();
             assert!(
@@ -366,6 +484,8 @@ impl Probe<'_> {
             ProbeTimings {
                 startup: startup.unwrap_or_default(),
                 input: timings,
+                frames: observation.frames,
+                printed: observation.printed,
             },
         )
     }

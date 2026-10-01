@@ -14,6 +14,7 @@ pub struct Config {
     pub on_failure: OnFailure,
     pub capture_output: CaptureOutput,
     pub input_assist: bool,
+    pub status_bar: bool,
     pub command_assist: bool,
     pub nl_guard: bool,
     pub builtin_name: String,
@@ -46,6 +47,7 @@ impl Default for Config {
             on_failure: OnFailure::Hint,
             capture_output: CaptureOutput::Last,
             input_assist: true,
+            status_bar: true,
             command_assist: true,
             nl_guard: true,
             builtin_name: "ai".into(),
@@ -81,6 +83,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "on_failure",
             "capture_output",
             "input_assist",
+            "status_bar",
             "command_assist",
             "nl_guard",
             "builtin_name",
@@ -247,6 +250,9 @@ impl Config {
         }
         if let Some(v) = r.bool("shell", "input_assist") {
             c.input_assist = v;
+        }
+        if let Some(v) = r.bool("shell", "status_bar") {
+            c.status_bar = v;
         }
         if let Some(v) = r.bool("shell", "command_assist") {
             c.command_assist = v;
@@ -512,6 +518,22 @@ on = true
                 .warnings
                 .iter()
                 .any(|w| w.contains("shell.input_assist: expected true or false"))
+        );
+    }
+
+    #[test]
+    fn status_bar_is_a_boolean_switch() {
+        assert!(Config::default().status_bar);
+        let disabled = Config::parse("[shell]\nstatus_bar = false");
+        assert!(!disabled.status_bar);
+        assert!(disabled.warnings.is_empty());
+        let invalid = Config::parse("[shell]\nstatus_bar = \"off\"");
+        assert!(invalid.status_bar);
+        assert!(
+            invalid
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("shell.status_bar"))
         );
     }
 

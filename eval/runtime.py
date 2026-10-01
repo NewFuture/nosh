@@ -10,6 +10,8 @@ import platform
 import re
 import shutil
 import subprocess
+import tarfile
+import tomllib
 
 from . import fixtures
 
@@ -50,6 +52,65 @@ def resolve_source_revision(source_ref: str = "main", revision: str = "", cwd: P
         raise ValueError("source_revision must be reachable from source_ref")
     reachable.check_returncode()
     return source
+
+
+def source_tool_command(source: Path) -> list[str] | None:
+    """Use the selected archive's tool and pin, not the harness checkout's submodule."""
+    manifest = tomllib.loads(source.joinpath("Cargo.toml").read_text(encoding="utf-8"))
+    dependency = manifest["workspace"]["dependencies"]["reedline"]
+    pin = source / "patches" / "reedline" / "source.toml"
+    managed = isinstance(dependency, dict) and dependency.get("path") == ".nosh/reedline"
+    if not managed and not pin.exists():
+        return None  # Older source revisions keep their original dependency layout.
+    tool = source / "tools" / "source" / "Cargo.toml"
+    if not managed or not pin.is_file() or not tool.is_file():
+        raise ValueError("selected source has an incomplete managed Reedline layout")
+    return ["cargo", "run", "--manifest-path", str(tool), "--locked", "--"]
+
+
+def source_dependency_provenance(source: Path) -> dict:
+    command = source_tool_command(source)
+    if command is None:
+        return {"schema_version": 1, "layout": "legacy", "managed_sources": {}}
+    data = json.loads(subprocess.check_output(
+        [*command, "provenance", "--root", str(source)], cwd=source, text=True))
+    pin = tomllib.loads(source.joinpath("patches", "reedline", "source.toml").read_text(encoding="utf-8"))
+    if (data.get("schema_version") != 1 or data.get("upstream_revision") != pin["revision"]
+            or data.get("upstream_repository") != pin["repository"]
+            or any(not re.fullmatch(r"[0-9a-f]{64}", data.get(field, ""))
+                   for field in ("patch_sha256", "source_pin_sha256", "prepared_archive_sha256"))
+            or any(not re.fullmatch(r"[0-9a-f]{40}", data.get(field, ""))
+                   for field in ("upstream_tree", "prepared_tree"))):
+        raise ValueError("selected source tool returned invalid dependency provenance")
+    return {"schema_version": 1, "layout": "managed", "managed_sources": {"reedline": data}}
+
+
+def prepare_source_dependencies(source: Path) -> dict:
+    command = source_tool_command(source)
+    if command is not None:
+        subprocess.run([*command, "prepare", "--root", str(source)], cwd=source, check=True)
+    return source_dependency_provenance(source)
+
+
+def verify_source_archive(source: Path, archive: Path) -> None:
+    """Check tracked inputs after preparation/cache/build; generated outputs are separate."""
+    with tarfile.open(archive) as contents:
+        for member in contents:
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("unsafe source archive member")
+            path = source / relative
+            if member.isfile():
+                stream = contents.extractfile(member)
+                if (stream is None or path.is_symlink() or not path.is_file()
+                        or path.read_bytes() != stream.read()
+                        or (os.name != "nt" and path.stat().st_mode & 0o111 != member.mode & 0o111)):
+                    raise ValueError(f"archived source changed during preparation/build: {member.name}")
+            elif member.issym():
+                if not path.is_symlink() or os.readlink(path) != member.linkname:
+                    raise ValueError(f"archived source link changed: {member.name}")
+            elif not member.isdir():
+                raise ValueError(f"unsupported source archive member: {member.name}")
 
 
 def required_tools(scenarios: list[dict]) -> set[str]:
