@@ -253,7 +253,7 @@ AI、审批和下载离开编辑器后由原界面显示，优先解释当前阶
 `columns - 1` 填充和安全末列与上一版相同。
 
 固定色板在 [`status/palette.rs`](../crates/nosh-shell/src/status/palette.rs) 内，
-不是可配置主题系统。所有文字（包括模式、图标和边界）均使用该块的前景，
+由唯一内建 `Theme::default()` 提供，不是用户可配置主题库。所有文字（包括模式、图标和边界）均使用该块的前景，
 没有用不同宿主主题里的“白/灰/亮蓝”名称代替 RGB。
 
 | 色块 / 状态 | 前景 RGB | 背景 RGB | sRGB 文字对比 | 256 色后备：前景 / 背景 | 后备对比 |
@@ -293,6 +293,52 @@ tmux 不因为继承 `WT_SESSION` 就自动认定 RGB；仍需其真实广告能
 也已核对。后续一列右内边距收尾仍需以对应冻结版本复验窄窗，
 不把上一候选截图当作最终版本自动通过。未测宿主、透明度或重定义色表
 的效果不从这两套主题外推。
+
+### 3.2 内部主题注入与更新入口
+
+`nosh_shell::status` 公开最小的类型安全配色接口，布局和业务事实仍由原
+renderer 控制：
+
+| 类型 / 调用 | 职责 |
+|---|---|
+| `ColorPair::new(fg_rgb, bg_rgb, fg_index, bg_index)` | 成对 RGB 与 256 色后备；索引必须在 16–255，错误显式返回 `InvalidColorIndex` |
+| `Theme` / `StatusPalette` | 环境、状态、操作、模式四区及 neutral/advice/pending/notice/error 语义色，不包含布局、按键或风险策略 |
+| `Theme::colors(Region, StatusTone)` | 按语义角色读取颜色，不靠文案匹配状态 |
+| `ThemeHandle::new(theme)` / `snapshot()` / `replace(theme)` | 注入、读取及替换一个共享色板；相同值不重绘，更新后通知现有 editor 的 repaint 信号 |
+| `ReplConfig.status_bar.theme` | 实际消费入口，不是未接线的 DTO；REPL 每帧只取一次完整快照，补全/搜索仍使用同一个 editor |
+
+```rust
+use nosh_shell::{ReplConfig, status::{ColorPair, Config, ThemeHandle}};
+
+let themes = ThemeHandle::default();
+let repl = ReplConfig {
+    status_bar: Config {
+        theme: themes.clone(),
+        ..Default::default()
+    },
+    ..Default::default()
+};
+// 把 repl 交给既有 nosh_shell::repl::run；宿主保留 themes 作为更新入口。
+let mut palette = themes.snapshot();
+palette.operation = ColorPair::new(
+    [238, 243, 248], [30, 64, 83], 231, 24,
+).expect("both fallback indices are extended colors");
+themes.replace(palette);
+```
+
+替换只更新色板并请求一次原生重绘，不重新构建 editor、不注入按键，不改草稿、
+光标、选区、undo、菜单、历史搜索或审批模式。注册回调由当前 editor 持有，
+退出后弱订阅不再重绘旧实例；回调在释放主题锁后执行。色板是固定大小的值，
+锁内仅复制数据/处理订阅，用户代码不在锁内运行。
+
+`NO_COLOR` / `CLICOLOR=0`、未声明扩展色、RGB/256 能力和 Unicode/ASCII 退让
+仍先于色板；主题不能强行打开颜色或修改槽位/形状。默认主题输出必须与冻结
+`990cfb` 版本逐字节一致；对比度约束是内建主题的验证，宿主自定义色板需
+自行检查后备色与实际显示效果。
+
+**本轮没有** `theme` TOML/CLI 参数、用户切换命令、主题文件监视器、插件协议、
+多套内建主题或新菜单/审批交互。完整主题库、视觉方案与用户切换 UX 留在
+[后续 shell 视觉设计 #45](https://github.com/NewFuture/nosh/issues/45)，该关系不是关闭条件。
 
 ## 4. 刷新和终端所有权
 

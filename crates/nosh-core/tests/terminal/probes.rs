@@ -179,7 +179,8 @@ pub(super) fn terminal_probe() {
         | "repl-blocked"
         | "repl-inline"
         | "repl-inline-off"
-        | "repl-inline-correct-execute" => {
+        | "repl-inline-correct-execute"
+        | "repl-inline-theme" => {
             let directory = tempfile::tempdir().unwrap();
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
@@ -216,6 +217,7 @@ pub(super) fn terminal_probe() {
             let config = nosh_shell::ReplConfig {
                 status_bar: nosh_shell::status::Config {
                     enabled: mode != "repl-inline-off",
+                    ..Default::default()
                 },
                 trigger: nosh_shell::TriggerConfig {
                     ai_enabled: false,
@@ -227,10 +229,49 @@ pub(super) fn terminal_probe() {
                 },
                 ..Default::default()
             };
+            let theme_updates = (mode == "repl-inline-theme").then(|| {
+                let themes = config.status_bar.theme.clone();
+                let home = std::path::PathBuf::from(std::env::var_os("NOSH_HOME").unwrap());
+                thread::spawn(move || {
+                    for revision in 1..=3 {
+                        let marker = home.join(format!("theme-request-{revision}"));
+                        let deadline = Instant::now() + Duration::from_secs(8);
+                        while !marker.exists() {
+                            assert!(
+                                Instant::now() < deadline,
+                                "theme fixture never received update {revision}"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        let theme = if revision == 3 {
+                            nosh_shell::status::Theme::default()
+                        } else {
+                            nosh_shell::status::Theme {
+                                environment: nosh_shell::status::ColorPair::new(
+                                    [238, 243, 248],
+                                    if revision == 1 {
+                                        [30, 64, 83]
+                                    } else {
+                                        [41, 54, 70]
+                                    },
+                                    231,
+                                    if revision == 1 { 24 } else { 25 },
+                                )
+                                .unwrap(),
+                                ..Default::default()
+                            }
+                        };
+                        assert!(themes.replace(theme));
+                    }
+                })
+            });
             assert_eq!(
                 nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, config),
                 if mode == "repl-blocked" { 130 } else { 0 }
             );
+            if let Some(updates) = theme_updates {
+                updates.join().unwrap();
+            }
             if mode.starts_with("repl-inline") {
                 assert!(
                     !directory.path().join("history_accepted").exists(),

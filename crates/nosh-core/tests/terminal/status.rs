@@ -395,3 +395,55 @@ fn full_row_background_never_reaches_submitted_command_output() {
         "command output was not independently observed: {err:?}"
     );
 }
+
+#[test]
+fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor() {
+    let (_, err, observations) = Probe {
+        mode: "repl-inline-theme",
+        stdout_tty: true,
+        stderr_tty: true,
+        columns: 120,
+        colorterm: Some("truecolor"),
+        track_frames: true,
+        steps: &[
+            ("(main)", b"echo theme_draft"),
+            ("echo theme_draft", b"@theme-switch"),
+            (
+                "\x1b[0;38;2;238;243;248;48;2;30;64;83m",
+                b"\x15cat candidate_\t",
+            ),
+            ("Completion", b"@theme-switch"),
+            ("\x1b[0;38;2;238;243;248;48;2;41;54;70m", b"\x1b"),
+            ("Tab", b"\x15\x12history_accepted"),
+            ("History search", b"@theme-switch"),
+            ("\x1b[0;38;2;238;243;248;48;2;20;60;64m", b"\r"),
+            ("touch history_accepted", b"\x15exit 0\r"),
+        ],
+        ..Default::default()
+    }
+    .run_with_timings();
+    assert_normal_flow(&err);
+    for (background, draft, state) in [
+        ([30, 64, 83], "echo theme_draft", ""),
+        ([41, 54, 70], "cat candidate_", "Completion"),
+        ([20, 60, 64], "touch history_accepted", "History search"),
+    ] {
+        let frame = observations
+            .frames
+            .iter()
+            .find(|frame| {
+                let row = frame.cursor.0;
+                row > 0
+                    && frame.lines[row].contains(draft)
+                    && frame.backgrounds[row - 1][0] == Some(super::screen::Color::Rgb(background))
+                    && frame.lines[row - 1].contains(state)
+            })
+            .unwrap_or_else(|| {
+                panic!("theme update did not reach the live {draft} interaction: {err:?}")
+            });
+        assert_eq!(frame.cursor.0, 2);
+        assert!(frame.painted[1][..119].iter().all(|cell| *cell));
+        assert!(!frame.painted[1][119]);
+        assert!(frame.backgrounds[2].iter().all(Option::is_none));
+    }
+}

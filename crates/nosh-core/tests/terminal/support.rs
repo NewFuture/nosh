@@ -349,6 +349,7 @@ impl Probe<'_> {
         let mut terminal_scan = 0;
         let mut cursor_replies = 0;
         let mut step_index = 0;
+        let mut theme_revision = 0;
         let mut resize_requested = None;
         let needs_cursor_reply = self.mode.starts_with("repl")
             && self
@@ -424,7 +425,17 @@ impl Probe<'_> {
                                     continue;
                                 }
                             }
-                            input.write_all(bytes).unwrap();
+                            if *bytes == b"@theme-switch" {
+                                assert_eq!(self.mode, "repl-inline-theme");
+                                theme_revision += 1;
+                                std::fs::write(
+                                    home.path().join(format!("theme-request-{theme_revision}")),
+                                    "",
+                                )
+                                .unwrap();
+                            } else {
+                                input.write_all(bytes).unwrap();
+                            }
                             next = steps.next();
                             step_index += 1;
                         }

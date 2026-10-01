@@ -534,6 +534,7 @@ pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
 struct EditorState {
     completion: Arc<Mutex<Option<crate::status::Completion>>>,
     bindings: crate::status::Bindings,
+    _theme_subscription: Option<crate::status::ThemeSubscription>,
 }
 
 struct RenderedPrompt {
@@ -545,6 +546,7 @@ struct RenderedPrompt {
 struct ReplPrompt {
     status_enabled: bool,
     status_feedback: bool,
+    theme: crate::status::ThemeHandle,
     environment: Option<(String, Option<String>)>,
     approval: String,
     note: Option<String>,
@@ -594,6 +596,7 @@ impl ReplPrompt {
         Self {
             status_enabled: false,
             status_feedback: false,
+            theme: crate::status::ThemeHandle::default(),
             environment,
             approval: badge.mode.clone(),
             note: badge.note.clone(),
@@ -619,6 +622,7 @@ impl ReplPrompt {
 
 impl Prompt for ReplPrompt {
     fn update_context(&self, context: PromptContext<'_>) {
+        let theme = self.theme.snapshot();
         let mut feedback = self
             .input_assist
             .as_ref()
@@ -664,6 +668,7 @@ impl Prompt for ReplPrompt {
                 color: style::stdout().color,
                 color_depth: crate::status::color_depth(),
                 unicode: style::stdout().unicode,
+                theme,
             })
         };
         let mut layout = compose(feedback.as_ref());
@@ -1068,6 +1073,7 @@ fn build_editor(
     let mut state = EditorState {
         completion: Default::default(),
         bindings: crate::status::Bindings::from_editor(&kb),
+        _theme_subscription: None,
     };
     if cfg.input_assist.enabled {
         state.bindings.enable_correction(&kb);
@@ -1094,6 +1100,12 @@ fn build_editor(
             prefix: cfg.trigger.ai_prefix.clone(),
         }))
         .with_highlighter(Box::new(NoHighlight));
+    let repaint = editor.repaint_signal();
+    state._theme_subscription = Some(
+        cfg.status_bar
+            .theme
+            .on_repaint(Arc::new(move || repaint.request_repaint())),
+    );
     let assist = cfg.input_assist.enabled.then(|| {
         let repaint = editor.repaint_signal();
         let columns = crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
@@ -1219,6 +1231,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         let mut prompt = ReplPrompt::build(shell, &ai.badge());
         prompt.status_enabled = status_supported && !shell.has_running_jobs();
         prompt.status_feedback = pipeline.cfg.status_bar.enabled;
+        prompt.theme = pipeline.cfg.status_bar.theme.clone();
         prompt.editor = editor_state.clone();
         *editor_state
             .completion
@@ -1330,6 +1343,7 @@ mod tests {
         ReplPrompt {
             status_enabled: true,
             status_feedback: true,
+            theme: crate::status::ThemeHandle::default(),
             environment: (!custom).then(|| ("~/project".into(), Some("main".into()))),
             approval: "Approval: Auto".into(),
             note: None,
@@ -1338,6 +1352,7 @@ mod tests {
             editor: EditorState {
                 completion: Default::default(),
                 bindings: crate::status::Bindings::from_editor(&keys),
+                _theme_subscription: None,
             },
             rendered: RefCell::new(None),
             left: if custom {
@@ -1353,6 +1368,96 @@ mod tests {
             input_assist: None,
             command_assist: None,
         }
+    }
+
+    #[test]
+    fn theme_replacement_keeps_the_editor_and_prompt_interaction_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let shell = EmbeddedShell::new(crate::ShellOptions {
+            working_dir: Some(directory.path().into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let config = ReplConfig {
+            input_assist: input_assist::Config {
+                enabled: false,
+                worker: None,
+            },
+            ..Default::default()
+        };
+        let themes = config.status_bar.theme.clone();
+        let (mut editor, _, state) = build_editor(&shell, &config, None);
+        assert!(
+            state._theme_subscription.is_some(),
+            "theme was not wired to the editor repaint signal"
+        );
+        let draft = "echo '中文 e\u{301}'";
+        editor.run_edit_commands(&[
+            EditCommand::InsertString(draft.into()),
+            EditCommand::MoveToPosition {
+                position: 5,
+                select: false,
+            },
+            EditCommand::MoveToPosition {
+                position: 9,
+                select: true,
+            },
+        ]);
+        let cursor = editor.current_insertion_point();
+        let selection = editor.current_selection();
+        let mut prompt = status_prompt(false);
+        prompt.theme = themes.clone();
+        for interaction in [
+            reedline::PromptInteraction::Editing,
+            reedline::PromptInteraction::Menu {
+                name: "completion_menu",
+                count: 10,
+                provisional: false,
+            },
+            reedline::PromptInteraction::HistorySearch {
+                term: "echo",
+                has_match: true,
+            },
+        ] {
+            themes.replace(crate::status::Theme::default());
+            let snapshot = || PromptContext {
+                buffer: draft,
+                cursor,
+                selection,
+                columns: 120,
+                rows: 24,
+                edit_mode: PromptEditMode::Emacs,
+                interaction,
+            };
+            prompt.update_context(snapshot());
+            let plain = style::strip_ansi(&prompt.render_prompt_left());
+            let theme = crate::status::Theme {
+                operation: crate::status::ColorPair::new([238, 243, 248], [30, 64, 83], 231, 24)
+                    .unwrap(),
+                ..Default::default()
+            };
+            assert!(
+                themes.replace(theme),
+                "each interaction must exercise an actual theme change"
+            );
+            prompt.update_context(snapshot());
+            assert_eq!(style::strip_ansi(&prompt.render_prompt_left()), plain);
+            assert_eq!(editor.current_buffer_contents(), draft);
+            assert_eq!(editor.current_insertion_point(), cursor);
+            assert_eq!(editor.current_selection(), selection);
+            assert_eq!(editor.prompt_edit_mode(), PromptEditMode::Emacs);
+        }
+        editor.run_edit_commands(&[
+            EditCommand::MoveToEnd { select: false },
+            EditCommand::InsertString(" appended".into()),
+        ]);
+        themes.replace(crate::status::Theme::default());
+        editor.run_edit_commands(&[EditCommand::Undo]);
+        assert_eq!(
+            editor.current_buffer_contents(),
+            draft,
+            "theme replacement lost the undo history"
+        );
     }
 
     fn prompt_context(columns: u16, rows: u16) -> PromptContext<'static> {

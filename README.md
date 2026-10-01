@@ -97,6 +97,8 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 
 实现使用固定基版的 Reedline 0.52.0 及局部渲染修补，不再包含固定底栏写入或按宿主名称设置的旧禁用表。`[shell] status_bar = false` 可关闭信息条，默认目录/分支回到原提示符；基础终端、非交互、不同输出 TTY 或已知后台 job 写入时沿用原显示路径。**tmux 的未提交草稿历史残留仍未解决，不保证所有宿主上的严格历史门禁通过**；功能 case、验证范围和兼容边界见[状态行设计](docs/STATUS-BAR.md)。
 
+嵌入宿主可通过 `ReplConfig.status_bar.theme` 注入和替换语义配色；默认外观保持不变，更新只请求现有编辑器重绘。当前没有用户主题切换命令或主题库，接口示例与后续 [#45](https://github.com/NewFuture/nosh/issues/45) 的范围见[主题扩展说明](docs/STATUS-BAR.md#32-内部主题注入与更新入口)。
+
 标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。
 
 普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。

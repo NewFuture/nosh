@@ -1,7 +1,11 @@
 //! Pure, read-only prompt composition. Reedline owns all terminal I/O.
 
 mod palette;
+mod theme;
 pub(crate) use palette::{ColorDepth, color_depth};
+pub use palette::{ColorPair, InvalidColorIndex, Region, StatusPalette, StatusTone, Theme};
+pub(crate) use theme::Subscription as ThemeSubscription;
+pub use theme::ThemeHandle;
 
 use std::collections::BTreeMap;
 
@@ -14,14 +18,18 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{Assistance, input_assist, style};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub enabled: bool,
+    pub theme: ThemeHandle,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            theme: ThemeHandle::default(),
+        }
     }
 }
 
@@ -223,6 +231,7 @@ pub(crate) struct Context<'a> {
     pub color: bool,
     pub color_depth: ColorDepth,
     pub unicode: bool,
+    pub theme: Theme,
 }
 
 #[derive(Default)]
@@ -681,6 +690,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         context.color,
         context.color_depth,
         context.unicode,
+        &context.theme,
     )
 }
 
@@ -790,6 +800,7 @@ fn render(
     color: bool,
     depth: ColorDepth,
     unicode: bool,
+    theme: &Theme,
 ) -> Layout {
     let slots = Slots::new(columns);
     let mut layout = Layout::default();
@@ -814,7 +825,7 @@ fn render(
         let block = format!(" {}{}{edge}", zone.text, " ".repeat(padding));
         if color && depth != ColorDepth::Plain {
             // Explicit pairs avoid the host's theme-overridable ANSI 0..15 palette.
-            let sgr = palette::pair(number, zone.tone).sgr(depth);
+            let sgr = theme.pair(number, zone.tone).sgr(depth);
             layout.text.push_str(&format!("{sgr}{block}\x1b[0m"));
         } else {
             layout.text.push_str(&block);
@@ -828,6 +839,72 @@ fn render(
 mod tests {
     use super::*;
     use reedline::PromptEditMode;
+
+    #[test]
+    fn injected_theme_changes_only_sgr_with_geometry_and_capability_fallbacks_preserved() {
+        let keys = bindings();
+        let handle = ThemeHandle::default();
+        let mut replacement = handle.snapshot();
+        replacement.environment = ColorPair::new([238, 243, 248], [30, 64, 83], 231, 24).unwrap();
+        replacement.status.advice = ColorPair::new([238, 243, 248], [39, 51, 74], 231, 25).unwrap();
+        let feedback = input_assist::Feedback {
+            text: "Unknown gti; try git".into(),
+            compact: "gti -> git".into(),
+            state: input_assist::State::Error,
+            correction: Some(input_assist::Correction {
+                version: Default::default(),
+                range: 0..3,
+                edit_range: 0..3,
+                from: "gti".into(),
+                to: "git".into(),
+            }),
+        };
+        let mut editor = editor("gti status");
+        for width in [32, 48, 64, 80, 120, 160] {
+            editor.columns = width;
+            for depth in [ColorDepth::Rgb, ColorDepth::Indexed, ColorDepth::Plain] {
+                for color in [false, true] {
+                    for unicode in [false, true] {
+                        handle.replace(Theme::default());
+                        let render = || {
+                            let mut context = context(&editor, &keys);
+                            context.theme = handle.snapshot();
+                            context.feedback = Some(&feedback);
+                            context.color = color;
+                            context.color_depth = depth;
+                            context.unicode = unicode;
+                            compose(context)
+                        };
+                        let original = render();
+                        handle.replace(replacement);
+                        let updated = render();
+                        assert_eq!(
+                            style::strip_ansi(&original.text),
+                            style::strip_ansi(&updated.text)
+                        );
+                        assert_eq!(original.correction_included, updated.correction_included);
+                        assert_eq!(original.note_included, updated.note_included);
+                        assert_eq!(
+                            style::width(&style::strip_ansi(&updated.text)),
+                            usize::from(width - 1)
+                        );
+                        if color && depth != ColorDepth::Plain {
+                            assert_ne!(
+                                original.text, updated.text,
+                                "the injected palette was not consumed"
+                            );
+                        } else {
+                            assert_eq!(
+                                original.text, updated.text,
+                                "a theme overrode disabled color"
+                            );
+                            assert!(!updated.text.contains('\x1b'));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn bindings() -> Bindings {
         let mut keys = reedline::default_emacs_keybindings();
@@ -881,6 +958,7 @@ mod tests {
             color: false,
             color_depth: ColorDepth::Rgb,
             unicode: true,
+            theme: Theme::default(),
         }
     }
 
@@ -1167,7 +1245,14 @@ mod tests {
             Field::new(2, "Esc exit", "Esc exit", "Esc exit", 99, true),
         ];
         for columns in 0..40 {
-            let layout = render(&fields, columns, false, ColorDepth::Plain, false);
+            let layout = render(
+                &fields,
+                columns,
+                false,
+                ColorDepth::Plain,
+                false,
+                &Theme::default(),
+            );
             assert!(
                 style::width(&layout.text) <= columns,
                 "{columns}: {:?}",
@@ -1375,6 +1460,7 @@ mod tests {
                 false,
                 ColorDepth::Plain,
                 false,
+                &Theme::default(),
             );
             assert!(
                 !layout.text.is_empty()
