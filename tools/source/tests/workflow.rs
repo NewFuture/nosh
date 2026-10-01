@@ -582,8 +582,6 @@ fn cargo_alias_bootstraps_before_workspace_dependency_exists() {
         "source",
         "prepare",
         "--offline",
-        "--root",
-        fixture.root.to_str().unwrap(),
         "--cache",
         fixture.upstream.to_str().unwrap(),
     ];
@@ -601,4 +599,43 @@ fn cargo_alias_bootstraps_before_workspace_dependency_exists() {
     );
     assert!(String::from_utf8_lossy(&repeated.stdout).contains("already prepared"));
     fixture.ok(&["check"]);
+}
+
+#[test]
+fn reused_binary_uses_runtime_source_root_instead_of_its_compilation_directory() {
+    let fixture = Fixture::new();
+    let run = |directory: &Path, explicit_root: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nosh-source"));
+        command
+            .current_dir(directory)
+            .args(["prepare", "--offline", "--cache"])
+            .arg(&fixture.upstream);
+        if explicit_root {
+            command.arg("--root").arg(&fixture.root);
+        }
+        command.output().unwrap()
+    };
+    let prepared = run(&fixture.root, false);
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    assert!(fixture.source().join(".git/nosh/state.json").is_file());
+    let outside = fixture._temporary.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let invalid = run(&outside, false);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("not a managed nosh source root"));
+    assert!(
+        !outside.join(".nosh").exists(),
+        "an invalid default root must remain untouched"
+    );
+    let explicit = run(&outside, true);
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert!(String::from_utf8_lossy(&explicit.stdout).contains("already prepared"));
 }

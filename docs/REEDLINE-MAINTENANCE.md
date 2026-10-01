@@ -35,7 +35,12 @@ From the repository root, use `cargo source prepare`, `check`, `export`,
 `provenance` or `upgrade`; `cargo source --help` lists the options. The Cargo
 alias expands to `cargo run --manifest-path tools/source/Cargo.toml --locked --`
 and works before the application's path dependency exists. The explicit form
-remains supported for CI and callers outside the repository root.
+remains supported for CI and callers outside the repository root, with
+`--root <repository-or-archive>` when their current directory is elsewhere.
+The default root is the **runtime working directory**, never a path baked into
+a cached tool binary; sharing `CARGO_TARGET_DIR` between checkouts/archives does
+not redirect preparation into the checkout where the tool was first compiled.
+An invalid root is rejected before creating `.nosh`.
 
 Use native Git and Rust on Linux/macOS, or in a Linux-native WSL checkout:
 

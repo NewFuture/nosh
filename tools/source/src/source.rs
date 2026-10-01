@@ -119,6 +119,12 @@ pub(crate) struct Manager {
 impl Manager {
     pub(crate) fn new(root: PathBuf, cache: Option<PathBuf>, offline: bool) -> Result<Self> {
         let root = dunce::canonicalize(root)?;
+        if !root.join(PIN).is_file() || !root.join(PATCH).is_file() {
+            return Err(format!(
+                "{} is not a managed nosh source root; run from the repository/archive root or pass --root <path>",
+                root.display()
+            ).into());
+        }
         fs::create_dir_all(root.join(".nosh"))?;
         let lock = File::options()
             .read(true)

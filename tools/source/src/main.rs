@@ -31,7 +31,7 @@ impl Action {
 fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     let mut action = None;
-    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut root = None;
     let mut cache = None;
     let mut offline = false;
     let mut revision = None;
@@ -48,7 +48,7 @@ fn run() -> Result<()> {
                     .next()
                     .ok_or_else(|| format!("{argument} needs a value"))?;
                 match argument.as_str() {
-                    "--root" => root = value.into(),
+                    "--root" => root = Some(PathBuf::from(value)),
                     "--cache" => cache = Some(dunce::canonicalize(value)?),
                     "--resolved" => resolved = Some(PathBuf::from(value)),
                     "--rev" => revision = Some(value),
@@ -69,6 +69,10 @@ fn run() -> Result<()> {
     if matches!(action, Action::Upgrade) && revision.is_none() {
         return Err("upgrade requires --rev".into());
     }
+    let root = match root {
+        Some(root) => root,
+        None => env::current_dir()?,
+    };
     let manager = Manager::new(root, cache, offline)?;
     match action {
         Action::Prepare => manager.prepare(),
