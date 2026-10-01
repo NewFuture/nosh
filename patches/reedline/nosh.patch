@@ -395,10 +395,10 @@ index 57ab8a04c8c181cbef32eaed78c834e348519fbd..7a0b3abca813b80f8e6b4ebdd35c3842
   "log",
 diff --git a/NOSH_PATCH.md b/NOSH_PATCH.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..8598cd9b29bd0e8d7ae05b363a915a889eaddbd3
+index 0000000000000000000000000000000000000000..c6addfa5b182c8d344602b18e43ff9adf4a42cf2
 --- /dev/null
 +++ b/NOSH_PATCH.md
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,54 @@
 +# nosh Reedline adaptation
 +
 +Base: upstream Reedline **0.52.0**, MIT licensed, Git commit
@@ -417,6 +417,12 @@ index 0000000000000000000000000000000000000000..8598cd9b29bd0e8d7ae05b363a915a88
 +It tracks painted physical rows and temporarily archived owned prefixes during
 +resize, clips long input by physical rows and graphemes, maps mouse positions
 +through that viewport, and retains complete submitted/cancelled transcripts.
++Literal tabs are retained through ANSI stripping and expanded in painting copies
++to eight-column stops, including wrapped tab cells and continuation-prompt
++offsets. Layout, viewport clipping, painted-row reflow and mouse-to-source byte
++mapping share that walk. Editable and submitted buffer bytes remain unchanged;
++the terminal is sent spaces for painted tabs, not raw HT with host-dependent
++margin behavior.
 +The imported repair's portable patch SHA256 is
 +`5dc972065b9b2a3486613eb439d6af9cfb0c022c5b8c4f6fb5bb4bb6aa6e08c5`.
 +
@@ -775,37 +781,16 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..dd5a2f13c4a9a1bd80c35f9e71d8971a
  mod edit_mode;
 diff --git a/src/painting/display.rs b/src/painting/display.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6dff957490
+index 0000000000000000000000000000000000000000..515cfed7f6adb67371c4b358eaf3166b0fb00d08
 --- /dev/null
 +++ b/src/painting/display.rs
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,379 @@
 +use super::utils::{
-+    advance_grapheme, estimate_required_lines, line_width, resolve_wrap, strip_ansi, wrap_position,
++    display_text, estimate_required_lines, expand_tabs, line_width, resolve_wrap, strip_ansi,
++    walk_grapheme, wrap_position,
 +};
-+use std::cell::Cell;
-+use std::io::{self, Write};
 +use std::ops::Range;
-+use std::rc::Rc;
 +use unicode_segmentation::UnicodeSegmentation;
-+
-+#[derive(Debug)]
-+struct MappedBytes {
-+    source_end: Rc<Cell<usize>>,
-+    bytes: Vec<u8>,
-+    ends: Vec<usize>,
-+}
-+
-+impl Write for MappedBytes {
-+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-+        self.bytes.extend_from_slice(bytes);
-+        self.ends.resize(self.bytes.len(), self.source_end.get());
-+        Ok(bytes.len())
-+    }
-+
-+    fn flush(&mut self) -> io::Result<()> {
-+        Ok(())
-+    }
-+}
 +
 +fn style_controls(text: &str) -> String {
 +    let bytes = text.as_bytes();
@@ -858,27 +843,16 @@ index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6d
 +    columns: u16,
 +    rows: Range<u16>,
 +) -> String {
-+    let source_end = Rc::new(Cell::new(0));
-+    let mut parser = strip_ansi_escapes::Writer::new(MappedBytes {
-+        source_end: source_end.clone(),
-+        bytes: Vec::new(),
-+        ends: Vec::new(),
-+    });
-+    // Reuse the ANSI parser rather than guessing where CSI/OSC sequences end.
-+    for (index, byte) in text.as_bytes().iter().enumerate() {
-+        source_end.set(index + 1);
-+        parser
-+            .write_all(std::slice::from_ref(byte))
-+            .expect("memory writer");
-+        parser.flush().expect("memory writer");
-+    }
-+    let mapped = parser.into_inner().expect("memory writer");
-+    let plain = String::from_utf8(mapped.bytes).expect("ANSI parser emits UTF-8");
++    let mut expanded_position = *position;
++    let expanded = expand_tabs(text, &mut expanded_position, columns);
++    let text = expanded.as_ref();
++    let mapped = display_text(text);
++    let plain = &mapped.text;
 +    let mut selected = None::<Range<usize>>;
 +    for (index, grapheme) in plain.grapheme_indices(true) {
 +        let old_row = position.0;
-+        let (at, width) = advance_grapheme(*position, grapheme, columns.max(1));
-+        *position = (at.0, at.1.saturating_add(width));
++        let mut at = *position;
++        *position = walk_grapheme(*position, grapheme, columns, |point, _, _| at = point);
 +        let visible = if grapheme == "\n" {
 +            rows.contains(&old_row) && rows.contains(&at.0)
 +        } else {
@@ -904,7 +878,7 @@ index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6d
 +        let controls = &text[previous..start];
 +        // Hidden rows contribute style, not prompt markers or cursor movement.
 +        output.push_str(&if visible {
-+            controls.replace(['\r', '\t'], "")
++            controls.replace('\r', "")
 +        } else {
 +            style_controls(controls)
 +        });
@@ -934,7 +908,9 @@ index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6d
 +
 +impl RenderedInput {
 +    pub(crate) fn overlay(&mut self, row: u16, column: u16, text: &str) {
-+        for (offset, line) in strip_ansi(text).split('\n').enumerate() {
++        let mut position = (0, column);
++        let text = expand_tabs(text, &mut position, u16::MAX);
++        for (offset, line) in strip_ansi(&text).split('\n').enumerate() {
 +            let row = usize::from(row) + offset;
 +            while self.rows.len() <= row {
 +                self.rows.push(PhysicalRow {
@@ -995,20 +971,22 @@ index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6d
 +        }];
 +        let mut position = (0, 0);
 +        for grapheme in strip_ansi(text).graphemes(true) {
-+            let (at, width) = advance_grapheme(position, grapheme, columns.max(1));
-+            if at.0 != position.0 && grapheme != "\n" {
-+                rows[position.0 as usize].wraps = true;
-+            }
-+            while rows.len() <= usize::from(at.0) {
-+                rows.push(PhysicalRow {
-+                    text: String::new(),
-+                    wraps: false,
-+                });
-+            }
-+            if grapheme != "\n" {
-+                rows[at.0 as usize].text.push_str(grapheme);
-+            }
-+            position = (at.0, at.1.saturating_add(width));
++            let mut previous_row = position.0;
++            position = walk_grapheme(position, grapheme, columns, |at, _, painted| {
++                if at.0 != previous_row && painted != "\n" {
++                    rows[usize::from(previous_row)].wraps = true;
++                }
++                while rows.len() <= usize::from(at.0) {
++                    rows.push(PhysicalRow {
++                        text: String::new(),
++                        wraps: false,
++                    });
++                }
++                if painted != "\n" {
++                    rows[usize::from(at.0)].text.push_str(painted);
++                }
++                previous_row = at.0;
++            });
 +        }
 +        // An absolute margin cursor can occupy a separate, empty hard row.
 +        while rows.len() <= usize::from(cursor.1) {
@@ -1056,6 +1034,52 @@ index 0000000000000000000000000000000000000000..b0a1dac7cf44114ef0067594b198ed6d
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn tab_spaces_are_clipped_by_physical_row_without_losing_the_style() {
++        let mut position = (0, 0);
++        let output = clip_display_rows("\x1b[31mab\t中x\x1b[0m", &mut position, 5, 1..2);
++        assert_eq!(strip_ansi(&output), "   中");
++        assert_eq!(position, (2, 1));
++        assert!(output.contains("\x1b[31m") && output.ends_with("\x1b[0m"));
++        assert!(!output.contains('\t'));
++    }
++
++    #[test]
++    fn painted_tab_spaces_and_cursor_reflow_like_terminal_cells() {
++        let input = RenderedInput::new("ab\t中x", (1, 2), 5);
++        assert_eq!(
++            input
++                .rows
++                .iter()
++                .map(|row| row.text.as_str())
++                .collect::<Vec<_>>(),
++            ["ab   ", "   中", "x"]
++        );
++        assert!(input.rows[0].wraps && input.rows[1].wraps);
++        assert_eq!(input.reflow_cursor(10), (1, 1));
++        let input = RenderedInput::new("ab\t中x", (3, 1), 5);
++        assert_eq!(input.reflow_cursor(10), (8, 0));
++    }
++
++    #[test]
++    fn tabs_clip_from_nonzero_columns_and_are_not_reinterpreted_after_resize() {
++        let mut position = (2, 5);
++        assert_eq!(clip_display_rows("\tX", &mut position, 20, 2..3), "   X");
++        assert_eq!(position, (2, 9));
++        let input = RenderedInput::new("abc\tz", (9, 0), 10);
++        let resized = input.reflowed(5);
++        assert_eq!(
++            resized
++                .rows
++                .iter()
++                .map(|row| row.text.as_str())
++                .collect::<Vec<_>>(),
++            ["abc  ", "   z"]
++        );
++        assert_eq!(resized.cursor, (4, 1));
++        assert_eq!(resized.reflow_cursor(10), (9, 0));
++    }
 +
 +    #[test]
 +    fn clip_long_line_by_physical_rows() {
@@ -1150,14 +1174,21 @@ index 18f5d97769db082bdee6083c761e6483f30785f0..a29dadeed55a91dc12e5fa03874aeaae
  mod prompt_lines;
  mod styled_text;
 diff --git a/src/painting/painter.rs b/src/painting/painter.rs
-index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d4ba58e97 100644
+index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878e76d562f 100644
 --- a/src/painting/painter.rs
 +++ b/src/painting/painter.rs
-@@ -1,3 +1,4 @@
+@@ -1,9 +1,10 @@
 +use super::display::{clip_display_rows, PhysicalRow, RenderedInput};
  use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
  use crate::{CursorConfig, PromptEditMode};
  
+ use {
+     super::utils::{
+-        advance_grapheme, coerce_crlf, deferred_wrap_row, line_width, resolve_wrap, wrap_position,
++        coerce_crlf, deferred_wrap_row, line_width, resolve_wrap, walk_grapheme, wrap_position,
+     },
+     crate::{
+         menu::{Menu, ReedlineMenu},
 @@ -26,6 +27,7 @@ use {crate::LineBuffer, crossterm::cursor::MoveUp};
  
  // Returns a string that skips N number of lines with the next offset of lines
@@ -1248,7 +1279,16 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
      }
  
      /// Main painter for the prompt and buffer
-@@ -771,7 +790,13 @@ impl Painter {
+@@ -715,6 +734,8 @@ impl Painter {
+         use_ansi_coloring: bool,
+         cursor_config: &Option<CursorConfig>,
+     ) -> Result<()> {
++        let expanded = lines.expanded_tabs(self.screen_width());
++        let lines = expanded.as_ref().unwrap_or(lines);
+         // Reset any ANSI styling that may have been left by external commands
+         // This ensures the prompt is not affected by previous output styling
+         // Note: Attribute::Reset (SGR 0) resets all attributes including colors
+@@ -771,7 +792,13 @@ impl Painter {
          self.large_buffer = required_lines >= screen_height;
  
          // Moving the start position of the cursor based on the size of the required lines
@@ -1263,7 +1303,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
              for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
                  self.stdout.queue(Print(&coerce_crlf("\n")))?;
              }
-@@ -797,7 +822,12 @@ impl Painter {
+@@ -797,7 +824,12 @@ impl Painter {
              self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
          };
  
@@ -1277,7 +1317,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
              let text = coerce_crlf(&lines.prompt_str_right);
              let text = if use_ansi_coloring {
                  format!("{}{}", prompt.get_prompt_right_color().prefix(), text)
-@@ -806,6 +836,38 @@ impl Painter {
+@@ -806,6 +838,38 @@ impl Painter {
              };
              (text, rp)
          });
@@ -1316,7 +1356,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
  
          self.last_layout = Some(layout);
  
-@@ -848,6 +910,7 @@ impl Painter {
+@@ -848,6 +912,7 @@ impl Painter {
          raw_before: &str,
          raw_after: &str,
          layout: &PromptLayout,
@@ -1324,7 +1364,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
      ) -> RenderSnapshot {
          let large_buffer_extra_rows_after_prompt = if self.large_buffer {
              Some(layout.extra_rows_after_prompt)
-@@ -872,6 +935,8 @@ impl Painter {
+@@ -872,6 +937,8 @@ impl Painter {
              large_buffer_extra_rows_after_prompt,
              large_buffer_offset,
              right_prompt: layout.right_prompt,
@@ -1333,7 +1373,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          }
      }
  
-@@ -913,6 +978,46 @@ impl Painter {
+@@ -913,6 +980,50 @@ impl Painter {
              }
          }
  
@@ -1350,26 +1390,30 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
 +            let buffer = format!("{}{}", snapshot.before_cursor, snapshot.after_cursor);
 +            for (index, grapheme) in buffer.grapheme_indices(true) {
 +                let newline = grapheme == "\n" || grapheme == "\r\n";
-+                let (at, width) = advance_grapheme(
++                let mut hit = None;
++                position = walk_grapheme(
 +                    position,
 +                    if newline { "\n" } else { grapheme },
-+                    snapshot.screen_width.max(1),
++                    snapshot.screen_width,
++                    |at, width, _| {
++                        if width > 0
++                            && at.0 == target_row
++                            && column >= at.1
++                            && column < at.1.saturating_add(width)
++                        {
++                            hit = Some(index);
++                        }
++                    },
 +                );
-+                if width > 0
-+                    && at.0 == target_row
-+                    && column >= at.1
-+                    && column < at.1.saturating_add(width)
-+                {
-+                    return Some(index);
++                if hit.is_some() {
++                    return hit;
 +                }
-+                position = (at.0, at.1.saturating_add(width));
 +                if newline {
 +                    for indicator in
 +                        super::utils::strip_ansi(&snapshot.multiline_indicator).graphemes(true)
 +                    {
-+                        let (at, width) =
-+                            advance_grapheme(position, indicator, snapshot.screen_width.max(1));
-+                        position = (at.0, at.1.saturating_add(width));
++                        position =
++                            walk_grapheme(position, indicator, snapshot.screen_width, |_, _, _| {});
 +                    }
 +                }
 +            }
@@ -1380,7 +1424,56 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          // Convert the absolute screen row to a row relative to the prompt start.
          let screen_width = snapshot.screen_width;
          let target_row = row.saturating_sub(snapshot.prompt_start_row);
-@@ -1206,6 +1311,32 @@ impl Painter {
+@@ -996,19 +1107,36 @@ impl Painter {
+                 // is the grapheme the layout put under the click. A zero-width
+                 // grapheme occupies no column and so is never the target; the
+                 // base grapheme it combines with already matched.
+-                let (at, width) =
+-                    advance_grapheme((current_row, current_col), grapheme, screen_width);
+-                (current_row, current_col) = at;
+-
+-                if width > 0
+-                    && current_row == target_row
+-                    && column >= current_col
+-                    && column < current_col.saturating_add(width)
+-                {
+-                    return Some(base_offset + index);
++                let mut hit = None;
++                (current_row, current_col) = walk_grapheme(
++                    (current_row, current_col),
++                    grapheme,
++                    screen_width,
++                    |at, width, _| {
++                        if width > 0
++                            && at.0 == target_row
++                            && column >= at.1
++                            && column < at.1.saturating_add(width)
++                        {
++                            hit = Some(base_offset + index);
++                        }
++                    },
++                );
++                if hit.is_some() {
++                    return hit;
++                }
++                if matches!(grapheme, "\n" | "\r\n") {
++                    for indicator in
++                        super::utils::strip_ansi(&snapshot.multiline_indicator).graphemes(true)
++                    {
++                        (current_row, current_col) = walk_grapheme(
++                            (current_row, current_col),
++                            indicator,
++                            screen_width,
++                            |_, _, _| {},
++                        );
++                    }
+                 }
+-
+-                current_col = current_col.saturating_add(width);
+             }
+ 
+             None
+@@ -1206,6 +1334,32 @@ impl Painter {
              self.stdout.queue(Print(&lines.hint))?;
          }
  
@@ -1413,7 +1506,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          Ok(cursor_row)
      }
  
-@@ -1219,11 +1350,42 @@ impl Painter {
+@@ -1219,11 +1373,42 @@ impl Painter {
      ) -> Result<Option<u16>> {
          let screen_width = self.screen_width();
          let screen_height = self.screen_height();
@@ -1460,7 +1553,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
  
          // Emit prompt start marker (OSC 133;A;k=i for primary prompt) only if prompt is visible
          if extra_rows == 0 {
-@@ -1239,15 +1401,7 @@ impl Painter {
+@@ -1239,15 +1424,7 @@ impl Painter {
                  .queue(Print(prompt.get_prompt_color().prefix()))?;
          }
  
@@ -1477,7 +1570,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
  
          if extra_rows == 0 {
              if use_ansi_coloring {
-@@ -1256,16 +1410,14 @@ impl Painter {
+@@ -1256,16 +1433,14 @@ impl Painter {
              }
  
              // Judged from the *skipped* prompt, which is what reached the screen.
@@ -1496,7 +1589,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
  
          // Emit command input start marker (OSC 133;B) after prompt indicator
          if let Some(markers) = &self.semantic_markers {
-@@ -1276,45 +1428,37 @@ impl Painter {
+@@ -1276,45 +1451,37 @@ impl Painter {
              self.stdout.queue(ResetColor)?;
          }
  
@@ -1562,7 +1655,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          Ok(cursor_row)
      }
  
-@@ -1324,7 +1468,7 @@ impl Painter {
+@@ -1324,7 +1491,7 @@ impl Painter {
          let term = var_os("TERM");
          self.term_is_dumb = term_is_dumb(term.as_deref());
  
@@ -1571,7 +1664,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
  
          // `cursor::position()` is blocking and can time out, but a
          // resize happens infrequently enough that we accept the cost.
-@@ -1339,8 +1483,20 @@ impl Painter {
+@@ -1339,8 +1506,20 @@ impl Painter {
          // paint takes this row as verified and never asks again, which leaves
          // this read as the only proof of the height until the next reported
          // size.
@@ -1594,7 +1687,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          }
      }
  
-@@ -1391,6 +1547,22 @@ impl Painter {
+@@ -1391,6 +1570,22 @@ impl Painter {
      /// cursor survives, leaving a rejected command on screen as the record of
      /// what was aborted (#1143).
      pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
@@ -1617,7 +1710,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          self.stdout.queue(Clear(ClearType::FromCursorDown))?;
          if let Some(after_cursor) = &self.after_cursor_lines {
              self.stdout.queue(Print(after_cursor))?;
-@@ -2138,6 +2310,8 @@ mod tests {
+@@ -2138,6 +2333,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -1626,7 +1719,113 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          }
      }
  
-@@ -2160,6 +2334,131 @@ mod tests {
+@@ -2151,6 +2348,105 @@ mod tests {
+         assert_eq!(painter.screen_to_buffer_offset(&snapshot, 3, 0), Some(1));
+     }
+ 
++    #[test]
++    fn tab_display_cells_map_back_to_the_original_byte_offset() {
++        let mut snapshot = base_snapshot();
++        snapshot.prompt_str_left = "> ".into();
++        snapshot.before_cursor = "a\t中x".into();
++        let painter = Painter::new(W::sink());
++        for column in 3..8 {
++            assert_eq!(
++                painter.screen_to_buffer_offset(&snapshot, column, 0),
++                Some(1)
++            );
++        }
++        for column in 8..10 {
++            assert_eq!(
++                painter.screen_to_buffer_offset(&snapshot, column, 0),
++                Some(2)
++            );
++        }
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 10, 0), Some(5));
++        snapshot.screen_width = 5;
++        snapshot.large_buffer = true;
++        snapshot.viewport_start_row = Some(1);
++        for column in 0..3 {
++            assert_eq!(
++                painter.screen_to_buffer_offset(&snapshot, column, 0),
++                Some(1)
++            );
++        }
++        for column in 3..5 {
++            assert_eq!(
++                painter.screen_to_buffer_offset(&snapshot, column, 0),
++                Some(2)
++            );
++        }
++        assert_eq!(painter.screen_to_buffer_offset(&snapshot, 0, 1), Some(5));
++    }
++
++    #[test]
++    fn mouse_tab_cells_follow_the_continuation_prompt_in_both_viewports() {
++        let painter = Painter::new(W::sink());
++        let mut snapshot = base_snapshot();
++        snapshot.prompt_str_left = "> ".into();
++        snapshot.before_cursor = "a\nb\tx".into();
++        snapshot.multiline_indicator = ".. ".into();
++        for viewport in [None, Some(1)] {
++            snapshot.viewport_start_row = viewport;
++            snapshot.large_buffer = viewport.is_some();
++            let row = u16::from(viewport.is_none());
++            for column in 0..3 {
++                assert_eq!(
++                    painter.screen_to_buffer_offset(&snapshot, column, row),
++                    None
++                );
++            }
++            assert_eq!(painter.screen_to_buffer_offset(&snapshot, 3, row), Some(2));
++            for column in 4..8 {
++                assert_eq!(
++                    painter.screen_to_buffer_offset(&snapshot, column, row),
++                    Some(3)
++                );
++            }
++            assert_eq!(painter.screen_to_buffer_offset(&snapshot, 8, row), Some(4));
++        }
++    }
++
++    #[test]
++    fn small_and_large_paints_expand_tabs_without_changing_source_fragments() {
++        for color in [false, true] {
++            for repeats in [1, 40] {
++                let draft = "a\t中e\u{301}z".repeat(repeats);
++                let styled = format!("\x1b[33m{draft}\x1b[0m");
++                let lines = make_lines("status\r\n", "> ", "", &styled, "\tAFTER");
++                let mut painter = Painter::new(W::capture());
++                painter.terminal_size = (11, 5);
++                painter.term_is_dumb = false;
++                painter.prompt_start_row.mark_verified(0);
++                painter
++                    .repaint_buffer(
++                        &TestPrompt,
++                        &lines,
++                        PromptEditMode::Default,
++                        None,
++                        color,
++                        &None,
++                    )
++                    .unwrap();
++                assert_eq!(painter.large_buffer, repeats > 1);
++                assert!(!String::from_utf8_lossy(painter.stdout.captured()).contains('\t'));
++                assert_eq!(lines.before_cursor, styled);
++                assert_eq!(lines.after_cursor, "\tAFTER");
++                painter.move_cursor_to_end().unwrap();
++                assert!(
++                    !String::from_utf8_lossy(painter.stdout.captured()).contains('\t'),
++                    "the committed visual transcript must use the same expanded cells"
++                );
++            }
++        }
++    }
++
+     #[test]
+     fn test_clicks_past_eol_clamps() {
+         let mut snapshot = base_snapshot();
+@@ -2160,6 +2456,131 @@ mod tests {
          assert_eq!(painter.screen_to_buffer_offset(&snapshot, 10, 0), Some(2));
      }
  
@@ -1758,7 +1957,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
      #[test]
      fn test_wrapped_line_mapping() {
          let mut snapshot = base_snapshot();
-@@ -3005,19 +3304,13 @@ mod tests {
+@@ -3005,19 +3426,13 @@ mod tests {
  
      #[test]
      fn test_layout_large_buffer_extra_rows() {
@@ -1781,6 +1980,313 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..d824dc2c48ed242cfeca06a0737afd1d
          assert_eq!(layout.first_buffer_col, 0); // scrolled, so col 0
      }
  
+diff --git a/src/painting/prompt_lines.rs b/src/painting/prompt_lines.rs
+index 34cbf1350f680f9137d693acb044deb261b4fef4..a592703c52d4e9638c2eee4ae199a82c66ffe2cf 100644
+--- a/src/painting/prompt_lines.rs
++++ b/src/painting/prompt_lines.rs
+@@ -1,4 +1,6 @@
+-use super::utils::{coerce_crlf, estimate_required_lines, line_width, resolve_wrap, wrap_position};
++use super::utils::{
++    coerce_crlf, estimate_required_lines, expand_tabs, line_width, resolve_wrap, wrap_position,
++};
+ use crate::{
+     menu::{Menu, ReedlineMenu},
+     prompt::PromptEditMode,
+@@ -54,6 +56,33 @@ impl<'prompt> PromptLines<'prompt> {
+         }
+     }
+ 
++    /// One painting copy shares tab stops across prompt, draft, cursor and hint.
++    pub(crate) fn expanded_tabs(&self, columns: u16) -> Option<PromptLines<'_>> {
++        if ![
++            &*self.prompt_str_left,
++            &*self.prompt_str_right,
++            &*self.prompt_indicator,
++            &*self.before_cursor,
++            &*self.after_cursor,
++            &*self.hint,
++        ]
++        .iter()
++        .any(|piece| piece.contains('\t'))
++        {
++            return None;
++        }
++        let mut position = (0, 0);
++        Some(PromptLines {
++            prompt_str_left: expand_tabs(&self.prompt_str_left, &mut position, columns),
++            prompt_indicator: expand_tabs(&self.prompt_indicator, &mut position, columns),
++            before_cursor: expand_tabs(&self.before_cursor, &mut position, columns),
++            after_cursor: expand_tabs(&self.after_cursor, &mut position, columns),
++            hint: expand_tabs(&self.hint, &mut position, columns),
++            prompt_str_right: expand_tabs(&self.prompt_str_right, &mut (0, 0), columns),
++            right_prompt_on_last_line: self.right_prompt_on_last_line,
++        })
++    }
++
+     /// Rows to reserve for the prompt and buffer, laid out end to end.
+     ///
+     /// Floored at [`Self::distance_from_prompt`] plus one: the cursor can rest
+@@ -179,6 +208,34 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use rstest::rstest;
+ 
++    #[test]
++    fn tab_expansion_shares_the_painted_column_across_the_cursor_and_hint() {
++        let lines = PromptLines {
++            prompt_str_left: "a".into(),
++            prompt_str_right: "".into(),
++            prompt_indicator: "> ".into(),
++            before_cursor: "b\t".into(),
++            after_cursor: "中\tz".into(),
++            hint: "\tH".into(),
++            right_prompt_on_last_line: false,
++        };
++        let expanded = lines.expanded_tabs(12).unwrap();
++        assert_eq!(expanded.before_cursor, "b    ");
++        assert_eq!(expanded.after_cursor, "中      z");
++        assert_eq!(expanded.hint, "   H");
++        assert_eq!(
++            lines.before_cursor, "b\t",
++            "source fragments must not be rewritten"
++        );
++        assert_eq!(expanded.required_lines(12, false, None), 2);
++        assert_eq!(expanded.distance_from_prompt(12), 0);
++        assert_eq!(expanded.cursor_pos(12), (8, 0));
++        assert!(
++            expanded.expanded_tabs(12).is_none(),
++            "only painting copies need expansion"
++        );
++    }
++
+     #[rstest]
+     #[case(
+         "~/path/",
+diff --git a/src/painting/utils.rs b/src/painting/utils.rs
+index bac952d5152c7cb70c014e427b36bdc3ce949462..dec0ee5a9d3b31782162ab5d5d0f31c49f270d3f 100644
+--- a/src/painting/utils.rs
++++ b/src/painting/utils.rs
+@@ -1,4 +1,7 @@
+ use std::borrow::Cow;
++use std::cell::Cell;
++use std::io::{self, Write};
++use std::rc::Rc;
+ use unicode_segmentation::UnicodeSegmentation;
+ use unicode_width::UnicodeWidthStr;
+ 
+@@ -40,11 +43,130 @@ pub(crate) fn coerce_crlf(input: &str) -> Cow<'_, str> {
+ ///
+ /// If parsing fails silently returns the input string
+ pub(crate) fn strip_ansi(string: &str) -> String {
++    if string.contains('\t') {
++        return display_text(string).text;
++    }
+     String::from_utf8(strip_ansi_escapes::strip(string))
+         .map_err(|_| ())
+         .unwrap_or_else(|_| string.to_owned())
+ }
+ 
++pub(crate) struct DisplayText {
++    pub(crate) text: String,
++    pub(crate) ends: Vec<usize>,
++}
++
++#[derive(Debug)]
++struct MappedBytes {
++    source: Rc<Cell<(usize, bool)>>,
++    bytes: Vec<u8>,
++    ends: Vec<usize>,
++}
++
++impl Write for MappedBytes {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        let (end, tab) = self.source.get();
++        if tab && bytes == b" " {
++            self.bytes.push(b'\t');
++        } else {
++            self.bytes.extend_from_slice(bytes);
++        }
++        self.ends.resize(self.bytes.len(), end);
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++/// Strip ANSI while retaining visible tabs and their original source byte ends.
++pub(crate) fn display_text(text: &str) -> DisplayText {
++    let source = Rc::new(Cell::new((0, false)));
++    let mut parser = strip_ansi_escapes::Writer::new(MappedBytes {
++        source: source.clone(),
++        bytes: Vec::new(),
++        ends: Vec::new(),
++    });
++    for (index, byte) in text.as_bytes().iter().enumerate() {
++        source.set((index + 1, *byte == b'\t'));
++        // A printable placeholder is emitted only in text, never inside CSI/OSC.
++        let printable = if *byte == b'\t' { b' ' } else { *byte };
++        parser
++            .write_all(std::slice::from_ref(&printable))
++            .expect("memory writer");
++        parser.flush().expect("memory writer");
++    }
++    let mapped = parser.into_inner().expect("memory writer");
++    DisplayText {
++        text: String::from_utf8(mapped.bytes).expect("ANSI parser emits UTF-8"),
++        ends: mapped.ends,
++    }
++}
++
++fn tab_columns(position: (u16, u16), columns: u16) -> u16 {
++    let column = if position.1 >= columns.max(1) {
++        0
++    } else {
++        position.1
++    };
++    8 - column % 8
++}
++
++/// Walk every painted span of one source grapheme; tab cells may cross rows.
++pub(crate) fn walk_grapheme(
++    mut position: (u16, u16),
++    grapheme: &str,
++    columns: u16,
++    mut visit: impl FnMut((u16, u16), u16, &str),
++) -> (u16, u16) {
++    let columns = columns.max(1);
++    if grapheme == "\t" {
++        for _ in 0..tab_columns(position, columns) {
++            let (at, width) = advance_grapheme(position, " ", columns);
++            visit(at, width, " ");
++            position = (at.0, at.1.saturating_add(width));
++        }
++    } else {
++        let (at, width) = advance_grapheme(position, grapheme, columns);
++        visit(at, width, grapheme);
++        position = (at.0, at.1.saturating_add(width));
++    }
++    position
++}
++
++/// Expand only visible tabs in a painting copy, leaving ANSI and source untouched.
++pub(crate) fn expand_tabs<'a>(
++    text: &'a str,
++    position: &mut (u16, u16),
++    columns: u16,
++) -> Cow<'a, str> {
++    if !text.contains('\t') {
++        for grapheme in strip_ansi(text).graphemes(true) {
++            *position = walk_grapheme(*position, grapheme, columns, |_, _, _| {});
++        }
++        return Cow::Borrowed(text);
++    }
++    let mapped = display_text(text);
++    let mut output = String::new();
++    let mut previous = 0;
++    for (index, grapheme) in mapped.text.grapheme_indices(true) {
++        if grapheme == "\t" {
++            let end = mapped.ends[index];
++            output.push_str(&text[previous..end - 1]);
++            output.push_str(&" ".repeat(usize::from(tab_columns(*position, columns))));
++            previous = end;
++        }
++        *position = walk_grapheme(*position, grapheme, columns, |_, _, _| {});
++    }
++    if previous == 0 {
++        Cow::Borrowed(text)
++    } else {
++        output.push_str(&text[previous..]);
++        Cow::Owned(output)
++    }
++}
++
+ pub(crate) fn estimate_required_lines(input: &str, screen_width: u16) -> usize {
+     input.lines().fold(0, |acc, line| {
+         let wrap = estimate_single_line_wraps(line, screen_width);
+@@ -85,7 +207,11 @@ pub(crate) fn estimate_single_line_wraps(line: &str, terminal_columns: u16) -> u
+ 
+ /// Compute the line width for ANSI escaped text
+ pub(crate) fn line_width(line: &str) -> usize {
+-    strip_ansi(line).width()
++    if !line.contains('\t') {
++        return strip_ansi(line).width();
++    }
++    let mut position = (0, 0);
++    strip_ansi(&expand_tabs(line, &mut position, u16::MAX)).width()
+ }
+ 
+ /// Which row to move to when printing `pieces` lands the cursor on the
+@@ -142,9 +268,7 @@ pub(crate) fn wrap_position<'a>(
+     let (mut row, mut col) = (0u16, 0u16);
+     for piece in pieces {
+         for grapheme in strip_ansi(piece).graphemes(true) {
+-            let (at, width) = advance_grapheme((row, col), grapheme, terminal_columns);
+-            (row, col) = at;
+-            col = col.saturating_add(width);
++            (row, col) = walk_grapheme((row, col), grapheme, terminal_columns, |_, _, _| {});
+         }
+     }
+     Some((col, row))
+@@ -158,13 +282,13 @@ pub(crate) fn wrap_position<'a>(
+ /// the reverse mapping in `Painter::screen_to_buffer_offset` has to walk the
+ /// same rule to turn a screen position back into a buffer offset, and the two
+ /// disagreeing is how a click lands on the wrong grapheme.
+-pub(crate) fn advance_grapheme(
++fn advance_grapheme(
+     (row, col): (u16, u16),
+     grapheme: &str,
+     terminal_columns: u16,
+ ) -> ((u16, u16), u16) {
+     match grapheme {
+-        "\n" => ((row.saturating_add(1), 0), 0),
++        "\n" | "\r\n" => ((row.saturating_add(1), 0), 0),
+         "\r" => ((row, 0), 0),
+         _ => {
+             let width = grapheme.width() as u16;
+@@ -194,6 +318,42 @@ mod test {
+     use pretty_assertions::assert_eq;
+     use rstest::rstest;
+ 
++    #[test]
++    fn tab_geometry_uses_the_current_display_column() {
++        assert_eq!(strip_ansi("\x1b[31ma\tz\x1b[0m"), "a\tz");
++        assert_eq!(wrap_position(["ab", "a\tz"], 20), Some((9, 0)));
++        assert_eq!(wrap_position(["ab\t中x"], 5), Some((1, 2)));
++        assert_eq!(line_width("ab\tz"), 9);
++    }
++
++    #[test]
++    fn tab_expansion_handles_margin_wide_characters_and_hard_line_breaks() {
++        for (pieces, columns, expected) in [
++            (["1234567", "\tz"], 10, (9, 0)),
++            (["12345678", "\tz"], 8, (1, 2)),
++            (["中e\u{301}", "\tz"], 10, (9, 0)),
++            (["ab\r\n", "\tz"], 5, (4, 2)),
++        ] {
++            assert_eq!(wrap_position(pieces, columns), Some(expected));
++        }
++        assert_eq!(wrap_position(["a\tb"], 0), None);
++        let raw = "\x1b]0;title\tpayload\x07\x1b[31m中e\u{301}\t\x1b[0mz";
++        let mut position = (0, 0);
++        let expanded = expand_tabs(raw, &mut position, 12);
++        assert_eq!(
++            expanded,
++            "\x1b]0;title\tpayload\x07\x1b[31m中e\u{301}     \x1b[0mz"
++        );
++        assert_eq!(position, (0, 9));
++        assert_eq!(strip_ansi(&expanded), "中e\u{301}     z");
++        assert_eq!(strip_ansi(raw), "中e\u{301}\tz");
++        let mut position = (0, 0);
++        assert!(matches!(
++            expand_tabs("\x1b[31munchanged\x1b[0m", &mut position, 20),
++            Cow::Borrowed(_)
++        ));
++    }
++
+     #[rstest]
+     #[case("sentence\nsentence", "sentence\r\nsentence")]
+     #[case("sentence\r\nsentence", "sentence\r\nsentence")]
 diff --git a/src/prompt/base.rs b/src/prompt/base.rs
 index 7a480103f101f3e06b112f9a51f4690abb8a4dda..1040c3c4cddebe41268f3c293d46fcb61b9df19b 100644
 --- a/src/prompt/base.rs

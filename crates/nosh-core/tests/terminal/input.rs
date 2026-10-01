@@ -1,6 +1,47 @@
 use super::support::*;
 
 #[test]
+fn pasted_tabs_have_exact_display_columns_and_preserve_submitted_literal_bytes() {
+    let draft = "printf '%s\\n' 'a\t中e\u{301}\tZ'";
+    let paste = format!("\x1b[200~{draft}\x1b[201~");
+    let expected = style::clip_line(&format!("❯ {draft}"), 120, 0, "...");
+    for no_color in ["", "1"] {
+        let (_, err, observations) = Probe {
+            mode: "repl-inline",
+            stdout_tty: true,
+            stderr_tty: true,
+            columns: 120,
+            no_color,
+            track_frames: true,
+            steps: &[
+                ("(main)", paste.as_bytes()),
+                ("Z'", b"\r"),
+                ("a\t中e\u{301}\tZ\r\n", b"exit 0\r"),
+            ],
+            ..Default::default()
+        }
+        .run_with_timings();
+        let frame = observations
+            .frames
+            .iter()
+            .find(|frame| frame.lines[frame.cursor.0] == expected)
+            .unwrap_or_else(|| {
+                panic!("pasted-tab drawing did not match exact expanded columns: {err:?}")
+            });
+        assert_eq!(frame.cursor.1, style::width(&expected));
+        assert!(
+            frame.backgrounds[frame.cursor.0]
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(
+            err.contains("a\t中e\u{301}\tZ\n"),
+            "the submitted literal was rewritten instead of only expanding the drawing"
+        );
+    }
+}
+
+#[test]
 fn input_assist_updates_without_another_key_and_keeps_unicode_input_unchanged() {
     for no_color in ["", "1"] {
         let initial = "printf '%s\\n' '中文e\u{301}👩\u{200d}💻";

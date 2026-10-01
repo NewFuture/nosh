@@ -4,6 +4,11 @@
 > **范围**：现有 Linux / macOS / WSL 交互 shell；原生 Windows 的独立编辑器验证不等于 nosh 的 Windows 移植。
 > **关联**：[#36](https://github.com/NewFuture/nosh/issues/36)。输入辅助、会话 PTY、审批模式分别见 [INPUT-ASSIST](INPUT-ASSIST.md)、[OUTPUT-CAPTURE](OUTPUT-CAPTURE.md)、[APPROVAL-MODES](APPROVAL-MODES.md)。
 
+制表符几何修复：输入中的字面 Tab 在绘制副本按当前物理列的八列制表位
+展开为空格，ANSI/无颜色路径、行裁剪、resize 的已绘制行重流与鼠标字节映射
+使用同一规则；原草稿、撤销、历史和提交参数保留字面 Tab。这项修复不
+代表原有 tmux resize-160 草稿历史门槛已通过。
+
 ## 1. 功能信息划分
 
 目标沿用 #36：在正常 shell 使用中，让用户知道**当前环境、正在发生什么、哪些操作有效**，不把所有信息挤在命令输入行，也不进入全屏聊天界面。状态层只读已有事实，不重做输入辅助、候选生成、审批或任务控制。
