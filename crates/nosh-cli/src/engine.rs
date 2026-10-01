@@ -163,6 +163,30 @@ fn first_download_needed(setup: &EngineSetup) -> Result<bool, HubError> {
 
 /// Background loading uses installed models only, without terminal interaction.
 pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String> {
+    let (engine, description, metadata) = if let Some(path) = std::env::var_os("NOSH_EVAL_WORKER") {
+        crate::eval_worker::connect(std::path::Path::new(&path), setup)?
+    } else {
+        let (engine, description, metadata) = load_local(setup, mode)?;
+        (
+            Box::new(engine) as Box<dyn nosh_llm::ChatEngine>,
+            description,
+            metadata,
+        )
+    };
+    let trace = std::env::var_os("NOSH_EVAL_TRACE").filter(|p| !p.is_empty());
+    let engine =
+        crate::eval_trace::wrap(engine, trace.as_deref().map(std::path::Path::new), metadata)
+            .map_err(|e| format!("evaluation trace: {e}"))?;
+    Ok(LoadedEngine {
+        engine,
+        description,
+    })
+}
+
+pub(crate) fn load_local(
+    setup: &EngineSetup,
+    mode: LoadMode,
+) -> Result<(LocalChatEngine, String, serde_json::Value), String> {
     let device = setup.device.clone()?;
     let background = mode == LoadMode::Background;
     let resolved = match locate(setup).map_err(|e| e.to_string())? {
@@ -226,7 +250,6 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
         info.threads,
         info.load_secs
     );
-    let trace = std::env::var_os("NOSH_EVAL_TRACE").filter(|p| !p.is_empty());
     let metadata = serde_json::json!({
         "model": resolved.entry.id,
         "device": info.device.to_string(),
@@ -238,18 +261,11 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
         "context_length": info.context,
         "threads": info.threads,
         "load_s": info.load_secs,
+        "device_init_s": info.device_init_secs,
+        "model_init_s": info.model_init_secs,
         "kv_dtype": format!("{:?}", info.kv_dtype),
     });
-    let engine = crate::eval_trace::wrap(
-        Box::new(engine),
-        trace.as_deref().map(std::path::Path::new),
-        metadata,
-    )
-    .map_err(|e| format!("evaluation trace: {e}"))?;
-    Ok(LoadedEngine {
-        engine,
-        description,
-    })
+    Ok((engine, description, metadata))
 }
 
 #[cfg(test)]

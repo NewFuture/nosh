@@ -169,7 +169,8 @@ def execution_evidence(events: list[dict]) -> list[dict]:
 
 
 def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
-            deadline_timeout: bool = False, expected_device: str = "cpu") -> dict:
+            deadline_timeout: bool = False, expected_device: str = "cpu",
+            expected_worker: dict | None = None) -> dict:
     from .runtime import inference_device
     expected_device = inference_device(expected_device)
     if type(seed) is not int or not 0 <= seed < 2**64:
@@ -237,6 +238,13 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         records, pending = index_trace(events)
         engines = [event["info"] for event in records["engine"]]
         for info in engines:
+            if expected_worker is not None:
+                if (info.get("execution_mode") != "resident"
+                        or info.get("worker_pid") != expected_worker["pid"] or info["load_s"] != 0
+                        or info.get("worker_config") != expected_worker["config"]):
+                    raise ValueError("native engine did not use the declared resident worker")
+            elif info.get("execution_mode", "cold") != "cold":
+                raise ValueError("cold trial unexpectedly used a resident engine")
             # Historical native-v1 traces omitted device and were CPU-only.
             actual = info.get("device", "cpu")
             if expected_device == "auto":
@@ -290,6 +298,20 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         first_end = next((event for event in ends if session_key(event) == session_key(starts[0])), None)
         metrics["ttft_s"] = first_end["usage"]["ttft_s"] if first_end is not None else None
         metrics["load_s"] = sum(e["info"]["load_s"] for e in records["engine"])
+        for metric in ("prefill_s", "decode_s"):
+            values = [event["usage"].get(metric) for event in ends]
+            if any(value is not None and (not finite_number(value) or value < 0) for value in values):
+                raise ValueError(f"invalid {metric} usage")
+            metrics[metric] = sum(values) if values and all(value is not None for value in values) else None
+        metrics["timing_complete"] = not pending
+        metrics["case_other_s"] = None
+        if not pending and all(metrics[name] is not None for name in ("prefill_s", "decode_s")):
+            other_s = result.total_s - sum(metrics[name] for name in ("load_s", "prefill_s", "decode_s"))
+            if not finite_number(other_s) or other_s < 0:
+                raise ValueError("invalid case_other_s: native model timings exceed measured case wall time")
+            metrics["case_other_s"] = other_s
+        metrics["first_step_cached_tokens"] = first_end["usage"].get("cached_tokens") if first_end else None
+        metrics["first_step_prompt_tokens"] = first_end["usage"].get("prompt_tokens") if first_end else None
         inputs = [e for e in events if e["ev"] in ("open", "step_start", "rewind", "compact", "tool_choice")]
         # Engine IDs are process-local bookkeeping, not model input.
         inputs = [{k: v for k, v in e.items() if k not in ("engine", "schema_version")} for e in inputs]

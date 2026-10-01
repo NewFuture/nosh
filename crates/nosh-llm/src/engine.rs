@@ -53,7 +53,7 @@ impl ToolCall {
 
 /// Conversation messages. Appended system context, user input and tool content
 /// are encoded as plain text; the initial [`SessionSpec::system`] is trusted.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     System(String),
     User(String),
@@ -64,7 +64,7 @@ pub enum Message {
     Tool(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallErrorKind {
     Malformed,
     UnknownTool,
@@ -73,7 +73,7 @@ pub enum CallErrorKind {
     Truncated,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallError {
     pub kind: CallErrorKind,
     pub message: String,
@@ -87,7 +87,7 @@ impl std::fmt::Display for CallError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// Visible answer text (streamed).
     Text(String),
@@ -102,14 +102,14 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
     EndOfTurn,
     MaxTokens,
     Cancelled,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     /// Tokens that had to be prefilled this step.
     pub prompt_tokens: usize,
@@ -134,7 +134,7 @@ impl Usage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepOutcome {
     pub text: String,
     pub think: String,
@@ -144,7 +144,7 @@ pub struct StepOutcome {
     pub usage: Usage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SamplingParams {
     pub temperature: f32,
     pub top_p: f32,
@@ -169,7 +169,7 @@ impl Default for SamplingParams {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSpec {
     /// Host-side provenance for observations; never rendered into model tokens.
     pub label: String,
@@ -181,7 +181,7 @@ pub struct SessionSpec {
     pub max_new_tokens: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "name", rename_all = "snake_case")]
 pub enum ToolChoice {
     #[default]

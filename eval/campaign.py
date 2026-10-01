@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -10,8 +11,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
-from . import fixtures, report, runtime
+from . import fixtures, report, resident, runtime
 from .suite import BUILTIN_SUITES, load_suite, positive_seconds, seeds
 from .trial import run_trial
 
@@ -65,6 +67,10 @@ def arguments(argv=None):
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--device", type=runtime.inference_device, default="cpu",
                         help="cpu (evaluation default), auto, cuda or cuda:N; written into every isolated trial config")
+    parser.add_argument("--execution-mode", choices=("cold", "resident"), default="cold",
+                        help="cold model process per trial, or one resident engine with isolated CLI processes")
+    parser.add_argument("--worker-start-timeout", type=float, default=120,
+                        help="resident startup deadline, separate from each trial deadline")
     parser.add_argument("--timeout", type=float)
     parser.add_argument("--plan", action="store_true", help="print the validated trial plan without running tools or models")
     parser.add_argument("--budget", type=float, help="maximum total trial-deadline budget, in seconds")
@@ -91,6 +97,7 @@ def main(argv=None) -> int:
     data = output = previous = None
     try:
         suite = load_suite(args.suite)
+        positive_seconds(args.worker_start_timeout, "worker startup timeout")
         if args.threads < 1:
             raise ValueError("threads must be positive")
         if args.label is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.label):
@@ -105,6 +112,11 @@ def main(argv=None) -> int:
         timeout = args.timeout if args.timeout is not None else suite["timeout_s"]
         maximum = validate_budget(dict(suite, seeds=selected_seeds), args.repeat, timeout, args.budget)
         planned = len(suite["scenarios"]) * len(selected_seeds) * args.repeat
+        needs_worker = args.execution_mode == "resident" and any(s["check"] != "typos" for s in suite["scenarios"])
+        worker_budget = args.worker_start_timeout + 10.0 * (planned + 2) + 10 if needs_worker else 0
+        positive_seconds(maximum + worker_budget, "combined campaign deadlines")
+        if args.budget is not None and maximum + worker_budget > args.budget:
+            raise ValueError("trial deadlines plus resident startup/cleanup exceed campaign budget")
         if args.plan:
             print(json.dumps({
                 "dataset_revision": suite["dataset_revision"],
@@ -112,6 +124,8 @@ def main(argv=None) -> int:
                 "seeds": selected_seeds, "repeat": args.repeat, "trials": planned,
                 "timeout_s": timeout, "maximum_trial_seconds": maximum,
                 "device": args.device,
+                "execution_mode": args.execution_mode, "warmup_generations": 0,
+                "maximum_worker_seconds": worker_budget,
             }, ensure_ascii=False, indent=2, allow_nan=False))
             return 0
         if args.model_path is None:
@@ -136,16 +150,35 @@ def main(argv=None) -> int:
         meta["settings"]["work_dir"] = str(work)
         output.mkdir(mode=0o700, parents=True, exist_ok=False)
         data = {"schema_version": report.SCHEMA_VERSION, "metadata": meta, "trials": []}
-        with fixtures.Workspace(work, toolchain) as workspace:
+        started = time.monotonic()
+        with fixtures.Workspace(work, toolchain) as workspace, contextlib.ExitStack() as stack:
             report.save(data, output, previous)
+            worker = None
+            if needs_worker:
+                worker = stack.enter_context(resident.Worker(args, binary, weights, output, meta))
+                report.save(data, output, previous)
             for repeat in range(args.repeat):
                 for scenario in suite["scenarios"]:
                     for seed in meta["seeds"]:
                         print(f"{scenario['id']} seed={seed} repeat={repeat}", flush=True)
-                        row = run_trial(args, meta, scenario, seed, repeat, workspace, output, binary, weights)
+                        if worker:
+                            worker.alive()
+                        row = run_trial(args, meta, scenario, seed, repeat, workspace, output, binary, weights,
+                                        **({"worker": worker} if worker else {}))
                         data["trials"].append(row)
+                        if worker:
+                            try:
+                                cleanup_started = time.monotonic()
+                                row["worker_after"] = worker.checkpoint()
+                                row["worker_cleanup_s"] = time.monotonic() - cleanup_started
+                            except (OSError, ValueError, RuntimeError) as error:
+                                row["status"] = "error"
+                                row["reasons"].append(f"worker cleanup failed: {error}")
+                                raise
                         report.save(data, output, previous)
                         print(f"  {row['status']}: {'; '.join(row['reasons'])}", flush=True)
+        meta["execution_wall_s"] = time.monotonic() - started
+        report.save(data, output, previous)
         print(f"Report: {output / 'report.md'}", flush=True)
         if any(t["status"] == "error" for t in data["trials"]):
             return 2

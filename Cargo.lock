@@ -2038,6 +2038,7 @@ dependencies = [
  "nosh-llm",
  "nosh-permissions",
  "nosh-shell",
+ "serde",
  "serde_json",
  "tempfile",
  "toml",
