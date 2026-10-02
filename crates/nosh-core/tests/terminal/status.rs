@@ -62,7 +62,7 @@ fn inline_menu_search_and_acceptance_keep_one_input_owner() {
             ("(main)", b"cat candidate_\t"),
             ("Completion", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
-            ("History search", b"\r"),
+            ("History search", b"\x1b"),
             ("touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
@@ -101,14 +101,14 @@ fn inline_background_suggestion_is_explicitly_accepted_but_not_executed() {
         input_assist: false,
         steps: &[
             ("probe> ", b"true\r"),
-            ("next: touch accepted", b"\x07"),
+            ("next: touch accepted", b"\x1bOQ"),
             ("touch accepted", b"\x15exit\r"),
         ],
         ..Default::default()
     }
     .run();
     assert_normal_flow(&err);
-    assert!(style::strip_ansi(&err).contains("Ctrl+G"), "{err:?}");
+    assert!(style::strip_ansi(&err).contains("F2"), "{err:?}");
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
                 ("Completion", b"\x1b"),
                 ("Tab", b"\x15\x12history_accepted"),
                 ("History search", b"\x1b"),
-                ("Ctrl+R", b"echo yz"),
+                ("Tab", b"\x15echo yz"),
                 ("echo yz", b"x"),
                 ("echo yzx", "\x15echo 中e\u{301}".as_bytes()),
                 ("echo 中e\u{301}", b"\x15"),
@@ -416,7 +416,7 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
             ("\x1b[0;38;2;238;243;248;48;2;41;54;70m", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
             ("History search", b"@theme-switch"),
-            ("\x1b[0;38;2;238;243;248;48;2;20;60;64m", b"\r"),
+            ("\x1b[0;38;2;238;243;248;48;2;20;60;64m", b"\x1b"),
             ("touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()

@@ -25,6 +25,9 @@ mod input;
 #[path = "terminal/command_assist.rs"]
 mod command_assist;
 
+#[path = "terminal/editing.rs"]
+mod editing;
+
 #[path = "terminal/status.rs"]
 mod status;
 

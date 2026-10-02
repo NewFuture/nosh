@@ -307,6 +307,7 @@ fn run_shell(
         },
         on_failure: cfg.on_failure,
         command_assist: cfg.command_assist,
+        editing: cfg.editing.clone(),
         input_assist: nosh_shell::input_assist::Config {
             enabled: cfg.input_assist,
             worker: if cfg.input_assist {

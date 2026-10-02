@@ -175,6 +175,7 @@ pub(super) fn terminal_probe() {
                 std::env::var("NOSH_TERMINAL_INITIAL").as_deref() == Ok("execute")
             );
         }
+        mode if mode.starts_with("repl-editing") => super::editing::probe(mode),
         "repl"
         | "repl-blocked"
         | "repl-inline"

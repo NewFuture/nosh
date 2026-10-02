@@ -7,7 +7,7 @@ fn automatic_assistance_is_displayed_and_accepting_never_executes_without_enter(
             let finish: &[u8] = if execute { b"\rexit\r" } else { b"\x15exit\r" };
             let steps: &[KeyStep<'_>] = &[
                 ("probe> ", b"true\r"),
-                ("next: touch accepted", b"\x07"),
+                ("next: touch accepted", b"\x1bOQ"),
                 ("touch accepted", finish),
             ];
             Probe {

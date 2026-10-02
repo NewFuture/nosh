@@ -119,7 +119,7 @@ pub fn read_key() -> Option<KeyEvent> {
 /// Reads a short line on stderr, starting from `initial`.
 /// `None` on Esc, Ctrl-C or Ctrl-D.
 pub fn read_text(prompt: &str, initial: &str) -> Option<String> {
-    text_result(read_short_line(prompt, initial, false, None))
+    text_result(read_short_line(prompt, initial, false, None, None).map(|(signal, _)| signal))
 }
 
 fn text_result(result: io::Result<Signal>) -> Option<String> {
@@ -135,10 +135,13 @@ fn text_result(result: io::Result<Signal>) -> Option<String> {
 
 pub(crate) fn read_plain_line(
     prompt: &str,
-    initial: &str,
+    draft: &mut String,
     assistance: Option<&crate::AssistDisplay>,
+    editing: &crate::editing::Compiled,
 ) -> io::Result<Signal> {
-    read_short_line(prompt, initial, true, assistance)
+    let (signal, buffer) = read_short_line(prompt, draft, true, assistance, Some(editing))?;
+    *draft = buffer;
+    Ok(signal)
 }
 
 fn read_short_line(
@@ -146,7 +149,8 @@ fn read_short_line(
     initial: &str,
     command: bool,
     assistance: Option<&crate::AssistDisplay>,
-) -> io::Result<Signal> {
+    editing: Option<&crate::editing::Compiled>,
+) -> io::Result<(Signal, String)> {
     if !available() {
         return Err(io::Error::new(
             io::ErrorKind::NotConnected,
@@ -174,7 +178,8 @@ fn read_short_line(
     let result = loop {
         if let Some(display) = assistance {
             if buf.is_empty() {
-                let status = display.status();
+                let status =
+                    display.status(editing.and_then(|maps| maps.ai_key(&maps.initial_mode())));
                 if !status.is_empty() && status != shown {
                     write!(err, "\r\n{status}\r\n")?;
                     shown = status;
@@ -191,25 +196,53 @@ fn read_short_line(
                 if let Some(display) = assistance {
                     display.invalidate();
                 }
-                buf.extend(s.chars().filter(|c| !c.is_control()));
+                if command && editing.is_some() {
+                    buf.push_str(&s.replace("\r\n", "\n").replace('\r', "\n"));
+                } else {
+                    buf.extend(s.chars().filter(|c| !c.is_control()));
+                }
             }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                if ctrl && k.code == KeyCode::Char('g') && buf.is_empty() {
-                    if let Some(display) = assistance
-                        && let Some(crate::Assistance::Command { program, .. }) = display.result()
-                    {
-                        buf = program;
+                if let Some(action) = editing.and_then(|editing| editing.plain_action(&k)) {
+                    match action {
+                        reedline::ReedlineEvent::ExecuteHostCommand(command) => {
+                            break Signal::HostCommand(command);
+                        }
+                        reedline::ReedlineEvent::Enter => break Signal::Success(buf.clone()),
+                        reedline::ReedlineEvent::CtrlC => break Signal::CtrlC,
+                        reedline::ReedlineEvent::Edit(commands)
+                            if commands.as_slice() == [reedline::EditCommand::InsertNewline] =>
+                        {
+                            buf.push('\n');
+                        }
+                        reedline::ReedlineEvent::Edit(commands)
+                            if commands.as_slice() == [reedline::EditCommand::Clear] =>
+                        {
+                            buf.clear();
+                        }
+                        _ => {
+                            return Err(io::Error::other(
+                                "unsupported compiled basic-input action",
+                            ));
+                        }
+                    }
+                    if let Some(display) = assistance {
                         display.invalidate();
                     }
-                } else if let Some(display) = assistance {
+                    line.draw(&mut err, &buf)?;
+                    continue;
+                }
+                if let Some(display) = assistance {
                     display.invalidate();
                 }
                 match k.code {
-                    KeyCode::Enter => break Signal::Success(buf),
+                    KeyCode::Enter => break Signal::Success(buf.clone()),
                     KeyCode::Esc => break Signal::CtrlC,
                     KeyCode::Char('c') if ctrl => break Signal::CtrlC,
-                    KeyCode::Char('d') if ctrl => break Signal::CtrlD,
+                    KeyCode::Char('d') if ctrl && (editing.is_none() || buf.is_empty()) => {
+                        break Signal::CtrlD;
+                    }
                     KeyCode::Char('u') if ctrl => buf.clear(),
                     KeyCode::Backspace => pop_grapheme(&mut buf),
                     KeyCode::Char(c) if !ctrl => {
@@ -232,7 +265,7 @@ fn read_short_line(
     };
     write!(err, "\r\n")?;
     err.flush()?;
-    Ok(result)
+    Ok((result, buf))
 }
 
 fn pop_grapheme(buf: &mut String) {
@@ -337,7 +370,7 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
         ed.run_edit_commands(&[reedline::EditCommand::InsertString(initial.to_string())]);
         text_result(ed.read_line(&PlainPrompt(prompt.to_string())))
     } else {
-        text_result(read_plain_line(prompt, initial, None))
+        text_result(read_short_line(prompt, initial, true, None, None).map(|(signal, _)| signal))
     }
 }
 

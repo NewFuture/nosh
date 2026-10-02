@@ -78,18 +78,19 @@ impl AssistDisplay {
             .clone()
     }
 
-    pub(crate) fn status(&self) -> String {
-        status_text(self.result().as_ref())
+    pub(crate) fn status(&self, key: Option<&str>) -> String {
+        status_text(self.result().as_ref(), key)
     }
 }
 
-pub(crate) fn status_text(result: Option<&Assistance>) -> String {
+pub(crate) fn status_text(result: Option<&Assistance>, key: Option<&str>) -> String {
     match result {
         Some(Assistance::Command {
             intent, program, ..
         }) => format!(
-            "{intent}: {}  (Ctrl+G)",
-            crate::style::clip_line(&crate::style::visible_text(program), 100, 0, "...")
+            "{intent}: {}{}",
+            crate::style::clip_line(&crate::style::visible_text(program), 100, 0, "..."),
+            key.map(|key| format!("  ({key})")).unwrap_or_default(),
         ),
         Some(Assistance::Message(text)) => crate::style::visible_text(text).into_owned(),
         None => String::new(),
@@ -99,15 +100,35 @@ pub(crate) fn status_text(result: Option<&Assistance>) -> String {
 pub(crate) struct AssistEditMode {
     pub inner: Box<dyn reedline::EditMode>,
     pub display: AssistDisplay,
+    pub completion_pending: bool,
 }
 
 impl reedline::EditMode for AssistEditMode {
     fn parse_event(&mut self, raw: reedline::ReedlineRawEvent) -> reedline::ReedlineEvent {
-        let event = self.inner.parse_event(raw);
+        self.parse_event_with_context(raw, reedline::EditContext::Editing)
+    }
+
+    fn parse_event_with_context(
+        &mut self,
+        raw: reedline::ReedlineRawEvent,
+        context: reedline::EditContext,
+    ) -> reedline::ReedlineEvent {
+        let event = self.inner.parse_event_with_context(raw, context);
+        self.completion_pending =
+            matches!(event, reedline::ReedlineEvent::CompleteOrHostCommand { .. });
         if !matches!(
             &event,
             reedline::ReedlineEvent::Resize(..) | reedline::ReedlineEvent::Repaint
-        ) && !matches!(&event, reedline::ReedlineEvent::ExecuteHostCommand(command) if command == "__nosh_suggest__")
+        ) && !matches!(&event, reedline::ReedlineEvent::ExecuteHostCommand(command)
+            if command == crate::repl::SUGGEST_COMMAND
+                || command == crate::editing::COMPLETION_AI_COMMAND
+                || command == crate::editing::FOCUS_NOTICE
+                || command == crate::editing::VI_LIMIT_NOTICE
+                || command == crate::editing::EDITOR_NOTICE)
+            && !matches!(
+                &event,
+                reedline::ReedlineEvent::CompleteOrHostCommand { .. }
+            )
         {
             self.display.invalidate();
         }
@@ -116,6 +137,25 @@ impl reedline::EditMode for AssistEditMode {
 
     fn edit_mode(&self) -> reedline::PromptEditMode {
         self.inner.edit_mode()
+    }
+
+    fn has_pending_input(&self) -> bool {
+        self.inner.has_pending_input()
+    }
+
+    fn handle_mode_specific_event(
+        &mut self,
+        event: reedline::ReedlineEvent,
+    ) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+
+    fn after_event(&mut self, context: reedline::EditContext, edited: bool) {
+        self.inner.after_event(context, edited);
+        if self.completion_pending && (edited || context != reedline::EditContext::Editing) {
+            self.display.invalidate();
+        }
+        self.completion_pending = false;
     }
 }
 

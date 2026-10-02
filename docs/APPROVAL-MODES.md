@@ -17,7 +17,7 @@
 | `--auto` / `--yolo` | 覆盖用户配置；两者不能同时使用 |
 | `ai mode confirm\|auto\|yolo` | 保持现有切换命令，选择跨任务保留；不每轮重置 |
 | `ai auto on/off`、`NOSH_DISABLE_AI`、`--safe` | 控制 AI 路由或是否启用 AI，与审批 Auto 独立 |
-| `nosh -s` / Ctrl+G | 只建议，不执行；没有工具权限 |
+| `nosh -s` / F2 / 适用的 Tab 兜底 | CommandAssist 仅通过受限查询提出建议，不执行目标；不进入 Agent 执行权限 |
 | 管道附件 | 仍仅提供只读工具；任何模式或白名单都不能增加 `run_command` |
 
 ## 2. 模式与规则优先级

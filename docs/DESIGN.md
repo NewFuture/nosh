@@ -38,7 +38,7 @@
 
 - **本身就是 shell**：内核是兼容 Bash 的 brush-core，提供 rc 加载、补全和作业控制，核心平台是 Linux。普通命令直接执行；AI 触发、本地纠错与自然语言安全网的边界见 §4.2。
 - **上下文连续**：agent 和用户在同一个 shell 会话里执行命令，cwd、变量、函数、venv 等状态会一直延续。
-- **CLI 与交互共用核心**：支持一次性任务、管道附件、命令建议，以及 nosh 内的 Ctrl+G。用户运行的 vim、htop 等程序直接使用终端，不经过 agent 输出采集。
+- **CLI 与交互共用核心**：支持一次性任务、管道附件、命令建议，以及 nosh 内的 F2/Tab 建议入口。用户运行的 vim、htop 等程序直接使用终端，不经过 agent 输出采集。
 - **本地优先，远程复用**：当前所有部分都在本机运行；规划中的远程版将 shell、harness、权限、工具和推理部署到 Linux 主机，客户端通过 SSH 连接。
 - **本地模型，断网可用**：基于 candle + GGUF。默认权重约 1.56 GB，含 tokenizer 首次下载约 1.57 GB；当前在前台下载，交互确认默认同意，之后推理无需联网。
 - **执行前判定**：agent 命令经过风险分析与审批策略；用户命令不走 agent 审批。风险分析不是操作系统沙箱，离线开关也不限制 shell 命令联网（§6、§8.3）。
@@ -63,8 +63,8 @@ nosh --safe                        # 跳过 rc，同时关闭 AI
 | 让 AI 做事 | `# 找出当前目录下最大的 10 个文件` |
 | 直接用中文说 | `帮我看看 8080 端口被谁占了`：无法解析为现有命令时交给 AI |
 | 命令打错了 | 输入 `gti status`，输入行会自动变成 `git status`，回车即可执行 |
-| 命令执行失败 | 默认后台生成修正建议，Ctrl+G 接受；`ai fix` 显式生成修复命令，`ai fix 为什么失败` 进入 Agent 诊断 |
-| 只要命令，不执行 | 输入一句话后按 Ctrl+G，输入行会被替换成命令，检查后自己按回车 |
+| 命令执行失败 | 默认后台生成修正建议，F2 接受已有候选；`ai fix` 显式生成修复命令，`ai fix 为什么失败` 进入 Agent 诊断 |
+| 只要命令，不执行 | 输入一句话后按 F2（或适用的 Tab 兜底），输入行被替换成命令，检查后自己按回车 |
 | 追问 | `# 再把它们打包`：在同一个对话里，可以引用上一步的结果 |
 | 审批 | `y` 执行；`n` 拒绝（可以附理由）；`e` 编辑；`a` 本会话内同类放行。强确认需键入 `yes`，适用范围见 §6.3 |
 | 中断 | 按 Ctrl-C 中断当前命令，再按一次中止整个任务 |
@@ -100,7 +100,7 @@ nosh --offline --no-download -a "列出当前目录的文件" # 模型必须已�
 | 平台与入口 | Linux / WSL 本地 MVP；Linux x86_64、aarch64 和 macOS Apple Silicon CI；shell、`-c`、脚本、`-a`、`-s` | Windows 原生后端、`init`、`connect/server` 未实现 |
 | 推理 | 默认 auto 按构建／可用显存选择 CPU 或单卡 CUDA、进程内 `LocalChatEngine`、f16 KV、对话内前缀复用、CPU 按平台预重排与释放 | 共享 engine、多会话 KV、磁盘前缀缓存、Metal、多卡推理与运行中设备迁移未实现 |
 | 工具与权限 | Agent 三个工具（run_command/read_file/grep）；CommandAssist 使用查询工具与 finish，不执行目标；confirm/auto/yolo，默认 auto；结构化用户规则、有界会话授权和模式标识 | `write_file/ask_user`、项目/管理员策略、远程审批和沙箱未实现 |
-| 交互与上下文 | nosh 内 Ctrl+G、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
+| 交互与上下文 | nosh 内 F2、输入编辑/改键、输出块、最近用户输出采集、旧工具结果压缩、空闲后新建对话 | 用户采集默认 `last`，可显式 `off`；仅保证无并发输出的前台命令；其他 shell 的快捷键集成、LLM 摘要未实现 |
 | 模型管理 | 前台下载、并行测速后顺序选源、断点续传、校验、GGUF + tokenizer 导入 | 后台与多源并行下载、打包导出、模型更新命令未实现 |
 | 本地数据 | shell 历史、agent 截断输出落盘；用户采集缓冲仅在内存；本地 `Redactor` 为 `NoRedact` | 显式评测 trace 仍记录输入；agent history/audit、自动清理、无痕模式和文件备份未实现 |
 | 评测 | revision 12 基础套件与 revision 13 的 8 场景真实工作流专项；原生 trace 记录宿主接受结果、工作流标签和 token 成本 | 新数据集成绩与历史基线分开；旧协议仅留证据；复现验收仍未满足（§13.2） |
@@ -355,7 +355,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 | `shell.trigger_on_error = false` | 关闭普通解析错误、无法纠错的未知命令自动转 AI | 本地纠错、单词内撇号分流、安全网、显式 AI 入口；执行失败由 `on_failure` 单独控制 |
 | `shell.on_failure = "off"` | 关闭已执行命令的失败提示与自动求助，包括 CJK 输入 | 执行前分流、显式 `ai fix` 等入口 |
 | `ai auto off` | 本会话暂停普通解析错误/未知命令的自动路由，以及命令完成后的 Next/Fix | 本地纠错、单词内撇号分流、安全网、显式入口；配置允许时仍显示失败提示 |
-| `shell.command_assist = false` | 关闭命令完成后的自动 Next/Fix | 显式 Ctrl+G、`-s`、`ai fix`、`ai next` 和 Agent |
+| `shell.command_assist = false` | 关闭命令完成后的自动 Next/Fix | 显式 F2/Tab 兜底、`-s`、`ai fix`、`ai next` 和 Agent |
 | `NOSH_DISABLE_AI=1` / `--safe` | 关闭 nosh AI 输入分流、纠错和自然语言安全网；`--safe` 还跳过 rc | 用户普通 shell 命令照常执行；不是沙箱或危险命令禁用开关 |
 
 因此，`ai auto off` **不是全局禁用 AI**；上述撇号例外是当前实现边界，不应靠该命令保证不会加载模型。
@@ -378,7 +378,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 - 这个检查完全在本地完成，耗时在微秒级。
 
 **其他入口**：
-- **Ctrl+G**：把输入行里的自然语言就地改写成命令。
+- **F2**：把非空白输入就地改写成命令草稿；空白输入只采用现有有效候选。**Tab** 在补全/菜单操作不可用、明确无结果时可兜底 AI。模式、上下文优先级和改键见[输入编辑](INPUT-EDITING.md)。
 - **内建命令 `ai`**：例如 `ai "任务"`、`ai mode …`、`ai fix`，当前与规划命令分列于 §9.1。管理命令不用 `/` 做前缀，以免与路径冲突。
 
 ### 4.3 共享会话
@@ -436,7 +436,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 
 `nosh init`、`connect/server`、`engine`、`config --defaults` 和 `doctor --rc` **尚未实现**；相关设计见 §9.2、§9.3、§10 和 §11。
 
-- **`nosh -s`**：stdout 只输出经 brush 校验的完整 shell program，不输出说明、不执行；诊断留在 stderr。退出码：0 表示有建议，1 表示没有有效建议，2 表示出错，130 表示被中止。Ctrl+G 使用相同建议路径，预填而不执行。
+- **`nosh -s`**：stdout 只输出经 brush 校验的完整 shell program，不输出说明、不执行；诊断留在 stderr。退出码：0 表示有建议，1 表示没有有效建议，2 表示出错，130 表示被中止。F2 使用相同建议路径，预填而不执行。
 - **`nosh -a`**：退出码为 0 表示完成，1 表示没有完成（达到步数上限，或者命令被拒绝后无法继续），2 表示出错，130 表示被中止。加 `--json` 时，以 JSON Lines 格式输出事件。
 - **状态含义**：`-a` 的 0 表示 harness 正常完成一轮任务，不是已经自动核实用户目标；事实正确性与最终状态由评测或用户验收。`-s` 的 0 表示建议通过了语法和有限静态检查，不保证运行成功、适用性或安全性。
 - **没有可见审批终端时**：需要确认的调用一律明确拒绝。审批要求可用控制终端且 stderr 为 TTY；stdin 可以是管道，但 stderr 重定向时不接受盲确认。模式和白名单只按 §6.3 决策，不虚构终端或绕过认证。
@@ -466,7 +466,7 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 | 入口 | 可用工具 | 执行方式 |
 |---|---|---|
 | shell 内（`# <任务>`、自然语言、`ai`、`ai fix <question>`）、无管道附件的 `nosh -a` | run_command、read_file、grep | Agent 按审批模式分析／执行（见 §6.3） |
-| CommandAssist（Ctrl+G、`nosh -s`、裸 `ai fix`、`ai next`、用户命令完成事件） | command_info、read_file、grep、finish | 按需查询，提交命令／澄清／无建议；不执行目标 |
+| CommandAssist（F2/Tab 兜底、`nosh -s`、裸 `ai fix`、`ai next`、用户命令完成事件） | command_info、read_file、grep、finish | 按需查询，提交命令／澄清／无建议；不执行目标 |
 | `nosh -a` 的管道附件 | `read_file`、`grep` | stdin 的内容截断后作为附件，不注册 `run_command` |
 
 **命令辅助边界**：Generate/Fix 最多 4 步、Next 最多 2 步，每步最多 512 个新 token，受更小的配置预算限制。唯一终态为 `finish(kind, text?)`；不能用自由文本或 Markdown 猜测命令。完整设计、后台取消和输出契约见 [CommandAssist](COMMAND-ASSIST.md)。语法／有限名称检查不替代执行前权限分析。
@@ -643,7 +643,7 @@ CALL ── id 19 </function> ──▶ ToolCall 或 CallError ──▶ TEXT
 
 这不是递增的权限阶梯。用户白名单优先于内置默认规则，但会话授权不能成为覆盖内置禁止的持久白名单；没有可用审批终端时，需审批的调用明确拒绝。
 
-- **只要建议、不想执行**：用 Ctrl+G 或 `nosh -s`。
+- **只要建议、不想执行**：用 F2 或 `nosh -s`。
 - **YOLO**：对非禁止操作免逐次审批，不代填密码或绕过外部认证。启用时显示准确说明，提示符显示 `审批: YOLO`。
 
 #### 6.3.2 自动准入与入口一致性
@@ -921,7 +921,7 @@ nosh --offline --no-download
 ```text
 ~/proj (main*) ❯ npm start
 Error: listen EADDRINUSE: address already in use :::8080
-✗ exit 1 · Ctrl+G 或 # 交给 AI
+✗ exit 1 · ai fix
 ~/proj (main*) ❯ # 为什么失败，帮我处理                 审批: 自动
 ┃ 端口 8080 被占用，先看看是哪个进程。
 ┃ ⚙ run_command  SAFE · 自动执行
@@ -945,7 +945,7 @@ Error: listen EADDRINUSE: address already in use :::8080
 | `ai mode confirm\|auto\|yolo` | 切换审批模式 |
 | `ai think on\|off` | 开关思考并新建对话 |
 | `ai auto on\|off` | 恢复 / 暂停部分自动路由；不是全局禁用，例外见 §4.2 |
-| `ai fix` | 分析最近记录的可求助失败；单独输入前缀或在空行按 Ctrl+G 也走此入口 |
+| `ai fix` | 生成最近可求助失败的修正建议；单独输入前缀也走此入口；空白 F2 不主动请求 Fix |
 | `ai out <编号>` | 查看本会话记录的 agent 输出 |
 | `ai clear`、`ai ctx`、`ai status` | 新建对话 / 查看上下文占用 / 查看模型与模式 |
 
@@ -959,9 +959,13 @@ Error: listen EADDRINUSE: address already in use :::8080
 
 配置使用 `shell.input_assist`（§11.1）；关闭颜色只关闭样式，基本终端/非 TTY 不进入实时分析。真正提交仍遵循 §4.2 的输入路由及适用的审批规则。
 
+### 9.1.2 输入编辑与键位
+
+默认启动时 `auto` 选择 Emacs/Vi，常用动作可改键；F2 和 Tab 的 AI 兜底仅回填，Ctrl+Z/Ctrl+_ 撤销、Ctrl+Y/Alt+/ 重做。历史搜索的 Enter 提交有效结果，Esc 只回填，Ctrl+G 恢复原草稿；其余基础键保留原生 Reedline 行为，不宣称统一 Bash/Fish 键表。模式/焦点矩阵、配置覆盖诊断、Vi 资源边界和基本终端降级统一见[输入编辑设计](INPUT-EDITING.md)。
+
 ### 9.2 嵌入其他 shell
 
-**规划（M2）**：`nosh init <shell>` 输出集成脚本，在 bash、zsh、fish 或 pwsh 里绑定 Ctrl+G，内部调用 `nosh -s`，仍由用户检查并回车执行。当前 `-s` 按 bash 生成建议，`init` 和 `--shell` 参数尚未实现；下面是目标集成草图，不能直接当作当前配置使用。
+**规划（M2）**：`nosh init <shell>` 输出集成脚本，内部调用 `nosh -s`，仍由用户检查并回车执行。宿主快捷键待 #20 按实际能力确定，不要求与 nosh 的 F2 机械一致。当前 `-s` 按 bash 生成建议，`init` 和 `--shell` 参数尚未实现；下面的 Ctrl+G 仅为历史目标草图中的示例，不是最终默认，不能直接当作当前配置使用。
 
 ```zsh
 _nosh_suggest() {
@@ -1057,6 +1061,8 @@ nosh connect user@host --push-model    把本地模型推送到主机
 
 本例使用当前默认 **`auto`**。`allow/deny` 使用统一 TOML 条目，命令选择器在加载时解析成参数前缀 / 精确匹配；不兼容旧的字符串 glob 数组。详见[用户规则及作用域](APPROVAL-MODES.md#4-用户规则与会话授权)。
 
+输入键位列表是显式覆盖示例，不是所有原生别名的完整清单；例如显式 `redo` 列表可移除默认保留的 Ctrl+G 别名。作用域与当前默认见[输入编辑](INPUT-EDITING.md)。
+
 ```toml
 [shell]
 ai_prefix = "#"
@@ -1068,7 +1074,12 @@ command_assist = true         # 用户命令完成后：成功 Next，失败 Fix
 status_bar = true             # 提示符上方四区信息条；关闭后保留原提示符和反馈，详见 STATUS-BAR.md
 nl_guard = "destructive"      # 破坏性命令安全网：destructive | off
 builtin_name = "ai"
-suggest_key = "ctrl-g"        # 当前固定支持 Ctrl+G，不支持自定义按键
+edit_mode = "auto"            # auto | emacs | vi；主模式仅启动时选择
+
+[shell.keybindings]
+ai_suggest = ["F2"]
+undo = ["Ctrl+Z", "Ctrl+_"]
+redo = ["Ctrl+Y", "Alt+/"]
 
 [agent]
 approval = "auto"             # 当前默认；可选 confirm | auto | yolo
@@ -1115,7 +1126,7 @@ reason = "Allow project fetches"
 | `[engine] shared / idle_exit_minutes / kv_budget` | 键被识别，但值被忽略；始终进程内推理 | M2：默认共享，空闲 15 分钟退出，KV 预算为可用内存的 25% |
 | `model.device = "cuda"` / `"cuda:N"` | `--features cuda` 构建后使用指定逻辑 GPU；不可用时报错，不回退 CPU | Metal 与多卡尚未实现；不支持的设备值拒绝加载 |
 | `model.thinking = "auto"` | 告警，按 off 处理 | 连续失败后自动开启 |
-| `shell.suggest_key` 的其他值 | 告警，仍使用 Ctrl+G | 后续按键扩展 |
+| 旧 `shell.suggest_key` | 未知字段告警，无迁移层 | 使用 `shell.keybindings`，完整动作/作用域见 [输入编辑](INPUT-EDITING.md) |
 | `nosh config --defaults` | 子命令不存在 | 后续完整配置输出 |
 | 隐私、扩展、远程及其他规划字段 | 不属于当前支持清单；不能依靠写入配置启用 | 随对应能力交付 |
 

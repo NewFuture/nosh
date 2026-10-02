@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use nosh_hub::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    EditMode, Emacs, Highlighter, Hinter, History, PromptContext, PromptInteraction, ReedlineEvent,
-    ReedlineRawEvent, StyledText,
+    EditContext, EditMode, EventStatus, Highlighter, Hinter, History, PromptContext,
+    PromptInteraction, ReedlineEvent, ReedlineRawEvent, StyledText,
 };
 
 use super::worker::{ChildHandle, Kind, Worker, kill_child};
@@ -353,7 +353,7 @@ impl InputAssist {
         }
     }
 
-    pub(crate) fn edit_mode(&self, inner: Emacs) -> Box<dyn EditMode> {
+    pub(crate) fn edit_mode(&self, inner: Box<dyn EditMode>) -> Box<dyn EditMode> {
         Box::new(InputEditMode {
             inner,
             shared: self.shared.clone(),
@@ -706,18 +706,27 @@ impl Highlighter for InputHighlighter {
 }
 
 struct InputEditMode {
-    inner: Emacs,
+    inner: Box<dyn EditMode>,
     shared: Arc<Shared>,
 }
 
 impl EditMode for InputEditMode {
     fn parse_event(&mut self, raw: ReedlineRawEvent) -> ReedlineEvent {
+        self.parse_event_with_context(raw, EditContext::Editing)
+    }
+
+    fn parse_event_with_context(
+        &mut self,
+        raw: ReedlineRawEvent,
+        context: EditContext,
+    ) -> ReedlineEvent {
         let raw: crossterm::event::Event = raw.into();
         let right = matches!(&raw, crossterm::event::Event::Key(key)
             if key.code == crossterm::event::KeyCode::Right && key.modifiers.is_empty());
-        let event = self
-            .inner
-            .parse_event(ReedlineRawEvent::try_from(raw).expect("normalized raw event"));
+        let event = self.inner.parse_event_with_context(
+            ReedlineRawEvent::try_from(raw).expect("normalized raw event"),
+            context,
+        );
         let correction = if right && right_navigation(&event) {
             self.shared.correction.try_lock().ok().and_then(|mut view| {
                 view.take()
@@ -737,7 +746,16 @@ impl EditMode for InputEditMode {
                 .columns
                 .store(usize::from(*columns), Ordering::Relaxed);
         }
-        if matches!(event, ReedlineEvent::SearchHistory) {
+        fn starts_search(event: &ReedlineEvent) -> bool {
+            match event {
+                ReedlineEvent::SearchHistory => true,
+                ReedlineEvent::Multiple(events) | ReedlineEvent::UntilFound(events) => {
+                    events.iter().any(starts_search)
+                }
+                _ => false,
+            }
+        }
+        if starts_search(&event) {
             self.shared.show_status.store(false, Ordering::Release);
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
         }
@@ -746,6 +764,18 @@ impl EditMode for InputEditMode {
 
     fn edit_mode(&self) -> reedline::PromptEditMode {
         self.inner.edit_mode()
+    }
+
+    fn has_pending_input(&self) -> bool {
+        self.inner.has_pending_input()
+    }
+
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+
+    fn after_event(&mut self, context: EditContext, edited: bool) {
+        self.inner.after_event(context, edited);
     }
 }
 
@@ -1454,6 +1484,7 @@ fn valid_analysis(input: &Input, analysis: &Analysis) -> bool {
 mod tests {
     use super::*;
     use crate::input_assist::tests::{Fixture, launcher};
+    use reedline::Emacs;
 
     fn editor() -> (Fixture, InputAssist, InputHighlighter) {
         let fixture = Fixture::new();
@@ -1590,6 +1621,7 @@ mod tests {
         PromptContext {
             buffer,
             cursor: buffer.len(),
+            completion_cursor: buffer.len(),
             selection: None,
             columns: 160,
             rows: 24,
@@ -1633,7 +1665,7 @@ mod tests {
         let text = "gti status -- '中文 e\u{301} 👩\u{200d}💻' && echo 'tail'";
         let (_fixture, assist, _highlighter) = ready_correction(text);
         assert!(assist.present_correction(&correction_context(text), true));
-        let mut mode = assist.edit_mode(Emacs::default());
+        let mut mode = assist.edit_mode(Box::new(Emacs::default()));
         let event = mode.parse_event(key(
             crossterm::event::KeyCode::Right,
             crossterm::event::KeyModifiers::NONE,
@@ -1666,7 +1698,7 @@ mod tests {
         ] {
             let (_fixture, assist, _highlighter) = ready_correction("gti status");
             assert!(assist.present_correction(&correction_context("gti status"), true));
-            let mut mode = assist.edit_mode(Emacs::default());
+            let mut mode = assist.edit_mode(Box::new(Emacs::default()));
             mode.parse_event(first);
             assert!(right_navigation(&mode.parse_event(key(K::Right, M::NONE))));
         }
@@ -1676,7 +1708,7 @@ mod tests {
     fn line_middle_selection_menu_search_and_unpresented_correction_keep_right_navigation() {
         use crossterm::event::{KeyCode as K, KeyModifiers as M};
         let (_fixture, assist, _highlighter) = ready_correction("gti status");
-        let mut mode = assist.edit_mode(Emacs::default());
+        let mut mode = assist.edit_mode(Box::new(Emacs::default()));
         for case in 0..5 {
             let mut context = correction_context("gti status");
             match case {
@@ -1818,7 +1850,7 @@ mod tests {
         let (_, assist, highlighter) = editor();
         highlighter.highlight("echo '", 6);
         assert!(assist.feedback("echo '").is_some());
-        let mut mode = assist.edit_mode(Emacs::default());
+        let mut mode = assist.edit_mode(Box::new(Emacs::default()));
         let raw = ReedlineRawEvent::try_from(crossterm::event::Event::Key(
             crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('r'),
@@ -2063,7 +2095,7 @@ mod tests {
             .clone();
         assert_eq!(context.path.as_deref(), Some("/updated"));
         assert!(context.aliases.contains("changed"));
-        let mut mode = assist.edit_mode(Emacs::default());
+        let mut mode = assist.edit_mode(Box::new(Emacs::default()));
         let event = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('r'),
             crossterm::event::KeyModifiers::CONTROL,

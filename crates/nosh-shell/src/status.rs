@@ -84,6 +84,9 @@ pub(crate) enum Action {
     Suggest,
     Cancel,
     Accept,
+    Submit,
+    AcceptSearch,
+    RestoreSearch,
     Close,
     Next,
     Previous,
@@ -95,6 +98,10 @@ pub(crate) enum Action {
 pub(crate) struct Bindings(BTreeMap<Action, String>);
 
 impl Bindings {
+    pub(crate) fn suggest_key(&self) -> Option<&str> {
+        self.0.get(&Action::Suggest).map(String::as_str)
+    }
+
     pub(crate) fn enable_correction(&mut self, bindings: &Keybindings) {
         if bindings.get_keybindings().iter().any(|(key, event)| {
             key.modifier.is_empty()
@@ -129,7 +136,14 @@ impl Bindings {
                 Action::Suggest
             }
             ReedlineEvent::CtrlC => Action::Cancel,
-            ReedlineEvent::Enter => Action::Accept,
+            ReedlineEvent::Enter => {
+                self.0.entry(Action::Submit).or_insert_with(|| key.into());
+                Action::Accept
+            }
+            ReedlineEvent::Submit => Action::Submit,
+            ReedlineEvent::AcceptHistorySearch => Action::AcceptSearch,
+            ReedlineEvent::CancelHistorySearch => Action::RestoreSearch,
+            ReedlineEvent::CompleteOrHostCommand { .. } => Action::Complete,
             ReedlineEvent::Esc => Action::Close,
             ReedlineEvent::MenuNext => Action::Next,
             ReedlineEvent::MenuPrevious => Action::Previous,
@@ -138,7 +152,7 @@ impl Bindings {
             {
                 Action::Newline
             }
-            ReedlineEvent::UntilFound(events) => {
+            ReedlineEvent::UntilFound(events) | ReedlineEvent::Multiple(events) => {
                 for event in events {
                     self.collect(event, key);
                 }
@@ -189,10 +203,13 @@ fn key_label(modifiers: KeyModifiers, key: KeyCode) -> Option<String> {
         return None;
     }
     let name = match key {
+        KeyCode::Char(' ') => "Space".into(),
         KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
         KeyCode::Enter => "Enter".into(),
         KeyCode::Tab | KeyCode::BackTab => "Tab".into(),
         KeyCode::Esc => "Esc".into(),
+        KeyCode::F(number) => format!("F{number}"),
+        KeyCode::Backspace => "Backspace".into(),
         _ => return None,
     };
     let mut label = String::new();
@@ -444,9 +461,26 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 },
             );
             if has_match {
-                add_action(&mut fields, Action::Accept, tr!("采用", "accept"), 98, true);
+                add_action(&mut fields, Action::Submit, tr!("提交", "submit"), 98, true);
             }
-            add_action(&mut fields, Action::Close, tr!("退出", "exit"), 99, true);
+            if context.bindings.0.contains_key(&Action::AcceptSearch) {
+                add_action(
+                    &mut fields,
+                    Action::AcceptSearch,
+                    tr!("回填", "edit"),
+                    99,
+                    true,
+                );
+                add_action(
+                    &mut fields,
+                    Action::RestoreSearch,
+                    tr!("取消", "cancel"),
+                    97,
+                    true,
+                );
+            } else {
+                add_action(&mut fields, Action::Close, tr!("退出", "exit"), 99, true);
+            }
             add_action(
                 &mut fields,
                 Action::History,
@@ -513,7 +547,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         }
         PromptInteraction::Editing => {
             let completion = context.completion.filter(|completion| {
-                completion.input == editor.buffer && completion.cursor == editor.cursor
+                completion.input == editor.buffer && completion.cursor == editor.completion_cursor
             });
             let blank = editor.buffer.trim().is_empty();
             let correction = context
@@ -623,8 +657,6 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                     97,
                     true,
                 );
-            } else if blank && context.failed_exit.is_some() {
-                add_action(&mut fields, Action::Suggest, tr!("修复", "fix"), 97, true);
             } else if blank {
                 add_action(
                     &mut fields,
@@ -922,8 +954,8 @@ mod tests {
             ReedlineEvent::MenuPrevious,
         );
         keys.add_binding(
-            KeyModifiers::CONTROL,
-            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+            KeyCode::F(2),
             ReedlineEvent::ExecuteHostCommand(crate::repl::SUGGEST_COMMAND.into()),
         );
         let mut bindings = Bindings::from_editor(&keys);
@@ -935,6 +967,7 @@ mod tests {
         PromptContext {
             buffer,
             cursor: buffer.len(),
+            completion_cursor: buffer.len(),
             selection: None,
             columns: 180,
             rows: 24,
@@ -1125,15 +1158,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_depends_on_blank_input_failure_and_current_background_candidate() {
+    fn ai_acceptance_requires_a_current_candidate_not_just_a_failure() {
         let keys = bindings();
         for buffer in ["", "   "] {
             let editor = editor(buffer);
-            assert!(!compose(context(&editor, &keys)).text.contains("Ctrl+G"));
+            assert!(!compose(context(&editor, &keys)).text.contains("F2"));
             let mut data = context(&editor, &keys);
             data.failed_exit = Some(7);
             let text = compose(data).text;
-            assert!(text.contains("Ctrl+G") && text.contains('7'), "{text}");
+            assert!(!text.contains("F2") && text.contains('7'), "{text}");
             let candidate = Assistance::Command {
                 command_id: 9,
                 intent: "next".into(),
@@ -1144,7 +1177,7 @@ mod tests {
             data.latest_command = Some(9);
             let text = compose(data).text;
             assert!(
-                text.contains("next: printf safe") && text.contains("Ctrl+G"),
+                text.contains("next: printf safe") && text.contains("F2"),
                 "{text}"
             );
             let mut data = context(&editor, &keys);
@@ -1154,7 +1187,7 @@ mod tests {
         }
         let editor = editor("describe this task");
         let text = compose(context(&editor, &keys)).text;
-        assert!(text.contains("Tab") && !text.contains("Ctrl+G"), "{text}");
+        assert!(text.contains("Tab") && !text.contains("F2"), "{text}");
     }
 
     #[test]

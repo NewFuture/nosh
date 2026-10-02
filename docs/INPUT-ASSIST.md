@@ -240,6 +240,7 @@ input_assist = true
 | [`command_context.rs`](../crates/nosh-shell/src/command_context.rs) | 输入与提交共用的纯静态事实 |
 | [`backend.rs`](../crates/nosh-shell/src/backend.rs) / [`trigger.rs`](../crates/nosh-shell/src/trigger.rs) | 轻量会话快照、共享索引、提交时作用域/路由 |
 | [`repl.rs`](../crates/nosh-shell/src/repl.rs) | Reedline 接入、提示符、取消与退出 |
+| [`editing.rs`](../crates/nosh-shell/src/editing.rs) | 实际 Emacs/Vi 与输入焦点键表；InputAssist 包装通用 EditMode 并转发模式事件，保留纠错采用的同批 epoch 检查 |
 | [`config.rs`](../crates/nosh-cli/src/config.rs) / [`main.rs`](../crates/nosh-cli/src/main.rs) | 总开关及内部 worker 入口；配置必须全链路接通 |
 
 ## 10. 验证与对照

@@ -3,7 +3,7 @@
 > **状态**：当前实现，本地交互 shell 默认启用。
 > **配置**：`shell.capture_output = "last" | "off"`，默认 `last`。
 > **范围**：Linux / WSL 与 macOS 的交互 shell。`-c`、脚本、stdin 非交互模式、`-a` 和 `-s` 不进入中转 PTY。
-> **关联**：[#18](https://github.com/NewFuture/nosh/issues/18)。失败求助快捷键和空输入行为仍由 #23 决定。
+> **关联**：[#18](https://github.com/NewFuture/nosh/issues/18)。#23 的建议键与空输入规则见[输入编辑](INPUT-EDITING.md)，不扩大这里的输出注入范围。
 
 本文是最近用户命令输出采集的单一设计来源。总设计只保留系统级摘要；评测场景、运行命令和历史结果见[真实模型评测](../eval/README.md)。
 
@@ -59,7 +59,7 @@ capture_output = "last"  # last（默认）| off
 | `ai fix <question>` | 是，进入 Agent 诊断 | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
 | `# <任务>`、`ai "<任务>"` | 否 | 普通任务默认不带终端输出 |
 | 被路由到 AI 的解析错误、未知命令或自然语言 | 否 | 新输入不能继承上一条命令的正文 |
-| 非空输入 Ctrl+G / `nosh -s` | 否 | CommandAssist Generate 按需查询，只输出／回填 |
+| 非空输入 F2／适用的 Tab 兜底 / `nosh -s` | 否 | CommandAssist Generate 按需查询，只输出／回填 |
 | 成功后的 Next / `ai next` | 否 | 仅提供执行元信息，不自动扩展成功输出的注入范围 |
 | `nosh -a`、管道附件 | 否 | 新进程没有交互会话采集槽 |
 | `ai mode/status/clear` 等管理子命令 | 否 | 它们不创建普通 `AiRequest` |
@@ -271,7 +271,7 @@ error[E0308]: ...
 
 目标契约：
 
-- 只加入普通 agent 的完整工具集，不加入 Ctrl+G / `nosh -s` 建议模式。
+- 只加入普通 agent 的完整工具集，不加入 F2 / `nosh -s` 建议模式。
 - 不执行或重跑命令，不读取重定向文件，不扩大为历史输出查询。
 - 返回命令 ID、命令、执行 cwd、退出码、耗时、来源、状态、观察/保留字节数以及截断、不完整、混流标记。
 - 只有 `Captured && !mixed` 时返回已有的有界正文；`off`、不可用、全屏、已知混流和成功空输出按各自状态返回，不能编造正文。

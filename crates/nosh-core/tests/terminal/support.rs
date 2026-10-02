@@ -189,6 +189,7 @@ pub(super) struct Probe<'a> {
     pub(super) steps: &'a [KeyStep<'a>],
     pub(super) input_assist: bool,
     pub(super) track_frames: bool,
+    pub(super) enhanced_keyboard: bool,
     pub(super) resizes: &'a [(usize, u16)],
 }
 
@@ -210,6 +211,7 @@ impl Default for Probe<'_> {
             steps: &[],
             input_assist: true,
             track_frames: false,
+            enhanced_keyboard: false,
             resizes: &[],
         }
     }
@@ -253,6 +255,8 @@ impl Probe<'_> {
             .env_remove("TMUX")
             .env_remove("STY")
             .env_remove("TERM_PROGRAM")
+            .env_remove("VISUAL")
+            .env_remove("EDITOR")
             .stdin(if self.stdin_pipe {
                 Stdio::piped()
             } else {
@@ -348,6 +352,7 @@ impl Probe<'_> {
         let marker = blocked_input_marker(child.id());
         let mut terminal_scan = 0;
         let mut cursor_replies = 0;
+        let mut keyboard_replies = 0;
         let mut step_index = 0;
         let mut theme_revision = 0;
         let mut resize_requested = None;
@@ -357,6 +362,18 @@ impl Probe<'_> {
                 .is_some_and(|t| !matches!(t, "" | "dumb" | "unknown"));
         let status = loop {
             if let Some(input) = input.as_mut() {
+                if self.enhanced_keyboard {
+                    let requests = observed
+                        .lock()
+                        .unwrap()
+                        .windows(4)
+                        .filter(|bytes| *bytes == b"\x1b[?u")
+                        .count();
+                    for _ in keyboard_replies..requests {
+                        input.write_all(b"\x1b[?1u\x1b[?1;2c").unwrap();
+                    }
+                    keyboard_replies = requests;
+                }
                 if let Some(tracking) = &tracking {
                     for reply in std::mem::take(&mut *tracking.replies.lock().unwrap()) {
                         input.write_all(&reply).unwrap();
