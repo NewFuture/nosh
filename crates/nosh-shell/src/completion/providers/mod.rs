@@ -4,6 +4,7 @@ pub(super) mod make;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use super::cache::{Cache, Entry, Set};
 use super::context::Context;
@@ -22,11 +23,50 @@ pub(crate) fn generate(
     {
         return None;
     }
-    match std::path::Path::new(name).file_name()?.to_str()? {
-        "git" => Some(git::complete(query, context, snapshot, cache)),
-        "make" | "gmake" => Some(make::complete(query, context, snapshot, cache)),
-        _ => None,
+    let result = match std::path::Path::new(name).file_name()?.to_str()? {
+        "git" => git::generate(query.clone(), context, snapshot, cache),
+        "make" | "gmake" => make::generate(query.clone(), context, snapshot, cache),
+        _ => return None,
+    };
+    Some(result.unwrap_or_else(|error| Answer::failed(query, error)))
+}
+
+fn version(
+    context: &Context,
+    snapshot: &NativeSnapshot,
+    cache: &mut Cache,
+) -> Result<(PathBuf, String), String> {
+    let executable = program(context, snapshot)?;
+    let key = format!("version\0{}", executable.display());
+    if let Some(set) = cache.get(&key, Duration::from_secs(5)) {
+        return Ok((
+            executable,
+            set.entries
+                .first()
+                .ok_or("empty provider version cache")?
+                .value
+                .clone(),
+        ));
     }
+    let value = output(
+        context,
+        snapshot,
+        &["--version".into()],
+        &snapshot.context.cwd,
+        4096,
+    )?;
+    cache.insert(
+        key,
+        Set {
+            entries: vec![Entry {
+                value: value.clone(),
+                kind: Kind::Value,
+                description: None,
+            }],
+            reason: None,
+        },
+    );
+    Ok((executable, value))
 }
 
 fn program(context: &Context, snapshot: &NativeSnapshot) -> Result<PathBuf, String> {

@@ -147,13 +147,13 @@ impl Service {
             trigger,
         };
         let result = if !self.available {
-            Err("completion worker entry point is unavailable".into())
+            Err("completion worker entry point is unavailable")
         } else if text.len() > MAX_INPUT || !text.is_char_boundary(cursor) {
-            Err("completion input/cursor limit".into())
+            Err("completion input/cursor limit")
         } else if query.session == 0
             || self.shared.snapshot_session.load(Ordering::Acquire) != query.session
         {
-            Err("completion session snapshot unavailable".into())
+            Err("completion session snapshot unavailable")
         } else {
             match self.shared.mailbox.try_lock() {
                 Ok(mut mailbox) => {
@@ -161,15 +161,12 @@ impl Service {
                     self.shared.wake.notify_one();
                     Ok(())
                 }
-                Err(_) => Err("completion request mailbox unavailable".into()),
+                Err(_) => Err("completion request mailbox unavailable"),
             }
         };
         if let Err(error) = result {
-            self.shared.publish(Answer {
-                query: query.clone(),
-                candidates: Vec::new(),
-                state: State::Unavailable(error),
-            });
+            self.shared
+                .publish(Answer::unavailable(query.clone(), error));
         }
         query
     }
@@ -217,10 +214,9 @@ impl Shared {
         if !self.current(&answer.query) {
             return;
         }
-        let answer = if valid_answer(&answer) {
-            answer
-        } else {
-            Answer::failed(answer.query, "invalid or oversized completion reply")
+        let answer = match answer.validate() {
+            Ok(()) => answer,
+            Err(error) => Answer::failed(answer.query, error),
         };
         if let Ok(mut publication) = self.publication.lock()
             && self.current(&answer.query)
@@ -232,21 +228,6 @@ impl Shared {
         }
         (self.repaint)();
     }
-}
-
-fn valid_answer(answer: &Answer) -> bool {
-    answer.candidates.len() <= MAX_RESULTS
-        && answer
-            .candidates
-            .iter()
-            .map(|candidate| candidate.bytes() + candidate.display.as_ref().map_or(0, String::len))
-            .sum::<usize>()
-            <= MAX_SET_BYTES
-        && answer.candidates.iter().all(|candidate| {
-            candidate.value.len() <= MAX_WORD
-                && candidate.span.start <= candidate.span.end
-                && answer.query.text.get(candidate.span.clone()).is_some()
-        })
 }
 
 #[derive(Default)]
@@ -369,11 +350,7 @@ fn start(
                     || "previous completion task has not been reaped".into(),
                     |error| format!("previous completion task has not been reaped: {error}"),
                 );
-                shared.publish(Answer {
-                    query,
-                    candidates: Vec::new(),
-                    state: State::Unavailable(message),
-                });
+                shared.publish(Answer::unavailable(query, message));
             } else {
                 slot.cleanup_failure(shared, "previous completion task has not been reaped");
             }
@@ -392,13 +369,10 @@ fn start(
     if query.trigger == Trigger::Refresh
         && (slot.failures >= 2 || slot.failed_session == query.session)
     {
-        shared.publish(Answer {
+        shared.publish(Answer::unavailable(
             query,
-            candidates: Vec::new(),
-            state: State::Unavailable(
-                "completion provider paused; explicitly request completion to retry".into(),
-            ),
-        });
+            "completion provider paused; explicitly request completion to retry",
+        ));
         return;
     }
     if query.trigger == Trigger::Explicit {
@@ -408,11 +382,7 @@ fn start(
     if index == 1
         && let Err(error) = &snapshot.script
     {
-        shared.publish(Answer {
-            query,
-            candidates: Vec::new(),
-            state: State::Unavailable(error.clone()),
-        });
+        shared.publish(Answer::unavailable(query, error.clone()));
         return;
     }
     if slot.worker.is_none() {
@@ -562,13 +532,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
                 Ok(Some(Response::Completion(Outcome::Progress { answer, .. }))) => {
                     if answer.query != query {
                         fail(&shared, slot, query, "completion progress version mismatch");
-                    } else if !valid_answer(&answer) {
-                        fail(
-                            &shared,
-                            slot,
-                            query,
-                            "invalid or oversized completion progress",
-                        );
+                    } else if let Err(error) = answer.validate() {
+                        fail(&shared, slot, query, error);
                     } else if !matches!(answer.state, State::Partial(_)) {
                         fail(&shared, slot, query, "non-partial completion progress");
                     } else {
@@ -603,13 +568,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
                         fail(&shared, slot, query, message);
                         continue;
                     }
-                    if !valid_answer(&answer) {
-                        fail(
-                            &shared,
-                            slot,
-                            query,
-                            "invalid or oversized completion reply",
-                        );
+                    if let Err(error) = answer.validate() {
+                        fail(&shared, slot, query, error);
                         continue;
                     }
                     match worker.residual_children() {

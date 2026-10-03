@@ -32,10 +32,14 @@ fn unsupported(
 #[derive(Default)]
 pub(crate) struct Server {
     native: Option<Arc<NativeSnapshot>>,
-    shell: Option<BrushShell>,
-    runtime: Option<tokio::runtime::Runtime>,
+    execution: Option<Execution>,
     cache: Cache,
     session: u64,
+}
+
+struct Execution {
+    shell: BrushShell,
+    runtime: tokio::runtime::Runtime,
 }
 
 fn ready(answer: Answer) -> Outcome {
@@ -98,8 +102,7 @@ impl Server {
                             .map_err(std::io::Error::other)?;
                     }
                     self.native = Some(native);
-                    self.shell = Some(shell);
-                    self.runtime = Some(runtime);
+                    self.execution = Some(Execution { shell, runtime });
                 }
                 _ => {
                     return Err(std::io::Error::other(
@@ -133,9 +136,11 @@ impl Server {
             return Ok(ready(answer));
         }
         let before = Registry::capture(
-            self.shell
+            &self
+                .execution
                 .as_ref()
-                .ok_or_else(|| std::io::Error::other("missing completion shell"))?,
+                .ok_or_else(|| std::io::Error::other("missing completion execution"))?
+                .shell,
         );
         UNSUPPORTED.store(false, Ordering::Release);
         let mut loaded = false;
@@ -143,35 +148,24 @@ impl Server {
             Ok(answer) => answer,
             Err(error) => Answer::failed(query.clone(), error),
         };
-        let background_jobs = self
-            .shell
+        let shell = &self
+            .execution
             .as_ref()
-            .is_some_and(|shell| !shell.jobs().jobs.is_empty());
-        let answer = if background_jobs {
-            Answer {
-                query: query.clone(),
-                candidates: Vec::new(),
-                state: State::Unavailable(
-                    "completion provider created background jobs; isolated execution must be reset"
-                        .into(),
-                ),
-            }
-        } else if UNSUPPORTED.load(Ordering::Acquire) {
-            Answer {
+            .ok_or_else(|| std::io::Error::other("missing completion execution"))?
+            .shell;
+        let answer = if !shell.jobs().jobs.is_empty() {
+            Answer::unavailable(
                 query,
-                candidates: Vec::new(),
-                state: State::Unavailable(
-                    "provider needs interactive job control; isolated completion cannot supply it"
-                        .into(),
-                ),
-            }
+                "completion provider created background jobs; isolated execution must be reset",
+            )
+        } else if UNSUPPORTED.load(Ordering::Acquire) {
+            Answer::unavailable(
+                query,
+                "provider needs interactive job control; isolated completion cannot supply it",
+            )
         } else {
             answer
         };
-        let shell = self
-            .shell
-            .as_ref()
-            .ok_or_else(|| std::io::Error::other("missing completion shell"))?;
         let registry = Registry::capture(shell);
         let checkpoint = if loaded && answer.state.is_complete() {
             Some(
@@ -322,11 +316,15 @@ impl Server {
             trigger: brush_core::completion::CompletionTrigger::InteractiveComplete,
         };
         for _ in 0..10 {
-            let shell = self.shell.as_mut().ok_or("missing completion shell")?;
+            let execution = self
+                .execution
+                .as_mut()
+                .ok_or("missing completion execution")?;
+            let shell = &mut execution.shell;
             let Some(spec) = shell.completion_config().specification(&request).cloned() else {
                 if context.word.contains(['$', '`']) && context.word.contains('/') {
-                    let runtime = self.runtime.as_ref().ok_or("missing completion runtime")?;
-                    let expanded = runtime
+                    let expanded = execution
+                        .runtime
                         .block_on(shell.expand_completion_path(&query.text[context.span.clone()]))
                         .map_err(|error| error.to_string())?;
                     let expanded_context = Context {
@@ -346,27 +344,23 @@ impl Server {
                     .map_err(|error| error.to_string());
             };
             if !snapshot.scripts {
-                return Ok(Answer {
-                    query: query.clone(),
-                    candidates: Vec::new(),
-                    state: State::Unavailable("programmable completion is disabled".into()),
-                });
+                return Ok(Answer::unavailable(
+                    query.clone(),
+                    "programmable completion is disabled",
+                ));
             }
             if spec
                 .actions
                 .iter()
                 .any(|action| matches!(action, CompleteAction::Job | CompleteAction::Running))
             {
-                return Ok(Answer {
-                    query: query.clone(),
-                    candidates: Vec::new(),
-                    state: State::Unavailable(
-                        "job candidates require the live interactive shell".into(),
-                    ),
-                });
+                return Ok(Answer::unavailable(
+                    query.clone(),
+                    "job candidates require the live interactive shell",
+                ));
             }
-            let runtime = self.runtime.as_ref().ok_or("missing completion runtime")?;
-            let result = runtime
+            let result = execution
+                .runtime
                 .block_on(spec.get_completions_without_fallback(shell, &request))
                 .map_err(|error| error.to_string())?;
             let brush_core::completion::Answer::Candidates(values, options) = result else {

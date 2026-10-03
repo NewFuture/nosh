@@ -1,10 +1,9 @@
 # Reedline source maintenance
 
-Reedline is maintained in this repository as an **official upstream submodule,
-one reviewable patch, and an ignored editable build copy**. The same fixed-source
-workflow also manages the official brush monorepo for completion; neither
-dependency needs a nosh-owned remote
-fork or two-repository release is required. Normal Rust development needs Rust,
+Reedline and the brush monorepo use the same fixed-source workflow: an
+**official upstream submodule, one reviewable patch, and an ignored editable
+build copy** for each. No nosh-owned remote fork or separate dependency release
+is required. Normal Rust development needs Rust,
 Git (with `git archive --mtime` support), and the usual platform linker; Python,
 Node, npm, `patch`, and `tar` are not source-preparation dependencies.
 
@@ -34,6 +33,11 @@ committing. Source archives lack an index; their tracked `source.toml` pins the
 same commit. Git's object identity, patch SHA256, upstream/patched Git trees and
 fixed-mtime patched archive SHA256 are recorded by `provenance`. Text input
 hashes use LF, matching the repository's `.gitattributes`.
+
+Provenance describes the build inputs, not completion candidates. It is checked
+by source-maintenance and evaluation tools, not on the typing or matching path.
+`tools/source/src/source.rs` holds the two fixed dependency descriptors together;
+the preparation, export and verification logic is shared.
 
 ## First checkout and daily commands
 

@@ -190,11 +190,100 @@ pub(crate) struct Answer {
 }
 
 impl Answer {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.candidates.len() > MAX_RESULTS
+            || self.candidates.iter().map(Candidate::bytes).sum::<usize>() > MAX_SET_BYTES
+            || self.candidates.iter().any(|candidate| {
+                candidate.value.len() > MAX_WORD
+                    || candidate.span.start > candidate.span.end
+                    || self.query.text.get(candidate.span.clone()).is_none()
+            })
+        {
+            Err("invalid or oversized completion reply")
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn unavailable(query: Query, message: impl Into<String>) -> Self {
+        Self {
+            query,
+            candidates: Vec::new(),
+            state: State::Unavailable(message.into()),
+        }
+    }
+
     pub fn failed(query: Query, error: impl Into<String>) -> Self {
         Self {
             query,
             candidates: Vec::new(),
             state: State::Failed(error.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply() -> Answer {
+        Answer {
+            query: Query {
+                text: "a中b".into(),
+                cursor: 5,
+                session: 1,
+                epoch: 1,
+                trigger: Trigger::Explicit,
+            },
+            candidates: vec![Candidate {
+                source: Source::Path,
+                value: "value".into(),
+                kind: Kind::File,
+                description: None,
+                span: 1..4,
+                filenames: true,
+                noquote: false,
+                nospace: false,
+                matches: Vec::new(),
+                display: None,
+            }],
+            state: State::Complete,
+        }
+    }
+
+    #[test]
+    fn reply_limits_accept_exact_boundaries() {
+        let mut answer = reply();
+        answer.candidates[0].value = "v".repeat(MAX_WORD);
+        answer.candidates = vec![answer.candidates[0].clone(); MAX_RESULTS];
+        assert!(answer.validate().is_ok());
+        answer.candidates.push(answer.candidates[0].clone());
+        assert!(answer.validate().is_err());
+        answer.candidates.truncate(1);
+        answer.candidates[0].value.push('v');
+        assert!(answer.validate().is_err());
+    }
+
+    #[test]
+    fn reply_display_bytes_are_counted_once() {
+        let mut answer = reply();
+        let candidate = &mut answer.candidates[0];
+        candidate.display = Some("d".repeat(MAX_SET_BYTES - candidate.bytes()));
+        assert_eq!(candidate.bytes(), MAX_SET_BYTES);
+        assert!(answer.validate().is_ok());
+        answer.candidates[0].display.as_mut().unwrap().push('d');
+        assert!(answer.validate().is_err());
+    }
+
+    #[test]
+    fn reply_spans_must_be_ordered_in_bounds_utf8_ranges() {
+        let mut answer = reply();
+        assert!(answer.validate().is_ok());
+        for (start, end) in [(4, 1), (1, 2), (2, 4), (0, 6)] {
+            answer.candidates[0].span = start..end;
+            assert!(answer.validate().is_err(), "{start}..{end}");
+        }
+        answer.candidates[0].span = 5..5;
+        assert!(answer.validate().is_ok());
     }
 }

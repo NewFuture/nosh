@@ -42,7 +42,6 @@ pub struct Completion {
     current: Option<Query>,
     serial: u64,
     values: Suggestions,
-    abbreviation_selections: HashMap<String, usize>,
     answer: Option<Arc<Answer>>,
     explicit: bool,
     automatic: bool,
@@ -337,7 +336,6 @@ impl Completion {
             current: None,
             serial: 0,
             values: Vec::<Suggestion>::new().into(),
-            abbreviation_selections: HashMap::new(),
             answer: None,
             explicit: false,
             automatic: false,
@@ -368,27 +366,22 @@ impl Completion {
 
     fn update_values(&mut self, answer: Arc<Answer>) {
         self.values = suggestions(&answer);
-        self.abbreviation_selections = answer
-            .candidates
-            .iter()
-            .zip(self.values.iter())
-            .enumerate()
-            .filter_map(|(index, (candidate, suggestion))| match &candidate.source {
-                Source::Abbreviation { .. } => Some((suggestion.completion_id.clone()?, index)),
-                _ => None,
-            })
-            .collect();
         self.answer = Some(answer);
     }
 
     fn partial(&self, query: &Query) -> Partial {
-        if self.abbreviation_selections.is_empty() {
-            common_prefix(query, &self.values)
-        } else {
+        if self.answer.as_ref().is_some_and(|answer| {
+            answer
+                .candidates
+                .iter()
+                .any(|candidate| matches!(candidate.source, Source::Abbreviation { .. }))
+        }) {
             Partial {
                 span: Span::new(query.cursor, query.cursor),
                 insert: String::new(),
             }
+        } else {
+            common_prefix(query, &self.values)
         }
     }
 }
@@ -398,8 +391,12 @@ impl Completer for Completion {
         let selection = suggestion
             .completion_id
             .as_ref()
-            .and_then(|id| self.abbreviation_selections.get(id))
-            .and_then(|index| self.answer.as_ref()?.candidates.get(*index));
+            .and_then(|id| {
+                self.values
+                    .iter()
+                    .position(|value| value.completion_id.as_ref() == Some(id))
+            })
+            .and_then(|index| self.answer.as_ref()?.candidates.get(index));
         let Some(Candidate {
             source: Source::Abbreviation { name, revision },
             ..
@@ -767,7 +764,7 @@ mod tests {
         rule.matches = vec![0, 1];
         completion.update_values(Arc::new(Answer {
             query: request.clone(),
-            candidates: vec![rule],
+            candidates: vec![rule.clone()],
             state: State::Complete,
         }));
         let suggestion = completion.values[0].clone();
@@ -794,6 +791,36 @@ mod tests {
                 name: "go".into(),
                 revision: 7
             }),]
+        );
+        rule.source = Source::Abbreviation {
+            name: "go".into(),
+            revision: 8,
+        };
+        completion.update_values(Arc::new(Answer {
+            query: request,
+            candidates: vec![candidate("gone", 0..2), rule],
+            state: State::Complete,
+        }));
+        assert_eq!(
+            completion.completion_accepted(&suggestion),
+            CompletionAcceptance::Continue,
+            "an old revision cannot select the refreshed rule",
+        );
+        assert_eq!(
+            completion.completion_accepted(&completion.values[0].clone()),
+            CompletionAcceptance::Continue,
+        );
+        assert_eq!(notifications.lock().unwrap().len(), 1);
+        assert_eq!(
+            completion.completion_accepted(&completion.values[1].clone()),
+            CompletionAcceptance::SuppressAbbreviationExpansion,
+        );
+        assert_eq!(
+            notifications.lock().unwrap()[1],
+            Selection::Abbreviation(AbbreviationSelection {
+                name: "go".into(),
+                revision: 8,
+            }),
         );
     }
 

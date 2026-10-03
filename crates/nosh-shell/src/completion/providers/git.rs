@@ -29,39 +29,13 @@ const SWITCH_OPTIONS: &[(&str, &str)] = &[
     ("--no-recurse-submodules", "Do not update submodules"),
 ];
 
-pub(super) fn complete(
-    query: Query,
-    context: &Context,
-    snapshot: &NativeSnapshot,
-    cache: &mut Cache,
-) -> Answer {
-    match generate(query.clone(), context, snapshot, cache) {
-        Ok(answer) => answer,
-        Err(error) => Answer::failed(query, error),
-    }
-}
-
-fn generate(
+pub(super) fn generate(
     query: Query,
     context: &Context,
     snapshot: &NativeSnapshot,
     cache: &mut Cache,
 ) -> Result<Answer, String> {
-    let executable = program(context, snapshot)?;
-    let version_key = format!("git-version\0{}", executable.display());
-    let version = cache
-        .get(&version_key, Duration::from_secs(5))
-        .map(|set| set.entries[0].value.clone())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            output(
-                context,
-                snapshot,
-                &["--version".into()],
-                &snapshot.context.cwd,
-                4096,
-            )
-        })?;
+    let (executable, version) = version(context, snapshot, cache)?;
     let number = version
         .trim()
         .strip_prefix("git version ")
@@ -75,17 +49,6 @@ fn generate(
     if numbers.len() != 2 || (numbers[0], numbers[1]) < (2, 23) {
         return Err("built-in switch completion requires Git 2.23 or newer".into());
     }
-    cache.insert(
-        version_key,
-        Set {
-            entries: vec![Entry {
-                value: version,
-                kind: Kind::Value,
-                description: None,
-            }],
-            reason: None,
-        },
-    );
     let mut prefix = vec!["--no-pager".into()];
     let mut command_index = 1;
     while command_index < context.index {

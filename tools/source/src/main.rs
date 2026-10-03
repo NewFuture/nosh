@@ -78,13 +78,10 @@ fn run() -> Result<()> {
     let dependencies = if let Some(dependency) = dependency {
         vec![dependency]
     } else if matches!(action, Action::Upgrade) {
-        vec![Dependency::Reedline]
+        vec![Dependency::REEDLINE]
     } else {
         Dependency::ALL.into_iter().collect()
     };
-    if dependencies.is_empty() {
-        return Err("not a managed nosh source root; run from the repository/archive root or pass --root <path>".into());
-    }
     let mut states = std::collections::BTreeMap::new();
     for dependency in dependencies {
         let manager = Manager::new(root.clone(), cache.clone(), offline, dependency)?;
@@ -96,7 +93,7 @@ fn run() -> Result<()> {
                 resolved.as_deref(),
             )?,
             Action::Check | Action::Provenance => {
-                states.insert(dependency.key(), manager.check()?);
+                states.insert(dependency.key, manager.check()?);
             }
         }
     }

@@ -72,7 +72,26 @@ completion_scripts = true
 
 U6 所有者提供 `input_assist::Abbreviations` 的 `revision`、`applicable` 和可信 `definitions`，关闭／不适用的规则不能留在 applicable 集合。U3 不管理规则或自动替换；完整联合场景由 #28 组织。
 
-## 已验证的固定环境结果
+## 实现与维护入口
+
+补全实现集中在 `crates/nosh-shell/src/completion`，按职责定位即可，不需要注册通用提供器框架：
+
+| 文件 | 职责 |
+|---|---|
+| `context.rs`、`snapshot.rs` | 解析当前参数，捕获当前 shell 状态 |
+| `native.rs`、`matching.rs`、`cache.rs` | 命令／路径集合、匹配和有界缓存 |
+| `providers/` | Git 和静态 Make 定义；共用程序解析、版本查询与错误处理 |
+| `worker.rs` | 在原生或脚本 worker 中生成候选；脚本 shell 与运行时作为一个执行实例保存 |
+| `service.rs` | 调度、期限、取消、回收和过期结果拒绝；复用 InputAssist 的进程与 IPC 机制 |
+| `types.rs`、`editor.rs` | 集中定义结果状态与预算校验；将候选转换为 Reedline 显示／插入值和选择通知 |
+
+编辑器直接使用当前候选及其显示身份，不另存缩写选择索引。新增候选来源时，先明确适用条件、匹配规则和失败／回退边界；不要为单一来源增加新的后台服务或缓存体系。
+
+第三方补丁只适配 brush 执行状态和 Reedline 编辑器接口，不承载 nosh 的补全策略。构建来源记录（provenance）只供源码核对，不参与输入、匹配或候选排序；日常维护命令见[源码维护](REEDLINE-MAINTENANCE.md)。
+
+## 固定环境基线记录
+
+以下耗时记录于初版实现验证时，保留作对照，不代表每次重构都重新测得相同数值。
 
 Ubuntu WSL、Rust 1.98.1、debug profile、无模型条件下，4,096 个真实目录条目的 fixture 首次查询约 39.1 ms，完整集合复用的 20 次查询 p50 约 5.62 ms、p95 约 5.79 ms；被首屏 256 项截断之外的目标在追加字符后排名第 1。
 
@@ -80,4 +99,4 @@ Ubuntu WSL、Rust 1.98.1、debug profile、无模型条件下，4,096 个真实�
 
 覆盖包括完整 workspace 回归、实际 Git refs／静态 Makefile、脚本状态与选项、队列／回收额度、清空环境的子进程归属、旧结果拒绝、引用／Unicode、U6 明确选择、Emacs／Vi、自定义菜单取消以及部分结果／自动刷新的回填边界。macOS 的资源／进程差异继续由 CI 覆盖；本次宿主实测不冒充 macOS 或 native Windows 应用验证。
 
-源码适配采用固定官方 brush-core 0.5.0／brush-parser 0.4.0 和 Reedline 0.52.0，不更换引擎。维护命令、构建副本和补丁回放见 [源码维护](REEDLINE-MAINTENANCE.md)。
+源码适配采用固定官方 brush-core 0.5.0／brush-parser 0.4.0 和 Reedline 0.52.0，不更换引擎。

@@ -28,53 +28,16 @@ const OPTIONS: &[(&str, &str)] = &[
     ("--version", "Print the GNU Make version"),
 ];
 
-pub(super) fn complete(
-    query: Query,
-    context: &Context,
-    snapshot: &NativeSnapshot,
-    cache: &mut Cache,
-) -> Answer {
-    match generate(query.clone(), context, snapshot, cache) {
-        Ok(answer) => answer,
-        Err(error) => Answer::failed(query, error),
-    }
-}
-
-fn generate(
+pub(super) fn generate(
     query: Query,
     context: &Context,
     snapshot: &NativeSnapshot,
     cache: &mut Cache,
 ) -> Result<Answer, String> {
-    let executable = program(context, snapshot)?;
-    let key = format!("make-version\0{}", executable.display());
-    let version = cache
-        .get(&key, Duration::from_secs(5))
-        .map(|set| set.entries[0].value.clone())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            output(
-                context,
-                snapshot,
-                &["--version".into()],
-                &snapshot.context.cwd,
-                4096,
-            )
-        })?;
+    let (_, version) = version(context, snapshot, cache)?;
     if !version.starts_with("GNU Make ") {
         return Err("built-in target completion supports GNU Make; load a definition for this implementation".into());
     }
-    cache.insert(
-        key,
-        Set {
-            entries: vec![Entry {
-                value: version,
-                kind: Kind::Value,
-                description: None,
-            }],
-            reason: None,
-        },
-    );
     let previous = context
         .index
         .checked_sub(1)
@@ -101,11 +64,10 @@ fn generate(
         ));
     }
     if matches!(previous, Some("-j" | "--jobs")) || context.word.starts_with("--jobs=") {
-        return Ok(Answer {
+        return Ok(Answer::unavailable(
             query,
-            candidates: Vec::new(),
-            state: State::Unavailable("jobs accepts an integer; no enumerated values".into()),
-        });
+            "jobs accepts an integer; no enumerated values",
+        ));
     }
     let prior = &context.words[1..context.index];
     if context.word.starts_with('-') && !prior.iter().any(|word| word == "--") {
@@ -119,11 +81,10 @@ fn generate(
         ));
     }
     if context.word.contains('=') {
-        return Ok(Answer {
+        return Ok(Answer::unavailable(
             query,
-            candidates: Vec::new(),
-            state: State::Unavailable("Make variable values are not inferred".into()),
-        });
+            "Make variable values are not inferred",
+        ));
     }
     let mut cwd = snapshot.context.cwd.clone();
     let mut files = Vec::new();

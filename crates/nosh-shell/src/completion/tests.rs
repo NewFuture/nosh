@@ -152,6 +152,52 @@ fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
     assert!(!directory.path().join("SIDE_EFFECT").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn provider_versions_are_reused_and_scoped_to_the_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, _, snapshot) = fixture();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let calls = directory.path().join("versions");
+    for (name, version) in [("make", "GNU Make 4.4"), ("gmake", "BSD Make")] {
+        let executable = bin.join(name);
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\nprintf '{name}\\n' >> '{}'\nprintf '{version}\\n'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut native = snapshot.native.as_ref().clone();
+    native.context.path = Some(bin.display().to_string());
+    let mut cache = super::cache::Cache::default();
+    for _ in 0..2 {
+        for name in ["make", "gmake"] {
+            let request = query(&format!("{name} --d"));
+            let context = Context::parse(&request, &native).unwrap();
+            let result =
+                super::providers::generate(request, &context, &native, &mut cache).unwrap();
+            if name == "make" {
+                assert_eq!(result.state, State::Complete);
+                assert!(
+                    result
+                        .candidates
+                        .iter()
+                        .any(|value| value.value == "--dry-run")
+                );
+            } else {
+                assert!(matches!(result.state, State::Failed(_)));
+            }
+        }
+    }
+    assert_eq!(fs::read_to_string(calls).unwrap(), "make\ngmake\n");
+}
+
 #[test]
 fn larger_result_sets_are_partial_and_refiltered_from_the_collection() {
     let (directory, _, snapshot) = fixture();
