@@ -237,13 +237,13 @@ fn read_short_line(
                     display.invalidate();
                 }
                 match k.code {
-                    KeyCode::Enter => break Signal::Success(buf.clone()),
-                    KeyCode::Esc => break Signal::CtrlC,
+                    KeyCode::Enter if editing.is_none() => break Signal::Success(buf.clone()),
+                    KeyCode::Esc if editing.is_none() => break Signal::CtrlC,
                     KeyCode::Char('c') if ctrl => break Signal::CtrlC,
                     KeyCode::Char('d') if ctrl && (editing.is_none() || buf.is_empty()) => {
                         break Signal::CtrlD;
                     }
-                    KeyCode::Char('u') if ctrl => buf.clear(),
+                    KeyCode::Char('u') if ctrl && editing.is_none() => buf.clear(),
                     KeyCode::Backspace => pop_grapheme(&mut buf),
                     KeyCode::Char(c) if !ctrl => {
                         buf.push(c);

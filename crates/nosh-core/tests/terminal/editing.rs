@@ -115,6 +115,15 @@ pub(super) fn probe(mode: &str) {
             },
         );
     }
+    if mode.ends_with("-basic-unbind") || mode.ends_with("-basic-remap") {
+        let remap = mode.ends_with("-basic-remap");
+        for (action, key) in [("accept", "F4"), ("cancel", "F5"), ("cut_to_start", "F6")] {
+            config.editing.keybindings.actions.insert(
+                action.into(),
+                if remap { vec![key.into()] } else { Vec::new() },
+            );
+        }
+    }
     let code = nosh_shell::repl::run(&mut shell, &mut ai, config);
     assert_eq!(code, 0);
     let snapshot = shell.snapshot();
@@ -439,6 +448,65 @@ fn configured_ai_key_and_basic_terminal_share_the_same_no_execution_boundary() {
         assert_eq!(result["requests"], 0);
         assert_eq!(result["agents"], 0);
     }
+}
+
+#[test]
+fn basic_terminal_unbinding_does_not_reactivate_legacy_enter_escape_or_clear() {
+    let result = run(
+        "repl-editing-basic-unbind",
+        "dumb",
+        &[
+            ("editing> ", b"hold"),
+            ("hold", b"\rX"),
+            ("holdX", b"\x1b"),
+            ("holdX", b"\x15Y"),
+            ("holdXY", b"\x7f\x7f\x7f\x7f\x7f\x7f"),
+            ("editing> ", b"\x04"),
+        ],
+    );
+    assert_eq!(result["requests"], 0);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(result["prompts"], 1);
+    assert!(
+        !result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command
+                .as_str()
+                .is_some_and(|line| line == "hold" || line == "holdX"))
+    );
+}
+
+#[test]
+fn basic_terminal_remapped_actions_replace_the_original_shortcuts() {
+    let result = run(
+        "repl-editing-basic-remap",
+        "dumb",
+        &[
+            ("editing> ", b"printf BASIC_"),
+            ("printf BASIC_", b"\ra"),
+            ("printf BASIC_a", b"\x1b"),
+            ("printf BASIC_a", b"b\x15"),
+            ("printf BASIC_ab", b"\x1b[17~"),
+            ("editing> ", b"discard_me"),
+            ("discard_me", b"\x1b[15~"),
+            ("editing> ", b"exit 0"),
+            ("exit 0", b"\x1bOS"),
+        ],
+    );
+    assert_eq!(result["requests"], 0);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(result["prompts"], 2);
+    assert!(
+        !result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command
+                .as_str()
+                .is_some_and(|line| line.starts_with("printf BASIC_")))
+    );
 }
 
 #[test]

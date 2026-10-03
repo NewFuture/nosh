@@ -1452,6 +1452,7 @@ fn suggest_draft(
                 display.invalidate();
                 return Some(program);
             }
+            display.invalidate();
             ui.notice(tr!(
                 "nosh: 建议已过期或无效；保留原输入",
                 "nosh: suggestion is stale or invalid; draft unchanged"
@@ -1488,6 +1489,84 @@ fn suggest_draft(
 mod tests {
     use super::*;
     use reedline::{EditCommand, KeyModifiers, ReedlineEvent};
+
+    #[test]
+    fn rejected_background_candidates_are_invalidated_without_a_model_request() {
+        struct CandidateAi {
+            display: crate::AssistDisplay,
+            requests: usize,
+        }
+        impl AiHandler for CandidateAi {
+            fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
+                self.requests += 1;
+                AiOutcome::default()
+            }
+            fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+                self.requests += 1;
+                AiOutcome::default()
+            }
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+                self.requests += 1;
+                None
+            }
+            fn badge(&self) -> Badge {
+                Badge::default()
+            }
+            fn assistance(&self) -> Option<crate::AssistDisplay> {
+                Some(self.display.clone())
+            }
+        }
+        struct Notices(Vec<String>);
+        impl ReplUi for Notices {
+            fn guard(&mut self, _: &str) -> GuardChoice {
+                GuardChoice::Cancel
+            }
+            fn notice(&mut self, message: &str) {
+                self.0.push(message.to_owned());
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut shell = EmbeddedShell::new(crate::ShellOptions {
+            working_dir: Some(directory.path().into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(shell.run_user_line("true").exit_code, 0);
+        let latest = shell.recent_commands().last().unwrap().id;
+        let mut ai = CandidateAi {
+            display: crate::AssistDisplay::default(),
+            requests: 0,
+        };
+        let mut ui = Notices(Vec::new());
+        for (command_id, program) in [(latest + 1, "echo stale"), (latest, "echo '")] {
+            let version = ai.display.invalidate();
+            assert!(ai.display.publish(
+                version,
+                Some(crate::Assistance::Command {
+                    command_id,
+                    intent: "next".into(),
+                    program: program.into(),
+                })
+            ));
+            assert!(!ai.display.status(Some("F2")).is_empty());
+            assert_eq!(
+                suggest_draft(&mut shell, &mut ai, &ReplConfig::default(), &mut ui, " "),
+                None
+            );
+            assert!(ai.display.result().is_none());
+            assert!(ai.display.status(Some("F2")).is_empty());
+            assert!(
+                !ai.display
+                    .publish(version, Some(crate::Assistance::Message("late".into())))
+            );
+            assert_eq!(
+                suggest_draft(&mut shell, &mut ai, &ReplConfig::default(), &mut ui, ""),
+                None
+            );
+        }
+        assert_eq!(ai.requests, 0);
+        assert_eq!(ui.0.len(), 4);
+    }
 
     fn status_prompt(custom: bool) -> ReplPrompt {
         let mut keys = reedline::default_emacs_keybindings();

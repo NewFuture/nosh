@@ -178,8 +178,11 @@ impl Bindings {
             key
         };
         let label = format!("{key} {text}");
-        let compact = if action == Action::Cancel && key == "Ctrl+C" {
-            format!("^C {text}")
+        let compact = if matches!(action, Action::Cancel | Action::RestoreSearch)
+            && key.starts_with("Ctrl+")
+            && key.chars().count() == 6
+        {
+            format!("^{} {text}", key.chars().last().expect("control-key label"))
         } else if action == Action::Accept || (action == Action::Correct && !unicode) {
             format!("{key} {}", tr!("采用", "use"))
         } else if action == Action::Complete {
@@ -191,7 +194,7 @@ impl Bindings {
         };
         let mut field = Field::new(2, &label, &compact, &compact, priority, required);
         field.correction = action == Action::Correct;
-        if action == Action::Cancel {
+        if matches!(action, Action::Cancel | Action::RestoreSearch) {
             field.tone = Tone::Secondary;
         }
         Some(field)
@@ -463,7 +466,9 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
             if has_match {
                 add_action(&mut fields, Action::Submit, tr!("提交", "submit"), 98, true);
             }
-            if context.bindings.0.contains_key(&Action::AcceptSearch) {
+            if context.bindings.0.contains_key(&Action::AcceptSearch)
+                || context.bindings.0.contains_key(&Action::RestoreSearch)
+            {
                 add_action(
                     &mut fields,
                     Action::AcceptSearch,
@@ -1155,6 +1160,40 @@ mod tests {
             text.contains("12") && text.contains("Enter") && text.contains("Esc"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn contextual_search_hints_remain_independent_when_one_action_is_unbound() {
+        for (action, expected, missing) in [
+            ("accept_search", "Ctrl+G", "Esc"),
+            ("cancel", "Esc", "Ctrl+G"),
+        ] {
+            let mut config = crate::editing::Config {
+                mode: crate::editing::Mode::Emacs,
+                ..Default::default()
+            };
+            config.keybindings.contexts.insert(
+                "history_search".into(),
+                std::collections::BTreeMap::from([(action.into(), Vec::new())]),
+            );
+            let (compiled, notices) =
+                config.compile(crate::editing::Capabilities { enhanced: false }, true);
+            assert!(notices.is_empty(), "{notices:?}");
+            for has_match in [false, true] {
+                let mut editor = editor("query");
+                editor.interaction = PromptInteraction::HistorySearch {
+                    term: "needle",
+                    has_match,
+                };
+                let keys = compiled.hints(&editor.edit_mode, editor.interaction);
+                let text = compose(context(&editor, keys)).text;
+                assert!(
+                    text.contains(expected) || (expected == "Ctrl+G" && text.contains("^G cancel")),
+                    "{action}: {text}"
+                );
+                assert!(!text.contains(missing), "{action}: {text}");
+            }
+        }
     }
 
     #[test]
