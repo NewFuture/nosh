@@ -6,6 +6,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 
 - **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`#` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
 - **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
+- **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。每次任务附上当前项目类型、manifest 基本信息及 Git 状态；切换项目或进入普通目录后重新判断，不沿用上一项目的描述。
 - **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。默认模型在 8K 上下文下常驻内存约 2.7 GiB（x86 AVX2/VNNI；详见 [MVP 报告 §5.3](docs/MVP-REPORT.md)）。
 - **安全**：agent 发起的命令要经过风险分级和审批。
@@ -103,9 +104,9 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 
 普通 agent 的模型工具为 `run_command`、`read_file` 和 `grep`。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `run_command` 调用 `ls` 等命令。`list_dir` 已移除；管道附件模式仅开放读取与内容搜索，不额外开放命令执行。
 
-`nosh -s` 和 Ctrl+G 使用 **CommandAssist Generate** 的独立短对话，可以按需查询命令身份、帮助和项目文件；通过 `finish` 提交完整 shell program、必要澄清或无建议。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝混合终态、Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
+`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的独立短对话，可以按需查询命令身份、帮助和项目文件；通过 `finish` 提交完整 shell program、必要澄清或无建议。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝混合终态、Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
 
-用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，Ctrl+G 接受，回车才执行；继续输入会取消并丢弃旧建议。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断，`ai next` 显式请求后续建议。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留显式入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
+用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，空白草稿用 F2 接受，回车才执行；继续输入会取消并丢弃旧建议。没有现成候选时，空白 F2 不新增模型请求。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断，`ai next` 显式请求后续建议。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留显式入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
 
 agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。复合命令前面的部分可能已经执行；交接提示会明确警告，请检查当前状态和整条命令后再自行运行，以免重复副作用。
 

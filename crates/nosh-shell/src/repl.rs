@@ -10,15 +10,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use nosh_hub::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    ColumnarMenu, CompletionResult, EditCommand, Emacs, KeyCode, KeyModifiers, MenuBuilder, Prompt,
-    PromptContext, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, Suggestion, ValidationResult,
+    ColumnarMenu, CompletionResult, KeyCode, MenuBuilder, Prompt, PromptContext, PromptEditMode,
+    PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineMenu, Signal, Suggestion,
+    ValidationResult,
 };
 
 use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
-use crate::{input_assist, style, term};
+use crate::{editing, input_assist, style, term};
 
 /// A request for the AI, produced by the pipeline.
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ pub trait AiHandler {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome;
     /// `ai <subcommand> …` management commands (mode, think, clear, ctx, …).
     fn builtin(&mut self, shell: &mut EmbeddedShell, args: &[String]) -> AiOutcome;
-    /// Ctrl+G: rewrite natural language in the input line into a command.
+    /// Rewrite the input into a command draft, never submit it.
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String>;
     fn badge(&self) -> Badge;
     fn assistance(&self) -> Option<crate::AssistDisplay> {
@@ -123,6 +123,7 @@ pub struct ReplConfig {
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
     pub command_assist: bool,
+    pub editing: editing::Config,
     pub input_assist: input_assist::Config,
     pub input_abbreviations: input_assist::Abbreviations,
 }
@@ -134,6 +135,7 @@ impl Default for ReplConfig {
             trigger: Default::default(),
             on_failure: Default::default(),
             command_assist: true,
+            editing: Default::default(),
             input_assist: Default::default(),
             input_abbreviations: Default::default(),
         }
@@ -266,7 +268,7 @@ impl Pipeline {
     }
 
     /// Asks the AI about the last failed command (`ai fix [question]`, bare
-    /// `#`, Ctrl+G on an empty line).
+    /// `#` or an explicit `ai fix` request).
     pub fn fix(
         &mut self,
         shell: &mut EmbeddedShell,
@@ -391,9 +393,10 @@ impl Pipeline {
             let _ = isolate(|| ai.after_command(shell, command, output));
             if ai.assistance().is_some() {
                 ui.notice(&style::dim(&format!(
-                    "{} exit {} · Ctrl+G / ai fix",
+                    "{} exit {} · {} fix",
                     style::glyph("✗", "x"),
-                    run.exit_code
+                    run.exit_code,
+                    style::visible_text(&self.cfg.trigger.builtin_name),
                 )));
                 return LineOutcome::Continue(None);
             }
@@ -415,10 +418,10 @@ impl Pipeline {
             _ => {
                 let code = run.exit_code;
                 ui.notice(&style::dim(&format!(
-                    "{} exit {code} {} {}",
+                    "{} exit {code} {} {} fix",
                     style::glyph("✗", "x"),
                     style::glyph("·", "|"),
-                    tr!("Ctrl+G 或 # 交给 AI", "Ctrl+G or # to ask AI")
+                    style::visible_text(&self.cfg.trigger.builtin_name)
                 )));
                 LineOutcome::Continue(None)
             }
@@ -534,6 +537,7 @@ pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
 struct EditorState {
     completion: Arc<Mutex<Option<crate::status::Completion>>>,
     bindings: crate::status::Bindings,
+    editing: Option<Arc<editing::Compiled>>,
     _theme_subscription: Option<crate::status::ThemeSubscription>,
 }
 
@@ -541,6 +545,7 @@ struct RenderedPrompt {
     left: String,
     right: String,
     inline: bool,
+    mode: PromptEditMode,
 }
 
 struct ReplPrompt {
@@ -637,13 +642,13 @@ impl Prompt for ReplPrompt {
             .err()
             .map(|_| crate::status::Completion {
                 input: context.buffer.to_owned(),
-                cursor: context.cursor,
+                cursor: context.completion_cursor,
                 error: Some(tr!("补全状态暂不可用", "Completion state unavailable").into()),
                 count: 0,
             });
         let completion = match &completion {
             Ok(snapshot) => snapshot.as_ref().filter(|snapshot| {
-                snapshot.input == context.buffer && snapshot.cursor == context.cursor
+                snapshot.input == context.buffer && snapshot.cursor == context.completion_cursor
             }),
             Err(_) => unavailable.as_ref(),
         };
@@ -664,7 +669,13 @@ impl Prompt for ReplPrompt {
                 failed_exit: self.failed_exit,
                 approval: &self.approval,
                 note: self.note.as_deref(),
-                bindings: &self.editor.bindings,
+                bindings: self
+                    .editor
+                    .editing
+                    .as_ref()
+                    .map_or(&self.editor.bindings, |maps| {
+                        maps.hints(&context.edit_mode, context.interaction)
+                    }),
                 color: style::stdout().color,
                 color_depth: crate::status::color_depth(),
                 unicode: style::stdout().unicode,
@@ -704,7 +715,18 @@ impl Prompt for ReplPrompt {
             } else {
                 self.left.clone()
             };
-            let command_status = crate::assist_display::status_text(assistance.as_ref());
+            let command_status =
+                if matches!(context.interaction, reedline::PromptInteraction::Editing) {
+                    crate::assist_display::status_text(
+                        assistance.as_ref(),
+                        self.editor.editing.as_ref().map_or_else(
+                            || self.editor.bindings.suggest_key(),
+                            |maps| maps.ai_key(&context.edit_mode),
+                        ),
+                    )
+                } else {
+                    String::new()
+                };
             if !command_status.is_empty() {
                 left = format!("{}\n{left}", style::stdout().paint("2", &command_status));
             }
@@ -737,6 +759,7 @@ impl Prompt for ReplPrompt {
             left,
             right,
             inline,
+            mode: context.edit_mode,
         });
     }
 
@@ -750,7 +773,7 @@ impl Prompt for ReplPrompt {
             self.left.as_str().into()
         };
         let left = if let Some(assist) = &self.command_assist {
-            let status = assist.status();
+            let status = assist.status(None);
             if status.is_empty() {
                 left
             } else {
@@ -775,8 +798,11 @@ impl Prompt for ReplPrompt {
         self.right.as_str().into()
     }
 
-    fn render_prompt_indicator(&self, _: PromptEditMode) -> Cow<'_, str> {
-        self.indicator.as_str().into()
+    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
+        match mode {
+            PromptEditMode::Vi(mode) => format!("{}{}", vi_indicator(mode), self.indicator).into(),
+            _ => self.indicator.as_str().into(),
+        }
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
@@ -792,16 +818,25 @@ impl Prompt for ReplPrompt {
         {
             return "? ".into();
         }
-        match hs.status {
+        let indicator = match hs.status {
             PromptHistorySearchStatus::Passing if hs.term.is_empty() => {
-                "(reverse-i-search) ".into()
+                "(reverse-i-search) ".to_string()
             }
             PromptHistorySearchStatus::Passing => {
-                format!("(reverse-i-search: {}) ", hs.term).into()
+                format!("(reverse-i-search: {}) ", hs.term)
             }
             PromptHistorySearchStatus::Failing => {
-                format!("(failing reverse-i-search: {}) ", hs.term).into()
+                format!("(failing reverse-i-search: {}) ", hs.term)
             }
+        };
+        if let Some(RenderedPrompt {
+            mode: PromptEditMode::Vi(mode),
+            ..
+        }) = self.rendered.borrow().as_ref()
+        {
+            format!("{}{indicator}", vi_indicator(mode.clone())).into()
+        } else {
+            indicator.into()
         }
     }
 
@@ -819,6 +854,14 @@ impl Prompt for ReplPrompt {
 
     fn get_prompt_multiline_color(&self) -> Color {
         Color::Default
+    }
+}
+
+fn vi_indicator(mode: reedline::PromptViMode) -> &'static str {
+    match mode {
+        reedline::PromptViMode::Insert => "[I] ",
+        reedline::PromptViMode::Normal => "[N] ",
+        reedline::PromptViMode::Visual => "[V] ",
     }
 }
 
@@ -1043,41 +1086,38 @@ fn build_editor(
     command_assist: Option<crate::AssistDisplay>,
 ) -> (Reedline, Option<input_assist::InputAssist>, EditorState) {
     let (rt, sh) = shell.shared();
-    let mut kb = reedline::default_emacs_keybindings();
-    kb.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion_menu".into()),
-            ReedlineEvent::MenuNext,
-            ReedlineEvent::Edit(vec![EditCommand::Complete]),
-        ]),
-    );
-    kb.add_binding(
-        KeyModifiers::SHIFT,
-        KeyCode::BackTab,
-        ReedlineEvent::MenuPrevious,
-    );
-    kb.add_binding(
-        KeyModifiers::ALT,
-        KeyCode::Enter,
-        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
-    );
-    if cfg.trigger.ai_enabled {
-        kb.add_binding(
-            KeyModifiers::CONTROL,
-            KeyCode::Char('g'),
-            ReedlineEvent::ExecuteHostCommand(SUGGEST_COMMAND.into()),
-        );
+    let enhanced = if cfg.editing.needs_enhanced_keyboard()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        match crossterm::terminal::supports_keyboard_enhancement() {
+            Ok(enhanced) => enhanced,
+            Err(error) => {
+                eprintln!("nosh: keyboard capabilities unavailable: {error}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let (compiled, notices) = cfg
+        .editing
+        .compile(editing::Capabilities { enhanced }, cfg.trigger.ai_enabled);
+    for notice in notices {
+        eprintln!("nosh: {notice}");
     }
+    let native_mode = compiled.editor();
     let mut state = EditorState {
         completion: Default::default(),
-        bindings: crate::status::Bindings::from_editor(&kb),
+        bindings: compiled
+            .hints(
+                &native_mode.edit_mode(),
+                reedline::PromptInteraction::Editing,
+            )
+            .clone(),
+        editing: Some(compiled),
         _theme_subscription: None,
     };
-    if cfg.input_assist.enabled {
-        state.bindings.enable_correction(&kb);
-    }
     let menu = ColumnarMenu::default()
         .with_name("completion_menu")
         .with_marker("")
@@ -1093,6 +1133,8 @@ fn build_editor(
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_quick_completions(true)
+        .with_contextual_input(true)
+        .use_kitty_keyboard_enhancement(enhanced)
         .with_menu_submit_protection(true)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
         .with_validator(Box::new(LineValidator {
@@ -1128,9 +1170,9 @@ fn build_editor(
     }));
     let edit_mode: Box<dyn reedline::EditMode> = if let Some(assist) = &assist {
         editor = editor.with_highlighter(assist.highlighter());
-        assist.edit_mode(Emacs::new(kb))
+        assist.edit_mode(native_mode)
     } else {
-        Box::new(Emacs::new(kb))
+        native_mode
     };
     editor = if let Some(display) = command_assist {
         let repaint = editor.repaint_signal();
@@ -1138,6 +1180,7 @@ fn build_editor(
         editor.with_edit_mode(Box::new(crate::assist_display::AssistEditMode {
             inner: edit_mode,
             display,
+            completion_pending: false,
         }))
     } else {
         editor.with_edit_mode(edit_mode)
@@ -1156,16 +1199,14 @@ impl reedline::Highlighter for NoHighlight {
 }
 
 fn set_buffer(ed: &mut Reedline, text: &str) {
-    ed.run_edit_commands(&[
-        EditCommand::Clear,
-        EditCommand::InsertString(text.to_string()),
-    ]);
+    ed.replace_buffer(text.to_owned());
 }
 
 fn read_plain_prompt(
     prompt: &ReplPrompt,
-    initial: &str,
+    draft: &mut String,
     validator: &LineValidator,
+    editing: &editing::Compiled,
 ) -> std::io::Result<Signal> {
     use reedline::Validator;
     use std::io::IsTerminal;
@@ -1176,10 +1217,9 @@ fn read_plain_prompt(
     {
         eprintln!("{}", style::visible_text(&style::strip_ansi(&prompt.right)));
     }
-    let mut full = String::new();
-    let mut initial = initial;
+    let mut continuation = false;
     loop {
-        let label = if full.is_empty() {
+        let label = if !continuation {
             format!("{}{}", prompt.left, prompt.indicator)
         } else {
             prompt.continuation.clone()
@@ -1187,20 +1227,18 @@ fn read_plain_prompt(
         let label = style::strip_ansi(&label);
         let line = match term::read_plain_line(
             &style::visible_text(&label),
-            initial,
+            draft,
             prompt.command_assist.as_ref(),
+            editing,
         )? {
             Signal::Success(line) => line,
             signal => return Ok(signal),
         };
-        initial = "";
-        if !full.is_empty() {
-            full.push('\n');
+        if matches!(validator.validate(&line), ValidationResult::Complete) {
+            return Ok(Signal::Success(line));
         }
-        full.push_str(&line);
-        if matches!(validator.validate(&full), ValidationResult::Complete) {
-            return Ok(Signal::Success(full));
-        }
+        draft.push('\n');
+        continuation = true;
     }
 }
 
@@ -1208,13 +1246,35 @@ fn read_plain_prompt(
 pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -> i32 {
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
-    let (mut editor, input_assist, editor_state) =
-        if style::stdout().ansi && std::io::stdin().is_terminal() {
-            let (editor, assist, state) = build_editor(shell, &cfg, ai.assistance());
-            (Some(editor), assist, state)
-        } else {
-            (None, None, EditorState::default())
-        };
+    let (mut editor, input_assist, editor_state) = if style::stdout().ansi
+        && std::io::stdin().is_terminal()
+    {
+        let (editor, assist, state) = build_editor(shell, &cfg, ai.assistance());
+        (Some(editor), assist, state)
+    } else {
+        let (compiled, notices) = cfg.editing.compile(
+            editing::Capabilities { enhanced: false },
+            cfg.trigger.ai_enabled,
+        );
+        for notice in notices {
+            eprintln!("nosh: {notice}");
+        }
+        eprintln!(
+            "{}",
+            tr!(
+                "nosh: 基本终端使用简化输入；Vi、历史搜索、撤销/重做和其它高级编辑暂不可用",
+                "nosh: basic terminal uses simplified input; Vi, history search, undo/redo and advanced editing are unavailable"
+            )
+        );
+        (
+            None,
+            None,
+            EditorState {
+                editing: Some(compiled),
+                ..Default::default()
+            },
+        )
+    };
     if input_assist.is_none() || (cfg.input_assist.enabled && cfg.input_assist.worker.is_none()) {
         shell.warm_command_names();
     }
@@ -1249,14 +1309,91 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             );
             prompt.input_assist = Some(assist.clone());
         }
-        let initial = prefill.take().unwrap_or_default();
-        let signal = if let Some(ed) = editor.as_mut() {
-            if !initial.is_empty() {
-                set_buffer(ed, &initial);
+        let mut plain_draft = prefill.take().unwrap_or_default();
+        if let Some(ed) = editor.as_mut()
+            && !plain_draft.is_empty()
+        {
+            set_buffer(ed, &plain_draft);
+        }
+        let signal = loop {
+            let signal = if let Some(ed) = editor.as_mut() {
+                ed.read_line(&prompt)
+            } else {
+                read_plain_prompt(
+                    &prompt,
+                    &mut plain_draft,
+                    &validator,
+                    editor_state
+                        .editing
+                        .as_ref()
+                        .expect("compiled basic-input bindings"),
+                )
+            };
+            let Ok(Signal::HostCommand(command)) = &signal else {
+                break signal;
+            };
+            if editor.is_some() {
+                eprintln!();
             }
-            ed.read_line(&prompt)
-        } else {
-            read_plain_prompt(&prompt, &initial, &validator)
+            match command.as_str() {
+                editing::FOCUS_NOTICE => ui.notice(tr!(
+                    "nosh: 请先退出或取消当前搜索、菜单、选区或 Vi 待完成操作，再请求 AI",
+                    "nosh: exit or cancel search, menu, visual selection or pending Vi input before requesting AI"
+                )),
+                editing::VI_LIMIT_NOTICE => ui.notice(tr!(
+                    "nosh: Vi 操作超限（最多 1024 次重复、64 字符序列）；未修改输入",
+                    "nosh: Vi input limit exceeded (1024 repetitions, 64 sequence characters); draft unchanged"
+                )),
+                editing::EDITOR_NOTICE => ui.notice(tr!(
+                    "nosh: 外部编辑器未配置；此动作暂不可用",
+                    "nosh: external editor is not configured; action unavailable"
+                )),
+                editing::PLAIN_NOTICE => ui.notice(tr!(
+                    "nosh: 基本终端不支持此编辑动作",
+                    "nosh: this editing action is unavailable in a basic terminal"
+                )),
+                SUGGEST_COMMAND | editing::COMPLETION_AI_COMMAND => {
+                    let buf = editor.as_ref().map_or_else(
+                        || plain_draft.clone(),
+                        |ed| ed.current_buffer_contents().to_owned(),
+                    );
+                    if command == editing::COMPLETION_AI_COMMAND {
+                        let snapshot = editor_state.completion.try_lock();
+                        let cursor = editor.as_ref().map(|ed| ed.current_completion_point());
+                        let result = snapshot.as_ref().ok().and_then(|snapshot| snapshot.as_ref())
+                            .filter(|snapshot| snapshot.input == buf && Some(snapshot.cursor) == cursor);
+                        if let Some(error) = result.and_then(|snapshot| snapshot.error.as_ref()) {
+                            ui.notice(error);
+                            continue;
+                        }
+                        if result.is_none() {
+                            ui.notice(tr!(
+                                "nosh: 补全结果暂不可确认；未请求 AI",
+                                "nosh: completion result unavailable; AI was not requested"
+                            ));
+                            continue;
+                        }
+                    }
+                    let needs_model = pipeline.cfg.trigger.ai_enabled && !buf.trim().is_empty();
+                    if needs_model && let Some(assist) = &input_assist {
+                        assist.suspend();
+                    }
+                    if let Some(program) = suggest_draft(shell, ai, &pipeline.cfg, &mut ui, &buf) {
+                        if let Some(ed) = editor.as_mut() {
+                            set_buffer(ed, &program);
+                        } else {
+                            plain_draft = program;
+                        }
+                    }
+                    if needs_model && let Some(assist) = &input_assist {
+                        assist.prepare(shell.input_context(
+                            &pipeline.trigger_cfg(),
+                            &pipeline.cfg.input_abbreviations,
+                        ));
+                    }
+                }
+                _ => ui.notice(&format!("nosh: unknown editor action: {}", style::visible_text(command))),
+            }
         };
         if let Some(assist) = &input_assist {
             assist.suspend();
@@ -1269,43 +1406,6 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                 match pipeline.process(shell, ai, &mut ui, &line) {
                     LineOutcome::Continue(p) => prefill = p,
                     LineOutcome::Exit(c) => break c,
-                }
-            }
-            Ok(Signal::HostCommand(cmd)) if cmd == SUGGEST_COMMAND => {
-                let Some(editor) = editor.as_mut() else {
-                    continue;
-                };
-                let buf = editor.current_buffer_contents().to_string();
-                eprintln!();
-                if buf.trim().is_empty() {
-                    set_buffer(editor, "");
-                    if let Some(display) = ai.assistance()
-                        && let Some(crate::Assistance::Command {
-                            command_id,
-                            program,
-                            ..
-                        }) = display.result()
-                        && shell
-                            .recent_commands()
-                            .last()
-                            .is_some_and(|command| command.id == command_id)
-                        && crate::trigger::is_suggestion_program(&program, shell)
-                    {
-                        display.invalidate();
-                        set_buffer(editor, &program);
-                        continue;
-                    }
-                    match pipeline.fix(shell, ai, &mut ui) {
-                        LineOutcome::Continue(p) => prefill = p,
-                        LineOutcome::Exit(c) => break c,
-                    }
-                } else {
-                    match isolate(|| ai.suggest(shell, &buf)).flatten() {
-                        Some(cmd) => set_buffer(editor, &cmd),
-                        None => {
-                            ui.notice(&style::dim(tr!("nosh: 没有建议", "nosh: no suggestion")))
-                        }
-                    }
                 }
             }
             Ok(Signal::CtrlC) => shell.set_last_exit_status(130),
@@ -1324,9 +1424,149 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     code
 }
 
+fn suggest_draft(
+    shell: &mut EmbeddedShell,
+    ai: &mut dyn AiHandler,
+    cfg: &ReplConfig,
+    ui: &mut dyn ReplUi,
+    draft: &str,
+) -> Option<String> {
+    if !cfg.trigger.ai_enabled {
+        ui.notice(tr!("nosh: AI 已禁用", "nosh: AI is disabled"));
+        return None;
+    }
+    if draft.trim().is_empty() {
+        if let Some(display) = ai.assistance()
+            && let Some(crate::Assistance::Command {
+                command_id,
+                program,
+                ..
+            }) = display.result()
+        {
+            if shell
+                .recent_commands()
+                .last()
+                .is_some_and(|command| command.id == command_id)
+                && crate::trigger::is_suggestion_program(&program, shell)
+            {
+                display.invalidate();
+                return Some(program);
+            }
+            display.invalidate();
+            ui.notice(tr!(
+                "nosh: 建议已过期或无效；保留原输入",
+                "nosh: suggestion is stale or invalid; draft unchanged"
+            ));
+            return None;
+        }
+        ui.notice(tr!(
+            "nosh: 没有可采用的建议；输入请求或使用 ai fix",
+            "nosh: no ready suggestion; enter a request or use ai fix"
+        ));
+        return None;
+    }
+    if let Some(display) = ai.assistance() {
+        display.invalidate();
+    }
+    let Some(program) = isolate(|| ai.suggest(shell, draft)).flatten() else {
+        ui.notice(tr!(
+            "nosh: 没有建议；保留原输入",
+            "nosh: no suggestion; draft unchanged"
+        ));
+        return None;
+    };
+    if !crate::trigger::is_suggestion_program(&program, shell) {
+        ui.notice(tr!(
+            "nosh: 建议未通过校验；保留原输入",
+            "nosh: suggestion failed validation; draft unchanged"
+        ));
+        return None;
+    }
+    Some(program)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reedline::{EditCommand, KeyModifiers, ReedlineEvent};
+
+    #[test]
+    fn rejected_background_candidates_are_invalidated_without_a_model_request() {
+        struct CandidateAi {
+            display: crate::AssistDisplay,
+            requests: usize,
+        }
+        impl AiHandler for CandidateAi {
+            fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
+                self.requests += 1;
+                AiOutcome::default()
+            }
+            fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+                self.requests += 1;
+                AiOutcome::default()
+            }
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+                self.requests += 1;
+                None
+            }
+            fn badge(&self) -> Badge {
+                Badge::default()
+            }
+            fn assistance(&self) -> Option<crate::AssistDisplay> {
+                Some(self.display.clone())
+            }
+        }
+        struct Notices(Vec<String>);
+        impl ReplUi for Notices {
+            fn guard(&mut self, _: &str) -> GuardChoice {
+                GuardChoice::Cancel
+            }
+            fn notice(&mut self, message: &str) {
+                self.0.push(message.to_owned());
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut shell = EmbeddedShell::new(crate::ShellOptions {
+            working_dir: Some(directory.path().into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(shell.run_user_line("true").exit_code, 0);
+        let latest = shell.recent_commands().last().unwrap().id;
+        let mut ai = CandidateAi {
+            display: crate::AssistDisplay::default(),
+            requests: 0,
+        };
+        let mut ui = Notices(Vec::new());
+        for (command_id, program) in [(latest + 1, "echo stale"), (latest, "echo '")] {
+            let version = ai.display.invalidate();
+            assert!(ai.display.publish(
+                version,
+                Some(crate::Assistance::Command {
+                    command_id,
+                    intent: "next".into(),
+                    program: program.into(),
+                })
+            ));
+            assert!(!ai.display.status(Some("F2")).is_empty());
+            assert_eq!(
+                suggest_draft(&mut shell, &mut ai, &ReplConfig::default(), &mut ui, " "),
+                None
+            );
+            assert!(ai.display.result().is_none());
+            assert!(ai.display.status(Some("F2")).is_empty());
+            assert!(
+                !ai.display
+                    .publish(version, Some(crate::Assistance::Message("late".into())))
+            );
+            assert_eq!(
+                suggest_draft(&mut shell, &mut ai, &ReplConfig::default(), &mut ui, ""),
+                None
+            );
+        }
+        assert_eq!(ai.requests, 0);
+        assert_eq!(ui.0.len(), 4);
+    }
 
     fn status_prompt(custom: bool) -> ReplPrompt {
         let mut keys = reedline::default_emacs_keybindings();
@@ -1336,8 +1576,8 @@ mod tests {
             ReedlineEvent::Menu("completion_menu".into()),
         );
         keys.add_binding(
-            KeyModifiers::CONTROL,
-            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+            KeyCode::F(2),
             ReedlineEvent::ExecuteHostCommand(SUGGEST_COMMAND.into()),
         );
         ReplPrompt {
@@ -1352,6 +1592,7 @@ mod tests {
             editor: EditorState {
                 completion: Default::default(),
                 bindings: crate::status::Bindings::from_editor(&keys),
+                editing: None,
                 _theme_subscription: None,
             },
             rendered: RefCell::new(None),
@@ -1423,6 +1664,7 @@ mod tests {
             let snapshot = || PromptContext {
                 buffer: draft,
                 cursor,
+                completion_cursor: cursor,
                 selection,
                 columns: 120,
                 rows: 24,
@@ -1464,6 +1706,7 @@ mod tests {
         PromptContext {
             buffer: "echo ok",
             cursor: 7,
+            completion_cursor: 7,
             selection: None,
             columns,
             rows,
@@ -1546,7 +1789,7 @@ mod tests {
         prompt.update_context(context);
         let left = prompt.render_prompt_left();
         assert!(
-            left.contains("next: printf safe") && left.contains("Ctrl+G"),
+            left.contains("next: printf safe") && left.contains("F2"),
             "{left}"
         );
         assert_eq!(left.matches('\n').count(), 1);
@@ -1556,7 +1799,7 @@ mod tests {
         context.cursor = 0;
         prompt.update_context(context);
         assert!(!prompt.render_prompt_left().contains("printf safe"));
-        assert!(!prompt.render_prompt_left().contains("Ctrl+G"));
+        assert!(!prompt.render_prompt_left().contains("F2"));
     }
 
     #[test]

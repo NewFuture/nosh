@@ -5,6 +5,7 @@ mod assist_display;
 pub mod backend;
 mod command_context;
 mod command_snapshot;
+pub mod editing;
 pub mod guard;
 pub mod history;
 pub mod input_assist;

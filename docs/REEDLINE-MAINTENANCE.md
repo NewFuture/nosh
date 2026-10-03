@@ -257,3 +257,11 @@ This maintenance change preserves the four-zone prompt integration, read-only
 context and opt-in menu submission protection. It does **not** resolve the
 recorded tmux resize/history failures or replace the required host acceptance
 checks; see [STATUS-BAR.md](STATUS-BAR.md).
+
+The input-editing integration also uses the same maintained delta: opt-in
+authoritative input-context dispatch, distinct history acceptance/cancellation,
+one-step host draft replacement, buffered-submit protection and bounded Vi
+sequences/repeats. It does not introduce another maintained source or modify
+the clean upstream. Contracts and terminal capability limits are documented in
+[INPUT-EDITING.md](INPUT-EDITING.md); exported library regressions accompany
+the host's configuration and real-PTY tests.

@@ -16,6 +16,7 @@ pub struct Config {
     pub input_assist: bool,
     pub status_bar: bool,
     pub command_assist: bool,
+    pub editing: nosh_shell::editing::Config,
     pub nl_guard: bool,
     pub builtin_name: String,
     pub approval: ApprovalMode,
@@ -49,6 +50,7 @@ impl Default for Config {
             input_assist: true,
             status_bar: true,
             command_assist: true,
+            editing: Default::default(),
             nl_guard: true,
             builtin_name: "ai".into(),
             approval: ApprovalMode::default(),
@@ -87,7 +89,8 @@ const KNOWN: &[(&str, &[&str])] = &[
             "command_assist",
             "nl_guard",
             "builtin_name",
-            "suggest_key",
+            "edit_mode",
+            "keybindings",
         ],
     ),
     (
@@ -281,11 +284,31 @@ impl Config {
         if let Some(v) = r.str("shell", "builtin_name") {
             c.builtin_name = v;
         }
-        if let Some(v) = r.str("shell", "suggest_key")
-            && v != "ctrl-g"
-        {
+        let mut editing_errors = Vec::new();
+        if let Some(value) = r.get("shell", "edit_mode") {
+            match value
+                .as_str()
+                .ok_or_else(|| "shell.edit_mode: expected a string".to_owned())
+                .and_then(str::parse)
+            {
+                Ok(mode) => c.editing.mode = mode,
+                Err(error) => editing_errors.push(error),
+            }
+        }
+        if let Some(value) = r.get("shell", "keybindings") {
+            match value.clone().try_into::<nosh_shell::editing::Bindings>() {
+                Ok(bindings) => c.editing.keybindings = bindings,
+                Err(error) => editing_errors.push(format!("shell.keybindings: {error}")),
+            }
+        }
+        if let Err(errors) = c.editing.validate() {
+            editing_errors.extend(errors);
+        }
+        if !editing_errors.is_empty() {
+            r.warnings.extend(editing_errors);
             r.warnings
-                .push("shell.suggest_key: only ctrl-g is supported in this version".into());
+                .push("shell editing configuration rejected; using defaults".into());
+            c.editing = Default::default();
         }
         if let Some(v) = r.str("agent", "approval") {
             match ApprovalMode::parse(&v) {
@@ -405,6 +428,55 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_settings_are_typed_and_invalid_groups_fall_back_without_losing_other_settings() {
+        let config = Config::parse(
+            r#"
+[shell]
+edit_mode = "vi"
+input_assist = false
+[shell.keybindings]
+ai_suggest = ["F2", "F3"]
+undo = ["Ctrl+Z", "Ctrl+_"]
+[shell.keybindings.modes.vi_normal]
+redo = ["F4"]
+[shell.keybindings.contexts.history_search]
+cancel = ["Ctrl+G", "F5"]
+"#,
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.editing.mode, nosh_shell::editing::Mode::Vi);
+        assert_eq!(
+            config.editing.keybindings.actions["ai_suggest"],
+            ["F2", "F3"]
+        );
+        assert!(!config.input_assist);
+        for invalid in [
+            "edit_mode = 'wrong'",
+            "edit_mode = 42",
+            "edit_mode = 'vi'\nkeybindings = { unknown = ['F2'] }",
+            "edit_mode = 'vi'\nkeybindings = { undo = ['F2'], redo = ['F2'] }",
+            "edit_mode = 'vi'\nkeybindings = { ai_suggest = ['Ctrl+C'] }",
+            "edit_mode = 'vi'\nkeybindings = { undo = 'F2' }",
+        ] {
+            let config = Config::parse(&format!("[shell]\ninput_assist = false\n{invalid}"));
+            assert_eq!(
+                config.editing.mode,
+                nosh_shell::editing::Mode::Auto,
+                "{invalid}"
+            );
+            assert!(config.editing.keybindings.actions.is_empty());
+            assert!(!config.input_assist);
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("using defaults")),
+                "{invalid}"
+            );
+        }
+    }
 
     #[test]
     fn device_requests_are_preserved_or_rejected_never_silently_cpu() {

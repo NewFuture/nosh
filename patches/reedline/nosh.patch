@@ -395,10 +395,10 @@ index 57ab8a04c8c181cbef32eaed78c834e348519fbd..7a0b3abca813b80f8e6b4ebdd35c3842
   "log",
 diff --git a/NOSH_PATCH.md b/NOSH_PATCH.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6addfa5b182c8d344602b18e43ff9adf4a42cf2
+index 0000000000000000000000000000000000000000..04252ceab40e4648401ef446d1b5f3f72f178dfe
 --- /dev/null
 +++ b/NOSH_PATCH.md
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,73 @@
 +# nosh Reedline adaptation
 +
 +Base: upstream Reedline **0.52.0**, MIT licensed, Git commit
@@ -439,6 +439,25 @@ index 0000000000000000000000000000000000000000..c6addfa5b182c8d344602b18e43ff9ad
 +- `with_menu_submit_protection(true)` keeps nosh's 0.51 submit boundary:
 +  Enter in an active empty/provisional menu closes it without executing the
 +  buffer. The upstream default and explicit `MenuAccept` remain unchanged.
++- `with_contextual_input(true)` dispatches each raw event against the current
++  input owner, including within rapid batches. The default remains disabled.
++  EditMode wrappers can forward contextual parsing, mode control and the
++  post-event observation without maintaining another buffer or focus machine.
++- Contextual reverse search accepts with validation on Enter, has distinct
++  accept-for-edit/cancel events, and restores the originating buffer/cursor/
++  selection/mode on cancel. Prompt context exposes the actual completion point
++  separately from a Vi caret.
++- `CompleteOrHostCommand` returns a host action only for a final empty menu;
++  provisional results never fall through. The host diagnoses completer errors
++  and decides whether its fallback capability is available.
++- Host draft replacement is one undo point with the initiating mode retained.
++  Suspended contextual batches retain remaining text but do not submit it before
++  the user can review the host result.
++- Vi has opt-in pending-sequence/effective-repeat limits, checked before event
++  expansion (including cached dot actions), and masks for rebound native
++  u/p/P/? aliases. Cancellation remains available with an unfinished operator.
++  Ordinary AltGr text preserves its original case. Keyboard protocol setup/
++  cleanup failures are returned or diagnosed, not silently accepted.
 +
 +These additions are separate from the geometry repair. Their regressions are
 +kept with the implementation; none of these changes is an upstream release.
@@ -469,8 +488,419 @@ index 3ba6144e7b74f6dd6fe9029b11523b651e4f98cf..52a379ba9f5cd3eec9d5ec6f9fe7010d
  ![GitHub](https://img.shields.io/github/license/nushell/reedline)
  [![Crates.io](https://img.shields.io/crates/v/reedline)](https://crates.io/crates/reedline)
  [![docs.rs](https://img.shields.io/docsrs/reedline)](https://docs.rs/reedline/)
+diff --git a/src/core_editor/editor.rs b/src/core_editor/editor.rs
+index c44c64e7a4f887eba8910f8d5f8d1f5b20783baf..e4ea11143f30d17eb65d31033275c8225bc3031b 100644
+--- a/src/core_editor/editor.rs
++++ b/src/core_editor/editor.rs
+@@ -37,6 +37,7 @@ pub struct Editor {
+     /// carets (emacs, vi insert) always cross regardless, since a bar may rest in
+     /// the gap around a `\n`. Defaults to `true`.
+     cross_line_cursor: bool,
++    revision: u64,
+ }
+ 
+ /// Whether an [`EditCommand`] could be applied in the current editor state.
+@@ -80,11 +81,16 @@ impl Default for Editor {
+             edit_mode: PromptEditMode::Default,
+             policy_unsettled: false,
+             cross_line_cursor: true,
++            revision: 0,
+         }
+     }
+ }
+ 
+ impl Editor {
++    pub(crate) fn revision(&self) -> u64 {
++        self.revision
++    }
++
+     /// Get the current [`LineBuffer`]
+     pub const fn line_buffer(&self) -> &LineBuffer {
+         &self.line_buffer
+@@ -928,6 +934,7 @@ impl Editor {
+     }
+ 
+     pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
++        self.revision = self.revision.wrapping_add(1);
+         if matches!(undo_behavior, UndoBehavior::NoOp) {
+             self.last_undo_behavior = UndoBehavior::NoOp;
+             return;
+diff --git a/src/edit_mode/base.rs b/src/edit_mode/base.rs
+index 517108b75abe3643dd7c0dbc7cd50d81f141ec71..9b8fd39ae038f255d3765cf46ec35e74d332d7e4 100644
+--- a/src/edit_mode/base.rs
++++ b/src/edit_mode/base.rs
+@@ -3,6 +3,17 @@ use crate::{
+     PromptEditMode,
+ };
+ 
++/// The input owner when a raw event is dispatched.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum EditContext {
++    /// The ordinary draft, including history traversal.
++    Editing,
++    /// The reverse history-search query.
++    HistorySearch,
++    /// An active completion menu.
++    Menu,
++}
++
+ /// Define the style of parsing for the edit events
+ /// Available default options:
+ /// - Emacs
+@@ -12,6 +23,23 @@ pub trait EditMode: Send {
+     /// Translate the given user input event into what the `LineEditor` understands
+     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent;
+ 
++    /// Parse against current engine state rather than a previously painted frame.
++    fn parse_event_with_context(
++        &mut self,
++        event: ReedlineRawEvent,
++        _context: EditContext,
++    ) -> ReedlineEvent {
++        self.parse_event(event)
++    }
++
++    /// Whether the mode is waiting for an operator, argument, or count.
++    fn has_pending_input(&self) -> bool {
++        false
++    }
++
++    /// Observe an applied event without guessing state from a painted frame.
++    fn after_event(&mut self, _context: EditContext, _edited: bool) {}
++
+     /// What to display in the prompt indicator
+     fn edit_mode(&self) -> PromptEditMode;
+ 
+diff --git a/src/edit_mode/emacs.rs b/src/edit_mode/emacs.rs
+index dae69fb44a2c2cf70de204a90200cf186a314ce4..54bc60194a620569cd5ba1ceb229bf441b99e36a 100644
+--- a/src/edit_mode/emacs.rs
++++ b/src/edit_mode/emacs.rs
+@@ -122,6 +122,7 @@ impl EditMode for Emacs {
+                 code, modifiers, ..
+             }) => match (modifiers, code) {
+                 (modifier, KeyCode::Char(c)) => {
++                    let typed = c;
+                     // Note. The modifier can also be a combination of modifiers, for
+                     // example:
+                     //     KeyModifiers::CONTROL | KeyModifiers::ALT
+@@ -148,9 +149,9 @@ impl EditMode for Emacs {
+                             {
+                                 ReedlineEvent::Edit(vec![EditCommand::InsertChar(
+                                     if modifier == KeyModifiers::SHIFT {
+-                                        c.to_ascii_uppercase()
++                                        typed.to_ascii_uppercase()
+                                     } else {
+-                                        c
++                                        typed
+                                     },
+                                 )])
+                             } else {
+diff --git a/src/edit_mode/mod.rs b/src/edit_mode/mod.rs
+index a136b9432107582a3884af18484fb4d896c39b51..107818f63ab4a41183c825d1da8d80b225d89a1b 100644
+--- a/src/edit_mode/mod.rs
++++ b/src/edit_mode/mod.rs
+@@ -5,7 +5,7 @@ mod helix;
+ mod keybindings;
+ mod vi;
+ 
+-pub use base::EditMode;
++pub use base::{EditContext, EditMode};
+ pub use cursors::CursorConfig;
+ pub use emacs::{default_emacs_keybindings, Emacs};
+ pub use helix::{
+diff --git a/src/edit_mode/vi/mod.rs b/src/edit_mode/vi/mod.rs
+index e0dc6f7d2c9085c9e59340ea3a7c9c09282e5f0b..684946abb96c6113fabc5a6ddc9f6b6472cb72a6 100644
+--- a/src/edit_mode/vi/mod.rs
++++ b/src/edit_mode/vi/mod.rs
+@@ -3,6 +3,9 @@ mod motion;
+ mod parser;
+ mod vi_keybindings;
+ 
++use std::collections::HashSet;
++use std::num::NonZeroUsize;
++
+ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+ pub use vi_keybindings::{
+     default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
+@@ -15,7 +18,7 @@ use crate::{
+     Direction, MotionTarget, PromptEditMode, PromptViMode,
+ };
+ 
+-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
++#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+ enum ViMode {
+     Normal,
+     Insert,
+@@ -48,6 +51,10 @@ pub struct Vi {
+     previous: Option<ReedlineEvent>,
+     // last f, F, t, T motion for ; and ,
+     last_char_search: Option<MotionTarget>,
++    input_limits: Option<(NonZeroUsize, NonZeroUsize, ReedlineEvent)>,
++    rejected_sequence: bool,
++    previous_repetitions: usize,
++    disabled_commands: HashSet<(ViMode, char)>,
+ }
+ 
+ impl Default for Vi {
+@@ -82,9 +89,39 @@ impl Vi {
+             mode: ViMode::Insert,
+             previous: None,
+             last_char_search: None,
++            input_limits: None,
++            rejected_sequence: false,
++            previous_repetitions: 1,
++            disabled_commands: HashSet::new(),
+         }
+     }
+ 
++    /// Bound pending input and effective repetition before allocating events.
++    /// `on_limit` is emitted without applying the rejected operation.
++    pub fn with_input_limits(
++        mut self,
++        repetitions: NonZeroUsize,
++        sequence_length: NonZeroUsize,
++        on_limit: ReedlineEvent,
++    ) -> Self {
++        self.input_limits = Some((repetitions, sequence_length, on_limit));
++        self
++    }
++
++    /// Disable native `u`, `p`, `P`, or `?` commands when a host replaces their
++    /// action's bindings. Counted forms are disabled too; motion arguments are not.
++    pub fn with_disabled_commands(
++        mut self,
++        mode: PromptViMode,
++        commands: impl IntoIterator<Item = char>,
++    ) -> Self {
++        self.disabled_commands.extend({
++            let mode = ViMode::from(mode);
++            commands.into_iter().map(move |key| (mode, key))
++        });
++        self
++    }
++
+     /// The keybinding table for the mode the machine is in.
+     fn keybindings(&self) -> &Keybindings {
+         match self.mode {
+@@ -115,12 +152,17 @@ impl EditMode for Vi {
+         }
+     }
+ 
++    fn has_pending_input(&self) -> bool {
++        !self.cache.is_empty() || self.rejected_sequence
++    }
++
+     fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> EventStatus {
+         match event {
+             ReedlineEvent::SwitchMode(PromptEditMode::Vi(target)) => {
+                 // Abandon a half-typed sequence (`3f`), or the next key would
+                 // be parsed as its argument in the new mode.
+                 self.cache.clear();
++                self.rejected_sequence = false;
+                 self.mode = ViMode::from(target);
+                 EventStatus::Handled
+             }
+@@ -143,7 +185,10 @@ impl Vi {
+             // non-empty, so `v` no longer enters Visual mode. Decide how
+             // count-prefixed Visual entry should behave before broadening this
+             // special case.
+-            (ViMode::Normal, KeyModifiers::NONE, KeyCode::Char('v')) if self.cache.is_empty() => {
++            (ViMode::Normal, KeyModifiers::NONE, KeyCode::Char('v'))
++                if !self.has_pending_input()
++                    && self.keybindings().find_binding(modifiers, code).is_none() =>
++            {
+                 self.mode = ViMode::Visual;
+                 // Entering Visual switches the rest policy to `Block`; the
+                 // pre-paint commit then widens the cursor into its min-width-1
+@@ -160,7 +205,30 @@ impl Vi {
+                 // A pending multi-key motion (e.g. `f<char>`) must be completed
+                 // before a custom keybinding can claim the next key; otherwise a
+                 // binding on that second key would hijack the sequence.
+-                if !self.cache.is_empty() || (binding.is_none() && is_typeable) {
++                if (self.has_pending_input() && is_typeable) || (binding.is_none() && is_typeable) {
++                    let mut limit_now = false;
++                    if self
++                        .input_limits
++                        .as_ref()
++                        .is_some_and(|(_, length, _)| self.cache.len() >= length.get())
++                    {
++                        limit_now = !self.rejected_sequence;
++                        self.rejected_sequence = true;
++                        // Keep only the bounded grammatical suffix while discarding
++                        // an oversized numeric prefix; consume its operation too.
++                        self.cache.retain(|c| !c.is_ascii_digit());
++                    }
++                    if self.rejected_sequence && c.is_ascii_digit() && self.cache.is_empty() {
++                        return if limit_now {
++                            self.input_limits
++                                .as_ref()
++                                .expect("configured limit")
++                                .2
++                                .clone()
++                        } else {
++                            ReedlineEvent::None
++                        };
++                    }
+                     self.cache.push(if modifier == KeyModifiers::SHIFT {
+                         c.to_ascii_uppercase()
+                     } else {
+@@ -171,18 +239,56 @@ impl Vi {
+ 
+                     if !res.is_valid() {
+                         self.cache.clear();
+-                        ReedlineEvent::None
++                        self.rejected_sequence = false;
++                        if limit_now {
++                            self.input_limits
++                                .as_ref()
++                                .expect("configured limit")
++                                .2
++                                .clone()
++                        } else {
++                            ReedlineEvent::None
++                        }
+                     } else if res.is_complete(self.mode) {
++                        if self.rejected_sequence {
++                            self.cache.clear();
++                            self.rejected_sequence = false;
++                            return if limit_now {
++                                self.input_limits
++                                    .as_ref()
++                                    .expect("configured limit")
++                                    .2
++                                    .clone()
++                            } else {
++                                ReedlineEvent::None
++                            };
++                        }
+                         let event = res.to_reedline_event(self);
+-                        if let Some(mode) = res.changes_mode(self.mode) {
+-                            self.mode = mode;
++                        let rejected = self
++                            .input_limits
++                            .as_ref()
++                            .is_some_and(|(_, _, on_limit)| &event == on_limit);
++                        if !rejected && !res.is_disabled(self) {
++                            if let Some(mode) = res.changes_mode(self.mode) {
++                                self.mode = mode;
++                            }
+                         }
+                         self.cache.clear();
+                         event
+                     } else {
+-                        ReedlineEvent::None
++                        if limit_now {
++                            self.input_limits
++                                .as_ref()
++                                .expect("configured limit")
++                                .2
++                                .clone()
++                        } else {
++                            ReedlineEvent::None
++                        }
+                     }
+                 } else if let Some(event) = binding {
++                    self.cache.clear();
++                    self.rejected_sequence = false;
+                     event
+                 } else {
+                     ReedlineEvent::None
+@@ -197,6 +303,7 @@ impl Vi {
+                 // Mixed modifiers are used by non american keyboards that have extra
+                 // keys like 'alt gr'. Keep this in mind if in the future there are
+                 // cases where an event is not being captured
++                let typed = c;
+                 let c = match modifier {
+                     KeyModifiers::NONE => c,
+                     _ => c.to_ascii_lowercase(),
+@@ -208,9 +315,9 @@ impl Vi {
+                         if is_text_char(modifier) {
+                             ReedlineEvent::Edit(vec![EditCommand::InsertChar(
+                                 if modifier == KeyModifiers::SHIFT {
+-                                    c.to_ascii_uppercase()
++                                    typed.to_ascii_uppercase()
+                                 } else {
+-                                    c
++                                    typed
+                                 },
+                             )])
+                         } else {
+@@ -226,11 +333,14 @@ impl Vi {
+                     // the next character is not read as a stale argument.
+                     Some(event) => {
+                         self.cache.clear();
++                        self.rejected_sequence = false;
+                         event
+                     }
+                     None => {
+                         // Default Enter behavior when no custom binding
+                         if modifiers == KeyModifiers::NONE && code == KeyCode::Enter {
++                            self.cache.clear();
++                            self.rejected_sequence = false;
+                             self.mode = ViMode::Insert;
+                             // The normal/visual block caret rests *on* a grapheme;
+                             // submitting (or inserting a newline on incomplete input)
+@@ -268,6 +378,7 @@ impl Vi {
+     /// the caret back onto the last typed grapheme, as vim does.
+     fn escape(&mut self) -> Vec<ReedlineEvent> {
+         self.cache.clear();
++        self.rejected_sequence = false;
+         let leaving_insert = self.mode == ViMode::Insert;
+         self.mode = ViMode::Normal;
+         let mut events = vec![ReedlineEvent::Esc];
+diff --git a/src/edit_mode/vi/parser.rs b/src/edit_mode/vi/parser.rs
+index 79dd9beb22d76020b8e5bd2e9b2762ca4303d6bb..f8c7006a2aa2308b9b9fc4cca589533153191aa9 100644
+--- a/src/edit_mode/vi/parser.rs
++++ b/src/edit_mode/vi/parser.rs
+@@ -151,8 +151,33 @@ impl ParsedViSequence {
+         }
+     }
+ 
++    pub fn is_disabled(&self, vi_state: &Vi) -> bool {
++        let native_key = match self.command {
++            Some(Command::Undo) => Some('u'),
++            Some(Command::PasteBefore) => Some('P'),
++            Some(Command::PasteAfter) => Some('p'),
++            Some(Command::HistorySearch) => Some('?'),
++            _ => None,
++        };
++        native_key.is_some_and(|key| vi_state.disabled_commands.contains(&(vi_state.mode, key)))
++    }
++
+     pub fn to_reedline_event(&self, vi_state: &mut Vi) -> ReedlineEvent {
+-        match (&self.multiplier, &self.command, &self.count, &self.motion) {
++        if self.is_disabled(vi_state) {
++            return ReedlineEvent::None;
++        }
++        let repeat = matches!(self.command, Some(Command::RepeatLastAction));
++        let effective = self.total_multiplier().saturating_mul(if repeat {
++            vi_state.previous_repetitions
++        } else {
++            1
++        });
++        if let Some((limit, _, on_limit)) = &vi_state.input_limits {
++            if effective > limit.get() {
++                return on_limit.clone();
++            }
++        }
++        let event = match (&self.multiplier, &self.command, &self.count, &self.motion) {
+             (_, Some(command), None, ParseResult::Incomplete) => {
+                 let events = self.apply_multiplier(Some(command.to_reedline(vi_state)));
+                 Self::record_previous(vi_state, command, &events);
+@@ -169,7 +194,11 @@ impl ParsedViSequence {
+                 self.apply_multiplier(Some(motion.to_reedline(vi_state)))
+             }
+             _ => ReedlineEvent::None,
++        };
++        if self.command.is_some() && !repeat && event != ReedlineEvent::None {
++            vi_state.previous_repetitions = effective;
+         }
++        event
+     }
+ }
+ 
 diff --git a/src/engine.rs b/src/engine.rs
-index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57cb036baed 100644
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..8c2f9452ea5e7563e28f7cca80d3a7da25a9de07 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -37,7 +37,8 @@ use {
@@ -483,7 +913,18 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
      },
      crossterm::{
          cursor::{SetCursorStyle, Show},
-@@ -169,6 +170,7 @@ pub struct Reedline {
+@@ -146,6 +147,10 @@ pub struct Reedline {
+     /// Last failed `history.save`, until [`Reedline::take_history_save_error`].
+     history_save_error: Option<ReedlineError>,
+     input_mode: InputMode,
++    contextual_input: bool,
++    history_search_origin: Option<(LineBuffer, PromptEditMode)>,
++    pending_input: std::collections::VecDeque<Event>,
++    buffered_input: bool,
+ 
+     // State of the painter after a `ReedlineEvent::ExecuteHostCommand` was requested, used after
+     // execution to decide if we can re-use the previous prompt or paint a new one.
+@@ -169,6 +174,7 @@ pub struct Reedline {
      // Provides the tab completions
      completer: Box<dyn Completer + Send>,
      quick_completions: bool,
@@ -491,7 +932,18 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
      partial_completions: bool,
      persistent_menus: bool,
      // Completions owed to a menu activation the completer could not answer in time
-@@ -374,6 +376,7 @@ impl Reedline {
+@@ -366,6 +372,10 @@ impl Reedline {
+             history_cursor_on_excluded: false,
+             history_save_error: None,
+             input_mode: InputMode::Regular,
++            contextual_input: false,
++            history_search_origin: None,
++            pending_input: std::collections::VecDeque::new(),
++            buffered_input: false,
+             suspended_state: None,
+             last_render_snapshot: None,
+             painter,
+@@ -374,6 +384,7 @@ impl Reedline {
              standby_edit_modes: Vec::new(),
              completer,
              quick_completions: false,
@@ -499,7 +951,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
              partial_completions: false,
              persistent_menus: false,
              deferred_menu_completion: None,
-@@ -513,6 +516,14 @@ impl Reedline {
+@@ -513,6 +524,22 @@ impl Reedline {
          self
      }
  
@@ -511,10 +963,406 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
 +        self
 +    }
 +
++    /// Dispatch each key against its current input owner, with Bash-style
++    /// history acceptance and resumable, non-submitting host-action typeahead.
++    /// Disabled by default for existing consumers.
++    pub fn with_contextual_input(mut self, enabled: bool) -> Self {
++        self.contextual_input = enabled;
++        self
++    }
++
      /// Control whether the cursor crosses line boundaries on left/right motions
      /// in a block caret (vi normal/visual mode). When `true` (the default), `l`
      /// at the end of a line moves to the next line's first character and `h` at
-@@ -2375,6 +2386,37 @@ impl Reedline {
+@@ -992,14 +1019,30 @@ impl Reedline {
+     pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
+         terminal::enable_raw_mode()?;
+         self.bracketed_paste.enter();
+-        self.kitty_protocol.enter();
+-
+-        let result = self.read_line_helper(prompt);
++        let result = match self.kitty_protocol.enter() {
++            Ok(()) => self.read_line_helper(prompt),
++            Err(error) => Err(error),
++        };
+ 
+         self.bracketed_paste.exit();
+-        self.kitty_protocol.exit();
+-        terminal::disable_raw_mode()?;
+-        result
++        let protocol = self.kitty_protocol.exit();
++        let raw = terminal::disable_raw_mode();
++        match result {
++            Err(error) => {
++                if let Err(cleanup) = protocol {
++                    eprintln!("reedline: cannot restore keyboard protocol: {cleanup}");
++                }
++                if let Err(cleanup) = raw {
++                    eprintln!("reedline: cannot restore terminal input: {cleanup}");
++                }
++                Err(error)
++            }
++            Ok(signal) => {
++                protocol?;
++                raw?;
++                Ok(signal)
++            }
++        }
+     }
+ 
+     /// Returns the current insertion point of the input buffer.
+@@ -1007,6 +1050,11 @@ impl Reedline {
+         self.editor.insertion_point()
+     }
+ 
++    /// The position used by the completer, which may differ from a Vi caret.
++    pub fn current_completion_point(&self) -> usize {
++        self.editor.completion_point()
++    }
++
+     /// Returns the current contents of the input buffer.
+     pub fn current_buffer_contents(&self) -> &str {
+         self.editor.get_buffer()
+@@ -1017,6 +1065,14 @@ impl Reedline {
+         self.editor.get_selection()
+     }
+ 
++    /// Replace a host-generated draft as one undoable edit, retaining edit mode.
++    pub fn replace_buffer(&mut self, buffer: String) {
++        self.editor.sync_edit_mode(self.edit_mode.edit_mode());
++        self.editor.clear_selection();
++        self.editor
++            .set_buffer(buffer, UndoBehavior::CreateUndoPoint);
++    }
++
+     /// Writes `msg` to the terminal with a following carriage return and newline
+     fn print_line(&mut self, msg: &str) -> Result<()> {
+         self.painter.paint_line(msg)
+@@ -1154,7 +1210,10 @@ impl Reedline {
+ 
+             let mut events: Vec<Event> = vec![];
+ 
+-            if !self.immediately_accept {
++            self.buffered_input = !self.pending_input.is_empty();
++            if self.buffered_input {
++                events.extend(self.pending_input.drain(..));
++            } else if !self.immediately_accept {
+                 if self.input_needs_polling() || completer_pending {
+                     if event::poll(self.poll_interval)? {
+                         events.push(crossterm::event::read()?);
+@@ -1166,7 +1225,10 @@ impl Reedline {
+ 
+                 // Receive all events in the queue without blocking. Will stop when
+                 // a line of input is completed.
+-                while !completed(&events) && event::poll(Duration::from_millis(0))? {
++                while !completed(&events)
++                    && (!self.contextual_input || events.len() < 4096)
++                    && event::poll(Duration::from_millis(0))?
++                {
+                     events.push(crossterm::event::read()?);
+                 }
+ 
+@@ -1175,7 +1237,10 @@ impl Reedline {
+                 if events.len() > EVENTS_THRESHOLD
+                     || events.iter().any(|e| matches!(e, Event::Resize(_, _)))
+                 {
+-                    while !completed(&events) && event::poll(POLL_WAIT)? {
++                    while !completed(&events)
++                        && (!self.contextual_input || events.len() < 4096)
++                        && event::poll(POLL_WAIT)?
++                    {
+                         events.push(crossterm::event::read()?);
+                     }
+                 }
+@@ -1289,6 +1354,9 @@ impl Reedline {
+         prompt: &dyn Prompt,
+         events: Vec<Event>,
+     ) -> Result<ControlFlow<Signal>> {
++        if self.contextual_input {
++            return self.process_contextual_input_batch(prompt, events);
++        }
+         // Convert `Event` into `ReedlineEvent`. Also, fuse consecutive
+         // `ReedlineEvent::EditCommand` into one. Also, if there're multiple
+         // `ReedlineEvent::Resize`, only keep the last one.
+@@ -1369,7 +1437,111 @@ impl Reedline {
+         Ok(ControlFlow::Continue(()))
+     }
+ 
++    fn process_contextual_input_batch(
++        &mut self,
++        prompt: &dyn Prompt,
++        events: Vec<Event>,
++    ) -> Result<ControlFlow<Signal>> {
++        fn starts_search(event: &ReedlineEvent) -> bool {
++            match event {
++                ReedlineEvent::SearchHistory => true,
++                ReedlineEvent::Multiple(events) | ReedlineEvent::UntilFound(events) => {
++                    events.iter().any(starts_search)
++                }
++                _ => false,
++            }
++        }
++
++        let mut events = events.into_iter();
++        let mut repaint = false;
++        while let Some(raw) = events.next() {
++            let Ok(raw) = ReedlineRawEvent::try_from(raw) else {
++                continue;
++            };
++            let before = self.edit_mode.edit_mode();
++            let revision = self.editor.revision();
++            let context = if self.input_mode == InputMode::HistorySearch {
++                crate::EditContext::HistorySearch
++            } else if self.menus.iter().any(|menu| menu.is_active()) {
++                crate::EditContext::Menu
++            } else {
++                crate::EditContext::Editing
++            };
++            let event = self.edit_mode.parse_event_with_context(raw, context);
++            if self.input_mode != InputMode::HistorySearch && starts_search(&event) {
++                self.history_search_origin = Some((self.editor.line_buffer().clone(), before));
++            }
++            self.editor.sync_edit_mode(self.edit_mode.edit_mode());
++            let status = self.handle_event(prompt, event)?;
++            let after = if self.input_mode == InputMode::HistorySearch {
++                crate::EditContext::HistorySearch
++            } else if self.menus.iter().any(|menu| menu.is_active()) {
++                crate::EditContext::Menu
++            } else {
++                crate::EditContext::Editing
++            };
++            self.edit_mode
++                .after_event(after, self.editor.revision() != revision);
++            match status {
++                EventStatus::Exits(signal) => {
++                    if self.suspended_state.is_some() {
++                        self.pending_input.extend(events);
++                    } else {
++                        self.painter.move_cursor_to_end()?;
++                    }
++                    return Ok(ControlFlow::Break(signal));
++                }
++                EventStatus::Handled => repaint = true,
++                EventStatus::Inapplicable => {}
++            }
++        }
++        if self.immediately_accept {
++            if let EventStatus::Exits(signal) = self.handle_event(prompt, ReedlineEvent::Submit)? {
++                self.painter.move_cursor_to_end()?;
++                return Ok(ControlFlow::Break(signal));
++            }
++        }
++        if repaint || self.editor.policy_unsettled() {
++            self.editor.set_edit_mode(self.edit_mode.edit_mode());
++            self.repaint(prompt)?;
++        }
++        Ok(ControlFlow::Continue(()))
++    }
++
+     fn handle_event(&mut self, prompt: &dyn Prompt, event: ReedlineEvent) -> Result<EventStatus> {
++        if self.contextual_input {
++            match event {
++                ReedlineEvent::Multiple(events) => {
++                    let mut result = EventStatus::Inapplicable;
++                    for event in events {
++                        match self.handle_event(prompt, event)? {
++                            EventStatus::Handled => result = EventStatus::Handled,
++                            EventStatus::Inapplicable => {}
++                            exit @ EventStatus::Exits(_) => return Ok(exit),
++                        }
++                    }
++                    return Ok(result);
++                }
++                ReedlineEvent::AcceptHistorySearch => {
++                    return self.finish_history_search(prompt, false, false);
++                }
++                ReedlineEvent::CancelHistorySearch => {
++                    return self.finish_history_search(prompt, false, true);
++                }
++                ReedlineEvent::Enter | ReedlineEvent::Submit | ReedlineEvent::SubmitOrNewline
++                    if self.input_mode == InputMode::HistorySearch =>
++                {
++                    return self.finish_history_search(prompt, true, false);
++                }
++                other => {
++                    return if self.input_mode == InputMode::HistorySearch {
++                        self.handle_history_search_event(other)
++                    } else {
++                        self.handle_editor_event(prompt, other)
++                    };
++                }
++            }
++        }
+         if self.input_mode == InputMode::HistorySearch {
+             self.handle_history_search_event(event)
+         } else {
+@@ -1377,6 +1549,43 @@ impl Reedline {
+         }
+     }
+ 
++    fn finish_history_search(
++        &mut self,
++        prompt: &dyn Prompt,
++        submit: bool,
++        cancel: bool,
++    ) -> Result<EventStatus> {
++        if self.input_mode != InputMode::HistorySearch {
++            return Ok(EventStatus::Inapplicable);
++        }
++        let value = self.history_cursor.string_at_cursor();
++        if !cancel && submit && value.is_none() {
++            return Ok(EventStatus::Handled);
++        }
++        self.input_mode = InputMode::Regular;
++        if cancel || value.is_none() {
++            if let Some((original, mode)) = self.history_search_origin.take() {
++                self.edit_mode
++                    .handle_mode_specific_event(ReedlineEvent::SwitchMode(mode.clone()));
++                self.editor.sync_edit_mode(mode);
++                self.editor.set_line_buffer(original, UndoBehavior::NoOp);
++            }
++        } else if let Some(value) = value {
++            self.replace_buffer(value);
++            self.history_search_origin = None;
++        }
++        if submit {
++            if matches!(self.edit_mode.edit_mode(), PromptEditMode::Vi(_)) {
++                self.change_edit_mode(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
++                    crate::PromptViMode::Insert,
++                )));
++            }
++            self.handle_editor_event(prompt, ReedlineEvent::Enter)
++        } else {
++            Ok(EventStatus::Handled)
++        }
++    }
++
+     fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
+         match event {
+             ReedlineEvent::UntilFound(events) => {
+@@ -1406,6 +1615,11 @@ impl Reedline {
+             }
+             ReedlineEvent::CtrlC => {
+                 self.input_mode = InputMode::Regular;
++                self.history_search_origin = None;
++                if self.contextual_input {
++                    self.run_edit_commands(&[EditCommand::Clear]);
++                    self.editor.reset_undo_stack();
++                }
+                 Ok(EventStatus::Exits(Signal::CtrlC))
+             }
+             ReedlineEvent::ClearScreen => {
+@@ -1492,6 +1706,9 @@ impl Reedline {
+             | ReedlineEvent::MenuPageNext
+             | ReedlineEvent::MenuPagePrevious
+             | ReedlineEvent::SwitchMode(_) => Ok(EventStatus::Inapplicable),
++            ReedlineEvent::AcceptHistorySearch
++            | ReedlineEvent::CancelHistorySearch
++            | ReedlineEvent::CompleteOrHostCommand { .. } => Ok(EventStatus::Inapplicable),
+         }
+     }
+ 
+@@ -1501,6 +1718,33 @@ impl Reedline {
+         event: ReedlineEvent,
+     ) -> io::Result<EventStatus> {
+         match event {
++            ReedlineEvent::CompleteOrHostCommand { menu, host_command } => {
++                let status = self.handle_editor_event(
++                    prompt,
++                    ReedlineEvent::UntilFound(vec![
++                        ReedlineEvent::Menu(menu),
++                        ReedlineEvent::MenuNext,
++                        ReedlineEvent::Edit(vec![EditCommand::Complete]),
++                    ]),
++                )?;
++                let exhausted = self.menus.iter().any(|menu| {
++                    menu.is_active()
++                        && menu.get_values().is_empty()
++                        && !menu.results_are_provisional()
++                });
++                if exhausted {
++                    self.deactivate_menus();
++                    self.handle_editor_event(
++                        prompt,
++                        ReedlineEvent::ExecuteHostCommand(host_command),
++                    )
++                } else {
++                    Ok(status)
++                }
++            }
++            ReedlineEvent::AcceptHistorySearch | ReedlineEvent::CancelHistorySearch => {
++                Ok(EventStatus::Inapplicable)
++            }
+             ReedlineEvent::Menu(name) => {
+                 if self.active_menu().is_none() {
+                     if let Some(index) = self.menus.iter().position(|menu| menu.name() == name) {
+@@ -1675,6 +1919,9 @@ impl Reedline {
+                 Ok(EventStatus::Handled)
+             }
+             ReedlineEvent::Enter => {
++                if self.buffered_input && self.active_menu().is_none() {
++                    return Ok(EventStatus::Handled);
++                }
+                 if self.menu_took_the_key(prompt)? {
+                     return Ok(EventStatus::Handled);
+                 }
+@@ -1697,6 +1944,9 @@ impl Reedline {
+                 }
+             }
+             ReedlineEvent::Submit => {
++                if self.buffered_input && self.active_menu().is_none() {
++                    return Ok(EventStatus::Handled);
++                }
+                 if self.menu_took_the_key(prompt)? {
+                     return Ok(EventStatus::Handled);
+                 }
+@@ -1711,6 +1961,9 @@ impl Reedline {
+                 Ok(self.submit_buffer(prompt)?)
+             }
+             ReedlineEvent::SubmitOrNewline => {
++                if self.buffered_input && self.active_menu().is_none() {
++                    return Ok(EventStatus::Handled);
++                }
+                 if self.menu_took_the_key(prompt)? {
+                     return Ok(EventStatus::Handled);
+                 }
+@@ -2089,6 +2342,15 @@ impl Reedline {
+     ///
+     /// This mode uses a separate prompt and handles keybindings slightly differently!
+     fn enter_history_search(&mut self) {
++        if self.contextual_input {
++            if self.history_search_origin.is_none() {
++                self.history_search_origin = Some((
++                    self.editor.line_buffer().clone(),
++                    self.edit_mode.edit_mode(),
++                ));
++            }
++            self.deactivate_menus();
++        }
+         self.history_cursor = HistoryCursor::new(
+             HistoryNavigationQuery::SubstringSearch("".to_string()),
+             self.get_history_session_id(),
+@@ -2102,6 +2364,19 @@ impl Reedline {
+     fn run_history_commands(&mut self, commands: &[EditCommand]) -> io::Result<()> {
+         for command in commands {
+             match command {
++                EditCommand::InsertString(text) if self.contextual_input => {
++                    let navigation = self.history_cursor.get_navigation();
++                    let mut query = match navigation {
++                        HistoryNavigationQuery::SubstringSearch(query) => query,
++                        _ => String::new(),
++                    };
++                    query.push_str(text);
++                    self.history_cursor = HistoryCursor::new(
++                        HistoryNavigationQuery::SubstringSearch(query),
++                        self.get_history_session_id(),
++                    );
++                    self.history_cursor.back(self.history.as_mut())?;
++                }
+                 EditCommand::InsertChar(c) => {
+                     let navigation = self.history_cursor.get_navigation();
+                     if let HistoryNavigationQuery::SubstringSearch(mut substring) = navigation {
+@@ -2375,6 +2650,38 @@ impl Reedline {
          }
      }
  
@@ -541,6 +1389,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
 +        prompt.update_context(PromptContext {
 +            buffer: self.editor.get_buffer(),
 +            cursor: self.editor.insertion_point(),
++            completion_cursor: self.editor.completion_point(),
 +            selection: self.editor.get_selection(),
 +            columns: self.painter.screen_width(),
 +            rows: self.painter.screen_height(),
@@ -552,7 +1401,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
      /// Expands an abbreviation at the word before the cursor, if any exists
      ///
      /// Calls [`Highlighter::should_expand_abbr`] with [`AbbrExpandContext::WordAbbreviation`]
-@@ -2658,6 +2700,7 @@ impl Reedline {
+@@ -2658,6 +2965,7 @@ impl Reedline {
      /// Overwrites the prompt indicator and highlights the search string
      /// separately from the result buffer.
      fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -560,7 +1409,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
          let use_ansi_coloring = self.effective_ansi_coloring();
          let navigation = self.history_cursor.get_navigation();
  
-@@ -2735,6 +2778,7 @@ impl Reedline {
+@@ -2735,6 +3043,7 @@ impl Reedline {
              }
          }
  
@@ -568,7 +1417,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
          let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
              cursor_position_in_buffer,
              prompt,
-@@ -2804,6 +2848,23 @@ impl Reedline {
+@@ -2804,6 +3113,23 @@ impl Reedline {
              }
          }
  
@@ -592,7 +1441,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
          let menu = self.menus.iter().find(|menu| menu.is_visible());
  
          self.painter.repaint_buffer(
-@@ -2819,10 +2880,14 @@ impl Reedline {
+@@ -2819,10 +3145,14 @@ impl Reedline {
              if let Some(layout) = &self.painter.last_layout {
                  let buffer = self.editor.get_buffer();
                  let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
@@ -611,7 +1460,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
              }
          } else {
              self.last_render_snapshot = None;
-@@ -2917,10 +2982,15 @@ impl Reedline {
+@@ -2917,10 +3247,15 @@ impl Reedline {
      /// Offer an open menu first refusal on a keypress that would otherwise
      /// submit, and report whether it took it.
      fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
@@ -629,7 +1478,18 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
      }
  
      /// Close an active menu when a typed character ends the word it was opened
-@@ -4310,6 +4380,8 @@ mod tests {
+@@ -3004,6 +3339,10 @@ impl Reedline {
+     }
+ }
+ 
++#[cfg(test)]
++#[path = "engine_input_tests.rs"]
++mod input_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -4310,6 +4649,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -638,7 +1498,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
          });
  
          let result = reedline.handle_event(
-@@ -6467,6 +6539,118 @@ mod tests {
+@@ -6467,6 +6808,118 @@ mod tests {
          );
      }
  
@@ -757,11 +1617,286 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..5c81e4ab269ae3f3f75624d63729d57c
      /// A menu whose filtered suggestions are empty has nothing to accept:
      /// Enter must close it and submit the line, not be swallowed.
      #[test]
+diff --git a/src/engine_input_tests.rs b/src/engine_input_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f824bf9a62642106e89f66af55eb3753258697b0
+--- /dev/null
++++ b/src/engine_input_tests.rs
+@@ -0,0 +1,209 @@
++use super::*;
++use crate::{DefaultPrompt, EditContext, PromptViMode, Vi};
++
++struct ContextMode {
++    inner: Box<dyn EditMode>,
++    query: Emacs,
++}
++
++impl EditMode for ContextMode {
++    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
++        self.inner.parse_event(event)
++    }
++
++    fn parse_event_with_context(
++        &mut self,
++        event: ReedlineRawEvent,
++        context: EditContext,
++    ) -> ReedlineEvent {
++        if context == EditContext::HistorySearch {
++            self.query.parse_event(event)
++        } else {
++            self.inner.parse_event(event)
++        }
++    }
++
++    fn edit_mode(&self) -> PromptEditMode {
++        self.inner.edit_mode()
++    }
++
++    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> EventStatus {
++        self.inner.handle_mode_specific_event(event)
++    }
++}
++
++fn press(code: KeyCode, modifiers: KeyModifiers) -> Event {
++    Event::Key(KeyEvent::new(code, modifiers))
++}
++
++fn text(value: &str) -> Vec<Event> {
++    value
++        .chars()
++        .map(|c| press(KeyCode::Char(c), KeyModifiers::NONE))
++        .collect()
++}
++
++fn editor(vi: bool) -> Reedline {
++    let mut query = crate::Keybindings::new();
++    query.add_binding(KeyModifiers::NONE, KeyCode::Enter, ReedlineEvent::Enter);
++    query.add_binding(
++        KeyModifiers::NONE,
++        KeyCode::Esc,
++        ReedlineEvent::AcceptHistorySearch,
++    );
++    query.add_binding(
++        KeyModifiers::CONTROL,
++        KeyCode::Char('g'),
++        ReedlineEvent::CancelHistorySearch,
++    );
++    let inner: Box<dyn EditMode> = if vi {
++        Box::new(Vi::default())
++    } else {
++        let mut keys = crate::default_emacs_keybindings();
++        keys.add_binding(
++            KeyModifiers::NONE,
++            KeyCode::F(2),
++            ReedlineEvent::ExecuteHostCommand("suggest".into()),
++        );
++        Box::new(Emacs::new(keys))
++    };
++    let mut editor = Reedline::create()
++        .with_contextual_input(true)
++        .with_edit_mode(Box::new(ContextMode {
++            inner,
++            query: Emacs::new(query),
++        }));
++    editor
++        .history_mut()
++        .save(HistoryItem::from_command_line("echo found"))
++        .unwrap();
++    editor.painter.force_prompt_anchored_for_test(0);
++    editor
++}
++
++#[test]
++fn same_batch_search_keys_belong_to_search_and_enter_submits_the_match() {
++    let mut editor = editor(false);
++    editor.replace_buffer("original".into());
++    let mut events = vec![press(KeyCode::Char('r'), KeyModifiers::CONTROL)];
++    events.extend(text("found"));
++    events.push(press(KeyCode::Enter, KeyModifiers::NONE));
++    assert!(matches!(
++        editor.process_input_batch(&DefaultPrompt::default(), events).unwrap(),
++        ControlFlow::Break(Signal::Success(value)) if value == "echo found"
++    ));
++}
++
++#[test]
++fn cancelling_vi_search_restores_original_text_cursor_selection_and_mode() {
++    let mut editor = editor(true);
++    editor.replace_buffer("echo '\u{4e2d} e\u{301}'".into());
++    let _ = editor
++        .process_input_batch(
++            &DefaultPrompt::default(),
++            vec![press(KeyCode::Esc, KeyModifiers::NONE)],
++        )
++        .unwrap();
++    let draft = editor.current_buffer_contents().to_owned();
++    let cursor = editor.current_insertion_point();
++    let selection = editor.current_selection();
++    let mut events = vec![press(KeyCode::Char('?'), KeyModifiers::NONE)];
++    events.extend(text("found"));
++    events.push(press(KeyCode::Char('g'), KeyModifiers::CONTROL));
++    let _ = editor
++        .process_input_batch(&DefaultPrompt::default(), events)
++        .unwrap();
++    assert_eq!(editor.current_buffer_contents(), draft);
++    assert_eq!(editor.current_insertion_point(), cursor);
++    assert_eq!(editor.current_selection(), selection);
++    assert_eq!(
++        editor.prompt_edit_mode(),
++        PromptEditMode::Vi(PromptViMode::Normal)
++    );
++}
++
++#[test]
++fn escape_accepts_without_submitting_and_no_match_enter_keeps_search() {
++    let mut editor = editor(false);
++    editor.replace_buffer("original".into());
++    let mut events = vec![press(KeyCode::Char('r'), KeyModifiers::CONTROL)];
++    events.extend(text("found"));
++    events.push(press(KeyCode::Esc, KeyModifiers::NONE));
++    assert!(matches!(
++        editor
++            .process_input_batch(&DefaultPrompt::default(), events)
++            .unwrap(),
++        ControlFlow::Continue(())
++    ));
++    assert_eq!(editor.current_buffer_contents(), "echo found");
++    let mut events = vec![press(KeyCode::Char('r'), KeyModifiers::CONTROL)];
++    events.extend(text("unmatched_fixture_query"));
++    events.push(press(KeyCode::Enter, KeyModifiers::NONE));
++    let _ = editor
++        .process_input_batch(&DefaultPrompt::default(), events)
++        .unwrap();
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    editor
++        .handle_event(
++            &DefaultPrompt::default(),
++            ReedlineEvent::CancelHistorySearch,
++        )
++        .unwrap();
++    assert_eq!(editor.current_buffer_contents(), "echo found");
++}
++
++#[test]
++fn host_replacement_is_one_edit_and_retained_typeahead_cannot_submit_it() {
++    let mut editor = editor(false);
++    editor.replace_buffer("original".into());
++    editor.run_edit_commands(&[
++        EditCommand::MoveToPosition {
++            position: 2,
++            select: false,
++        },
++        EditCommand::MoveToPosition {
++            position: 5,
++            select: true,
++        },
++    ]);
++    let cursor = editor.current_insertion_point();
++    let selection = editor.current_selection();
++    assert!(selection.is_some());
++    let events = vec![
++        press(KeyCode::F(2), KeyModifiers::NONE),
++        press(KeyCode::Char('!'), KeyModifiers::NONE),
++        press(KeyCode::Enter, KeyModifiers::NONE),
++    ];
++    assert!(matches!(
++        editor.process_input_batch(&DefaultPrompt::default(), events).unwrap(),
++        ControlFlow::Break(Signal::HostCommand(value)) if value == "suggest"
++    ));
++    editor.replace_buffer("\u{4e2d}".into());
++    assert_eq!(editor.current_selection(), None);
++    editor.run_edit_commands(&[EditCommand::Undo]);
++    assert_eq!(editor.current_buffer_contents(), "original");
++    assert_eq!(editor.current_insertion_point(), cursor);
++    assert_eq!(
++        editor.current_selection(),
++        None,
++        "native undo clears the selection"
++    );
++    editor.run_edit_commands(&[EditCommand::Redo]);
++    editor.buffered_input = true;
++    let events = editor.pending_input.drain(..).collect();
++    assert!(matches!(
++        editor
++            .process_input_batch(&DefaultPrompt::default(), events)
++            .unwrap(),
++        ControlFlow::Continue(())
++    ));
++    assert_eq!(editor.current_buffer_contents(), "\u{4e2d}!");
++    editor.buffered_input = false;
++    assert!(matches!(
++        editor.process_input_batch(
++            &DefaultPrompt::default(),
++            vec![press(KeyCode::Enter, KeyModifiers::NONE)]
++        ).unwrap(),
++        ControlFlow::Break(Signal::Success(value)) if value == "\u{4e2d}!"
++    ));
++}
+diff --git a/src/enums.rs b/src/enums.rs
+index 084936a9214ce8ab071f77c0aa144002d3c6be71..6987ef510a3d1feb11c59314c2e7c4ca43ef61cf 100644
+--- a/src/enums.rs
++++ b/src/enums.rs
+@@ -1100,6 +1100,12 @@ pub enum ReedlineEvent {
+     /// Search the history for a string
+     SearchHistory,
+ 
++    /// Accept the current reverse-search result without submitting it.
++    AcceptHistorySearch,
++
++    /// Cancel reverse search and restore its original draft and editing mode.
++    CancelHistorySearch,
++
+     /// In vi mode multiple reedline events can be chained while parsing the
+     /// command or movement characters
+     Multiple(Vec<ReedlineEvent>),
+@@ -1110,6 +1116,15 @@ pub enum ReedlineEvent {
+     /// Trigger a menu event. It activates a menu with the event name
+     Menu(String),
+ 
++    /// Complete or navigate `menu`, returning a host command only for a final
++    /// empty result. The host remains responsible for diagnosing query errors.
++    CompleteOrHostCommand {
++        /// Completion menu to activate or navigate.
++        menu: String,
++        /// Opaque host action for the exhausted-completion case.
++        host_command: String,
++    },
++
+     /// Accept the highlighted menu item without submitting the line.
+     ///
+     /// Splices the selection into the buffer and closes the menu, as `Enter` does while
+@@ -1174,9 +1189,13 @@ pub enum ReedlineEvent {
+     SwitchMode(PromptEditMode),
+ }
+ 
++/// The outcome of handling an editor event.
+ pub enum EventStatus {
++    /// The event was consumed.
+     Handled,
++    /// Another event or mode may handle it.
+     Inapplicable,
++    /// Editing returned control to the host.
+     Exits(Signal),
+ }
+ 
 diff --git a/src/lib.rs b/src/lib.rs
-index 2cb3662efdf8a8a764d0213a664db8120469e339..dd5a2f13c4a9a1bd80c35f9e71d8971a7315765a 100644
+index 2cb3662efdf8a8a764d0213a664db8120469e339..361b42642750a25aa7edea4ab5da4f06c4c31da0 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -306,11 +306,12 @@ pub use history::{
+@@ -280,9 +280,9 @@ pub use auto_pairs::{AutoPairAction, AutoPairContext, AutoPairs};
+ 
+ mod enums;
+ pub use enums::{
+-    Direction, EditCommand, EditCommandDiscriminants, FindStop, Granularity, MotionTarget,
+-    MouseButton, ReedlineEvent, ReedlineEventDiscriminants, ReedlineRawEvent, Signal, TextObject,
+-    TextObjectScope, TextObjectType, UndoBehavior, WordEdge, WordKind,
++    Direction, EditCommand, EditCommandDiscriminants, EventStatus, FindStop, Granularity,
++    MotionTarget, MouseButton, ReedlineEvent, ReedlineEventDiscriminants, ReedlineRawEvent, Signal,
++    TextObject, TextObjectScope, TextObjectType, UndoBehavior, WordEdge, WordKind,
+ };
+ 
+ mod painting;
+@@ -306,17 +306,18 @@ pub use history::{
  mod prompt;
  pub use prompt::PromptHelixMode;
  pub use prompt::{
@@ -779,6 +1914,13 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..dd5a2f13c4a9a1bd80c35f9e71d8971a
  };
  
  mod edit_mode;
+ pub use edit_mode::{
+     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
+-    default_vi_visual_keybindings, CursorConfig, EditMode, Emacs, Keybindings, Vi,
++    default_vi_visual_keybindings, CursorConfig, EditContext, EditMode, Emacs, Keybindings, Vi,
+ };
+ pub use edit_mode::{
+     default_helix_insert_keybindings, default_helix_normal_keybindings,
 diff --git a/src/painting/display.rs b/src/painting/display.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..515cfed7f6adb67371c4b358eaf3166b0fb00d08
@@ -2288,10 +3430,10 @@ index bac952d5152c7cb70c014e427b36bdc3ce949462..dec0ee5a9d3b31782162ab5d5d0f31c4
      #[case("sentence\nsentence", "sentence\r\nsentence")]
      #[case("sentence\r\nsentence", "sentence\r\nsentence")]
 diff --git a/src/prompt/base.rs b/src/prompt/base.rs
-index 7a480103f101f3e06b112f9a51f4690abb8a4dda..1040c3c4cddebe41268f3c293d46fcb61b9df19b 100644
+index 7a480103f101f3e06b112f9a51f4690abb8a4dda..0547c45a4227dd9144e7a971fed2564c6f93edbe 100644
 --- a/src/prompt/base.rs
 +++ b/src/prompt/base.rs
-@@ -261,11 +261,57 @@ impl IntoDiscriminant for PromptEditMode {
+@@ -261,11 +261,59 @@ impl IntoDiscriminant for PromptEditMode {
      }
  }
  
@@ -2325,6 +3467,8 @@ index 7a480103f101f3e06b112f9a51f4690abb8a4dda..1040c3c4cddebe41268f3c293d46fcb6
 +    pub buffer: &'a str,
 +    /// Byte offset of the insertion point.
 +    pub cursor: usize,
++    /// Byte offset used for completion; a Vi block caret completes its word.
++    pub completion_cursor: usize,
 +    /// Current selection as a byte range, if any.
 +    pub selection: Option<(usize, usize)>,
 +    /// Physical terminal columns.
@@ -2366,3 +3510,48 @@ index 8ee197edc984e0e97e52dfd6eb6b063305faa00c..f7ad3fdece9489ad5c669c7f7e79f9ac
  };
  
  pub use default::{
+diff --git a/src/terminal_extensions/kitty.rs b/src/terminal_extensions/kitty.rs
+index 72d5784bdb81859de691e0db5a967b33c94d0af1..a6e8ce12c8f686fe09e01c09f682a9944897d328 100644
+--- a/src/terminal_extensions/kitty.rs
++++ b/src/terminal_extensions/kitty.rs
+@@ -31,30 +31,34 @@ impl KittyProtocolGuard {
+ 
+         self.enabled = enable && self.support_kitty_protocol.unwrap_or(false);
+     }
+-    pub fn enter(&mut self) {
++    pub fn enter(&mut self) -> std::io::Result<()> {
+         if self.enabled && !self.active {
+-            let _ = execute!(
++            execute!(
+                 std::io::stdout(),
+                 event::PushKeyboardEnhancementFlags(
+                     event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                 )
+-            );
++            )?;
+ 
+             self.active = true;
+         }
++        Ok(())
+     }
+-    pub fn exit(&mut self) {
++    pub fn exit(&mut self) -> std::io::Result<()> {
+         if self.active {
+-            let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
++            execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags)?;
+             self.active = false;
+         }
++        Ok(())
+     }
+ }
+ 
+ impl Drop for KittyProtocolGuard {
+     fn drop(&mut self) {
+         if self.active {
+-            let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
++            if let Err(error) = self.exit() {
++                eprintln!("reedline: cannot restore keyboard protocol: {error}");
++            }
+         }
+     }
+ }
