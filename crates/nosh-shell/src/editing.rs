@@ -294,14 +294,17 @@ impl Action {
             Self::Accept => R::Enter,
             Self::AcceptSearch => R::AcceptHistorySearch,
             Self::Cancel if context == Context::HistorySearch => R::CancelHistorySearch,
-            Self::Cancel if context == Context::Editing && mode == EditorMode::ViInsert => {
-                R::Multiple(vec![
-                    R::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
-                    R::Esc,
-                    R::Edit(vec![EditCommand::MoveLeft { select: false }]),
-                    R::Repaint,
-                ])
-            }
+            Self::Cancel if mode == EditorMode::ViInsert => R::Multiple(vec![
+                R::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
+                R::Esc,
+                R::Edit(vec![EditCommand::MoveLeft { select: false }]),
+                R::Repaint,
+            ]),
+            Self::Cancel if mode == EditorMode::ViVisual => R::Multiple(vec![
+                R::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
+                R::Esc,
+                R::Repaint,
+            ]),
             Self::Cancel => R::Esc,
             Self::InsertNewline => R::Edit(vec![EditCommand::InsertNewline]),
             Self::Undo => R::Edit(vec![EditCommand::Undo]),
@@ -334,11 +337,20 @@ impl Key {
             self.code = KeyCode::BackTab;
             self.modifiers = KeyModifiers::SHIFT;
         }
-        if self.modifiers.contains(KeyModifiers::CONTROL)
-            && !self.modifiers.contains(KeyModifiers::ALT)
+        // Match the mode parsers' shortcut identity without folding AltGr text.
+        if !self.modifiers.is_empty()
+            && !self
+                .modifiers
+                .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
             && let KeyCode::Char(c) = self.code
         {
             self.code = KeyCode::Char(c.to_ascii_lowercase());
+        }
+        // CSI-u reports Ctrl+_ using the unshifted minus key and a Shift flag.
+        if self.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            && matches!(self.code, KeyCode::Char('-' | '_'))
+        {
+            self = Self::new(KeyModifiers::CONTROL, KeyCode::Char('_'));
         }
         if !caps.enhanced && self.modifiers == KeyModifiers::CONTROL {
             self = match self.code {
@@ -874,6 +886,27 @@ impl Config {
                         );
                     }
                 }
+                // Removed helper keys must not fall through to editing bindings.
+                for (key, binding) in &original {
+                    if binding.action.is_some() && !keys.contains_key(key) {
+                        let emergency_escape = mode != EditorMode::Emacs
+                            && context != Context::HistorySearch
+                            && *key == Key::new(KeyModifiers::NONE, KeyCode::Esc);
+                        keys.insert(
+                            *key,
+                            if emergency_escape {
+                                binding.clone()
+                            } else {
+                                Binding {
+                                    action: None,
+                                    event: ReedlineEvent::None,
+                                    custom: true,
+                                    implicit: false,
+                                }
+                            },
+                        );
+                    }
+                }
                 let mut native = Keybindings::new();
                 let mut hints = Keybindings::new();
                 let mut disabled_commands = Vec::new();
@@ -1068,8 +1101,19 @@ impl EditMode for ConfiguredEditMode {
                 if context == Context::Menu && binding.action == Some(Action::AiSuggest) {
                     return ReedlineEvent::ExecuteHostCommand(FOCUS_NOTICE.into());
                 }
-                if context == Context::Menu && binding.custom && !self.inner.has_pending_input() {
-                    return binding.event.clone();
+                if context == Context::Menu && binding.custom {
+                    let pending = self.inner.has_pending_input();
+                    let motion_argument = matches!(normalized.code, KeyCode::Char(_))
+                        && (normalized.modifiers.is_empty()
+                            || normalized.modifiers == KeyModifiers::SHIFT);
+                    if !pending || !motion_argument {
+                        if pending && binding.event != ReedlineEvent::None {
+                            let current = self.inner.edit_mode();
+                            self.inner
+                                .handle_mode_specific_event(ReedlineEvent::SwitchMode(current));
+                        }
+                        return binding.event.clone();
+                    }
                 }
             } else if context == Context::HistorySearch
                 && self
@@ -1169,6 +1213,264 @@ mod tests {
             ),
             ReedlineEvent::CancelHistorySearch,
         );
+    }
+
+    #[test]
+    fn shifted_shortcuts_share_the_mode_parser_identity_and_focus_guards() {
+        for mode in [Mode::Emacs, Mode::Vi] {
+            let mut cfg = Config {
+                mode,
+                ..Default::default()
+            };
+            cfg.keybindings
+                .actions
+                .insert("ai_suggest".into(), vec!["X".into(), "Alt+G".into()]);
+            let (compiled, notices) = cfg.compile(Capabilities { enhanced: false }, true);
+            assert!(notices.is_empty(), "{notices:?}");
+            let mut editor = compiled.editor();
+            for (code, modifiers) in [
+                (KeyCode::Char('X'), KeyModifiers::SHIFT),
+                (KeyCode::Char('x'), KeyModifiers::SHIFT),
+                (KeyCode::Char('G'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                (KeyCode::Char('g'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            ] {
+                assert_eq!(
+                    editor.parse_event(key(code, modifiers)),
+                    ReedlineEvent::ExecuteHostCommand(crate::repl::SUGGEST_COMMAND.into()),
+                );
+                for context in [EditContext::Menu, EditContext::HistorySearch] {
+                    assert_eq!(
+                        editor.parse_event_with_context(key(code, modifiers), context),
+                        ReedlineEvent::ExecuteHostCommand(FOCUS_NOTICE.into()),
+                        "{mode:?} {context:?} {code:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn menu_lists_replace_or_unbind_defaults_without_changing_editing_bindings() {
+        for accept in [Vec::new(), vec!["F3".into()]] {
+            let mut cfg = Config {
+                mode: Mode::Emacs,
+                ..Default::default()
+            };
+            cfg.keybindings.contexts.insert(
+                "menu".into(),
+                BTreeMap::from([
+                    ("accept".into(), accept.clone()),
+                    ("undo".into(), Vec::new()),
+                ]),
+            );
+            let (compiled, notices) = cfg.compile(Capabilities { enhanced: false }, true);
+            assert!(notices.is_empty(), "{notices:?}");
+            let mut editor = compiled.editor();
+            assert_eq!(
+                editor.parse_event_with_context(
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                    EditContext::Menu,
+                ),
+                ReedlineEvent::None,
+            );
+            assert_eq!(
+                editor.parse_event_with_context(
+                    key(KeyCode::Char('z'), KeyModifiers::CONTROL),
+                    EditContext::Menu,
+                ),
+                ReedlineEvent::None,
+            );
+            assert_eq!(
+                editor.parse_event_with_context(
+                    key(KeyCode::F(3), KeyModifiers::NONE),
+                    EditContext::Menu,
+                ),
+                if accept.is_empty() {
+                    ReedlineEvent::None
+                } else {
+                    ReedlineEvent::Enter
+                },
+            );
+            assert_eq!(
+                editor.parse_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+                ReedlineEvent::Enter
+            );
+            assert_eq!(
+                editor.parse_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+                ReedlineEvent::Edit(vec![EditCommand::Undo]),
+            );
+        }
+    }
+
+    #[test]
+    fn remapped_visual_cancel_returns_the_mode_machine_to_normal() {
+        let mut cfg = Config {
+            mode: Mode::Vi,
+            ..Default::default()
+        };
+        cfg.keybindings.modes.insert(
+            "vi_visual".into(),
+            ModeBindings {
+                actions: BTreeMap::from([("cancel".into(), vec!["F3".into()])]),
+                ..Default::default()
+            },
+        );
+        let (compiled, notices) = cfg.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        for context in [EditContext::Editing, EditContext::Menu] {
+            assert!(matches!(
+                editor.handle_mode_specific_event(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+                    PromptViMode::Visual
+                ),)),
+                EventStatus::Handled,
+            ));
+            let event =
+                editor.parse_event_with_context(key(KeyCode::F(3), KeyModifiers::NONE), context);
+            let ReedlineEvent::Multiple(events) = event else {
+                panic!("visual cancellation must also switch the native mode machine");
+            };
+            assert!(events.contains(&ReedlineEvent::Esc));
+            for event in events {
+                if matches!(event, ReedlineEvent::SwitchMode(_)) {
+                    assert!(matches!(
+                        editor.handle_mode_specific_event(event),
+                        EventStatus::Handled
+                    ));
+                }
+            }
+            assert_eq!(editor.edit_mode(), PromptEditMode::Vi(PromptViMode::Normal));
+        }
+    }
+
+    #[test]
+    fn menu_chord_overrides_do_not_steal_native_vi_motion_arguments() {
+        let mut cfg = Config {
+            mode: Mode::Vi,
+            ..Default::default()
+        };
+        cfg.keybindings.contexts.insert(
+            "menu".into(),
+            BTreeMap::from([
+                ("accept".into(), Vec::new()),
+                ("undo".into(), Vec::new()),
+                ("cancel".into(), vec!["F4".into()]),
+            ]),
+        );
+        let (compiled, notices) = cfg.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        editor.handle_mode_specific_event(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+            PromptViMode::Normal,
+        )));
+        editor.parse_event_with_context(
+            key(KeyCode::Char('f'), KeyModifiers::NONE),
+            EditContext::Menu,
+        );
+        let argument = editor.parse_event_with_context(
+            key(KeyCode::Char('u'), KeyModifiers::NONE),
+            EditContext::Menu,
+        );
+        assert!(
+            matches!(argument, ReedlineEvent::Multiple(events) if events.iter().any(|event|
+                matches!(event, ReedlineEvent::Edit(commands) if commands.iter().any(|command|
+                    matches!(command, EditCommand::Move(reedline::MotionTarget::Find { ch: 'u', .. }))
+                ))
+            ))
+        );
+        assert!(!editor.has_pending_input());
+        editor.parse_event_with_context(
+            key(KeyCode::Char('3'), KeyModifiers::NONE),
+            EditContext::Menu,
+        );
+        assert_eq!(
+            editor.parse_event_with_context(
+                key(KeyCode::Enter, KeyModifiers::NONE),
+                EditContext::Menu
+            ),
+            ReedlineEvent::None,
+        );
+        assert!(editor.has_pending_input());
+        assert_eq!(
+            editor.parse_event_with_context(
+                key(KeyCode::F(4), KeyModifiers::NONE),
+                EditContext::Menu
+            ),
+            ReedlineEvent::Esc,
+        );
+        assert!(!editor.has_pending_input());
+    }
+
+    #[test]
+    fn enhanced_underscore_encodings_match_undo_and_conflict_as_the_same_key() {
+        let caps = Capabilities { enhanced: true };
+        let mut cfg = Config {
+            mode: Mode::Emacs,
+            ..Default::default()
+        };
+        cfg.keybindings
+            .actions
+            .insert("redo".into(), vec!["Ctrl+Shift+Z".into()]);
+        let (compiled, notices) = cfg.compile(caps, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        for (code, modifiers) in [
+            (
+                KeyCode::Char('-'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                KeyCode::Char('_'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('_'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                editor.parse_event(key(code, modifiers)),
+                ReedlineEvent::Edit(vec![EditCommand::Undo]),
+            );
+        }
+        assert_eq!(
+            Key::parse("Ctrl+_", caps).unwrap(),
+            Key::parse("Ctrl+Shift+-", caps).unwrap(),
+        );
+        cfg.keybindings
+            .actions
+            .insert("undo".into(), vec!["Ctrl+_".into(), "Ctrl+Shift+-".into()]);
+        assert!(
+            cfg.validate().is_err(),
+            "equivalent spellings must be diagnosed"
+        );
+    }
+
+    #[test]
+    fn shortcut_identity_does_not_change_unbound_text_or_altgr() {
+        for mode in [Mode::Emacs, Mode::Vi] {
+            let cfg = Config {
+                mode,
+                ..Default::default()
+            };
+            let (compiled, _) = cfg.compile(Capabilities { enhanced: true }, true);
+            let mut editor = compiled.editor();
+            for (c, modifiers) in [
+                ('A', KeyModifiers::NONE),
+                ('A', KeyModifiers::SHIFT),
+                ('A', KeyModifiers::CONTROL | KeyModifiers::ALT),
+                (
+                    'A',
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+                ),
+                ('-', KeyModifiers::SHIFT),
+                ('\u{20ac}', KeyModifiers::CONTROL | KeyModifiers::ALT),
+                ('\u{4e2d}', KeyModifiers::SHIFT),
+            ] {
+                assert_eq!(
+                    editor.parse_event(key(KeyCode::Char(c), modifiers)),
+                    ReedlineEvent::Edit(vec![EditCommand::InsertChar(c)]),
+                    "{mode:?} {c:?} {modifiers:?}",
+                );
+            }
+        }
     }
 
     #[test]

@@ -58,6 +58,8 @@ cancel = ["Ctrl+G"]
 
 作用域从低到高为：预设 → 公共动作 → `modes` → 公共 `contexts` → 模式下的 `contexts`。模式名为 `emacs`、`vi_insert`、`vi_normal`、`vi_visual`；上下文为 `editing`、`history_search`、`menu`。更具体的列表只替换同名动作，不按 TOML 排列顺序选“最后一条”。
 
+例如 `contexts.menu.accept = []` 会停用菜单中的 Enter 接受；改成 `["F3"]` 则只有新列表接受候选，不保留旧 Enter，也不改变普通编辑的提交键。Vi 视觉态的 `cancel` 改键同样退出视觉态、恢复普通态，而不是仅清除一次选区；原生 Esc 保底仍然可用。
+
 | 动作 | 能力 |
 |---|---|
 | `complete_or_ai` | 默认 Tab 的补全优先／AI 兜底 |
@@ -81,6 +83,8 @@ cancel = ["Ctrl+G"]
 键名接受 Ctrl/Control、Alt、Shift 与一个字符或 Tab、Enter、Esc、Backspace、方向键、Home/End、PageUp/PageDown、F1–F24；加号字符写 `Plus`。不支持组合键序列。
 
 传统编码中 Tab/Ctrl+I、Enter/Ctrl+M、Esc/Ctrl+[ 等可等价；`0x1f` 经 Crossterm 解析为 Ctrl+7，按 Ctrl+_ 的传统入口处理，不影响普通数字 7。冲突判断与实际事件使用同一归一化。AltGr 的 Ctrl+Alt 文本组合不作为可配置字符快捷键，以免破坏输入。
+
+大小写快捷键查表与模式解析使用一致身份，`X`／`Alt+G` 等绑定不能绕过菜单或搜索的 AI 焦点限制；未绑定文字和 AltGr 保留原字符。增强协议的 `Ctrl+_` 既接受字符形式，也接受实际移位减号事件 `CSI 45;6u`；`Ctrl+_` 与 `Ctrl+Shift+-` 作为等价绑定进行冲突诊断，不仅依赖传统 `0x1f`。
 
 配置确实需要可区分的增强事件时，在启动时查询并使用已有键盘协议；不支持时明确诊断并回退。Ctrl+Shift+Z、Shift+Enter、Ctrl+Tab 不能宣称跨终端通用；终端应用、输入法或系统仍可能截获按键，shell 无法检测全部宿主绑定。
 

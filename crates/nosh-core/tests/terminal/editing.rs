@@ -86,6 +86,35 @@ pub(super) fn probe(mode: &str) {
             .actions
             .insert("redo".into(), vec!["Ctrl+Shift+Z".into()]);
     }
+    if mode.ends_with("-uppercase") {
+        config
+            .editing
+            .keybindings
+            .actions
+            .insert("ai_suggest".into(), vec!["X".into(), "Alt+G".into()]);
+    }
+    if mode.ends_with("-menu-unbind") || mode.ends_with("-menu-replace") {
+        config.editing.keybindings.contexts.insert(
+            "menu".into(),
+            std::collections::BTreeMap::from([(
+                "accept".into(),
+                if mode.ends_with("-menu-replace") {
+                    vec!["F3".into()]
+                } else {
+                    Vec::new()
+                },
+            )]),
+        );
+    }
+    if mode.ends_with("-visual-cancel") {
+        config.editing.keybindings.modes.insert(
+            "vi_visual".into(),
+            nosh_shell::editing::ModeBindings {
+                actions: std::collections::BTreeMap::from([("cancel".into(), vec!["F3".into()])]),
+                ..Default::default()
+            },
+        );
+    }
     let code = nosh_shell::repl::run(&mut shell, &mut ai, config);
     assert_eq!(code, 0);
     let snapshot = shell.snapshot();
@@ -162,6 +191,115 @@ fn real_enhanced_events_work_only_after_capability_negotiation() {
     );
     assert_eq!(result["requests"], 1);
     assert_eq!(result["generated"], false);
+}
+
+#[test]
+fn uppercase_ai_keys_are_guarded_in_menu_and_search_but_work_in_editing() {
+    let result = run(
+        "repl-editing-uppercase",
+        "xterm-256color",
+        &[
+            ("editing> ", b"candidate_\t"),
+            ("candidate_two", b"X"),
+            ("exit or cancel", b"\x1bG"),
+            ("exit or cancel", b"\x1b"),
+            ("editing> ", b"\x15\x12history_executed"),
+            ("touch history_executed", b"X"),
+            ("exit or cancel", b"\x07"),
+            ("editing> ", b"rewrite_this_fixture"),
+            ("rewrite_this_fixture", b"X"),
+            ("touch generated", b"\x15exit 0\r"),
+        ],
+    );
+    assert_eq!(result["requests"], 1);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(result["generated"], false);
+    assert_eq!(result["history_executed"], false);
+    assert_eq!(result["prompts"], 1);
+}
+
+#[test]
+fn menu_accept_unbinding_and_replacement_do_not_keep_the_enter_alias() {
+    for replace in [false, true] {
+        let finish: &[u8] = if replace { F3 } else { b"\x1b" };
+        let mut steps: Vec<KeyStep<'_>> = vec![
+            ("editing> ", b"candidate_\t"),
+            ("candidate_two", b"\r\x1b[B"),
+            ("CANDIDATE_", finish),
+        ];
+        steps.push(("editing> ", b"\x15exit 0\r"));
+        let result = run(
+            if replace {
+                "repl-editing-menu-replace"
+            } else {
+                "repl-editing-menu-unbind"
+            },
+            "xterm-256color",
+            &steps,
+        );
+        assert_eq!(result["requests"], 0);
+        assert_eq!(result["agents"], 0);
+        assert_eq!(result["generated"], false);
+        assert_eq!(result["prompts"], 1);
+        assert_eq!(
+            result["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|command| command
+                    .as_str()
+                    .is_some_and(|line| line.starts_with("candidate_")))
+                .count(),
+            0,
+        );
+    }
+}
+
+#[test]
+fn remapped_visual_cancel_exits_selection_and_preserves_the_draft() {
+    let result = run(
+        "repl-editing-vi-visual-cancel",
+        "xterm-256color",
+        &[
+            ("[I]", b"printf vi_visual"),
+            ("vi_visual", b"\x1b"),
+            ("[N]", b"v"),
+            ("[V]", F3),
+            ("[N]", b"A"),
+            ("[I]", b"_restored\r"),
+            ("editing> ", b"exit 0\r"),
+        ],
+    );
+    assert_eq!(result["requests"], 0);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(result["prompts"], 2);
+    assert!(
+        result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "printf vi_visual_restored")
+    );
+}
+
+#[test]
+fn negotiated_ctrl_underscore_uses_the_real_shifted_minus_event() {
+    let result = run_with_keyboard(
+        "repl-editing-enhanced",
+        "xterm-256color",
+        true,
+        &[
+            ("editing> ", b"rewrite_this_fixture"),
+            ("rewrite_this_fixture", F2),
+            ("touch generated", b"\x1b[45;6u"),
+            ("rewrite_this_fixture", b"\x1b[122;6u"),
+            ("touch generated", b"\x15exit 0\r"),
+        ],
+    );
+    assert_eq!(result["requests"], 1);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(result["generated"], false);
+    assert_eq!(result["prompts"], 1);
 }
 
 #[test]
