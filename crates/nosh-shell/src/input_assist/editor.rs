@@ -328,31 +328,6 @@ impl InputAssist {
         }
     }
 
-    pub(crate) fn after_completion(&self, shell: &Mutex<crate::backend::BrushShell>) {
-        let context = self
-            .shared
-            .mailbox
-            .try_lock()
-            .ok()
-            .and_then(|mailbox| mailbox.context.clone());
-        if let Some(context) = context {
-            let trigger = crate::TriggerConfig {
-                ai_enabled: context.ai_enabled,
-                ai_prefix: context.ai_prefix.clone(),
-                builtin_name: context.ai_builtin.clone(),
-                trigger_on_error: context.trigger_on_error,
-                ..crate::TriggerConfig::default()
-            };
-            self.prepare(crate::EmbeddedShell::input_context_from_shared(
-                shell,
-                &trigger,
-                &context.abbreviations,
-            ));
-        } else {
-            self.prepare(Err("session snapshot unavailable after completion".into()));
-        }
-    }
-
     pub(crate) fn edit_mode(&self, inner: Box<dyn EditMode>) -> Box<dyn EditMode> {
         Box::new(InputEditMode {
             inner,
@@ -2075,14 +2050,14 @@ mod tests {
     }
 
     #[test]
-    fn completion_refreshes_context_and_reverse_search_hides_old_diagnostics() {
+    fn prompt_refreshes_context_and_reverse_search_hides_old_diagnostics() {
         let (mut fixture, assist, highlighter) = editor();
         highlighter.highlight("echo x", 6);
         let previous = assist.shared.session.load(Ordering::Acquire);
         fixture
             .shell
             .run_user_line("PATH=/updated; shopt -s expand_aliases; alias changed='echo'");
-        assist.after_completion(&fixture.shell.shared().1);
+        assist.prepare(Ok(fixture.context()));
         assert!(assist.shared.session.load(Ordering::Acquire) > previous);
         highlighter.highlight("changed", 7);
         let context = highlighter

@@ -1,3 +1,6 @@
 [submodule "reedline-upstream"]
 	path = third_party/reedline-upstream
 	url = https://github.com/nushell/reedline.git
+[submodule "brush-upstream"]
+	path = third_party/brush-upstream
+	url = https://github.com/reubeno/brush.git

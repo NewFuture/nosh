@@ -294,6 +294,7 @@ impl Action {
             Self::Accept => R::Enter,
             Self::AcceptSearch => R::AcceptHistorySearch,
             Self::Cancel if context == Context::HistorySearch => R::CancelHistorySearch,
+            Self::Cancel if context == Context::Menu && mode != EditorMode::ViVisual => R::Esc,
             Self::Cancel if mode == EditorMode::ViInsert => R::Multiple(vec![
                 R::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
                 R::Esc,

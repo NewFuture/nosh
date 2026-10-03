@@ -22,12 +22,11 @@ pub struct Proc {
 
 /// `(pid, ppid, pgid)` of every visible process.
 #[cfg(target_os = "linux")]
-fn all_procs() -> Vec<(i32, i32, i32)> {
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
+fn all_procs() -> std::io::Result<Vec<(i32, i32, i32)>> {
+    let dir = std::fs::read_dir("/proc")?;
     let mut out = Vec::new();
-    for e in dir.flatten() {
+    for e in dir {
+        let e = e?;
         let name = e.file_name();
         let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
             continue;
@@ -47,23 +46,21 @@ fn all_procs() -> Vec<(i32, i32, i32)> {
             out.push((pid, ppid, pgid));
         }
     }
-    out
+    Ok(out)
 }
 
 /// `(pid, ppid, pgid)` of every visible process.
 #[cfg(target_os = "macos")]
-fn all_procs() -> Vec<(i32, i32, i32)> {
+fn all_procs() -> std::io::Result<Vec<(i32, i32, i32)>> {
     // SAFETY: with a null buffer libproc only reports the number of pids.
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    let Ok(n) = usize::try_from(n) else {
-        return Vec::new();
-    };
+    let n = usize::try_from(n).map_err(|_| std::io::Error::last_os_error())?;
     // Room for processes started since the count.
     let mut pids: Vec<libc::pid_t> = vec![0; n + 64];
     let bytes = libc::c_int::try_from(pids.len() * size_of::<libc::pid_t>()).unwrap_or(0);
     // SAFETY: `pids` is writable for `bytes` bytes.
     let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-    pids.truncate(usize::try_from(n).unwrap_or(0));
+    pids.truncate(usize::try_from(n).map_err(|_| std::io::Error::last_os_error())?);
     let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let mut out = Vec::with_capacity(pids.len());
     for pid in pids {
@@ -73,23 +70,32 @@ fn all_procs() -> Vec<(i32, i32, i32)> {
         let got = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        // Processes that exited meanwhile (and zombies) have no BSD info.
         if got == size {
             out.push((pid, info.pbi_ppid as i32, info.pbi_pgid as i32));
+        } else {
+            // Zombies can lack BSD info but must still hold an owned group.
+            let pgid = unsafe { libc::getpgid(pid) };
+            if pgid > 0 {
+                out.push((pid, 0, pgid));
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn all_procs() -> Vec<(i32, i32, i32)> {
-    Vec::new()
+fn all_procs() -> std::io::Result<Vec<(i32, i32, i32)>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "owned process enumeration is unsupported on this platform",
+    ))
 }
 
 /// Direct children of this process.
 pub fn children() -> Vec<Proc> {
     let me = std::process::id() as i32;
     all_procs()
+        .unwrap_or_default()
         .into_iter()
         .filter(|&(_, ppid, _)| ppid == me)
         .map(|(pid, _, pgid)| Proc { pid, pgid })
@@ -177,7 +183,7 @@ pub fn run_procs(before: &HashSet<i32>, run: &str) -> Vec<Proc> {
     let entry = format!("{RUN_VAR}={run}").into_bytes();
     let mut kids: HashMap<i32, Vec<Proc>> = HashMap::new();
     let mut stack = Vec::new();
-    for (pid, ppid, pgid) in all_procs() {
+    for (pid, ppid, pgid) in all_procs().unwrap_or_default() {
         let p = Proc { pid, pgid };
         kids.entry(ppid).or_default().push(p);
         if pid != me && ((ppid == me && !before.contains(&pid)) || has_run(pid, &entry)) {
@@ -196,6 +202,38 @@ pub fn run_procs(before: &HashSet<i32>, run: &str) -> Vec<Proc> {
         out.push(p);
     }
     out
+}
+
+/// Completion ownership never includes other newly spawned root children.
+/// The caller must retain the unreaped leader while using its group/session id.
+pub(crate) fn owned_procs(leader: i32, run: &str) -> std::io::Result<Vec<Proc>> {
+    let entry = format!("{RUN_VAR}={run}").into_bytes();
+    let mut kids: HashMap<i32, Vec<Proc>> = HashMap::new();
+    let mut stack = Vec::new();
+    for (pid, ppid, pgid) in all_procs()? {
+        let process = Proc { pid, pgid };
+        kids.entry(ppid).or_default().push(process);
+        // A child may have its own group, a cleared environment, or a new
+        // parent after cancellation, while still belonging to the owned session.
+        let session = unsafe { libc::getsid(pid) };
+        if pid == leader || pgid == leader || session == leader || has_run(pid, &entry) {
+            stack.push(process);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    while let Some(process) = stack.pop() {
+        if !seen.insert(process.pid) {
+            continue;
+        }
+        if let Some(children) = kids.get(&process.pid) {
+            stack.extend(children.iter().copied());
+        }
+        if process.pid != leader {
+            out.push(process);
+        }
+    }
+    Ok(out)
 }
 
 /// What to signal to stop an agent command: its own process groups, plus
@@ -238,6 +276,147 @@ pub fn signal(t: &Targets, sig: i32) {
                 libc::kill(pid, sig);
             }
         }
+    }
+}
+
+/// A helper confirmed by its run marker or a retained worker session.
+/// The stable handle also detects an exited-but-unreaped helper.
+#[cfg(target_os = "linux")]
+pub(crate) struct TaggedProcess {
+    pub process: Proc,
+    descriptor: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl TaggedProcess {
+    pub fn open(process: Proc, run: &str) -> std::io::Result<Option<Self>> {
+        let Some(tracked) = Self::capture(process)? else {
+            return Ok(None);
+        };
+        if !has_run(process.pid, format!("{RUN_VAR}={run}").as_bytes()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot confirm detached completion process ownership",
+            ));
+        }
+        Ok(Some(tracked))
+    }
+
+    /// The caller retains the unreaped worker which created this private session.
+    pub fn open_in_session(process: Proc, run: &str, leader: i32) -> std::io::Result<Option<Self>> {
+        match Self::open(process, run) {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let Some(tracked) = Self::capture(process)? else {
+                    return Ok(None);
+                };
+                // Capture before reading metadata: a reused pid can never make
+                // this handle signal an unrelated live process. Other processes
+                // cannot join the session created by the retained worker leader.
+                let session = unsafe { libc::getsid(process.pid) };
+                if leader > 1 && session == leader {
+                    Ok(Some(tracked))
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        }
+    }
+
+    fn capture(process: Proc) -> std::io::Result<Option<Self>> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // SAFETY: pidfd_open creates a non-reusable, close-on-exec kernel handle.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0) };
+        if descriptor < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: a successful syscall returned a new descriptor owned here.
+        let tracked = Self {
+            process,
+            descriptor: unsafe { OwnedFd::from_raw_fd(descriptor as i32) },
+        };
+        if tracked.gone()? {
+            return Ok(None);
+        }
+        Ok(Some(tracked))
+    }
+
+    pub fn signal(&self, signal: i32) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the retained pidfd cannot signal a process which reused the pid.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.descriptor.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn gone(&self) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut descriptor = libc::pollfd {
+            fd: self.descriptor.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll inspects one valid descriptor without waiting.
+        if unsafe { libc::poll(&raw mut descriptor, 1, 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::other("invalid completion process handle"));
+        }
+        // POLLIN alone only means exit. POLLHUP means the process was reaped.
+        Ok(descriptor.revents & libc::POLLHUP != 0)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TaggedProcess {
+    pub process: Proc,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl TaggedProcess {
+    pub fn open(_process: Proc, _run: &str) -> std::io::Result<Option<Self>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "detached completion helpers require stable Linux process handles",
+        ))
+    }
+
+    pub fn open_in_session(
+        process: Proc,
+        run: &str,
+        _leader: i32,
+    ) -> std::io::Result<Option<Self>> {
+        Self::open(process, run)
+    }
+
+    pub fn signal(&self, _signal: i32) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "detached completion helpers require stable Linux process handles",
+        ))
+    }
+
+    pub fn gone(&self) -> std::io::Result<bool> {
+        Ok(false)
     }
 }
 

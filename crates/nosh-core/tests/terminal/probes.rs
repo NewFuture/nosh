@@ -6,7 +6,8 @@ pub(super) fn terminal_probe() {
     };
     print!("{BEGIN}");
     eprint!("{BEGIN}");
-    let original_stdout = if mode.starts_with("repl-inline") {
+    let original_stdout = if mode.starts_with("repl-inline") || mode.starts_with("repl-completion")
+    {
         std::io::stdout().flush().unwrap();
         // SAFETY: preserve the harness framing stream, then give the editor one TTY.
         let saved = unsafe { libc::dup(1) };
@@ -207,6 +208,7 @@ pub(super) fn terminal_probe() {
             );
         }
         mode if mode.starts_with("repl-editing") => super::editing::probe(mode),
+        mode if mode.starts_with("repl-completion") => super::completion::probe(mode),
         "repl"
         | "repl-blocked"
         | "repl-inline"
@@ -247,6 +249,10 @@ pub(super) fn terminal_probe() {
                 ],
             };
             let config = nosh_shell::ReplConfig {
+                completion: nosh_shell::completion::Config {
+                    worker: Some(worker.clone()),
+                    ..Default::default()
+                },
                 status_bar: nosh_shell::status::Config {
                     enabled: mode != "repl-inline-off",
                     ..Default::default()

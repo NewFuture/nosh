@@ -235,6 +235,7 @@ pub(crate) struct Completion {
     pub cursor: usize,
     pub error: Option<String>,
     pub count: usize,
+    pub phase: crate::completion::Phase,
 }
 
 pub(crate) struct Context<'a> {
@@ -497,11 +498,16 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         PromptInteraction::Menu {
             count, provisional, ..
         } => {
+            let limited = context
+                .completion
+                .is_some_and(|completion| completion.phase == crate::completion::Phase::Partial);
             let error = context
                 .completion
                 .and_then(|completion| completion.error.as_deref());
             let label = if error.is_some() {
                 tr!("补全失败", "Completion failed")
+            } else if limited {
+                tr!("部分补全结果", "Partial completions")
             } else if provisional {
                 tr!("补全查询中", "Completion pending")
             } else if count == 0 {
@@ -514,6 +520,8 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 &error.map_or_else(|| label.into(), |error| format!("{label}: {error}")),
                 if error.is_some() {
                     tr!("失败", "Failed")
+                } else if limited {
+                    tr!("部分", "Partial")
                 } else if provisional {
                     tr!("查询中", "Pending")
                 } else if count == 0 {
@@ -523,7 +531,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 },
                 if error.is_some() {
                     Tone::Error
-                } else if provisional {
+                } else if provisional && !limited {
                     Tone::Pending
                 } else if count == 0 && !provisional {
                     Tone::Notice
@@ -535,11 +543,11 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 let count = format!("{count}{}", if provisional { "+" } else { "" });
                 fields.push(Field::new(1, &count, &count, &count, 90, false));
             }
-            if count > 0 && !provisional && error.is_none() {
+            if count > 0 && (!provisional || limited) && error.is_none() {
                 add_action(&mut fields, Action::Accept, tr!("采用", "accept"), 98, true);
             }
             add_action(&mut fields, Action::Close, tr!("关闭", "close"), 99, true);
-            if count > 1 && !provisional && error.is_none() {
+            if count > 1 && (!provisional || limited) && error.is_none() {
                 add_action(&mut fields, Action::Next, tr!("下一个", "next"), 85, false);
                 add_action(
                     &mut fields,
@@ -598,7 +606,9 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                     tr!("补全失败", "Completion failed"),
                     Tone::Error,
                 );
-            } else if completion.is_some_and(|completion| completion.count == 0) {
+            } else if completion.is_some_and(|completion| {
+                completion.count == 0 && completion.phase == crate::completion::Phase::Complete
+            }) {
                 state(
                     &mut fields,
                     tr!("无补全候选", "No completions"),
@@ -1266,6 +1276,7 @@ mod tests {
             cursor: 3,
             count: 0,
             error: Some("failure\x1b[2J\nnext".into()),
+            phase: crate::completion::Phase::Unavailable,
         };
         let mut data = context(&editor, &keys);
         data.completion = Some(&completion);
@@ -1279,6 +1290,45 @@ mod tests {
             "{text}"
         );
         assert!(plain(&"👩\u{200d}💻".repeat(200)).ends_with("..."));
+    }
+
+    #[test]
+    fn partial_menu_results_show_acceptance_but_pending_results_do_not() {
+        let keys = bindings();
+        let mut editor = editor("query");
+        editor.columns = 200;
+        editor.interaction = PromptInteraction::Menu {
+            name: "completion_menu",
+            count: 2,
+            provisional: true,
+        };
+        for phase in [
+            crate::completion::Phase::Partial,
+            crate::completion::Phase::Pending,
+        ] {
+            let completion = Completion {
+                input: "query".into(),
+                cursor: 5,
+                error: None,
+                count: 2,
+                phase,
+            };
+            let mut data = context(&editor, &keys);
+            data.completion = Some(&completion);
+            let text = compose(data).text;
+            if phase == crate::completion::Phase::Partial {
+                assert!(text.contains("Partial") && text.contains("Enter"), "{text}");
+            } else {
+                assert!(
+                    text.contains("pending") && !text.contains("Enter"),
+                    "{text}"
+                );
+            }
+            assert!(
+                !text.contains("No completions") && text.contains("2+"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

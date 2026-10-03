@@ -33,10 +33,14 @@ impl AiHandler for DraftAi {
 }
 
 pub(super) fn probe(mode: &str) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("nosh-editing-")
+        .tempdir_in(".")
+        .unwrap();
+    let directory_path = directory.path().canonicalize().unwrap();
     let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
         interactive: true,
-        working_dir: Some(directory.path().into()),
+        working_dir: Some(directory_path),
         ..Default::default()
     })
     .unwrap();
@@ -64,6 +68,10 @@ pub(super) fn probe(mode: &str) {
         input_assist: nosh_shell::input_assist::Config {
             enabled: false,
             worker: None,
+        },
+        completion: nosh_shell::completion::Config {
+            worker: Some(input_worker_command()),
+            ..Default::default()
         },
         status_bar: nosh_shell::status::Config {
             enabled: false,
@@ -234,7 +242,7 @@ fn menu_accept_unbinding_and_replacement_do_not_keep_the_enter_alias() {
         let mut steps: Vec<KeyStep<'_>> = vec![
             ("editing> ", b"candidate_\t"),
             ("candidate_two", b"\r\x1b[B"),
-            ("CANDIDATE_", finish),
+            (">candidate_two", finish),
         ];
         steps.push(("editing> ", b"\x15exit 0\r"));
         let result = run(
@@ -363,6 +371,7 @@ fn tab_only_requests_ai_when_completion_is_definitively_exhausted() {
         "xterm-256color",
         &[
             ("editing> ", b"nosh_no_completion_match_fixture\t"),
+            ("NO RECORDS FOUND", b"\t"),
             ("touch generated", b"\x15exit 0\r"),
         ],
     );

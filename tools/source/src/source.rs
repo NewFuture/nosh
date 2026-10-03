@@ -12,10 +12,72 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PIN: &str = "patches/reedline/source.toml";
-const PATCH: &str = "patches/reedline/nosh.patch";
-const UPSTREAM: &str = "third_party/reedline-upstream";
-const GENERATED: &str = ".nosh/reedline";
+#[derive(Clone, Copy)]
+pub(crate) enum Dependency {
+    Reedline,
+    Brush,
+}
+
+impl Dependency {
+    pub(crate) const ALL: [Self; 2] = [Self::Reedline, Self::Brush];
+
+    pub(crate) fn parse(name: &str) -> Result<Self> {
+        match name {
+            "reedline" => Ok(Self::Reedline),
+            "brush-core" => Ok(Self::Brush),
+            _ => Err("dependency must be reedline or brush-core".into()),
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Reedline => "reedline",
+            Self::Brush => "brush-core",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Reedline => "Reedline",
+            Self::Brush => "brush-core",
+        }
+    }
+
+    fn repository(self) -> &'static str {
+        match self {
+            Self::Reedline => "https://github.com/nushell/reedline.git",
+            Self::Brush => "https://github.com/reubeno/brush.git",
+        }
+    }
+
+    pub(crate) fn pin(self) -> &'static str {
+        match self {
+            Self::Reedline => "patches/reedline/source.toml",
+            Self::Brush => "patches/brush-core/source.toml",
+        }
+    }
+
+    fn patch(self) -> &'static str {
+        match self {
+            Self::Reedline => "patches/reedline/nosh.patch",
+            Self::Brush => "patches/brush-core/nosh.patch",
+        }
+    }
+
+    fn upstream(self) -> &'static str {
+        match self {
+            Self::Reedline => "third_party/reedline-upstream",
+            Self::Brush => "third_party/brush-upstream",
+        }
+    }
+
+    fn generated(self) -> &'static str {
+        match self {
+            Self::Reedline => ".nosh/reedline",
+            Self::Brush => ".nosh/brush",
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,27 +94,32 @@ struct Inputs {
 }
 
 impl Inputs {
-    fn read(root: &Path) -> Result<Self> {
+    fn read(root: &Path, dependency: Dependency) -> Result<Self> {
         let read = |path| -> Result<Vec<u8>> {
             Ok(fs::read_to_string(root.join(path))?
                 .replace("\r\n", "\n")
                 .into_bytes())
         };
-        let pin = read(PIN)?;
+        let pin = read(dependency.pin())?;
         let source: Source = toml::from_str(std::str::from_utf8(&pin)?)?;
         validate_revision(&source.revision)?;
-        if source.repository != "https://github.com/nushell/reedline.git" {
-            return Err("Reedline source must be the official nushell/reedline repository".into());
+        if source.repository != dependency.repository() {
+            return Err(format!(
+                "{} source must be the official {} repository",
+                dependency.name(),
+                dependency.repository()
+            )
+            .into());
         }
         Ok(Self {
             source,
             pin,
-            patch: read(PATCH)?,
+            patch: read(dependency.patch())?,
         })
     }
 
-    fn ensure_current(&self, root: &Path, operation: &str) -> Result<()> {
-        if *self != Self::read(root)? {
+    fn ensure_current(&self, root: &Path, dependency: Dependency, operation: &str) -> Result<()> {
+        if *self != Self::read(root, dependency)? {
             return Err(format!(
                 "pin/patch changed during {operation}; live source was not replaced"
             )
@@ -109,6 +176,7 @@ struct Replay {
 }
 
 pub(crate) struct Manager {
+    dependency: Dependency,
     root: PathBuf,
     cache: PathBuf,
     cache_read_only: bool,
@@ -117,9 +185,14 @@ pub(crate) struct Manager {
 }
 
 impl Manager {
-    pub(crate) fn new(root: PathBuf, cache: Option<PathBuf>, offline: bool) -> Result<Self> {
+    pub(crate) fn new(
+        root: PathBuf,
+        cache: Option<PathBuf>,
+        offline: bool,
+        dependency: Dependency,
+    ) -> Result<Self> {
         let root = dunce::canonicalize(root)?;
-        if !root.join(PIN).is_file() || !root.join(PATCH).is_file() {
+        if !root.join(dependency.pin()).is_file() || !root.join(dependency.patch()).is_file() {
             return Err(format!(
                 "{} is not a managed nosh source root; run from the repository/archive root or pass --root <path>",
                 root.display()
@@ -135,8 +208,10 @@ impl Manager {
         lock.try_lock()
             .map_err(|e| format!("another source command is running, or locking failed: {e}"))?;
         Ok(Self {
+            dependency,
             cache_read_only: cache.is_some(),
-            cache: cache.unwrap_or_else(|| root.join(".nosh/cache/reedline.git")),
+            cache: cache
+                .unwrap_or_else(|| root.join(format!(".nosh/cache/{}.git", dependency.key()))),
             root,
             offline,
             _lock: lock,
@@ -144,7 +219,7 @@ impl Manager {
     }
 
     fn upstream(&self) -> Result<Option<PathBuf>> {
-        let upstream = self.root.join(UPSTREAM);
+        let upstream = self.root.join(self.dependency.upstream());
         if !upstream.join(".git").exists() {
             return Ok(None);
         }
@@ -154,25 +229,29 @@ impl Manager {
         )?
         .is_empty()
         {
-            return Err(
-                "upstream submodule is dirty; preserve its edits and edit .nosh/reedline instead"
-                    .into(),
-            );
+            return Err(format!(
+                "upstream submodule is dirty; preserve its edits and edit {} instead",
+                self.dependency.generated()
+            )
+            .into());
         }
         Ok(Some(upstream))
     }
 
     fn inputs(&self) -> Result<Inputs> {
-        let inputs = Inputs::read(&self.root)?;
+        let inputs = Inputs::read(&self.root, self.dependency)?;
         if self.root.join(".git").exists() {
-            let entry = git_text(&self.root, &["ls-files", "--stage", "--", UPSTREAM])?;
+            let entry = git_text(
+                &self.root,
+                &["ls-files", "--stage", "--", self.dependency.upstream()],
+            )?;
             let fields: Vec<_> = entry.split_whitespace().collect();
             if fields.len() != 4
                 || fields[0] != "160000"
                 || fields[1] != inputs.source.revision
                 || fields[2] != "0"
             {
-                return Err("Reedline gitlink and source.toml disagree (or gitlink is unmerged). Update them together; for a Windows worktree run source commands with Windows Git.".into());
+                return Err(format!("{} gitlink and source.toml disagree (or gitlink is unmerged). Update them together; for a Windows worktree run source commands with Windows Git.", self.dependency.name()).into());
             }
         }
         if let Some(upstream) = self.upstream()?
@@ -211,8 +290,8 @@ impl Manager {
         }
         if self.offline {
             return Err(format!(
-                "offline: Reedline {} is absent from the submodule and cache {}; initialize it online or supply --cache <bare-repository>. No unpatched fallback.",
-                source.revision, self.cache.display()
+                "offline: {} {} is absent from the submodule and cache {}; initialize it online or supply --cache <bare-repository>. No unpatched fallback.",
+                self.dependency.name(), source.revision, self.cache.display()
             ).into());
         }
         fs::create_dir_all(&self.cache)?;
@@ -290,7 +369,10 @@ impl Manager {
     }
 
     fn state(&self) -> Result<State> {
-        let path = self.root.join(GENERATED).join(".git/nosh/state.json");
+        let path = self
+            .root
+            .join(self.dependency.generated())
+            .join(".git/nosh/state.json");
         let bytes = fs::read(&path).map_err(|e| format!(
             "missing/invalid prepared state at {}: {e}; run prepare, do not delete unexported edits",
             path.display()
@@ -299,8 +381,8 @@ impl Manager {
     }
 
     fn clean(&self, state: &State) -> Result<()> {
-        if snapshot(&self.root.join(GENERATED))? != state.prepared_tree {
-            return Err("unexported Reedline edits (including new/deleted files); run export first. Nothing was overwritten.".into());
+        if snapshot(&self.root.join(self.dependency.generated()))? != state.prepared_tree {
+            return Err(format!("unexported {} edits (including new/deleted files); run export first. Nothing was overwritten.", self.dependency.name()).into());
         }
         Ok(())
     }
@@ -350,10 +432,12 @@ impl Manager {
     }
 
     fn install(&self, staging: &Path) -> Result<()> {
-        let live = self.root.join(GENERATED);
-        let previous = self.root.join(".nosh/previous-reedline");
+        let live = self.root.join(self.dependency.generated());
+        let previous = self
+            .root
+            .join(format!(".nosh/previous-{}", self.dependency.key()));
         if previous.exists() {
-            return Err("previous interrupted preparation retained .nosh/previous-reedline; inspect and preserve it before retrying".into());
+            return Err(format!("previous interrupted preparation retained {}; inspect and preserve it before retrying", previous.display()).into());
         }
         let had_live = live.exists();
         if had_live {
@@ -379,24 +463,28 @@ impl Manager {
 
     pub(crate) fn prepare(&self) -> Result<()> {
         let inputs = self.inputs()?;
-        if self.root.join(GENERATED).exists() {
+        if self.root.join(self.dependency.generated()).exists() {
             let state = self.state()?;
             self.clean(&state)?;
             if state.matches(&inputs) {
-                println!("Reedline is already prepared; no files changed.");
+                println!(
+                    "{} is already prepared; no files changed.",
+                    self.dependency.name()
+                );
                 return Ok(());
             }
         }
         let staging = self.apply(&inputs.source, &inputs.patch)?;
-        inputs.ensure_current(&self.root, "preparation")?;
+        inputs.ensure_current(&self.root, self.dependency, "preparation")?;
         self.record(&staging, &inputs, snapshot(&staging)?)?;
-        if self.root.join(GENERATED).exists() {
+        if self.root.join(self.dependency.generated()).exists() {
             self.clean(&self.state()?)?;
         }
         self.install(&staging)?;
         println!(
-            "Prepared patched Reedline at {}",
-            self.root.join(GENERATED).display()
+            "Prepared patched {} at {}",
+            self.dependency.name(),
+            self.root.join(self.dependency.generated()).display()
         );
         Ok(())
     }
@@ -410,15 +498,16 @@ impl Manager {
         if !self.state()?.matches(&inputs) {
             return Err("pin/patch changed since preparation; preserve local edits and reconcile before export".into());
         }
-        let live = self.root.join(GENERATED);
+        let live = self.root.join(self.dependency.generated());
         let replay = self.replay(&inputs.source, &live)?;
-        inputs.ensure_current(&self.root, "export")?;
-        write_atomic(&self.root.join(PATCH), &replay.patch)?;
+        inputs.ensure_current(&self.root, self.dependency, "export")?;
+        write_atomic(&self.root.join(self.dependency.patch()), &replay.patch)?;
         inputs.patch = replay.patch;
         self.record(&live, &inputs, replay.tree)?;
         fs::remove_dir_all(replay.dir)?;
         println!(
-            "Exported and replay-verified patches/reedline/nosh.patch; commit it with nosh changes."
+            "Exported and replay-verified {}; commit it with nosh changes.",
+            self.dependency.patch()
         );
         Ok(())
     }
@@ -434,7 +523,7 @@ impl Manager {
         let candidate = if let Some(dir) = resolved {
             let dir = dunce::canonicalize(dir)?;
             if !dir.starts_with(self.root.join(".nosh"))
-                || dir == self.root.join(GENERATED)
+                || dir == self.root.join(self.dependency.generated())
                 || git_text(&dir, &["rev-parse", "HEAD"])? != revision
             {
                 return Err(
@@ -477,15 +566,15 @@ impl Manager {
         }
         next.pin = toml::to_string(&next.source)?.into_bytes();
         next.patch = replay.patch;
-        write_atomic(&self.root.join(PIN), &next.pin)?;
-        write_atomic(&self.root.join(PATCH), &next.patch)?;
+        write_atomic(&self.root.join(self.dependency.pin()), &next.pin)?;
+        write_atomic(&self.root.join(self.dependency.patch()), &next.patch)?;
         git(
             &self.root,
             &[
                 "update-index",
                 "--add",
                 "--cacheinfo",
-                &format!("160000,{revision},{UPSTREAM}"),
+                &format!("160000,{revision},{}", self.dependency.upstream()),
             ],
         )?;
         self.record(&replay.dir, &next, replay.tree)?;

@@ -8,7 +8,7 @@ mod editor;
 mod lookup;
 #[cfg(test)]
 mod tests;
-mod worker;
+pub(crate) mod worker;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -78,9 +78,17 @@ impl Default for Config {
 /// Only rules already confirmed enabled and applicable by their owner belong here.
 /// Recognition does not expand a rule or treat it as an external executable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Abbreviation {
+    pub expansion: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Abbreviations {
     pub revision: u64,
     pub applicable: BTreeSet<String>,
+    #[serde(default)]
+    pub definitions: BTreeMap<String, Abbreviation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +293,10 @@ pub(crate) type SharedIndex = Arc<std::sync::Mutex<Option<Index>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
+    Complete {
+        query: crate::completion::types::Query,
+        install: Option<crate::completion::types::Install>,
+    },
     Analyze(Arc<Input>),
     Lookup {
         input: Arc<Input>,
@@ -302,6 +314,7 @@ pub(crate) enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Response {
+    Completion(crate::completion::types::Outcome),
     Analysis(Analysis),
     Lookup {
         version: Version,

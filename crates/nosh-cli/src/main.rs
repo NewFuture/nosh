@@ -323,6 +323,23 @@ fn run_shell(
             },
         },
         input_abbreviations: Default::default(),
+        completion: nosh_shell::completion::Config {
+            enabled: cfg.completion,
+            scripts: cfg.completion_scripts,
+            abbreviations: Default::default(),
+            selection_observer: None,
+            worker: if cfg.completion {
+                match nosh_shell::completion::WorkerCommand::nosh() {
+                    Ok(worker) => Some(worker),
+                    Err(error) => {
+                        eprintln!("nosh: completion worker unavailable: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            },
+        },
     };
     if !ai_on {
         return nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, repl_cfg);

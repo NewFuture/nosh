@@ -7,6 +7,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 - **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`#` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
 - **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
 - **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
+- **上下文补全**：命令与路径默认 smart-case 模糊，内置 Git `switch`／GNU Make 静态目标，保留已加载脚本的候选语义。慢任务独立、有界、可取消；完整覆盖和执行限制见[补全说明](docs/COMPLETION.md)。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。每次任务附上当前项目类型、manifest 基本信息及 Git 状态；切换项目或进入普通目录后重新判断，不沿用上一项目的描述。
 - **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。默认模型在 8K 上下文下常驻内存约 2.7 GiB（x86 AVX2/VNNI；详见 [MVP 报告 §5.3](docs/MVP-REPORT.md)）。
 - **安全**：agent 发起的命令要经过风险分级和审批。
@@ -28,7 +29,7 @@ cargo build --release                  # rust-toolchain.toml 固定 Rust 1.98.1
 ./target/release/nosh                  # 启动 shell；--norc 跳过 ~/.bashrc，--safe 同时关闭 AI
 ```
 
-首次 clone、切换依赖版本或补丁后，先准备 Reedline 修补源再运行 Cargo/IDE；重复准备不会覆盖未导出的本地修改。普通 Rust 构建不要求 Python、Node 或 npm。离线准备、同仓联调、补丁导出与升级见 [Reedline 维护说明](docs/REEDLINE-MAINTENANCE.md)。
+首次 clone、切换依赖版本或补丁后，先准备 Reedline 与 brush 修补源再运行 Cargo/IDE；重复准备不会覆盖未导出的本地修改。普通 Rust 构建不要求 Python、Node 或 npm。离线准备、同仓联调、补丁导出与升级见 [源码维护说明](docs/REEDLINE-MAINTENANCE.md)。
 
 常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
 
@@ -161,4 +162,4 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 
 ## 许可
 
-Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。Reedline 上游及派生补丁采用 MIT；固定上游的 `LICENSE` 随源准备保留，来源与维护方式见 [Reedline 说明](docs/REEDLINE-MAINTENANCE.md)。
+Apache-2.0。`third_party/candle-core` 是打了一个小补丁的 candle-core（MIT OR Apache-2.0），来源与改动见其中的 [NOSH_PATCH.md](third_party/candle-core/NOSH_PATCH.md)。Reedline、brush 上游及派生补丁采用 MIT；固定上游的 `LICENSE` 随源准备保留，来源与维护方式见 [源码维护说明](docs/REEDLINE-MAINTENANCE.md)。

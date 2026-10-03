@@ -70,15 +70,28 @@ def source_dependency_provenance(source: Path) -> dict:
     command = source_tool_command(source)
     data = json.loads(subprocess.check_output(
         [*command, "provenance", "--root", str(source)], cwd=source, text=True))
-    pin = tomllib.loads(source.joinpath("patches", "reedline", "source.toml").read_text(encoding="utf-8"))
-    if (data.get("schema_version") != 1 or data.get("upstream_revision") != pin["revision"]
-            or data.get("upstream_repository") != pin["repository"]
-            or any(not re.fullmatch(r"[0-9a-f]{64}", data.get(field, ""))
-                   for field in ("patch_sha256", "source_pin_sha256", "prepared_archive_sha256"))
-            or any(not re.fullmatch(r"[0-9a-f]{40}", data.get(field, ""))
-                   for field in ("upstream_tree", "prepared_tree"))):
+    if not isinstance(data, dict):
         raise ValueError("selected source tool returned invalid dependency provenance")
-    return {"schema_version": 1, "layout": "managed", "managed_sources": {"reedline": data}}
+    managed = {"reedline": data} if data.get("schema_version") == 1 else data
+    expected = ["reedline"]
+    if source.joinpath("patches", "brush-core").exists():
+        expected.append("brush-core")
+    if set(managed) != set(expected):
+        raise ValueError("selected source tool returned incomplete dependency provenance")
+    for dependency in expected:
+        state = managed[dependency]
+        pin = tomllib.loads(source.joinpath("patches", dependency, "source.toml").read_text(encoding="utf-8"))
+        if (not isinstance(state, dict) or state.get("schema_version") != 1
+                or state.get("upstream_revision") != pin["revision"]
+                or state.get("upstream_repository") != pin["repository"]
+                or any(not isinstance(state.get(field), str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", state[field])
+                       for field in ("patch_sha256", "source_pin_sha256", "prepared_archive_sha256"))
+                or any(not isinstance(state.get(field), str)
+                       or not re.fullmatch(r"[0-9a-f]{40}", state[field])
+                       for field in ("upstream_tree", "prepared_tree"))):
+            raise ValueError("selected source tool returned invalid dependency provenance")
+    return {"schema_version": 1, "layout": "managed", "managed_sources": managed}
 
 
 def prepare_source_dependencies(source: Path) -> dict:
