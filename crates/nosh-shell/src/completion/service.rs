@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use super::context::Context;
 use super::types::*;
 use crate::input_assist::worker::{ChildHandle, Kind, Worker, kill_child};
-use crate::input_assist::{Request, Response, WorkerCommand};
+use crate::input_assist::{Request, Response, WorkerCommand, short_error};
 
 struct Prepared {
     version: u64,
@@ -250,10 +250,6 @@ struct Slot {
     executing_script: bool,
     waiting_epoch: u64,
     fault: Option<String>,
-}
-
-fn short_error(error: impl std::fmt::Display) -> String {
-    error.to_string().chars().take(240).collect()
 }
 
 impl Slot {

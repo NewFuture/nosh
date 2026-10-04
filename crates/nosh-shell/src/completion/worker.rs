@@ -249,7 +249,7 @@ impl Server {
                 context,
                 snapshot,
                 &mut self.cache,
-                context.command.as_deref() == Some("cd") && !context.redirect,
+                context.command() == Some("cd") && !context.redirect,
             ))
         }
     }
@@ -267,7 +267,7 @@ impl Server {
         let refs: Vec<_> = tokens.iter().collect();
         let request = brush_core::completion::Context {
             token_to_complete: &words.word,
-            command_name: context.command.as_deref(),
+            command_name: context.command(),
             preceding_token: words
                 .index
                 .checked_sub(1)

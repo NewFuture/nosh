@@ -2959,7 +2959,7 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..a633401eeebff7853b310d258f47b4f7
  
  mod hinter;
 diff --git a/src/menu/columnar_menu.rs b/src/menu/columnar_menu.rs
-index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e789580378f0b6adc 100644
+index bdff005f82108888f71623eb082eb37632fc6431..3aa605db80cfbe66b90413f8e0eb4f8cd256fc2e 100644
 --- a/src/menu/columnar_menu.rs
 +++ b/src/menu/columnar_menu.rs
 @@ -10,6 +10,8 @@ use crate::{
@@ -2971,29 +2971,27 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
  
  /// The traversal direction of the menu
  #[derive(Debug, PartialEq, Eq)]
-@@ -87,6 +89,10 @@ pub struct ColumnarMenu {
+@@ -87,6 +89,9 @@ pub struct ColumnarMenu {
      event: Option<MenuEvent>,
      /// String collected after the menu is activated
      input: Option<String>,
 +    message: Option<String>,
-+    selection_valid: bool,
 +    missing_selection: Option<String>,
 +    preserve_case: bool,
  }
  
  impl Default for ColumnarMenu {
-@@ -104,6 +110,10 @@ impl Default for ColumnarMenu {
+@@ -104,6 +109,9 @@ impl Default for ColumnarMenu {
              skip_rows: 0,
              event: None,
              input: None,
 +            message: None,
-+            selection_valid: true,
 +            missing_selection: None,
 +            preserve_case: false,
          }
      }
  }
-@@ -117,6 +127,13 @@ impl MenuBuilder for ColumnarMenu {
+@@ -117,6 +125,13 @@ impl MenuBuilder for ColumnarMenu {
  
  // Menu specific configuration functions
  impl ColumnarMenu {
@@ -3007,12 +3005,12 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
      /// Menu builder with new columns value
      #[must_use]
      pub fn with_columns(mut self, columns: u16) -> Self {
-@@ -405,37 +422,24 @@ impl ColumnarMenu {
+@@ -405,37 +420,24 @@ impl ColumnarMenu {
  
      /// Handles plain-text formatting.
      fn format_plain(&self, suggestion: &Suggestion, index: usize) -> String {
 -        let is_selected = index == self.index();
-+        let is_selected = self.selection_valid && index == self.index();
++        let is_selected = self.missing_selection.is_none() && index == self.index();
          let terminal_width = self.get_width();
 -        let display_value = suggestion.display_value();
 -
@@ -3058,38 +3056,37 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
              // Modifies in-place. Prevents unicode edge cases as well.
              formatted_line.make_ascii_uppercase();
          }
-@@ -445,7 +449,7 @@ impl ColumnarMenu {
+@@ -445,7 +447,7 @@ impl ColumnarMenu {
  
      /// Handles ANSI-colored formatting.
      fn format_ansi(&self, suggestion: &Suggestion, index: usize) -> String {
 -        let is_selected = index == self.index();
-+        let is_selected = self.selection_valid && index == self.index();
++        let is_selected = self.missing_selection.is_none() && index == self.index();
          let terminal_width = self.get_width();
          let display_value = suggestion.display_value();
          let display_width = self.display_width(index);
-@@ -535,9 +539,21 @@ impl ColumnarMenu {
+@@ -535,9 +537,19 @@ impl ColumnarMenu {
              MenuEvent::Activate(updated) | MenuEvent::Edit(updated) => {
                  self.reload(updated, editor, completer)
              }
+-            MenuEvent::Deactivate => {}
 +            event => self.move_selection(event),
 +        }
 +    }
 +
 +    fn move_selection(&mut self, event: MenuEvent) {
 +        match event {
-+            MenuEvent::Activate(_) | MenuEvent::Edit(_) => {}
-             MenuEvent::Deactivate => {}
++            MenuEvent::Activate(_) | MenuEvent::Edit(_) | MenuEvent::Deactivate => {}
              // No values, no grid: nothing to move over.
              _ if self.get_values().is_empty() => {}
-+            _ if !self.selection_valid => {
-+                self.selection_valid = true;
++            _ if self.missing_selection.is_some() => {
 +                self.missing_selection = None;
 +                self.reset_position();
 +            }
              MenuEvent::NextElement => self.move_next(),
              MenuEvent::PreviousElement => self.move_previous(),
              MenuEvent::MoveUp => self.move_up(),
-@@ -553,6 +569,7 @@ impl ColumnarMenu {
+@@ -553,6 +565,7 @@ impl ColumnarMenu {
      /// Recompute the completion box geometry from the current suggestions,
      /// selection, and terminal size. Runs on every repaint.
      pub fn recompute_layout(&mut self, painter: &Painter) {
@@ -3097,7 +3094,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
          let screen_width = painter.screen_width() as usize;
  
          // If there is at least one suggestion that contains a description, then the layout
-@@ -591,9 +608,37 @@ impl ColumnarMenu {
+@@ -591,9 +604,38 @@ impl ColumnarMenu {
                  possible_columns.min(self.default_details.columns).max(1);
          }
  
@@ -3111,12 +3108,13 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
 +
 +    fn header_rows(&self) -> u16 {
 +        u16::from(
-+            !self.get_values().is_empty() && (self.message.is_some() || !self.selection_valid),
++            !self.get_values().is_empty()
++                && (self.message.is_some() || self.missing_selection.is_some()),
 +        )
 +    }
 +
 +    fn message_string(&self) -> Option<String> {
-+        let message = if self.selection_valid {
++        let message = if self.missing_selection.is_none() {
 +            self.message.clone()?
 +        } else {
 +            match &self.message {
@@ -3136,24 +3134,23 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
  }
  
  impl Menu for ColumnarMenu {
-@@ -627,7 +672,10 @@ impl Menu for ColumnarMenu {
+@@ -627,7 +669,10 @@ impl Menu for ColumnarMenu {
          }
  
          // Stale results can't splice wrong span
 -        if self.completions.common_prefix(editor) {
-+        if self.selection_valid
++        if self.missing_selection.is_none()
 +            && !self.phase.provisional()
 +            && self.completions.common_prefix(editor)
 +        {
              // Recalculate spans after replacement
              self.update_values(editor, completer);
  
-@@ -649,12 +697,22 @@ impl Menu for ColumnarMenu {
+@@ -649,12 +694,21 @@ impl Menu for ColumnarMenu {
          // Reset completions on activation
          self.completions = CompletionDisplay::default();
          self.phase.on_activate();
 +        self.message = None;
-+        self.selection_valid = true;
 +        self.missing_selection = None;
      }
  
@@ -3172,19 +3169,17 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
      }
  
      /// Updates menu values
-@@ -667,10 +725,46 @@ impl Menu for ColumnarMenu {
+@@ -667,10 +721,42 @@ impl Menu for ColumnarMenu {
          let (input, pos) = resolve_completer_input(editor, &mut self.input, &self.settings);
  
          let (result, base_ranges) = completer.complete_with_base_ranges(&input, pos);
-+        let selected = if !self.selection_valid {
-+            self.missing_selection.clone()
-+        } else {
++        let selected = self.missing_selection.clone().or_else(|| {
 +            self.phase
 +                .acceptable()
 +                .then(|| self.get_values().get(self.index()))
 +                .flatten()
 +                .map(suggestion_identity)
-+        };
++        });
 +        self.message = match &result {
 +            crate::CompletionResult::Limited { message, .. }
 +            | crate::CompletionResult::Unavailable { message } => Some(bounded_message(message)),
@@ -3202,13 +3197,11 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
 +                {
 +                    (self.row_pos, self.col_pos) = self.position_from_index(index);
 +                } else {
-+                    self.selection_valid = false;
 +                    self.missing_selection = Some(selected);
 +                    self.reset_position();
 +                }
 +            } else {
 +                self.reset_position();
-+                self.selection_valid = true;
 +                self.missing_selection = None;
 +            }
 +        }
@@ -3220,7 +3213,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
          }
      }
  
-@@ -691,13 +785,21 @@ impl Menu for ColumnarMenu {
+@@ -691,13 +777,21 @@ impl Menu for ColumnarMenu {
  
      /// Replace buffer at span via completion display
      fn replace_in_buffer(&self, editor: &mut Editor) {
@@ -3245,12 +3238,12 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
      }
  
      /// Gets values from filler that will be displayed in the menu
-@@ -709,28 +811,40 @@ impl Menu for ColumnarMenu {
+@@ -709,28 +803,40 @@ impl Menu for ColumnarMenu {
          self.phase.provisional()
      }
  
 +    fn results_can_be_accepted(&self) -> bool {
-+        self.selection_valid && self.phase.acceptable()
++        self.missing_selection.is_none() && self.phase.acceptable()
 +    }
 +
      fn is_awaiting_first_answer(&self) -> bool {
@@ -3289,7 +3282,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
                  TraversalDirection::Vertical => {
                      // `grid_rows`, since `step_by(0)` panics: the type proves
                      // what the enclosing non-empty branch implies.
-@@ -786,11 +900,43 @@ impl Menu for ColumnarMenu {
+@@ -786,11 +892,43 @@ impl Menu for ColumnarMenu {
                          })
                          .collect()
                  }
@@ -3333,7 +3326,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
  #[cfg(test)]
  mod tests {
      use crate::painting::W;
-@@ -974,6 +1120,146 @@ mod tests {
+@@ -974,6 +1112,146 @@ mod tests {
          );
      }
  
@@ -3408,8 +3401,8 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
 +        menu.update_working_details(&mut editor, &mut completer, &painter);
 +        (menu.row_pos, menu.col_pos) = menu.position_from_index(1);
 +
-+        for _ in 0..3 {
-+            completer.0 = crate::CompletionResult::fresh(identified_values(&["alpha"], false));
++        for names in [&["alpha"][..], &["alpha", "beta"][..], &["alpha"][..]] {
++            completer.0 = crate::CompletionResult::fresh(identified_values(names, false));
 +            menu.update_values(&mut editor, &mut completer);
 +            menu.update_working_details(&mut editor, &mut completer, &painter);
 +            assert!(!menu.results_can_be_accepted());
@@ -3480,7 +3473,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
      #[test]
      fn test_menu_replace_backtick() {
          // https://github.com/nushell/nushell/issues/7885
-@@ -1340,6 +1626,20 @@ mod tests {
+@@ -1340,6 +1618,20 @@ mod tests {
          );
      }
  
@@ -3502,7 +3495,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..3f1052901bcca2a304bfab0e78958037
      #[test]
      fn default_completer_partial_completion_matches_demo_example() {
 diff --git a/src/menu/menu_functions.rs b/src/menu/menu_functions.rs
-index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e304d8dca 100644
+index 091f8cd196266c507f016e78cbbd756c04122b54..e993d9bfd83b7fb070881805445e7fd6aa52108b 100644
 --- a/src/menu/menu_functions.rs
 +++ b/src/menu/menu_functions.rs
 @@ -318,6 +318,10 @@ pub(crate) enum CompletionPhase {
@@ -3516,20 +3509,24 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
      /// Computed for the line on screen.
      Fresh,
      /// Cached values for another line: shown, never decided on.
-@@ -334,7 +338,11 @@ impl CompletionPhase {
+@@ -334,18 +338,20 @@ impl CompletionPhase {
  
      /// Fold the answer to an update into the phase.
      pub(crate) fn note(&mut self, result: &CompletionResult) {
 -        let kind = if result.is_pending() {
-+        let kind = if matches!(result, CompletionResult::Limited { .. }) {
-+            AnswerKind::Limited
-+        } else if matches!(result, CompletionResult::Unavailable { .. }) {
-+            AnswerKind::Unavailable
-+        } else if result.is_pending() {
-             AnswerKind::Pending
-         } else if result.is_provisional() {
-             AnswerKind::Stale
-@@ -345,7 +353,9 @@ impl CompletionPhase {
+-            AnswerKind::Pending
+-        } else if result.is_provisional() {
+-            AnswerKind::Stale
+-        } else {
+-            AnswerKind::Fresh
++        let kind = match result {
++            CompletionResult::Limited { .. } => AnswerKind::Limited,
++            CompletionResult::Unavailable { .. } => AnswerKind::Unavailable,
++            CompletionResult::Pending => AnswerKind::Pending,
++            CompletionResult::Stale { .. } => AnswerKind::Stale,
++            CompletionResult::Fresh { .. } => AnswerKind::Fresh,
+         };
+         *self = match (*self, kind) {
              // Once open, no later answer can put the menu back off screen.
              (CompletionPhase::Open(_), kind) => CompletionPhase::Open(kind),
              // Only a final answer ends the opening phase.
@@ -3540,7 +3537,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
              (_, kind) => CompletionPhase::Opening(kind),
          };
      }
-@@ -374,6 +384,10 @@ impl CompletionPhase {
+@@ -374,6 +380,10 @@ impl CompletionPhase {
      pub(crate) fn awaiting_first_answer(self) -> bool {
          !matches!(self, CompletionPhase::Open(_))
      }
@@ -3551,7 +3548,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
  }
  
  /// A menu's suggestions, tied to the buffer they were computed against.
-@@ -404,10 +418,25 @@ impl CompletionDisplay {
+@@ -404,10 +414,25 @@ impl CompletionDisplay {
      ) -> Option<Self> {
          match result {
              CompletionResult::Pending => None,
@@ -3577,7 +3574,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
                  // Stamped from live editor (Fresh result)
                  let origin = CompletionOrigin::new(editor.get_buffer(), editor.insertion_point());
                  Some(Self::new(suggestions, partial, base_ranges, origin))
-@@ -471,9 +500,25 @@ impl CompletionDisplay {
+@@ -471,9 +496,25 @@ impl CompletionDisplay {
  
      /// Accept suggestion at index (no-op if stale or out of range)
      pub fn accept(&self, index: usize, editor: &mut Editor, output_mode: Option<OutputMode>) {
@@ -3605,7 +3602,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
      }
  
      /// Apply partial completion (completer-supplied or derived). No-op and returns false when stale or unchanged.
-@@ -557,15 +602,18 @@ pub fn replace_in_buffer(
+@@ -557,15 +598,18 @@ pub fn replace_in_buffer(
      editor: &mut Editor,
      output_mode: Option<OutputMode>,
  ) {
@@ -3633,7 +3630,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..0a8edd7e1912df8653865c0c81e7084e
  
      let buffer = editor.get_buffer();
      let (raw_start, raw_end) = match output_mode {
-@@ -577,11 +625,12 @@ pub fn replace_in_buffer(
+@@ -577,11 +621,12 @@ pub fn replace_in_buffer(
      let end = floor_char_boundary(buffer, raw_end);
      let start = floor_char_boundary(buffer, raw_start).min(end);
  

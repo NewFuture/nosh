@@ -231,6 +231,17 @@ fn frame(value: &impl Serialize) -> io::Result<Vec<u8>> {
     Ok(framed)
 }
 
+fn frame_length(header: &[u8]) -> io::Result<usize> {
+    let header = header
+        .try_into()
+        .map_err(|_| invalid("invalid frame header"))?;
+    let length = u32::from_be_bytes(header) as usize;
+    if length > MAX_FRAME {
+        return Err(invalid("worker frame limit"));
+    }
+    Ok(length)
+}
+
 fn read_frame(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut header = [0; 4];
     match reader.read_exact(&mut header[..1]) {
@@ -239,10 +250,7 @@ fn read_frame(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
         Err(error) => return Err(error),
     }
     reader.read_exact(&mut header[1..])?;
-    let length = u32::from_be_bytes(header) as usize;
-    if length > MAX_FRAME {
-        return Err(invalid("worker frame limit"));
-    }
+    let length = frame_length(&header)?;
     let mut buffer = vec![0; length];
     reader.read_exact(&mut buffer)?;
     Ok(Some(buffer))
@@ -395,7 +403,6 @@ pub(crate) struct Worker {
 
 pub(crate) struct OwnedChild {
     child: Child,
-    group: bool,
     reaped: bool,
     marker: Option<String>,
     helpers: Vec<crate::procs::TaggedProcess>,
@@ -418,7 +425,7 @@ impl OwnedChild {
         if self.reaped {
             return Ok(());
         }
-        if self.group {
+        if self.marker.is_some() {
             // No consuming wait occurs until every owned descendant is gone.
             if unsafe { libc::killpg(self.child.id() as i32, libc::SIGKILL) } != 0 {
                 let error = io::Error::last_os_error();
@@ -525,20 +532,21 @@ impl OwnedChild {
         Ok(pid != 0)
     }
 
+    fn stop(&mut self) -> io::Result<()> {
+        let descendants = self.stop_descendants();
+        let killed = self.kill();
+        descendants.and(killed)
+    }
+
     fn retire(&mut self) -> io::Result<bool> {
         if self.reaped {
             return Ok(true);
         }
-        if self.group {
-            let descendants = self.stop_descendants();
-            let killed = self.kill();
-            descendants?;
-            killed?;
-            if !self.exited_without_reaping()? || !self.residual_children()?.is_empty() {
-                return Ok(false);
-            }
-        } else {
-            self.kill()?;
+        self.stop()?;
+        if self.marker.is_some()
+            && (!self.exited_without_reaping()? || !self.residual_children()?.is_empty())
+        {
+            return Ok(false);
         }
         self.reaped = self.child.try_wait()?.is_some();
         Ok(self.reaped)
@@ -688,7 +696,6 @@ impl Worker {
         Ok(Self {
             child: Arc::new(Mutex::new(OwnedChild {
                 child: process,
-                group: kind.completion(),
                 reaped: false,
                 marker,
                 helpers: Vec::new(),
@@ -781,15 +788,7 @@ impl Worker {
             let remaining = if self.incoming.len() < 4 {
                 4 - self.incoming.len()
             } else {
-                let length = u32::from_be_bytes(
-                    self.incoming[..4]
-                        .try_into()
-                        .map_err(|_| invalid("invalid frame header"))?,
-                ) as usize;
-                if length > MAX_FRAME {
-                    return Err(invalid("worker frame limit"));
-                }
-                length + 4 - self.incoming.len()
+                frame_length(&self.incoming[..4])? + 4 - self.incoming.len()
             };
             let size = remaining.min(chunk.len()).min(TRANSFER_BUDGET - read);
             match self.stream.read(&mut chunk[..size]) {
@@ -816,9 +815,10 @@ impl Worker {
 
     pub fn stop(&mut self) -> io::Result<()> {
         self.stopping = true;
-        let descendants = self.stop_residual_children();
-        let killed = kill_child(&self.child);
-        descendants.and(killed)
+        self.child
+            .try_lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .stop()
     }
 
     pub fn reaped(&mut self) -> io::Result<bool> {
@@ -846,24 +846,11 @@ impl Worker {
             .residual_children()
     }
 
-    pub fn stop_residual_children(&self) -> io::Result<()> {
-        self.child
-            .try_lock()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .stop_descendants()
-    }
-
     fn take_response(&mut self) -> io::Result<Option<Response>> {
-        if self.incoming.len() < 4 {
+        let Some(header) = self.incoming.get(..4) else {
             return Ok(None);
-        }
-        let header: [u8; 4] = self.incoming[..4]
-            .try_into()
-            .map_err(|_| invalid("invalid frame header"))?;
-        let length = u32::from_be_bytes(header) as usize;
-        if length > MAX_FRAME {
-            return Err(invalid("worker frame limit"));
-        }
+        };
+        let length = frame_length(header)?;
         if self.incoming.len() < length + 4 {
             return Ok(None);
         }
@@ -1024,7 +1011,6 @@ mod tests {
                 index: 1,
                 word: String::new(),
                 span: 7..7,
-                command: Some("sample".into()),
                 command_start: 0,
                 command_end: 7,
                 quote: None,

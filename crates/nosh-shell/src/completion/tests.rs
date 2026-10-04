@@ -46,7 +46,7 @@ fn completion_context_uses_active_command_and_byte_ranges() {
     let mut request = query("echo 中; git switch fe tail; echo untouched");
     request.cursor = "echo 中; git switch fe".len();
     let context = Context::parse(&request, &snapshot.native).unwrap();
-    assert_eq!(context.command.as_deref(), Some("git"));
+    assert_eq!(context.command(), Some("git"));
     assert_eq!(context.words.as_ref(), ["git", "switch", "fe", "tail"]);
     assert_eq!(context.index, 2);
     assert_eq!(&request.text[context.span], "fe");
@@ -73,7 +73,7 @@ fn long_unicode_command_chains_keep_byte_ranges_within_the_lookup_budget() {
     let started = std::time::Instant::now();
     let context = Context::parse(&request, &snapshot.native).unwrap();
     let elapsed = started.elapsed();
-    assert_eq!(context.command.as_deref(), Some("git"));
+    assert_eq!(context.command(), Some("git"));
     assert_eq!(&text[context.span], "fe");
     assert!(
         elapsed < std::time::Duration::from_millis(500),

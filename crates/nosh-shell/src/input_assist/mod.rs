@@ -330,7 +330,7 @@ pub(crate) enum Response {
     Failed(String),
 }
 
-fn short_error(error: impl std::fmt::Display) -> String {
+pub(crate) fn short_error(error: impl std::fmt::Display) -> String {
     error.to_string().chars().take(240).collect()
 }
 

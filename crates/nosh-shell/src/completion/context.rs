@@ -13,7 +13,6 @@ pub(crate) struct Context {
     pub index: usize,
     pub word: String,
     pub span: Range<usize>,
-    pub command: Option<String>,
     pub command_start: usize,
     pub command_end: usize,
     pub quote: Option<char>,
@@ -179,17 +178,11 @@ impl Context {
             .chars()
             .next()
             .filter(|character| matches!(character, '\'' | '"'));
-        let command = words
-            .values
-            .first()
-            .filter(|word| !word.is_empty())
-            .cloned();
         let mut context = Self {
             words: words.values.into(),
             index: words.index,
             word: words.word,
             span: words.span,
-            command,
             command_start,
             command_end,
             quote,
@@ -204,6 +197,13 @@ impl Context {
         Ok(context)
     }
 
+    pub fn command(&self) -> Option<&str> {
+        self.words
+            .first()
+            .map(String::as_str)
+            .filter(|word| !word.is_empty())
+    }
+
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {
         if self.redirect {
             return false;
@@ -212,13 +212,13 @@ impl Context {
         if registry.overflow {
             return true;
         }
-        if self.command.is_none() {
+        if self.command().is_none() {
             registry.empty
         } else if self.index == 0 {
             registry.initial
         } else {
             registry.default
-                || self.command.as_deref().is_some_and(|command| {
+                || self.command().is_some_and(|command| {
                     registry.names.contains(command)
                         || std::path::Path::new(command)
                             .file_name()

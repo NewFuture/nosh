@@ -37,7 +37,7 @@ pub(crate) fn generate(
     snapshot: &NativeSnapshot,
     cache: &mut Cache,
 ) -> Option<Answer> {
-    let name = context.command.as_deref()?;
+    let name = context.command()?;
     if context.index == 0
         || snapshot.context.aliases.contains(name)
         || snapshot.context.functions.contains(name)
@@ -90,7 +90,7 @@ fn version(
 }
 
 fn program(context: &Context, snapshot: &NativeSnapshot) -> Result<PathBuf, String> {
-    let name = context.command.as_deref().ok_or("missing command")?;
+    let name = context.command().ok_or("missing command")?;
     super::native::resolve(snapshot, context, name)?
         .ok_or_else(|| "provider command was not found in the current PATH".into())
 }
@@ -132,7 +132,7 @@ fn output(
         if !status.success() {
             return Err(format!(
                 "{} query exited with {status}",
-                context.command.as_deref().unwrap_or("provider")
+                context.command().unwrap_or("provider")
             ));
         }
         String::from_utf8(bytes).map_err(|_| "provider returned non-UTF-8 names".into())

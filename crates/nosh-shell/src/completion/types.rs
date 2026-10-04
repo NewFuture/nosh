@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const MAX_INPUT: usize = 256 * 1024;
-pub(crate) const MAX_WORD: usize = 8 * 1024;
+pub(crate) use crate::input_assist::{MAX_FRAME, MAX_INPUT, MAX_WORD};
+
 pub(crate) const MAX_SET: usize = 16_384;
 pub(crate) const MAX_SET_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_RESULTS: usize = 256;
 pub(crate) const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT: usize = 4 * 1024 * 1024;
-pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Registry {
