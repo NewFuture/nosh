@@ -103,9 +103,7 @@ pub(super) fn generate(
             snapshot.context.cwd,
             prefix
         );
-        let set = if let Some(set) = cache.get(&key, Duration::from_secs(1)) {
-            set
-        } else {
+        let set = cache.load(key, Duration::from_secs(1), || {
             let mut args = prefix.clone();
             args.push("--list-cmds=main,others,nohelpers,alias".into());
             let data = output(
@@ -115,20 +113,8 @@ pub(super) fn generate(
                 &snapshot.context.cwd,
                 MAX_SET_BYTES,
             )?;
-            let mut entries: Vec<_> = data
-                .lines()
-                .map(|value| Entry {
-                    value: value.into(),
-                    kind: Kind::Subcommand,
-                    description: None,
-                })
-                .collect();
-            entries.sort_by(|left, right| left.value.cmp(&right.value));
-            entries.dedup_by(|left, right| left.value == right.value);
-            let reason = (entries.len() > MAX_SET).then(|| "Git command limit reached".into());
-            entries.truncate(MAX_SET);
-            cache.insert(key, Set { entries, reason })
-        };
+            Ok(Set::lines(data.lines(), Kind::Subcommand, None))
+        })?;
         return Ok(native::select(
             query,
             context,
@@ -226,9 +212,7 @@ pub(super) fn generate(
         snapshot.context.cwd,
         prefix
     );
-    let set = if let Some(set) = cache.get(&key, Duration::from_secs(1)) {
-        set
-    } else {
+    let set = cache.load(key, Duration::from_secs(1), || {
         let mut args = prefix;
         args.extend(["for-each-ref".into(), "--format=%(refname:strip=2)".into()]);
         if remote {
@@ -246,27 +230,12 @@ pub(super) fn generate(
             &snapshot.context.cwd,
             MAX_SET_BYTES,
         )?;
-        let mut values: Vec<_> = data
-            .lines()
-            .filter(|name| !name.ends_with("/HEAD"))
-            .map(|name| Entry {
-                value: name.into(),
-                kind: Kind::Branch,
-                description: Some("Git ref".into()),
-            })
-            .collect();
-        values.sort_by(|left, right| left.value.cmp(&right.value));
-        values.dedup_by(|left, right| left.value == right.value);
-        let reason = (values.len() > MAX_SET).then(|| "Git ref limit reached".into());
-        values.truncate(MAX_SET);
-        cache.insert(
-            key,
-            Set {
-                entries: values,
-                reason,
-            },
-        )
-    };
+        Ok(Set::lines(
+            data.lines().filter(|name| !name.ends_with("/HEAD")),
+            Kind::Branch,
+            Some("Git ref"),
+        ))
+    })?;
     Ok(native::select(
         query,
         context,

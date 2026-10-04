@@ -131,11 +131,9 @@ pub(super) fn generate(
         files.extend(extra.split_whitespace().map(PathBuf::from));
     }
     let key = format!("make-targets\0{:?}\0{:?}\0{:?}", cwd, files, includes);
-    let set = if let Some(set) = cache.get(&key, Duration::from_secs(1)) {
-        set
-    } else {
-        cache.insert(key, targets(&cwd, &files, &includes))
-    };
+    let set = cache.load(key, Duration::from_secs(1), || {
+        Ok(targets(&cwd, &files, &includes))
+    })?;
     Ok(native::select(
         query,
         context,

@@ -44,9 +44,53 @@ fn completion_context_uses_active_command_and_byte_ranges() {
     request.cursor = "echo 中; git switch fe".len();
     let context = Context::parse(&request, &snapshot.native).unwrap();
     assert_eq!(context.command.as_deref(), Some("git"));
-    assert_eq!(context.words, ["git", "switch", "fe", "tail"]);
+    assert_eq!(context.words.as_ref(), ["git", "switch", "fe", "tail"]);
     assert_eq!(context.index, 2);
     assert_eq!(&request.text[context.span], "fe");
+}
+
+#[test]
+fn shared_words_keep_empty_mid_line_tokens_and_share_immutable_buffers() {
+    let (_, _, snapshot) = fixture();
+    let mut request = query("sample first   tail");
+    request.cursor = "sample first ".len();
+    assert!(Arc::ptr_eq(&request.text, &request.clone().text));
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    assert!(Arc::ptr_eq(&context.words, &context.clone().words));
+    let words = context.script_words(&request, &snapshot.native).unwrap();
+    assert_eq!(words.values, ["sample", "first", "", "tail"]);
+    assert_eq!(words.starts, [0, 7, 13, 15]);
+    assert_eq!(words.index, 2);
+    assert_eq!(words.span, 13..13);
+}
+
+#[test]
+fn long_unicode_command_chains_keep_byte_ranges_within_the_lookup_budget() {
+    let (_, _, snapshot) = fixture();
+    let text = format!("{}git switch fe", "echo 中; ".repeat(8192));
+    let request = query(&text);
+    let started = std::time::Instant::now();
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(context.command.as_deref(), Some("git"));
+    assert_eq!(&text[context.span], "fe");
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+    println!("completion context8192={elapsed:?}");
+}
+
+#[test]
+fn provider_collection_budgets_remain_partial_after_deduplication() {
+    let set =
+        super::cache::Set::lines(std::iter::repeat_n("same", MAX_SET + 1), Kind::Branch, None);
+    assert_eq!(set.entries.len(), 1);
+    assert!(set.reason.is_some());
+    let long = "x".repeat(MAX_SET_BYTES);
+    let set = super::cache::Set::lines(std::iter::once(long.as_str()), Kind::Branch, None);
+    assert!(set.entries.is_empty());
+    assert!(set.reason.is_some());
 }
 
 #[test]
@@ -188,6 +232,41 @@ fn package_fixture() -> (tempfile::TempDir, Snapshot) {
     }
     Arc::make_mut(&mut snapshot.native).context.path = Some(bin.display().to_string());
     (directory, snapshot)
+}
+
+#[test]
+fn scoped_path_overrides_ignore_stale_command_hashes_for_all_native_sources() {
+    let (directory, mut snapshot) = package_fixture();
+    let old = directory.path().join("bin").join("npm");
+    Arc::make_mut(&mut snapshot.native)
+        .context
+        .hashed_commands
+        .insert("npm".into(), old);
+    let empty = directory.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    fs::write(
+        directory.path().join("package.json"),
+        r#"{"scripts":{"build":"compile"}}"#,
+    )
+    .unwrap();
+    let mut server = Server::default();
+    let result = answer(
+        &mut server,
+        query(&format!("PATH={} npm run b", empty.display())),
+        snapshot.clone(),
+    );
+    assert!(matches!(result.state, State::Failed(_)));
+    let commands = answer(
+        &mut server,
+        query(&format!("PATH={} np", empty.display())),
+        snapshot,
+    );
+    assert!(
+        commands
+            .candidates
+            .iter()
+            .all(|candidate| candidate.value != "npm")
+    );
 }
 
 #[test]

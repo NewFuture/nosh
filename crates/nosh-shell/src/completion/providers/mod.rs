@@ -75,28 +75,7 @@ fn version(
 
 fn program(context: &Context, snapshot: &NativeSnapshot) -> Result<PathBuf, String> {
     let name = context.command.as_deref().ok_or("missing command")?;
-    if name.contains('/') {
-        let path = snapshot.context.cwd.join(name);
-        return crate::backend::is_executable(&path)
-            .then_some(path)
-            .ok_or_else(|| "provider command is not executable".into());
-    }
-    if context.path == snapshot.context.path
-        && let Some(path) = snapshot.context.hashed_commands.get(name)
-    {
-        let path = snapshot.context.cwd.join(path);
-        return crate::backend::is_executable(&path)
-            .then_some(path)
-            .ok_or_else(|| "hashed provider command is not executable".into());
-    }
-    context
-        .path
-        .as_deref()
-        .into_iter()
-        .flat_map(|path| path.split(':'))
-        .take(128)
-        .map(|directory| snapshot.context.cwd.join(directory).join(name))
-        .find(|path| crate::backend::is_executable(path))
+    super::native::resolve(snapshot, context, name)?
         .ok_or_else(|| "provider command was not found in the current PATH".into())
 }
 

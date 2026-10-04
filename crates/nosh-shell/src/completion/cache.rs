@@ -19,6 +19,32 @@ pub(crate) struct Set {
 }
 
 impl Set {
+    pub fn lines<'a>(
+        values: impl Iterator<Item = &'a str>,
+        kind: Kind,
+        description: Option<&str>,
+    ) -> Self {
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        let mut reason = None;
+        for value in values {
+            let size = value.len() + description.map_or(0, str::len) + 96;
+            if entries.len() >= MAX_SET || bytes + size > MAX_SET_BYTES {
+                reason = Some("provider collection limit reached".into());
+                break;
+            }
+            bytes += size;
+            entries.push(Entry {
+                value: value.into(),
+                kind,
+                description: description.map(str::to_owned),
+            });
+        }
+        entries.sort_by(|left, right| left.value.cmp(&right.value));
+        entries.dedup_by(|left, right| left.value == right.value);
+        Self { entries, reason }
+    }
+
     pub fn bytes(&self) -> usize {
         self.entries
             .iter()
@@ -34,6 +60,18 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
+    pub fn load(
+        &mut self,
+        key: String,
+        ttl: Duration,
+        build: impl FnOnce() -> Result<Set, String>,
+    ) -> Result<Arc<Set>, String> {
+        if let Some(set) = self.get(&key, ttl) {
+            return Ok(set);
+        }
+        Ok(self.insert(key, build()?))
+    }
+
     pub fn get(&mut self, key: &str, ttl: Duration) -> Option<Arc<Set>> {
         let position = self
             .items

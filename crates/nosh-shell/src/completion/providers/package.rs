@@ -153,11 +153,7 @@ pub(super) fn generate(
         .ok_or("no package.json found within 32 ancestor directories")??;
     let shortcut = !npm && !explicit_run;
     let key = format!("package-scripts\0{}\0{shortcut}", manifest.display());
-    let set = if let Some(set) = cache.get(&key, Duration::from_secs(1)) {
-        set
-    } else {
-        cache.insert(key, read(&manifest, shortcut)?)
-    };
+    let set = cache.load(key, Duration::from_secs(1), || read(&manifest, shortcut))?;
     Ok(native::select(query, context, &set, source, false, false))
 }
 

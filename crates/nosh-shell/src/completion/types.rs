@@ -113,7 +113,7 @@ pub(crate) enum Trigger {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Query {
-    pub text: String,
+    pub text: Arc<str>,
     pub cursor: usize,
     pub session: u64,
     pub epoch: u64,
@@ -122,7 +122,7 @@ pub(crate) struct Query {
 
 impl Query {
     pub fn matches(&self, text: &str, cursor: usize) -> bool {
-        self.cursor == cursor && self.text == text
+        self.cursor == cursor && self.text.as_ref() == text
     }
 }
 
@@ -153,6 +153,12 @@ pub(crate) enum Kind {
     Abbreviation,
 }
 
+impl Kind {
+    pub fn is_path(self) -> bool {
+        matches!(self, Self::File | Self::Directory)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Candidate {
     pub source: Source,
@@ -160,7 +166,6 @@ pub(crate) struct Candidate {
     pub kind: Kind,
     pub description: Option<String>,
     pub span: Range<usize>,
-    pub filenames: bool,
     pub noquote: bool,
     pub nospace: bool,
     pub matches: Vec<usize>,
@@ -168,10 +173,6 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
-    pub fn identity(&self) -> String {
-        format!("{:?}\0{:?}\0{}", self.source, self.kind, self.value)
-    }
-
     pub fn bytes(&self) -> usize {
         self.value.len()
             + self.description.as_ref().map_or(0, String::len)
@@ -254,7 +255,6 @@ mod tests {
                 kind: Kind::File,
                 description: None,
                 span: 1..4,
-                filenames: true,
                 noquote: false,
                 nospace: false,
                 matches: Vec::new(),

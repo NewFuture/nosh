@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use brush_core::completion::{CompleteAction, CompletionToken};
+use brush_core::completion::CompleteAction;
 use brush_core::{CommandArg, ExecutionContext, ExecutionResult};
 
 use super::cache::{Cache, Entry, Set};
@@ -282,46 +282,18 @@ impl Server {
         loaded: &mut bool,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
     ) -> Result<Answer, String> {
-        let raw = context.script_tokens(query, snapshot);
-        let mut words: Vec<_> = raw
-            .iter()
-            .map(|token| brush_parser::unquote_str(token.text))
-            .collect();
-        let cursor = query.cursor - context.command_start;
-        let index = raw
-            .iter()
-            .position(|token| token.start <= cursor && cursor <= token.end())
-            .unwrap_or_else(|| raw.iter().take_while(|token| token.end() < cursor).count());
-        let current = raw
-            .get(index)
-            .filter(|token| token.start <= cursor && cursor <= token.end());
-        let start = current.map_or(cursor, |token| token.start);
-        let end = current.map_or(cursor, |token| token.end());
-        let token = query
-            .text
-            .get(context.command_start + start..query.cursor)
-            .ok_or("invalid script completion span")?;
-        let token = brush_parser::unquote_str(token);
-        if current.is_none() {
-            words.insert(index, String::new());
-        }
-        let tokens: Vec<_> = words
-            .iter()
-            .enumerate()
-            .map(|(index, text)| CompletionToken {
-                text,
-                start: raw.get(index).map_or(cursor, |token| token.start),
-            })
-            .collect();
+        let words = context.script_words(query, snapshot)?;
+        let tokens = words.tokens();
         let refs: Vec<_> = tokens.iter().collect();
         let request = brush_core::completion::Context {
-            token_to_complete: &token,
+            token_to_complete: &words.word,
             command_name: context.command.as_deref(),
-            preceding_token: index
+            preceding_token: words
+                .index
                 .checked_sub(1)
-                .and_then(|index| words.get(index))
+                .and_then(|index| words.values.get(index))
                 .map(String::as_str),
-            token_index: index,
+            token_index: words.index,
             input_line: &query.text,
             cursor_index: query.cursor,
             tokens: &refs,
@@ -418,8 +390,7 @@ impl Server {
                     value,
                     kind,
                     description: None,
-                    span: context.command_start + start..context.command_start + end,
-                    filenames: options.treat_as_filenames,
+                    span: words.span.clone(),
                     noquote: options.no_autoquote_filenames,
                     nospace: options.no_trailing_space_at_end_of_line || kind == Kind::Directory,
                     matches: Vec::new(),

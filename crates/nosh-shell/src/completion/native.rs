@@ -24,7 +24,6 @@ pub(crate) fn candidate(
         kind: entry.kind,
         description: entry.description.clone(),
         span: context.span.clone(),
-        filenames: matches!(entry.kind, Kind::File | Kind::Directory),
         noquote: false,
         nospace: entry.kind == Kind::Directory
             || (entry.kind == Kind::Option && entry.value.ends_with('=')),
@@ -242,7 +241,6 @@ fn abbreviations(answer: &mut Answer, context: &Context, snapshot: &NativeSnapsh
             kind: Kind::Abbreviation,
             description: Some(format!("{} [{}]", definition.expansion, definition.source)),
             span: context.span.clone(),
-            filenames: false,
             noquote: true,
             nospace: definition.expansion.ends_with(char::is_whitespace),
             matches: matching::rank(name, &context.word, false, false)
@@ -250,12 +248,12 @@ fn abbreviations(answer: &mut Answer, context: &Context, snapshot: &NativeSnapsh
             display: Some(name.clone()),
         });
     }
-    answer.candidates.sort_by_key(|candidate| {
+    answer.candidates.sort_by_cached_key(|candidate| {
         let name = candidate.display.as_deref().unwrap_or(&candidate.value);
         (
             matching::rank(name, &context.word, true, false).map(|(score, _)| score),
             name.to_owned(),
-            candidate.identity(),
+            matches!(candidate.source, Source::Command),
         )
     });
     if answer.candidates.len() > MAX_RESULTS {
@@ -269,20 +267,39 @@ pub(crate) fn executable(
     context: &Context,
     name: &str,
 ) -> Result<bool, String> {
+    Ok(known(snapshot, name).is_some() || resolve(snapshot, context, name)?.is_some())
+}
+
+pub(super) fn resolve(
+    snapshot: &NativeSnapshot,
+    context: &Context,
+    name: &str,
+) -> Result<Option<PathBuf>, String> {
     use std::os::unix::ffi::OsStrExt;
-    if known(snapshot, name).is_some() {
-        return Ok(true);
-    }
-    let mut paths = Vec::new();
-    if let Some(path) = snapshot.context.hashed_commands.get(name) {
-        paths.push(snapshot.context.cwd.join(path));
-    } else if let Some(path) = &context.path {
-        paths.extend(
-            path.split(':')
+    let fixed = if name.contains('/') {
+        Some(Path::new(name))
+    } else if context.path == snapshot.context.path {
+        snapshot
+            .context
+            .hashed_commands
+            .get(name)
+            .map(PathBuf::as_path)
+    } else {
+        None
+    };
+    let paths = fixed
+        .into_iter()
+        .map(|path| snapshot.context.cwd.join(path))
+        .chain(
+            context
+                .path
+                .as_deref()
+                .filter(|_| fixed.is_none())
+                .into_iter()
+                .flat_map(|path| path.split(':'))
                 .take(128)
                 .map(|directory| snapshot.context.cwd.join(directory).join(name)),
         );
-    }
     for path in paths {
         match fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => {
@@ -290,7 +307,7 @@ pub(crate) fn executable(
                     .map_err(|error| error.to_string())?;
                 // SAFETY: the path is NUL-terminated and access only queries this candidate.
                 if unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0 {
-                    return Ok(true);
+                    return Ok(Some(path));
                 }
                 let error = std::io::Error::last_os_error();
                 if !matches!(
@@ -309,7 +326,7 @@ pub(crate) fn executable(
             Err(error) => return Err(error.to_string()),
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub(crate) fn commands(
@@ -401,7 +418,12 @@ pub(crate) fn commands(
             }
         }
     }
-    for name in snapshot.context.hashed_commands.keys() {
+    for name in snapshot
+        .context
+        .hashed_commands
+        .keys()
+        .filter(|_| context.path == snapshot.context.path)
+    {
         if !entries.iter().any(|entry| &entry.value == name)
             && matching::rank(name, &context.word, true, false).is_some()
         {

@@ -225,16 +225,14 @@ struct Failure {
 #[derive(Default)]
 struct Slot {
     worker: Option<Worker>,
-    request: Option<(Query, Instant)>,
+    query: Option<Query>,
     pending: Option<(Query, Instant)>,
     installed: u64,
     installed_script: bool,
     failures: [Failure; 2],
     executing_script: bool,
-    last_query: Option<Query>,
     waiting_epoch: u64,
-    cleanup_failed: bool,
-    cleanup_error: Option<String>,
+    fault: Option<String>,
 }
 
 fn short_error(error: impl std::fmt::Display) -> String {
@@ -244,22 +242,21 @@ fn short_error(error: impl std::fmt::Display) -> String {
 impl Slot {
     fn cleanup_failure(&mut self, shared: &Shared, error: impl std::fmt::Display) {
         let message = short_error(error);
-        if !self.cleanup_failed {
+        if self.fault.is_none() {
             let failure = &mut self.failures[usize::from(self.executing_script)];
             failure.count = failure.count.saturating_add(1);
             failure.session = shared.session.load(Ordering::Acquire);
-            self.cleanup_failed = true;
         }
-        if self.cleanup_error.as_ref() == Some(&message) {
+        if self.fault.as_ref() == Some(&message) {
             return;
         }
         eprintln!("nosh completion cleanup: {message}");
-        self.cleanup_error = Some(message.clone());
+        self.fault = Some(message.clone());
         let query = self
             .pending
             .as_ref()
             .map(|(query, _)| query)
-            .or(self.last_query.as_ref());
+            .or(self.query.as_ref());
         if let Some(query) = query {
             shared.publish(Answer::failed(
                 query.clone(),
@@ -269,7 +266,6 @@ impl Slot {
     }
 
     fn stop(&mut self, shared: &Shared) {
-        self.request = None;
         if let Some(worker) = &mut self.worker
             && !worker.stopping
             && let Err(error) = worker.stop()
@@ -287,8 +283,7 @@ impl Slot {
                     self.worker = None;
                     self.installed = 0;
                     self.installed_script = false;
-                    self.cleanup_failed = false;
-                    self.cleanup_error = None;
+                    self.fault = None;
                     if let Ok(mut child) = shared.child.lock() {
                         *child = None;
                     }
@@ -304,9 +299,10 @@ fn fail(shared: &Shared, slot: &mut Slot, query: Query, error: impl std::fmt::Di
     let failure = &mut slot.failures[usize::from(slot.executing_script)];
     failure.count = failure.count.saturating_add(1);
     failure.session = query.session;
-    slot.cleanup_failed = true;
-    slot.last_query = Some(query.clone());
-    shared.publish(Answer::failed(query, short_error(error)));
+    let message = short_error(error);
+    slot.fault = Some(message.clone());
+    slot.query = Some(query.clone());
+    shared.publish(Answer::failed(query, message));
     slot.stop(shared);
 }
 
@@ -321,11 +317,10 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
     }
     let script = super::context::Context::parse(&query, &snapshot.native)
         .is_ok_and(|context| context.needs_execution(&snapshot.native));
-    if slot.request.is_some()
-        || slot
-            .worker
-            .as_ref()
-            .is_some_and(|worker| worker.busy && !worker.stopping)
+    if slot
+        .worker
+        .as_ref()
+        .is_some_and(|worker| worker.busy && !worker.stopping)
     {
         return;
     }
@@ -335,14 +330,14 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
         } else {
             crate::input_assist::LOOKUP_TIMEOUT
         };
-        if slot.waiting_epoch != query.epoch && (slot.cleanup_failed || item.1.elapsed() >= grace) {
+        if slot.waiting_epoch != query.epoch && (slot.fault.is_some() || item.1.elapsed() >= grace)
+        {
             slot.waiting_epoch = query.epoch;
-            if slot.cleanup_failed {
-                let message = slot.cleanup_error.as_ref().map_or_else(
-                    || "previous completion task has not been reaped".into(),
-                    |error| format!("previous completion task has not been reaped: {error}"),
-                );
-                shared.publish(Answer::unavailable(query, message));
+            if let Some(error) = &slot.fault {
+                shared.publish(Answer::unavailable(
+                    query,
+                    format!("previous completion task has not been reaped: {error}"),
+                ));
             } else {
                 slot.cleanup_failure(shared, "previous completion task has not been reaped");
             }
@@ -353,9 +348,7 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
     {
         return;
     }
-    let Some(item) = slot.pending.take() else {
-        return;
-    };
+    slot.pending = None;
     slot.executing_script = script;
     let failure = &mut slot.failures[usize::from(script)];
     if query.trigger == Trigger::Refresh && (failure.count >= 2 || failure.session == query.session)
@@ -380,8 +373,7 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
                 shared.spawns.fetch_add(1, Ordering::Relaxed);
                 slot.worker = Some(worker);
                 slot.installed = 0;
-                slot.cleanup_failed = false;
-                slot.cleanup_error = None;
+                slot.fault = None;
                 if let Ok(mut child) = shared.child.lock() {
                     *child = slot.worker.as_ref().map(Worker::handle);
                 } else {
@@ -425,9 +417,8 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
             }
             slot.installed = query.session;
             slot.installed_script |= script;
-            slot.last_query = Some(query);
+            slot.query = Some(query);
             slot.waiting_epoch = 0;
-            slot.request = Some(item);
         }
         Err(error) => fail(shared, slot, query, error),
     }
@@ -437,77 +428,72 @@ fn poll(shared: &Shared, slot: &mut Slot, snapshot: &mut Option<Snapshot>) {
     let Some(worker) = &mut slot.worker else {
         return;
     };
-    if worker.stopping {
+    if worker.stopping || !worker.busy {
         return;
     }
-    let Some((query, _)) = slot.request.clone() else {
+    let Some(query) = slot.query.clone() else {
         return;
     };
-    match worker.poll() {
-        Ok(Some(Response::Completion(Outcome::Progress { answer, .. }))) => {
-            if answer.query != query {
-                fail(shared, slot, query, "completion progress version mismatch");
-            } else if let Err(error) = answer.validate() {
-                fail(shared, slot, query, error);
-            } else if !matches!(answer.state, State::Partial(_)) {
-                fail(shared, slot, query, "non-partial completion progress");
-            } else {
-                shared.publish_with(answer, true);
-            }
+    let (answer, updated, ongoing) = match worker.poll() {
+        Ok(Some(Response::Completion(Outcome::Progress { answer, .. }))) => (answer, None, true),
+        Ok(Some(Response::Completion(Outcome::Ready { answer, snapshot }))) => {
+            (answer, snapshot, false)
         }
-        Ok(Some(Response::Completion(Outcome::Ready {
-            answer,
-            snapshot: updated,
-        }))) => {
-            slot.request = None;
-            if answer.query != query {
-                fail(shared, slot, query, "completion reply version mismatch");
-                return;
-            }
-            if !shared.current(&query) {
-                slot.stop(shared);
-                return;
-            }
-            if let State::Failed(message) | State::Unavailable(message) = &answer.state {
+        Ok(None) => return,
+        other => {
+            let message = match other {
+                Ok(Some(Response::Failed(error))) => error,
+                Err(error) => error.to_string(),
+                _ => "unexpected completion worker reply".into(),
+            };
+            fail(shared, slot, query, message);
+            return;
+        }
+    };
+    let invalid = if answer.query != query {
+        Some("completion reply version mismatch")
+    } else if ongoing && !matches!(answer.state, State::Partial(_)) {
+        Some("non-partial completion progress")
+    } else {
+        answer.validate().err()
+    };
+    if let Some(error) = invalid {
+        fail(shared, slot, query, error);
+        return;
+    }
+    if !shared.current(&query) {
+        slot.stop(shared);
+        return;
+    }
+    if let State::Failed(message) | State::Unavailable(message) = &answer.state {
+        fail(shared, slot, query, message);
+        return;
+    }
+    if !ongoing {
+        match worker.residual_children() {
+            Ok(children) if children.is_empty() => {}
+            other => {
+                let message = match other {
+                    Err(error) => error.to_string(),
+                    _ => {
+                        "provider left background processes; provider paused during cleanup".into()
+                    }
+                };
                 fail(shared, slot, query, message);
                 return;
             }
-            if let Err(error) = answer.validate() {
-                fail(shared, slot, query, error);
-                return;
-            }
-            match worker.residual_children() {
-                Ok(children) if !children.is_empty() => {
-                    fail(
-                        shared,
-                        slot,
-                        query,
-                        "provider left background processes; provider paused during cleanup",
-                    );
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    fail(shared, slot, query, error);
-                    return;
-                }
-            }
-            if let Some(updated) = updated {
-                if let Err(error) = updated.validate() {
-                    fail(shared, slot, query, error);
-                    return;
-                }
-                if shared.current(&query) {
-                    *snapshot = Some(updated);
-                }
-            }
-            shared.publish(answer);
         }
-        Ok(Some(Response::Failed(error))) => fail(shared, slot, query, error),
-        Ok(Some(_)) => fail(shared, slot, query, "unexpected completion worker reply"),
-        Ok(None) => {}
-        Err(error) => fail(shared, slot, query, error),
     }
+    if let Some(updated) = updated {
+        if let Err(error) = updated.validate() {
+            fail(shared, slot, query, error);
+            return;
+        }
+        if shared.current(&query) {
+            *snapshot = Some(updated);
+        }
+    }
+    shared.publish_with(answer, ongoing);
 }
 
 fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
@@ -542,10 +528,11 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
         if stopped {
             slot.pending = None;
             slot.stop(&shared);
-        } else if slot
-            .request
-            .as_ref()
-            .is_some_and(|(query, _)| !shared.current(query))
+        } else if slot.worker.as_ref().is_some_and(|worker| worker.busy)
+            && slot
+                .query
+                .as_ref()
+                .is_some_and(|query| !shared.current(query))
         {
             // Cancelled scripts may contain half-restored mutable shell state.
             slot.stop(&shared);
@@ -570,10 +557,10 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
             return;
         }
         let retiring = slot.worker.as_ref().is_some_and(|worker| worker.stopping);
-        let mut interval = if slot.request.is_some() {
-            Duration::from_millis(8)
-        } else if retiring {
+        let mut interval = if retiring {
             Duration::from_millis(100)
+        } else if slot.worker.as_ref().is_some_and(|worker| worker.busy) {
+            Duration::from_millis(8)
         } else {
             Duration::from_secs(1)
         };
@@ -1018,7 +1005,7 @@ mod tests {
         });
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(slot.pending.is_none());
-        assert_eq!(slot.request.as_ref().unwrap().0, query);
+        assert_eq!(slot.query.as_ref().unwrap(), &query);
         assert!(!Arc::ptr_eq(
             &original,
             &slot.worker.as_ref().unwrap().handle()

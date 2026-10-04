@@ -42,7 +42,7 @@ pub struct Completion {
     current: Option<Query>,
     serial: u64,
     values: Suggestions,
-    answer: Option<Arc<Answer>>,
+    selections: Vec<(usize, AbbreviationSelection)>,
     explicit: bool,
     automatic: bool,
 }
@@ -78,7 +78,8 @@ fn insert(candidate: &Candidate, query: &Query) -> String {
 }
 
 fn insert_in_quote(candidate: &Candidate, query: &Query, quote: Option<char>) -> String {
-    if candidate.noquote || (!candidate.filenames && matches!(candidate.source, Source::Script(_)))
+    if candidate.noquote
+        || (!candidate.kind.is_path() && matches!(candidate.source, Source::Script(_)))
     {
         return candidate.value.clone();
     }
@@ -115,6 +116,18 @@ fn insert_in_quote(candidate: &Candidate, query: &Query, quote: Option<char>) ->
 
 fn display_text(text: &str, matches: &[usize], limit: usize) -> (String, Vec<usize>) {
     display_text_limited(text, matches, limit, 4096)
+}
+
+fn description(text: &str) -> &str {
+    match text {
+        "alias" => tr!("别名", "alias"),
+        "function" => tr!("函数", "function"),
+        "builtin" => tr!("内建命令", "builtin"),
+        "executable" => tr!("外部命令", "executable"),
+        "hashed executable" => tr!("已索引外部命令", "hashed executable"),
+        "static Make target" => tr!("静态 Make 目标", "static Make target"),
+        _ => text,
+    }
 }
 
 fn display_text_limited(
@@ -173,22 +186,6 @@ fn identity(candidate: &Candidate, scope: u64) -> String {
     )
 }
 
-fn display_bytes(suggestion: &Suggestion) -> usize {
-    std::mem::size_of::<Suggestion>()
-        + suggestion
-            .display_override
-            .as_ref()
-            .map_or(0, String::capacity)
-        + suggestion.description.as_ref().map_or(0, String::capacity)
-        + suggestion
-            .completion_id
-            .as_ref()
-            .map_or(0, String::capacity)
-        + suggestion.match_indices.as_ref().map_or(0, |matches| {
-            matches.capacity() * std::mem::size_of::<usize>()
-        })
-}
-
 fn common_prefix(query: &Query, values: &[Suggestion]) -> Partial {
     let unchanged = Partial {
         span: Span {
@@ -241,13 +238,12 @@ fn suggestions(answer: &Answer) -> Suggestions {
     let mut scopes = HashMap::new();
     let count = answer.candidates.len().min(MAX_RESULTS);
     let fixed = count * (std::mem::size_of::<Suggestion>() + 128) + 256;
-    let mut budget = DISPLAY_GENERATION_BYTES.saturating_sub(fixed);
+    let share = DISPLAY_GENERATION_BYTES.saturating_sub(fixed) / count.max(1);
     answer
         .candidates
         .iter()
         .take(count)
-        .enumerate()
-        .map(|(index, candidate)| {
+        .map(|candidate| {
             let scope = scopes
                 .entry((candidate.span.start, candidate.span.end))
                 .or_insert_with(|| {
@@ -263,7 +259,6 @@ fn suggestions(answer: &Answer) -> Suggestions {
             let (scope, quote) = *scope;
             let mut completion_id = identity(candidate, scope);
             completion_id.shrink_to_fit();
-            let share = budget / (count - index);
             let available = share.saturating_sub(completion_id.capacity());
             let reserve = if candidate.description.is_some() {
                 128.min(available / 4)
@@ -286,20 +281,9 @@ fn suggestions(answer: &Answer) -> Suggestions {
             let remaining = available.saturating_sub(
                 display.capacity() + matches.capacity() * std::mem::size_of::<usize>(),
             );
-            let description =
-                candidate
-                    .description
-                    .as_deref()
-                    .map(|description| match description {
-                        "alias" => display_text_limited(tr!("别名", "alias"), &[], 240, remaining).0,
-                        "function" => display_text_limited(tr!("函数", "function"), &[], 240, remaining).0,
-                        "builtin" => display_text_limited(tr!("内建命令", "builtin"), &[], 240, remaining).0,
-                        "executable" => display_text_limited(tr!("外部命令", "executable"), &[], 240, remaining).0,
-                        "hashed executable" => display_text_limited(tr!("已索引外部命令", "hashed executable"), &[], 240, remaining).0,
-                        "static Make target" => display_text_limited(tr!("静态 Make 目标", "static Make target"), &[], 240, remaining).0,
-                        _ => display_text_limited(description, &[], 240, remaining).0,
-                    });
-            let suggestion = Suggestion {
+            let description = candidate.description.as_deref()
+                .map(|text| display_text_limited(description(text), &[], 240, remaining).0);
+            Suggestion {
                 completion_id: Some(completion_id),
                 value: insert_in_quote(candidate, &answer.query, quote),
                 display_override: Some(display),
@@ -314,11 +298,7 @@ fn suggestions(answer: &Answer) -> Suggestions {
                 style: (candidate.kind == Kind::Directory)
                     .then(|| nu_ansi_term::Color::Green.normal()),
                 ..Suggestion::default()
-            };
-            budget = budget.saturating_sub(
-                display_bytes(&suggestion) - std::mem::size_of::<Suggestion>(),
-            );
-            suggestion
+            }
         })
         .collect()
 }
@@ -336,7 +316,7 @@ impl Completion {
             current: None,
             serial: 0,
             values: Vec::<Suggestion>::new().into(),
-            answer: None,
+            selections: Vec::new(),
             explicit: false,
             automatic: false,
         }
@@ -355,7 +335,7 @@ impl Completion {
     fn status(&self, query: &Query, phase: Phase, error: Option<String>, count: usize) {
         if let Ok(mut state) = self.state.try_lock() {
             *state = Some(crate::status::Completion {
-                input: query.text.clone(),
+                input: query.text.to_string(),
                 cursor: query.cursor,
                 error,
                 count,
@@ -366,16 +346,25 @@ impl Completion {
 
     fn update_values(&mut self, answer: Arc<Answer>) {
         self.values = suggestions(&answer);
-        self.answer = Some(answer);
+        self.selections = answer
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| match &candidate.source {
+                Source::Abbreviation { name, revision } => Some((
+                    index,
+                    AbbreviationSelection {
+                        name: name.clone(),
+                        revision: *revision,
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
     }
 
     fn partial(&self, query: &Query) -> Partial {
-        if self.answer.as_ref().is_some_and(|answer| {
-            answer
-                .candidates
-                .iter()
-                .any(|candidate| matches!(candidate.source, Source::Abbreviation { .. }))
-        }) {
+        if !self.selections.is_empty() {
             Partial {
                 span: Span::new(query.cursor, query.cursor),
                 insert: String::new(),
@@ -396,19 +385,17 @@ impl Completer for Completion {
                     .iter()
                     .position(|value| value.completion_id.as_ref() == Some(id))
             })
-            .and_then(|index| self.answer.as_ref()?.candidates.get(index));
-        let Some(Candidate {
-            source: Source::Abbreviation { name, revision },
-            ..
-        }) = selection
-        else {
+            .and_then(|index| {
+                self.selections
+                    .iter()
+                    .find(|(position, _)| *position == index)
+            })
+            .map(|(_, selection)| selection);
+        let Some(selection) = selection else {
             return CompletionAcceptance::Continue;
         };
         if let Some(observer) = &self.config.selection_observer {
-            observer(&Selection::Abbreviation(AbbreviationSelection {
-                name: name.clone(),
-                revision: *revision,
-            }));
+            observer(&Selection::Abbreviation(selection.clone()));
         }
         CompletionAcceptance::SuppressAbbreviationExpansion
     }
@@ -475,25 +462,22 @@ impl Completer for Completion {
             self.update_values(answer.clone());
             self.serial = serial;
         }
-        match &answer.state {
-            State::Complete => {
-                self.status(query, Phase::Complete, None, self.values.len());
-                CompletionResult::fresh(self.values.clone()).with_partial(Some(self.partial(query)))
-            }
-            State::Partial(message) => {
-                self.status(
-                    query,
-                    if ongoing && self.values.is_empty() {
-                        Phase::Pending
-                    } else {
-                        Phase::Partial
-                    },
-                    None,
-                    self.values.len(),
-                );
+        let querying = ongoing && self.values.is_empty();
+        let (phase, result) = match &answer.state {
+            State::Complete => (
+                Phase::Complete,
+                CompletionResult::fresh(self.values.clone())
+                    .with_partial(Some(self.partial(query))),
+            ),
+            State::Partial(message) => (
+                if querying {
+                    Phase::Pending
+                } else {
+                    Phase::Partial
+                },
                 CompletionResult::Limited {
                     suggestions: self.values.clone(),
-                    message: if ongoing && self.values.is_empty() {
+                    message: if querying {
                         display_text(message, &[], 240).0
                     } else {
                         format!(
@@ -502,8 +486,8 @@ impl Completer for Completion {
                             display_text(message, &[], 220).0,
                         )
                     },
-                }
-            }
+                },
+            ),
 
             State::Failed(message) | State::Unavailable(message) => {
                 let message = format!(
@@ -511,10 +495,23 @@ impl Completer for Completion {
                     tr!("补全暂不可用", "Completion unavailable"),
                     display_text(message, &[], 240).0
                 );
-                self.status(query, Phase::Unavailable, Some(message.clone()), 0);
-                CompletionResult::Unavailable { message }
+                (
+                    Phase::Unavailable,
+                    CompletionResult::Unavailable { message },
+                )
             }
-        }
+        };
+        let error = match &result {
+            CompletionResult::Unavailable { message } => Some(message.clone()),
+            _ => None,
+        };
+        let count = if error.is_some() {
+            0
+        } else {
+            self.values.len()
+        };
+        self.status(query, phase, error, count);
+        result
     }
 
     fn poll_completion(&mut self) -> CompletionStatus {
@@ -539,6 +536,22 @@ mod tests {
     use super::*;
     use crate::{EmbeddedShell, ShellOptions};
 
+    fn display_bytes(suggestion: &Suggestion) -> usize {
+        std::mem::size_of::<Suggestion>()
+            + suggestion
+                .display_override
+                .as_ref()
+                .map_or(0, String::capacity)
+            + suggestion.description.as_ref().map_or(0, String::capacity)
+            + suggestion
+                .completion_id
+                .as_ref()
+                .map_or(0, String::capacity)
+            + suggestion.match_indices.as_ref().map_or(0, |matches| {
+                matches.capacity() * std::mem::size_of::<usize>()
+            })
+    }
+
     fn query(text: &str, cursor: usize) -> Query {
         Query {
             text: text.into(),
@@ -556,7 +569,6 @@ mod tests {
             kind: Kind::File,
             description: None,
             span,
-            filenames: true,
             noquote: false,
             nospace: true,
             matches: Vec::new(),
@@ -762,11 +774,17 @@ mod tests {
         rule.description = Some("go build 'literal $text' · fixture".into());
         rule.noquote = true;
         rule.matches = vec![0, 1];
-        completion.update_values(Arc::new(Answer {
+        let answer = Arc::new(Answer {
             query: request.clone(),
             candidates: vec![rule.clone()],
             state: State::Complete,
-        }));
+        });
+        completion.update_values(answer.clone());
+        assert_eq!(
+            Arc::strong_count(&answer),
+            1,
+            "rendering must not retain the complete reply"
+        );
         let suggestion = completion.values[0].clone();
         assert_eq!(suggestion.value, "go build 'literal $text'");
         assert_eq!(suggestion.display_value(), "go");
