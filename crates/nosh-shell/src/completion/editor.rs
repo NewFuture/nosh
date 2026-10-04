@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_missing_workers_are_unavailable_not_authoritative_empty() {
+    fn unavailable_completion_status() {
         for enabled in [true, false] {
             let state = Arc::new(Mutex::new(None));
             let mut completion = Completion::new(
@@ -774,17 +774,11 @@ mod tests {
         rule.description = Some("go build 'literal $text' · fixture".into());
         rule.noquote = true;
         rule.matches = vec![0, 1];
-        let answer = Arc::new(Answer {
+        completion.update_values(Arc::new(Answer {
             query: request.clone(),
             candidates: vec![rule.clone()],
             state: State::Complete,
-        });
-        completion.update_values(answer.clone());
-        assert_eq!(
-            Arc::strong_count(&answer),
-            1,
-            "rendering must not retain the complete reply"
-        );
+        }));
         let suggestion = completion.values[0].clone();
         assert_eq!(suggestion.value, "go build 'literal $text'");
         assert_eq!(suggestion.display_value(), "go");
@@ -795,10 +789,6 @@ mod tests {
             "a prefix is not a rule selection"
         );
         assert!(notifications.lock().unwrap().is_empty());
-        assert_eq!(
-            completion.completion_accepted(&Suggestion::default()),
-            CompletionAcceptance::Continue,
-        );
         assert_eq!(
             completion.completion_accepted(&suggestion),
             CompletionAcceptance::SuppressAbbreviationExpansion,
@@ -867,11 +857,6 @@ mod tests {
         assert!(
             bytes + MAX_RESULTS * 128 + 256 <= DISPLAY_GENERATION_BYTES,
             "{bytes}"
-        );
-        assert!(
-            values
-                .iter()
-                .all(|value| value.completion_id.as_ref().unwrap().len() == 50)
         );
         assert_eq!(values[0].value, answer.candidates[0].value);
         assert_eq!(

@@ -1,11 +1,8 @@
 # Reedline source maintenance
 
-Reedline and the brush monorepo use the same fixed-source workflow: an
-**official upstream submodule, one reviewable patch, and an ignored editable
-build copy** for each. No nosh-owned remote fork or separate dependency release
-is required. Normal Rust development needs Rust,
-Git (with `git archive --mtime` support), and the usual platform linker; Python,
-Node, npm, `patch`, and `tar` are not source-preparation dependencies.
+Reedline and brush each use an **official upstream submodule, a maintained patch,
+and an ignored editable build copy**. Source preparation requires Rust, Git
+(with `git archive --mtime` support), and the platform linker.
 
 ## Layout and source of truth
 
@@ -33,11 +30,6 @@ committing. Source archives lack an index; their tracked `source.toml` pins the
 same commit. Git's object identity, patch SHA256, upstream/patched Git trees and
 fixed-mtime patched archive SHA256 are recorded by `provenance`. Text input
 hashes use LF, matching the repository's `.gitattributes`.
-
-Provenance describes the build inputs, not completion candidates. It is checked
-by source-maintenance and evaluation tools, not on the typing or matching path.
-`tools/source/src/source.rs` holds the two fixed dependency descriptors together;
-the preparation, export and verification logic is shared.
 
 ## First checkout and daily commands
 
@@ -104,11 +96,8 @@ cargo source provenance
 ```
 
 `prepare`, `check`, `export` and default `provenance` cover both fixed dependencies.
-Default provenance is an object keyed by `reedline` and `brush-core`; the selected
-archive's evaluation code validates both pins and trees. A partial managed layout
-is an error, not a registry fallback. Bare caches are passed to Git with an explicit
-`--git-dir`, preserving `safe.bareRepository=explicit` rather than weakening the
-user's protected Git policy.
+Default provenance is an object keyed by `reedline` and `brush-core`, recording
+the build inputs used by source verification and evaluation.
 
 Use `--dependency reedline` or `--dependency brush-core` for a focused operation,
 or for separate read-only offline caches. A focused provenance retains the
@@ -142,18 +131,13 @@ Review and commit nosh edits and the exported patch in **one PR**. Do not edit t
 patch and the generated source independently; an input change blocks export
 rather than guessing which copy wins. Export before changing branches.
 
-For brush, edit `.nosh\brush\brush-core`, keeping the fixed parser crate unchanged.
-Its public completion additions expose source selection, bounded output, effective
-options, true errors and completion execution snapshots; nosh owns worker policy,
-fuzzy matching and UI. Run the relevant completion regressions before export:
+For brush, edit `.nosh\brush\brush-core` and run the completion regressions through
+the root workspace in Linux/macOS/WSL. Export with the checkout's native Git:
 
 ```powershell
 cargo source export --dependency brush-core
 cargo source check
 ```
-
-In Linux/WSL, compile brush-core via the root Cargo graph or the prepared monorepo
-using native paths. Do not use Linux Git to export a Windows worktree.
 
 ## Upgrading upstream
 
