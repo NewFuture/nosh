@@ -89,20 +89,11 @@ impl Snapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Outcome {
-    Progress {
-        answer: Answer,
-        budget: Budget,
-    },
+    Progress(Answer),
     Ready {
         answer: Answer,
         snapshot: Option<Snapshot>,
     },
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub(crate) enum Budget {
-    Lookup,
-    Index,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +125,7 @@ pub(crate) enum Source {
     Make,
     Npm,
     Yarn,
-    Script(String),
+    Script,
     Variable,
     Abbreviation { name: String, revision: u64 },
 }
@@ -151,12 +142,6 @@ pub(crate) enum Kind {
     Target,
     Variable,
     Abbreviation,
-}
-
-impl Kind {
-    pub fn is_path(self) -> bool {
-        matches!(self, Self::File | Self::Directory)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -205,14 +205,10 @@ impl Shared {
         if !self.current(&answer.query) {
             return;
         }
-        let answer = match answer.validate() {
-            Ok(()) => answer,
-            Err(error) => Answer::failed(answer.query, error),
-        };
+        debug_assert!(answer.validate().is_ok());
         if let Ok(mut publication) = self.publication.lock()
             && self.current(&answer.query)
         {
-            let ongoing = ongoing && matches!(answer.state, State::Partial(_));
             publication.answer = Some(Arc::new(answer));
             publication.serial += 1;
             publication.ongoing = ongoing;
@@ -328,7 +324,7 @@ fn fail(shared: &Shared, slot: &mut Slot, query: Query, error: impl std::fmt::Di
 }
 
 fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &Snapshot) {
-    let Some(item) = slot.pending.as_mut() else {
+    let Some(item) = slot.pending.as_ref() else {
         return;
     };
     let query = item.query.clone();
@@ -363,103 +359,98 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
         }
         return;
     }
-    if item.context.is_none() {
-        #[cfg(test)]
-        shared.parses.fetch_add(1, Ordering::Relaxed);
-        match Context::parse(&query, &snapshot.native) {
-            Ok(context) => item.context = Some(context),
-            Err(error) => {
-                slot.pending = None;
-                slot.executing_script = false;
-                fail(shared, slot, query, error);
-                return;
-            }
-        }
-    }
-    let context = item.context.as_ref().expect("pending context was parsed");
-    let script = context.requires_execution;
-    if script && query.trigger == Trigger::Refresh && item.at.elapsed() < Duration::from_millis(300)
-    {
-        return;
-    }
-    let context = slot
-        .pending
-        .take()
-        .and_then(|pending| pending.context)
-        .expect("pending context was parsed");
-    slot.executing_script = script;
-    let failure = &mut slot.failures[usize::from(script)];
-    if query.trigger == Trigger::Refresh && (failure.count >= 2 || failure.session == query.session)
-    {
-        shared.publish(Answer::unavailable(
-            query,
-            "completion provider paused; explicitly request completion to retry",
-        ));
-        return;
-    }
-    if query.trigger == Trigger::Explicit {
-        *failure = Failure::default();
-    }
-    if script && let Some(Err(error)) = &snapshot.script {
-        shared.publish(Answer::unavailable(query, error.clone()));
-        return;
-    }
-    if slot.worker.is_none() {
-        match Worker::spawn(launcher, Kind::Completion) {
-            Ok(worker) => {
-                #[cfg(test)]
-                shared.spawns.fetch_add(1, Ordering::Relaxed);
-                slot.worker = Some(worker);
-                slot.installed = 0;
-                slot.fault = None;
-                if let Ok(mut child) = shared.child.lock() {
-                    *child = slot.worker.as_ref().map(Worker::handle);
-                } else {
-                    fail(shared, slot, query, "completion child registry unavailable");
-                    return;
-                }
-            }
-            Err(error) => {
-                fail(shared, slot, query, error);
-                return;
-            }
-        }
-    }
-    if slot.installed != query.session {
-        slot.installed_script = false;
-    }
-    let install = if slot.installed != query.session || (script && !slot.installed_script) {
-        Some(Snapshot {
-            native: snapshot.native.clone(),
-            script: script.then(|| snapshot.script.clone()).flatten(),
-        })
-    } else {
-        None
-    };
-    let Some(worker) = slot.worker.as_mut() else {
-        return;
-    };
-    #[cfg(test)]
-    let installing = install.is_some();
-    match worker.start(&Request::Complete {
-        query: query.clone(),
-        context: Box::new(context),
-        install,
-    }) {
-        Ok(()) => {
+    let result: Result<(), String> = (|| {
+        let item = slot.pending.as_mut().expect("pending request exists");
+        if item.context.is_none() {
             #[cfg(test)]
-            {
-                shared.requests.fetch_add(1, Ordering::Relaxed);
-                if installing {
-                    shared.installs.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            slot.installed = query.session;
-            slot.installed_script |= script;
-            slot.query = Some(query);
-            slot.waiting_epoch = 0;
+            shared.parses.fetch_add(1, Ordering::Relaxed);
+            slot.executing_script = false;
+            item.context = Some(Context::parse(&query, &snapshot.native)?);
         }
-        Err(error) => fail(shared, slot, query, error),
+        let context = item.context.as_ref().expect("pending context was parsed");
+        let script = context.requires_execution;
+        if script
+            && query.trigger == Trigger::Refresh
+            && item.at.elapsed() < Duration::from_millis(300)
+        {
+            return Ok(());
+        }
+        let context = slot
+            .pending
+            .take()
+            .and_then(|pending| pending.context)
+            .expect("pending context was parsed");
+        slot.executing_script = script;
+        let failure = &mut slot.failures[usize::from(script)];
+        let unavailable = if query.trigger == Trigger::Refresh
+            && (failure.count >= 2 || failure.session == query.session)
+        {
+            Some("completion provider paused; explicitly request completion to retry")
+        } else {
+            if query.trigger == Trigger::Explicit {
+                *failure = Failure::default();
+            }
+            snapshot
+                .script
+                .as_ref()
+                .and_then(|state| state.as_ref().err())
+                .filter(|_| script)
+                .map(String::as_str)
+        };
+        if let Some(message) = unavailable {
+            shared.publish(Answer::unavailable(query.clone(), message));
+            return Ok(());
+        }
+        if slot.worker.is_none() {
+            slot.worker =
+                Some(Worker::spawn(launcher, Kind::Completion).map_err(|error| error.to_string())?);
+            #[cfg(test)]
+            shared.spawns.fetch_add(1, Ordering::Relaxed);
+            slot.installed = 0;
+            slot.fault = None;
+            *shared
+                .child
+                .lock()
+                .map_err(|_| "completion child registry unavailable")? =
+                slot.worker.as_ref().map(Worker::handle);
+        }
+        if slot.installed != query.session {
+            slot.installed_script = false;
+        }
+        let install =
+            (slot.installed != query.session || (script && !slot.installed_script)).then(|| {
+                Snapshot {
+                    native: snapshot.native.clone(),
+                    script: script.then(|| snapshot.script.clone()).flatten(),
+                }
+            });
+        #[cfg(test)]
+        let installing = install.is_some();
+        slot.worker
+            .as_mut()
+            .expect("worker was spawned")
+            .start(&Request::Complete {
+                query: query.clone(),
+                context: Box::new(context),
+                install,
+            })
+            .map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        {
+            shared.requests.fetch_add(1, Ordering::Relaxed);
+            if installing {
+                shared.installs.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        slot.installed = query.session;
+        slot.installed_script |= script;
+        slot.query = Some(query.clone());
+        slot.waiting_epoch = 0;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        slot.pending = None;
+        fail(shared, slot, query, error);
     }
 }
 
@@ -473,66 +464,55 @@ fn poll(shared: &Shared, slot: &mut Slot, snapshot: &mut Option<Snapshot>) {
     let Some(query) = slot.query.clone() else {
         return;
     };
-    let (answer, updated, ongoing) = match worker.poll() {
-        Ok(Some(Response::Completion(Outcome::Progress { answer, .. }))) => (answer, None, true),
-        Ok(Some(Response::Completion(Outcome::Ready { answer, snapshot }))) => {
-            (answer, snapshot, false)
+    let result = (|| -> Result<_, String> {
+        let (answer, updated, ongoing) = match worker.poll().map_err(|error| error.to_string())? {
+            Some(Response::Completion(Outcome::Progress(answer))) => (answer, None, true),
+            Some(Response::Completion(Outcome::Ready { answer, snapshot })) => {
+                (answer, snapshot, false)
+            }
+            Some(Response::Failed(error)) => return Err(error),
+            Some(_) => return Err("unexpected completion worker reply".into()),
+            None => return Ok(None),
+        };
+        if answer.query != query {
+            return Err("completion reply version mismatch".into());
         }
-        Ok(None) => return,
-        other => {
-            let message = match other {
-                Ok(Some(Response::Failed(error))) => error,
-                Err(error) => error.to_string(),
-                _ => "unexpected completion worker reply".into(),
-            };
-            fail(shared, slot, query, message);
-            return;
+        if ongoing && !matches!(answer.state, State::Partial(_)) {
+            return Err("non-partial completion progress".into());
         }
-    };
-    let invalid = if answer.query != query {
-        Some("completion reply version mismatch")
-    } else if ongoing && !matches!(answer.state, State::Partial(_)) {
-        Some("non-partial completion progress")
-    } else {
-        answer.validate().err()
-    };
-    if let Some(error) = invalid {
-        fail(shared, slot, query, error);
-        return;
-    }
+        answer.validate()?;
+        if let State::Failed(message) = &answer.state {
+            return Err(message.clone());
+        }
+        if !ongoing
+            && !worker
+                .residual_children()
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        {
+            return Err(
+                "provider left background processes; provider paused during cleanup".into(),
+            );
+        }
+        if let Some(updated) = &updated {
+            updated.validate().map_err(|error| error.to_string())?;
+        }
+        Ok(Some((answer, updated, ongoing)))
+    })();
     if !shared.current(&query) {
         slot.stop(shared);
         return;
     }
-    if let State::Failed(message) = &answer.state {
-        fail(shared, slot, query, message);
-        return;
-    }
-    if !ongoing {
-        match worker.residual_children() {
-            Ok(children) if children.is_empty() => {}
-            other => {
-                let message = match other {
-                    Err(error) => error.to_string(),
-                    _ => {
-                        "provider left background processes; provider paused during cleanup".into()
-                    }
-                };
-                fail(shared, slot, query, message);
-                return;
+    match result {
+        Ok(Some((answer, updated, ongoing))) => {
+            if updated.is_some() {
+                *snapshot = updated;
             }
+            shared.publish_with(answer, ongoing);
         }
+        Ok(None) => {}
+        Err(error) => fail(shared, slot, query, error),
     }
-    if let Some(updated) = updated {
-        if let Err(error) = updated.validate() {
-            fail(shared, slot, query, error);
-            return;
-        }
-        if shared.current(&query) {
-            *snapshot = Some(updated);
-        }
-    }
-    shared.publish_with(answer, ongoing);
 }
 
 fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {

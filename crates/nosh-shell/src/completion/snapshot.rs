@@ -60,16 +60,18 @@ pub(crate) fn capture(
         crate::input_assist::MAX_CONTEXT,
     )
     .map_err(|error| format!("completion snapshot: {error}"))?;
-    let script = crate::input_assist::bounded_json(&shell.completion_state(), MAX_SNAPSHOT)
-        .map_err(|error| format!("script snapshot: {error}"))
-        .and_then(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
-        .and_then(|json| {
-            serde_json::value::RawValue::from_string(json)
-                .map(Arc::from)
-                .map_err(|error| error.to_string())
-        });
     Ok(Snapshot {
         native: Arc::new(native),
-        script: Some(script),
+        script: Some(execution_state(&shell).map_err(|error| format!("script snapshot: {error}"))),
     })
+}
+
+pub(super) fn execution_state(
+    shell: &crate::backend::BrushShell,
+) -> std::io::Result<Arc<serde_json::value::RawValue>> {
+    let bytes = crate::input_assist::bounded_json(&shell.completion_state(), MAX_SNAPSHOT)?;
+    let json = String::from_utf8(bytes).map_err(std::io::Error::other)?;
+    serde_json::value::RawValue::from_string(json)
+        .map(Arc::from)
+        .map_err(std::io::Error::other)
 }

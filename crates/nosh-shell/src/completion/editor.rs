@@ -78,9 +78,7 @@ fn insert(candidate: &Candidate, query: &Query) -> String {
 }
 
 fn insert_in_quote(candidate: &Candidate, query: &Query, quote: Option<char>) -> String {
-    if candidate.noquote
-        || (!candidate.kind.is_path() && matches!(candidate.source, Source::Script(_)))
-    {
+    if candidate.noquote {
         return candidate.value.clone();
     }
     if let Some(quote) = quote {
@@ -112,10 +110,6 @@ fn insert_in_quote(candidate: &Candidate, query: &Query, quote: Option<char>) ->
         brush_core::escape::quote_if_needed(&candidate.value, QuoteMode::BackslashEscape)
             .into_owned()
     }
-}
-
-fn display_text(text: &str, matches: &[usize], limit: usize) -> (String, Vec<usize>) {
-    display_text_limited(text, matches, limit, 4096)
 }
 
 fn description(text: &str) -> &str {
@@ -377,21 +371,11 @@ impl Completion {
 
 impl Completer for Completion {
     fn completion_accepted(&mut self, suggestion: &Suggestion) -> CompletionAcceptance {
-        let selection = suggestion
-            .completion_id
-            .as_ref()
-            .and_then(|id| {
-                self.values
-                    .iter()
-                    .position(|value| value.completion_id.as_ref() == Some(id))
-            })
-            .and_then(|index| {
-                self.selections
-                    .iter()
-                    .find(|(position, _)| *position == index)
-            })
-            .map(|(_, selection)| selection);
-        let Some(selection) = selection else {
+        let Some((_, selection)) = self
+            .selections
+            .iter()
+            .find(|(index, _)| self.values[*index].completion_id == suggestion.completion_id)
+        else {
             return CompletionAcceptance::Continue;
         };
         if let Some(observer) = &self.config.selection_observer {
@@ -462,72 +446,54 @@ impl Completer for Completion {
             self.update_values(answer.clone());
             self.serial = serial;
         }
-        let querying = ongoing && self.values.is_empty();
-        let (phase, result) = match &answer.state {
-            State::Complete => (
-                Phase::Complete,
-                CompletionResult::fresh(self.values.clone())
-                    .with_partial(Some(self.partial(query))),
-            ),
-            State::Partial(message) => (
-                if querying {
+        match &answer.state {
+            State::Complete => {
+                self.status(query, Phase::Complete, None, self.values.len());
+                CompletionResult::fresh(self.values.clone()).with_partial(Some(self.partial(query)))
+            }
+            State::Partial(message) => {
+                let querying = ongoing && self.values.is_empty();
+                let phase = if querying {
                     Phase::Pending
                 } else {
                     Phase::Partial
-                },
+                };
+                self.status(query, phase, None, self.values.len());
                 CompletionResult::Limited {
                     suggestions: self.values.clone(),
                     message: if querying {
-                        display_text(message, &[], 240).0
+                        display_text_limited(message, &[], 240, 4096).0
                     } else {
                         format!(
                             "{}: {}",
                             tr!("部分补全结果", "Partial completions"),
-                            display_text(message, &[], 220).0,
+                            display_text_limited(message, &[], 220, 4096).0,
                         )
                     },
-                },
-            ),
+                }
+            }
 
             State::Failed(message) | State::Unavailable(message) => {
                 let message = format!(
                     "{}: {}",
                     tr!("补全暂不可用", "Completion unavailable"),
-                    display_text(message, &[], 240).0
+                    display_text_limited(message, &[], 240, 4096).0
                 );
-                (
-                    Phase::Unavailable,
-                    CompletionResult::Unavailable { message },
-                )
+                self.status(query, Phase::Unavailable, Some(message.clone()), 0);
+                CompletionResult::Unavailable { message }
             }
-        };
-        let error = match &result {
-            CompletionResult::Unavailable { message } => Some(message.clone()),
-            _ => None,
-        };
-        let count = if error.is_some() {
-            0
-        } else {
-            self.values.len()
-        };
-        self.status(query, phase, error, count);
-        result
+        }
     }
 
     fn poll_completion(&mut self) -> CompletionStatus {
-        if let Some(query) = &self.current {
-            if let Some((serial, _, ongoing)) = self.service.result(query) {
-                if serial != self.serial {
-                    return CompletionStatus::Ready;
-                }
-                if ongoing {
-                    return CompletionStatus::Pending;
-                }
-            } else {
-                return CompletionStatus::Pending;
-            }
+        let Some(query) = &self.current else {
+            return CompletionStatus::Idle;
+        };
+        match self.service.result(query) {
+            Some((serial, _, _)) if serial != self.serial => CompletionStatus::Ready,
+            None | Some((_, _, true)) => CompletionStatus::Pending,
+            _ => CompletionStatus::Idle,
         }
-        CompletionStatus::Idle
     }
 }
 
@@ -837,7 +803,7 @@ mod tests {
         let request = query("x", 1);
         let value = "👩\u{200d}💻\t中".repeat(200);
         let mut entry = candidate(&value, 0..1);
-        entry.source = Source::Script("provider".repeat(1024));
+        entry.source = Source::Script;
         entry.noquote = true;
         entry.matches = (0..256).collect();
         entry.description = Some("👩\u{200d}💻\nlarge description".repeat(300));

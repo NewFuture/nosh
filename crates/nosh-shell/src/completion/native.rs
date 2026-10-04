@@ -341,10 +341,7 @@ pub(crate) fn commands(
     };
     let mut early_answer = select(query.clone(), context, &local, Source::Command, true, false);
     abbreviations(&mut early_answer, context, snapshot);
-    progress(Outcome::Progress {
-        answer: early_answer,
-        budget: Budget::Index,
-    })?;
+    progress(Outcome::Progress(early_answer))?;
     let key = format!(
         "commands\0{}\0{:?}",
         snapshot.context.cwd.display(),

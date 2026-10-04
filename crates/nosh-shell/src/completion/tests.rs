@@ -247,6 +247,28 @@ fn script_options_and_session_isolation() {
     );
     assert_eq!(shell.var("COMP_LINE").as_deref(), Some("original"));
     assert!(shell.var("MUTATED").is_none());
+    assert_eq!(
+        shell
+            .run_user_line("plain() { COMPREPLY=('space name'); }")
+            .exit_code,
+        0
+    );
+    for (options, noquote) in [
+        ("", true),
+        ("-o filenames", false),
+        ("-o filenames -o noquote", true),
+    ] {
+        assert_eq!(
+            shell
+                .run_user_line(&format!("complete {options} -F plain sample"))
+                .exit_code,
+            0
+        );
+        let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+        let result = answer(&mut Server::default(), query("sample "), snapshot);
+        assert_eq!(result.candidates[0].value, "space name");
+        assert_eq!(result.candidates[0].noquote, noquote);
+    }
 }
 
 #[test]
@@ -543,7 +565,7 @@ fn loaded_package_completion_definitions_override_builtin_script_names() {
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
     let result = answer(&mut Server::default(), query("npm run "), snapshot);
     assert_eq!(result.candidates[0].value, "provided");
-    assert!(matches!(&result.candidates[0].source, Source::Script(name) if name == "npm"));
+    assert_eq!(result.candidates[0].source, Source::Script);
 }
 
 #[test]

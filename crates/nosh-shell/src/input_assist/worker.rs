@@ -870,18 +870,13 @@ impl Worker {
         let envelope: Envelope =
             serde_json::from_slice(&self.incoming[4..length + 4]).map_err(io::Error::other)?;
         self.incoming.drain(..length + 4);
-        let progress = if let Response::Completion(crate::completion::types::Outcome::Progress {
-            budget,
-            ..
-        }) = &envelope.response
+        let progress = if let Response::Completion(crate::completion::types::Outcome::Progress(_)) =
+            &envelope.response
         {
             if envelope.retire {
                 return Err(invalid("completion progress cannot retire its worker"));
             }
-            self.timeout = self.timeout.max(match budget {
-                crate::completion::types::Budget::Lookup => LOOKUP_TIMEOUT,
-                crate::completion::types::Budget::Index => INDEX_TIMEOUT,
-            });
+            self.timeout = self.timeout.max(INDEX_TIMEOUT);
             true
         } else {
             false
@@ -1073,7 +1068,7 @@ mod tests {
 
     #[test]
     fn completion_frames_probe() {
-        use crate::completion::types::{Budget, Outcome, State};
+        use crate::completion::types::{Outcome, State};
         if std::env::var(WORKER_ENV).is_err() {
             return;
         }
@@ -1083,26 +1078,21 @@ mod tests {
         stream
             .write_all(
                 &frame(&Envelope {
-                    response: Response::Completion(Outcome::Progress {
-                        answer: completion_answer(State::Partial("indexing".into())),
-                        budget: Budget::Index,
-                    }),
+                    response: Response::Completion(Outcome::Progress(completion_answer(
+                        State::Partial("indexing".into()),
+                    ))),
                     retire: false,
                 })
                 .unwrap(),
             )
             .unwrap();
         let mut bytes = Vec::new();
-        for (message, budget) in [
-            ("x".repeat(MAX_FRAME - 512), Budget::Index),
-            ("y".repeat(2048), Budget::Lookup),
-        ] {
+        for message in ["x".repeat(MAX_FRAME - 512), "y".repeat(2048)] {
             bytes.extend(
                 frame(&Envelope {
-                    response: Response::Completion(Outcome::Progress {
-                        answer: completion_answer(State::Partial(message)),
-                        budget,
-                    }),
+                    response: Response::Completion(Outcome::Progress(completion_answer(
+                        State::Partial(message),
+                    ))),
                     retire: false,
                 })
                 .unwrap(),
@@ -1136,7 +1126,7 @@ mod tests {
         loop {
             if let Some(response) = worker.poll().unwrap() {
                 match response {
-                    Response::Completion(Outcome::Progress { .. }) => {
+                    Response::Completion(Outcome::Progress(_)) => {
                         progress += 1;
                         assert!(worker.busy);
                         assert!(!worker.stopping);
@@ -1160,14 +1150,13 @@ mod tests {
 
     #[test]
     fn progress_cannot_retire_and_final_frames_cannot_have_unsolicited_trailers() {
-        use crate::completion::types::{Budget, Outcome, State};
+        use crate::completion::types::{Outcome, State};
         let launch = crate::input_assist::tests::launcher("input_assist::tests::worker_probe");
         let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         worker.incoming = frame(&Envelope {
-            response: Response::Completion(Outcome::Progress {
-                answer: completion_answer(State::Partial("querying".into())),
-                budget: Budget::Index,
-            }),
+            response: Response::Completion(Outcome::Progress(completion_answer(State::Partial(
+                "querying".into(),
+            )))),
             retire: true,
         })
         .unwrap();
@@ -1194,7 +1183,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn untagged_session_child_probe() {
-        use crate::completion::types::{Budget, Outcome, State};
+        use crate::completion::types::{Outcome, State};
         if std::env::var(WORKER_ENV).is_err() {
             return;
         }
@@ -1222,10 +1211,9 @@ mod tests {
         stream
             .write_all(
                 &frame(&Envelope {
-                    response: Response::Completion(Outcome::Progress {
-                        answer: completion_answer(State::Partial("child started".into())),
-                        budget: Budget::Index,
-                    }),
+                    response: Response::Completion(Outcome::Progress(completion_answer(
+                        State::Partial("child started".into()),
+                    ))),
                     retire: false,
                 })
                 .unwrap(),

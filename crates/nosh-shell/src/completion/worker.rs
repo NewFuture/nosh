@@ -10,10 +10,11 @@ use brush_core::{CommandArg, ExecutionContext, ExecutionResult};
 use super::cache::{Cache, Entry, Set};
 use super::context::Context;
 use super::types::*;
-use super::{native, providers};
+use super::{native, providers, snapshot};
 use crate::backend::BrushShell;
 
 static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+const _: () = assert!(MAX_RESULTS * (MAX_WORD + 128) <= MAX_SET_BYTES);
 
 fn unsupported(
     _context: ExecutionContext<'_>,
@@ -132,14 +133,11 @@ impl Server {
                 "programmable completion is disabled",
             )));
         }
-        progress(Outcome::Progress {
-            answer: Answer {
-                query: query.clone(),
-                candidates: Vec::new(),
-                state: State::Partial("querying programmable completion".into()),
-            },
-            budget: Budget::Index,
-        })?;
+        progress(Outcome::Progress(Answer {
+            query: query.clone(),
+            candidates: Vec::new(),
+            state: State::Partial("querying programmable completion".into()),
+        }))?;
         if self.execution.is_none() {
             self.execution = Some(Execution::new(&snapshot)?);
         }
@@ -168,32 +166,22 @@ impl Server {
             answer
         };
         let registry = Registry::capture(shell);
-        let checkpoint =
-            if loaded && matches!(answer.state, State::Complete | State::Unavailable(_)) {
-                Some(
-                    crate::input_assist::bounded_json(&shell.completion_state(), MAX_SNAPSHOT)
-                        .and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other))
-                        .and_then(|json| {
-                            serde_json::value::RawValue::from_string(json)
-                                .map_err(std::io::Error::other)
-                        })?,
-                )
-            } else {
-                None
-            };
-        let changed = registry != native.registry || checkpoint.is_some();
-        if let Some(current) = &mut self.snapshot {
+        let save = loaded && matches!(answer.state, State::Complete | State::Unavailable(_));
+        if registry != native.registry || save {
+            let mut updated = snapshot.clone();
             if registry != native.registry {
-                Arc::make_mut(&mut current.native).registry = registry;
+                Arc::make_mut(&mut updated.native).registry = registry;
             }
-            if let Some(state) = checkpoint {
-                current.script = Some(Ok(Arc::from(state)));
+            if save {
+                updated.script = Some(Ok(snapshot::execution_state(shell)?));
             }
+            self.snapshot = Some(updated.clone());
+            return Ok(Outcome::Ready {
+                answer,
+                snapshot: Some(updated),
+            });
         }
-        Ok(Outcome::Ready {
-            answer,
-            snapshot: changed.then(|| self.snapshot.clone()).flatten(),
-        })
+        Ok(ready(answer))
     }
 
     fn basic(
@@ -343,19 +331,15 @@ impl Server {
                 *loaded = true;
                 continue;
             };
-            let generation = options.generation.clone().unwrap_or_default();
+            let generation = options.generation.unwrap_or_default();
             let mut seen = HashSet::new();
             let mut candidates = Vec::new();
-            let mut bytes = 0;
             let mut reason = None;
             for value in values {
                 if !seen.insert(value.clone()) {
                     continue;
                 }
-                if value.len() > MAX_WORD
-                    || candidates.len() >= MAX_RESULTS
-                    || bytes + value.len() + 128 > MAX_SET_BYTES
-                {
+                if value.len() > MAX_WORD || candidates.len() >= MAX_RESULTS {
                     reason = Some("script candidate/result limit reached".into());
                     break;
                 }
@@ -376,14 +360,17 @@ impl Server {
                 if kind == Kind::Directory && !value.ends_with('/') {
                     value.push('/');
                 }
-                bytes += value.len() + 128;
+                if value.len() > MAX_WORD {
+                    reason = Some("script candidate/result limit reached".into());
+                    break;
+                }
                 candidates.push(Candidate {
-                    source: Source::Script(context.command.clone().unwrap_or_default()),
+                    source: Source::Script,
                     value,
                     kind,
                     description: None,
                     span: words.span.clone(),
-                    noquote: options.no_autoquote_filenames,
+                    noquote: options.no_autoquote_filenames || !options.treat_as_filenames,
                     nospace: options.no_trailing_space_at_end_of_line || kind == Kind::Directory,
                     matches: Vec::new(),
                     display: None,
