@@ -100,6 +100,7 @@ impl Server {
     pub fn run(
         &mut self,
         query: Query,
+        context: &Context,
         install: Option<Snapshot>,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
     ) -> std::io::Result<Outcome> {
@@ -121,12 +122,8 @@ impl Server {
                 "completion snapshot version mismatch",
             ));
         }
-        let context = match Context::parse(&query, native) {
-            Ok(context) => context,
-            Err(error) => return Ok(ready(Answer::failed(query, error))),
-        };
-        if !context.needs_execution(native) {
-            let answer = self.basic(query, &context, native, progress)?;
+        if !context.requires_execution {
+            let answer = self.basic(query, context, native, progress)?;
             return Ok(ready(answer));
         }
         if context.needs_script(native) && !native.scripts {
@@ -148,7 +145,7 @@ impl Server {
         }
         UNSUPPORTED.store(false, Ordering::Release);
         let mut loaded = false;
-        let answer = match self.script(&query, &context, native, &mut loaded, progress) {
+        let answer = match self.script(&query, context, native, &mut loaded, progress) {
             Ok(answer) => answer,
             Err(error) => Answer::failed(query.clone(), error),
         };
@@ -158,12 +155,12 @@ impl Server {
             .ok_or_else(|| std::io::Error::other("missing completion execution"))?
             .shell;
         let answer = if !shell.jobs().jobs.is_empty() {
-            Answer::unavailable(
+            Answer::failed(
                 query,
                 "completion provider created background jobs; isolated execution must be reset",
             )
         } else if UNSUPPORTED.load(Ordering::Acquire) {
-            Answer::unavailable(
+            Answer::failed(
                 query,
                 "provider needs interactive job control; isolated completion cannot supply it",
             )
@@ -171,18 +168,19 @@ impl Server {
             answer
         };
         let registry = Registry::capture(shell);
-        let checkpoint = if loaded && answer.state.is_complete() {
-            Some(
-                crate::input_assist::bounded_json(&shell.completion_state(), MAX_SNAPSHOT)
-                    .and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other))
-                    .and_then(|json| {
-                        serde_json::value::RawValue::from_string(json)
-                            .map_err(std::io::Error::other)
-                    })?,
-            )
-        } else {
-            None
-        };
+        let checkpoint =
+            if loaded && matches!(answer.state, State::Complete | State::Unavailable(_)) {
+                Some(
+                    crate::input_assist::bounded_json(&shell.completion_state(), MAX_SNAPSHOT)
+                        .and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other))
+                        .and_then(|json| {
+                            serde_json::value::RawValue::from_string(json)
+                                .map_err(std::io::Error::other)
+                        })?,
+                )
+            } else {
+                None
+            };
         let changed = registry != native.registry || checkpoint.is_some();
         if let Some(current) = &mut self.snapshot {
             if registry != native.registry {

@@ -295,6 +295,7 @@ pub(crate) type SharedIndex = Arc<std::sync::Mutex<Option<Index>>>;
 pub(crate) enum Request {
     Complete {
         query: crate::completion::types::Query,
+        context: Box<crate::completion::context::Context>,
         install: Option<crate::completion::types::Snapshot>,
     },
     Analyze(Arc<Input>),

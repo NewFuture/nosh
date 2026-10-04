@@ -117,8 +117,15 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
         let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         validate_request(&request)?;
         let response = match (kind, request) {
-            (Kind::Completion, Request::Complete { query, install }) => {
-                let outcome = completion.run(query, install, &mut |outcome| {
+            (
+                Kind::Completion,
+                Request::Complete {
+                    query,
+                    context,
+                    install,
+                },
+            ) => {
+                let outcome = completion.run(query, &context, install, &mut |outcome| {
                     stream.write_all(&frame(&Envelope {
                         response: Response::Completion(outcome),
                         retire: false,
@@ -159,11 +166,19 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
 }
 
 fn validate_request(request: &Request) -> io::Result<()> {
-    if let Request::Complete { query, install } = request {
+    if let Request::Complete {
+        query,
+        context,
+        install,
+    } = request
+    {
         if query.text.len() > crate::completion::types::MAX_INPUT
             || !query.text.is_char_boundary(query.cursor)
         {
             return Err(invalid("invalid completion input or cursor"));
+        }
+        if !context.valid_for(query) {
+            return Err(invalid("invalid completion context"));
         }
         write_json(
             install,
@@ -1006,6 +1021,37 @@ mod tests {
         }
     }
 
+    fn completion_request() -> Request {
+        Request::Complete {
+            query: completion_query(),
+            context: Box::new(crate::completion::context::Context {
+                words: ["sample".into(), "".into()].into(),
+                index: 1,
+                word: String::new(),
+                span: 7..7,
+                command: Some("sample".into()),
+                command_start: 0,
+                command_end: 7,
+                quote: None,
+                redirect: false,
+                path: None,
+                requires_execution: false,
+            }),
+            install: None,
+        }
+    }
+
+    #[test]
+    fn completion_context_bounds_are_validated() {
+        let mut request = completion_request();
+        assert!(validate_request(&request).is_ok());
+        let Request::Complete { context, .. } = &mut request else {
+            unreachable!()
+        };
+        context.span = 8..9;
+        assert!(validate_request(&request).is_err());
+    }
+
     fn completion_answer(
         state: crate::completion::types::State,
     ) -> crate::completion::types::Answer {
@@ -1083,12 +1129,7 @@ mod tests {
             "input_assist::worker::tests::completion_frames_probe",
         );
         let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
-        worker
-            .start(&Request::Complete {
-                query: completion_query(),
-                install: None,
-            })
-            .unwrap();
+        worker.start(&completion_request()).unwrap();
         assert_eq!(worker.timeout, LOOKUP_TIMEOUT);
         let deadline = Instant::now() + Duration::from_secs(4);
         let mut progress = 0;
@@ -1203,12 +1244,7 @@ mod tests {
             "input_assist::worker::tests::untagged_session_child_probe",
         );
         let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
-        worker
-            .start(&Request::Complete {
-                query: completion_query(),
-                install: None,
-            })
-            .unwrap();
+        worker.start(&completion_request()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if worker.poll().unwrap().is_some() {

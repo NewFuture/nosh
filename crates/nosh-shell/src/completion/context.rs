@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use brush_core::completion::CompletionToken;
 use brush_parser::Token;
+use serde::{Deserialize, Serialize};
 
 use super::types::{NativeSnapshot, Query};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Context {
     pub words: Arc<[String]>,
     pub index: usize,
@@ -18,6 +19,7 @@ pub(crate) struct Context {
     pub quote: Option<char>,
     pub redirect: bool,
     pub path: Option<String>,
+    pub requires_execution: bool,
 }
 
 pub(super) struct Words {
@@ -182,7 +184,7 @@ impl Context {
             .first()
             .filter(|word| !word.is_empty())
             .cloned();
-        Ok(Self {
+        let mut context = Self {
             words: words.values.into(),
             index: words.index,
             word: words.word,
@@ -193,7 +195,13 @@ impl Context {
             quote,
             redirect,
             path,
-        })
+            requires_execution: false,
+        };
+        context.requires_execution = context.needs_script(snapshot)
+            || (context.quote != Some('\'')
+                && context.word.contains(['$', '`'])
+                && context.word.contains('/'));
+        Ok(context)
     }
 
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {
@@ -220,14 +228,25 @@ impl Context {
         }
     }
 
-    pub fn needs_execution(&self, snapshot: &NativeSnapshot) -> bool {
-        self.needs_script(snapshot)
-            || (self.quote != Some('\'')
-                && self.word.contains(['$', '`'])
-                && self.word.contains('/'))
+    pub fn valid_for(&self, query: &Query) -> bool {
+        self.index < self.words.len()
+            && self.command_start <= self.span.start
+            && self.span.start <= query.cursor
+            && query.cursor <= self.span.end
+            && self.span.end <= self.command_end
+            && query
+                .text
+                .get(self.command_start..self.command_end)
+                .is_some()
+            && query.text.get(self.span.clone()).is_some()
+            && self.word.len() <= super::types::MAX_WORD
     }
 
-    pub fn script_words(&self, query: &Query, snapshot: &NativeSnapshot) -> Result<Words, String> {
+    pub(super) fn script_words(
+        &self,
+        query: &Query,
+        snapshot: &NativeSnapshot,
+    ) -> Result<Words, String> {
         let delimiters: Vec<_> = snapshot.word_breaks.chars().collect();
         Words::parse(query, self.command_start, self.command_end, &delimiters)
     }

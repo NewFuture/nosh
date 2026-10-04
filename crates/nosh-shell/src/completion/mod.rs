@@ -1,7 +1,7 @@
 //! Source-aware completion with bounded, isolated native and programmable queries.
 
 mod cache;
-mod context;
+pub(crate) mod context;
 mod editor;
 mod matching;
 mod native;

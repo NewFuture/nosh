@@ -30,7 +30,10 @@ fn query(text: &str) -> Query {
 }
 
 fn answer(server: &mut Server, query: Query, snapshot: Snapshot) -> Answer {
-    let outcome = server.run(query, Some(snapshot), &mut |_| Ok(())).unwrap();
+    let context = Context::parse(&query, &snapshot.native).unwrap();
+    let outcome = server
+        .run(query, &context, Some(snapshot), &mut |_| Ok(()))
+        .unwrap();
     match outcome {
         Outcome::Ready { answer, .. } => answer,
         other => panic!("unexpected completion outcome: {other:?}"),
@@ -244,6 +247,33 @@ fn script_options_and_session_isolation() {
     );
     assert_eq!(shell.var("COMP_LINE").as_deref(), Some("original"));
     assert!(shell.var("MUTATED").is_none());
+}
+
+#[test]
+fn autoloaded_unavailable_definitions_survive_worker_replacement() {
+    let (directory, mut shell, _) = fixture();
+    assert_eq!(shell.run_user_line(
+        "load() { printf x >> loads; complete -r -D; complete -A job jobsample; return 124; }; complete -D -F load"
+    ).exit_code, 0);
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    let request = query("jobsample ");
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    let Outcome::Ready {
+        answer: first,
+        snapshot: Some(checkpoint),
+    } = Server::default()
+        .run(request.clone(), &context, Some(snapshot), &mut |_| Ok(()))
+        .unwrap()
+    else {
+        panic!("missing autoload checkpoint")
+    };
+    assert!(matches!(first.state, State::Unavailable(_)));
+    let next = answer(&mut Server::default(), request, checkpoint);
+    assert!(matches!(next.state, State::Unavailable(_)));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("loads")).unwrap(),
+        "x"
+    );
 }
 
 #[test]

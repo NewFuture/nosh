@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use super::context::Context;
 use super::types::*;
 use crate::input_assist::worker::{ChildHandle, Kind, Worker, kill_child};
 use crate::input_assist::{Request, Response, WorkerCommand};
@@ -37,6 +38,8 @@ struct Shared {
     installs: AtomicU64,
     #[cfg(test)]
     spawns: AtomicU64,
+    #[cfg(test)]
+    parses: AtomicU64,
 }
 
 struct Lifetime(Arc<Shared>);
@@ -82,6 +85,8 @@ impl Service {
             installs: AtomicU64::new(0),
             #[cfg(test)]
             spawns: AtomicU64::new(0),
+            #[cfg(test)]
+            parses: AtomicU64::new(0),
         });
         let mut available = launcher.is_some();
         if let Some(launcher) = launcher {
@@ -222,11 +227,27 @@ struct Failure {
     session: u64,
 }
 
+struct Pending {
+    query: Query,
+    at: Instant,
+    context: Option<Context>,
+}
+
+impl Pending {
+    fn new(query: Query, at: Instant) -> Self {
+        Self {
+            query,
+            at,
+            context: None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Slot {
     worker: Option<Worker>,
     query: Option<Query>,
-    pending: Option<(Query, Instant)>,
+    pending: Option<Pending>,
     installed: u64,
     installed_script: bool,
     failures: [Failure; 2],
@@ -255,7 +276,7 @@ impl Slot {
         let query = self
             .pending
             .as_ref()
-            .map(|(query, _)| query)
+            .map(|pending| &pending.query)
             .or(self.query.as_ref());
         if let Some(query) = query {
             shared.publish(Answer::failed(
@@ -307,16 +328,14 @@ fn fail(shared: &Shared, slot: &mut Slot, query: Query, error: impl std::fmt::Di
 }
 
 fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &Snapshot) {
-    let Some(item) = slot.pending.as_ref() else {
+    let Some(item) = slot.pending.as_mut() else {
         return;
     };
-    let query = item.0.clone();
+    let query = item.query.clone();
     if !shared.current(&query) {
         slot.pending = None;
         return;
     }
-    let script = super::context::Context::parse(&query, &snapshot.native)
-        .is_ok_and(|context| context.needs_execution(&snapshot.native));
     if slot
         .worker
         .as_ref()
@@ -330,7 +349,7 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
         } else {
             crate::input_assist::LOOKUP_TIMEOUT
         };
-        if slot.waiting_epoch != query.epoch && (slot.fault.is_some() || item.1.elapsed() >= grace)
+        if slot.waiting_epoch != query.epoch && (slot.fault.is_some() || item.at.elapsed() >= grace)
         {
             slot.waiting_epoch = query.epoch;
             if let Some(error) = &slot.fault {
@@ -344,11 +363,30 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
         }
         return;
     }
-    if script && query.trigger == Trigger::Refresh && item.1.elapsed() < Duration::from_millis(300)
+    if item.context.is_none() {
+        #[cfg(test)]
+        shared.parses.fetch_add(1, Ordering::Relaxed);
+        match Context::parse(&query, &snapshot.native) {
+            Ok(context) => item.context = Some(context),
+            Err(error) => {
+                slot.pending = None;
+                slot.executing_script = false;
+                fail(shared, slot, query, error);
+                return;
+            }
+        }
+    }
+    let context = item.context.as_ref().expect("pending context was parsed");
+    let script = context.requires_execution;
+    if script && query.trigger == Trigger::Refresh && item.at.elapsed() < Duration::from_millis(300)
     {
         return;
     }
-    slot.pending = None;
+    let context = slot
+        .pending
+        .take()
+        .and_then(|pending| pending.context)
+        .expect("pending context was parsed");
     slot.executing_script = script;
     let failure = &mut slot.failures[usize::from(script)];
     if query.trigger == Trigger::Refresh && (failure.count >= 2 || failure.session == query.session)
@@ -405,6 +443,7 @@ fn start(shared: &Shared, slot: &mut Slot, launcher: &WorkerCommand, snapshot: &
     let installing = install.is_some();
     match worker.start(&Request::Complete {
         query: query.clone(),
+        context: Box::new(context),
         install,
     }) {
         Ok(()) => {
@@ -465,7 +504,7 @@ fn poll(shared: &Shared, slot: &mut Slot, snapshot: &mut Option<Snapshot>) {
         slot.stop(shared);
         return;
     }
-    if let State::Failed(message) | State::Unavailable(message) = &answer.state {
+    if let State::Failed(message) = &answer.state {
         fail(shared, slot, query, message);
         return;
     }
@@ -522,7 +561,7 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
         if let Ok(mut mailbox) = shared.mailbox.lock()
             && let Some(item) = mailbox.take()
         {
-            slot.pending = Some(item);
+            slot.pending = Some(Pending::new(item.0, item.1));
         }
         let stopped = shared.stopped.load(Ordering::Acquire);
         if stopped {
@@ -540,7 +579,7 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
         if slot
             .pending
             .as_ref()
-            .is_some_and(|(query, _)| !shared.current(query))
+            .is_some_and(|pending| !shared.current(&pending.query))
         {
             slot.pending = None;
         }
@@ -565,15 +604,16 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
             Duration::from_secs(1)
         };
         if !retiring
-            && let Some((query, at)) = &slot.pending
-            && query.trigger == Trigger::Refresh
-            && snapshot.as_ref().is_some_and(|snapshot| {
-                super::context::Context::parse(query, &snapshot.native)
-                    .is_ok_and(|context| context.needs_execution(&snapshot.native))
-            })
+            && let Some(pending) = &slot.pending
+            && pending.query.trigger == Trigger::Refresh
+            && pending
+                .context
+                .as_ref()
+                .is_some_and(|context| context.requires_execution)
         {
-            interval = interval
-                .min((*at + Duration::from_millis(300)).saturating_duration_since(Instant::now()));
+            interval = interval.min(
+                (pending.at + Duration::from_millis(300)).saturating_duration_since(Instant::now()),
+            );
         }
         if let Ok(mailbox) = shared.mailbox.lock()
             && mailbox.is_none()
@@ -811,6 +851,87 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_results_keep_the_worker_and_allow_refresh() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = worker_test();
+        let mut fixture = Fixture::new("complete -A job jobsample");
+        fs::write(
+            fixture.file("make"),
+            "#!/bin/sh\nprintf 'GNU Make 4.4\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(fixture.file("make"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            fixture
+                .shell
+                .run_user_line("PATH=.:/usr/bin:/bin")
+                .exit_code,
+            0
+        );
+        let service = fixture.service();
+        complete(&service, "cd ");
+        let original = service.shared.child.lock().unwrap().clone().unwrap();
+        for text in ["make --jobs 4", "jobsample "] {
+            let query = request(&service, text, Trigger::Explicit);
+            wait_answer(&service, &query, |answer| {
+                matches!(answer.state, State::Unavailable(_))
+            });
+            let refresh = request(&service, "cd ", Trigger::Refresh);
+            wait_answer(&service, &refresh, |answer| answer.state.is_complete());
+            assert!(Arc::ptr_eq(
+                &original,
+                service.shared.child.lock().unwrap().as_ref().unwrap()
+            ));
+        }
+        assert_eq!(service.shared.spawns.load(Ordering::Relaxed), 1);
+        close(service);
+    }
+
+    #[test]
+    fn pending_context_is_parsed_once_and_reused_by_the_worker() {
+        let _guard = worker_test();
+        let fixture = Fixture::new("values() { COMPREPLY=(ready); }; complete -F values sample");
+        let snapshot = fixture.snapshot();
+        let service = isolated_service(&snapshot);
+        let query = service.request("sample ", 7, Trigger::Refresh);
+        let mut slot = Slot {
+            pending: Some(Pending::new(
+                query.clone(),
+                Instant::now() + Duration::from_secs(30),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..5 {
+            start(&service.shared, &mut slot, &launcher(), &snapshot);
+        }
+        assert_eq!(service.shared.parses.load(Ordering::Relaxed), 1);
+        assert!(slot.worker.is_none());
+        slot.pending.as_mut().unwrap().at = Instant::now() - Duration::from_millis(300);
+        start(&service.shared, &mut slot, &launcher(), &snapshot);
+        let mut current = Some(snapshot.clone());
+        wait_until(|| {
+            poll(&service.shared, &mut slot, &mut current);
+            service
+                .result(&query)
+                .is_some_and(|(_, answer, _)| answer.state.is_complete())
+        });
+        assert_eq!(
+            service.result(&query).unwrap().1.candidates[0].value,
+            "ready"
+        );
+        assert_eq!(service.shared.parses.load(Ordering::Relaxed), 1);
+        let next = service.request("cd ", 3, Trigger::Refresh);
+        slot.pending = Some(Pending::new(next, Instant::now()));
+        start(&service.shared, &mut slot, &launcher(), &snapshot);
+        assert_eq!(service.shared.parses.load(Ordering::Relaxed), 2);
+        slot.stop(&service.shared);
+        wait_until(|| {
+            slot.reap(&service.shared);
+            slot.worker.is_none()
+        });
+    }
+
+    #[test]
     fn refresh_coalesces_to_the_newest_script_after_idle_but_native_is_immediate() {
         let _guard = worker_test();
         let fixture = Fixture::new(
@@ -947,7 +1068,7 @@ mod tests {
         let service = isolated_service(&snapshot);
         let mut slot = Slot::default();
         let first = service.request("cat t", 5, Trigger::Explicit);
-        slot.pending = Some((first.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(first.clone(), Instant::now()));
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         let original = slot.worker.as_ref().unwrap().handle();
         slot.worker.as_mut().unwrap().hold_reaping(true);
@@ -955,10 +1076,10 @@ mod tests {
         for index in 0..50 {
             let text = format!("cat target{index}");
             let query = service.request(&text, text.len(), Trigger::Explicit);
-            slot.pending = Some((query.clone(), Instant::now()));
+            slot.pending = Some(Pending::new(query.clone(), Instant::now()));
             slot.reap(&service.shared);
             start(&service.shared, &mut slot, &launcher(), &snapshot);
-            assert_eq!(slot.pending.as_ref().unwrap().0, query);
+            assert_eq!(slot.pending.as_ref().unwrap().query, query);
             assert!(Arc::ptr_eq(
                 &original,
                 &slot.worker.as_ref().unwrap().handle()
@@ -969,7 +1090,7 @@ mod tests {
             ));
         }
         let query = service.request("cat target", 10, Trigger::Explicit);
-        slot.pending = Some((query.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(query.clone(), Instant::now()));
         slot.worker.as_mut().unwrap().hold_reaping(false);
         wait_until(|| {
             slot.reap(&service.shared);
@@ -1002,11 +1123,11 @@ mod tests {
         };
         let mut slot = Slot::default();
         let first = service.request("cd ", 3, Trigger::Explicit);
-        slot.pending = Some((first, Instant::now()));
+        slot.pending = Some(Pending::new(first, Instant::now()));
         start(&service.shared, &mut slot, &unavailable, &snapshot);
         assert_eq!(slot.failures[0].count, 1);
         let same = service.request("cd x", 4, Trigger::Refresh);
-        slot.pending = Some((same.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(same.clone(), Instant::now()));
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(slot.worker.is_none());
         assert!(matches!(
@@ -1016,12 +1137,12 @@ mod tests {
 
         service.prepare(Ok(snapshot.clone()));
         let newer = service.request("cd ", 3, Trigger::Refresh);
-        slot.pending = Some((newer, Instant::now()));
+        slot.pending = Some(Pending::new(newer, Instant::now()));
         start(&service.shared, &mut slot, &unavailable, &snapshot);
         assert_eq!(slot.failures[0].count, 2);
         service.prepare(Ok(snapshot.clone()));
         let paused = service.request("cd ", 3, Trigger::Refresh);
-        slot.pending = Some((paused.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(paused.clone(), Instant::now()));
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(slot.worker.is_none());
         assert!(matches!(
@@ -1030,7 +1151,7 @@ mod tests {
         ));
 
         let retry = service.request("cd ", 3, Trigger::Explicit);
-        slot.pending = Some((retry, Instant::now()));
+        slot.pending = Some(Pending::new(retry, Instant::now()));
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(slot.worker.is_some());
         assert_eq!(slot.failures[0].count, 0);
@@ -1142,7 +1263,7 @@ mod tests {
         let service = isolated_service(&snapshot);
         let query = service.request("cd ", 3, Trigger::Explicit);
         let mut slot = Slot {
-            pending: Some((query.clone(), Instant::now())),
+            pending: Some(Pending::new(query.clone(), Instant::now())),
             ..Default::default()
         };
         start(&service.shared, &mut slot, &launcher(), &snapshot);
@@ -1159,10 +1280,10 @@ mod tests {
             State::Failed(_)
         ));
         let pending = service.request("cd x", 4, Trigger::Explicit);
-        slot.pending = Some((pending.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(pending.clone(), Instant::now()));
         slot.reap(&service.shared);
         start(&service.shared, &mut slot, &launcher(), &snapshot);
-        assert_eq!(slot.pending.as_ref().unwrap().0, pending);
+        assert_eq!(slot.pending.as_ref().unwrap().query, pending);
         assert_eq!(service.shared.spawns.load(Ordering::Relaxed), 1);
         slot.worker.as_mut().unwrap().hold_reaping(false);
         wait_until(|| {
@@ -1218,18 +1339,18 @@ mod tests {
         let service = isolated_service(&snapshot);
         let query = service.request("cd ", 3, Trigger::Explicit);
         let mut slot = Slot {
-            pending: Some((query, Instant::now())),
+            pending: Some(Pending::new(query, Instant::now())),
             ..Default::default()
         };
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         slot.worker.as_mut().unwrap().hold_reaping(true);
         slot.stop(&service.shared);
         let newest = service.request("cd x", 4, Trigger::Explicit);
-        slot.pending = Some((newest.clone(), Instant::now()));
+        slot.pending = Some(Pending::new(newest.clone(), Instant::now()));
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(service.result(&newest).is_none());
-        assert_eq!(slot.pending.as_ref().unwrap().0, newest);
-        slot.pending.as_mut().unwrap().1 =
+        assert_eq!(slot.pending.as_ref().unwrap().query, newest);
+        slot.pending.as_mut().unwrap().at =
             Instant::now() - crate::input_assist::LOOKUP_TIMEOUT - Duration::from_millis(1);
         start(&service.shared, &mut slot, &launcher(), &snapshot);
         assert!(matches!(
