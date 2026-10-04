@@ -32,6 +32,24 @@ pub(crate) fn candidate(
     }
 }
 
+fn ranked<'a>(
+    entries: impl Iterator<Item = &'a Entry>,
+    word: &str,
+    fuzzy: bool,
+    nocase: bool,
+) -> Vec<(matching::Score, &'a Entry, Vec<usize>)> {
+    let mut ranked: Vec<_> = entries
+        .filter_map(|entry| {
+            matching::rank(&entry.value, word, fuzzy, nocase)
+                .map(|(score, indices)| (score, entry, indices))
+        })
+        .collect();
+    if fuzzy {
+        ranked.sort_by(|left, right| (&left.0, &left.1.value).cmp(&(&right.0, &right.1.value)));
+    }
+    ranked
+}
+
 pub(crate) fn select(
     query: Query,
     context: &Context,
@@ -40,17 +58,7 @@ pub(crate) fn select(
     fuzzy: bool,
     nocase: bool,
 ) -> Answer {
-    let mut ranked: Vec<_> = set
-        .entries
-        .iter()
-        .filter_map(|entry| {
-            matching::rank(&entry.value, &context.word, fuzzy, nocase)
-                .map(|(score, indices)| (score, entry, indices))
-        })
-        .collect();
-    if fuzzy {
-        ranked.sort_by(|left, right| (&left.0, &left.1.value).cmp(&(&right.0, &right.1.value)));
-    }
+    let ranked = ranked(set.entries.iter(), &context.word, fuzzy, nocase);
     let reason = set
         .reason
         .clone()
@@ -85,22 +93,11 @@ pub(crate) fn paths(
             .home
             .as_ref()
             .map(|home| Path::new(home).join(rest))
-    } else if head == "~" {
-        snapshot.context.home.as_ref().map(PathBuf::from)
     } else {
-        Some(
-            snapshot
-                .context
-                .cwd
-                .join(if head.is_empty() { "." } else { head }),
-        )
+        Some(snapshot.context.cwd.join(head))
     };
     let Some(directory) = directory else {
-        return Answer {
-            query,
-            candidates: Vec::new(),
-            state: State::Unavailable("dynamic path needs an isolated expansion query".into()),
-        };
+        return Answer::unavailable(query, "dynamic path needs an isolated expansion query");
     };
     let key = format!(
         "path\0{}\0{directories}\0{}",
@@ -108,73 +105,20 @@ pub(crate) fn paths(
         component.starts_with('.')
     );
     let set = cache.get(&key, Duration::from_secs(1)).unwrap_or_else(|| {
-        let mut set = Set {
-            entries: Vec::new(),
-            reason: None,
+        let set = match fs::read_dir(&directory) {
+            Ok(entries) => Set::collect(entries.take(65_537).enumerate().filter_map(
+                |(visited, entry)| {
+                    if visited == 65_536 {
+                        return Some(Err("directory enumeration limit reached".into()));
+                    }
+                    directory_entry(entry, component.starts_with('.'), directories).transpose()
+                },
+            )),
+            Err(error) => Set {
+                entries: Vec::new(),
+                reason: Some(format!("{}: {error}", directory.display())),
+            },
         };
-        match fs::read_dir(&directory) {
-            Ok(entries) => {
-                let mut bytes = 0;
-                for (visited, entry) in entries.enumerate() {
-                    if visited >= 65_536 || set.entries.len() >= MAX_SET || bytes >= MAX_SET_BYTES {
-                        set.reason = Some("directory enumeration limit reached".into());
-                        break;
-                    }
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(error) => {
-                            set.reason.get_or_insert_with(|| error.to_string());
-                            continue;
-                        }
-                    };
-                    let name = entry.file_name();
-                    let Some(name) = name.to_str() else {
-                        set.reason
-                            .get_or_insert_with(|| "non-UTF-8 filename".into());
-                        continue;
-                    };
-                    if name.starts_with('.') && !component.starts_with('.') {
-                        continue;
-                    }
-                    let kind = match entry.file_type() {
-                        Ok(kind) if kind.is_dir() => Kind::Directory,
-                        Ok(kind) if kind.is_symlink() => match fs::metadata(entry.path()) {
-                            Ok(metadata) if metadata.is_dir() => Kind::Directory,
-                            Ok(_) => Kind::File,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                Kind::File
-                            }
-                            Err(error) => {
-                                set.reason.get_or_insert_with(|| error.to_string());
-                                continue;
-                            }
-                        },
-                        Ok(_) => Kind::File,
-                        Err(error) => {
-                            set.reason.get_or_insert_with(|| error.to_string());
-                            continue;
-                        }
-                    };
-                    if directories && kind != Kind::Directory {
-                        continue;
-                    }
-                    let value: String = name.into();
-                    if bytes + value.len() + 96 > MAX_SET_BYTES {
-                        set.reason = Some("directory candidate byte limit reached".into());
-                        break;
-                    }
-                    bytes += value.len() + 96;
-                    set.entries.push(Entry {
-                        value,
-                        kind,
-                        description: None,
-                    });
-                }
-            }
-            Err(error) => set.reason = Some(format!("{}: {error}", directory.display())),
-        }
-        set.entries
-            .sort_by(|left, right| left.value.cmp(&right.value));
         cache.insert(key, set)
     });
     let component_context = Context {
@@ -208,6 +152,40 @@ pub(crate) fn paths(
     answer
 }
 
+fn directory_entry(
+    entry: std::io::Result<fs::DirEntry>,
+    hidden: bool,
+    directories: bool,
+) -> Result<Option<Entry>, String> {
+    let entry = entry.map_err(|error| error.to_string())?;
+    let name = entry
+        .file_name()
+        .into_string()
+        .map_err(|_| "non-UTF-8 filename")?;
+    if !hidden && name.starts_with('.') {
+        return Ok(None);
+    }
+    let kind = entry.file_type().map_err(|error| error.to_string())?;
+    let directory = if kind.is_symlink() {
+        match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        }
+    } else {
+        kind.is_dir()
+    };
+    Ok((!directories || directory).then_some(Entry {
+        value: name,
+        kind: if directory {
+            Kind::Directory
+        } else {
+            Kind::File
+        },
+        description: None,
+    }))
+}
+
 fn known(snapshot: &NativeSnapshot, name: &str) -> Option<&'static str> {
     if snapshot.context.aliases.contains(name) {
         Some("alias")
@@ -221,6 +199,7 @@ fn known(snapshot: &NativeSnapshot, name: &str) -> Option<&'static str> {
 }
 
 fn abbreviations(answer: &mut Answer, context: &Context, snapshot: &NativeSnapshot) {
+    let count = answer.candidates.len();
     for name in &snapshot.abbreviations.applicable {
         let Some(definition) = snapshot.abbreviations.definitions.get(name) else {
             continue;
@@ -247,6 +226,9 @@ fn abbreviations(answer: &mut Answer, context: &Context, snapshot: &NativeSnapsh
                 .map_or_else(Vec::new, |(_, indices)| indices),
             display: Some(name.clone()),
         });
+    }
+    if answer.candidates.len() == count {
+        return;
     }
     answer.candidates.sort_by_cached_key(|candidate| {
         let name = candidate.display.as_deref().unwrap_or(&candidate.value);
@@ -342,24 +324,22 @@ pub(crate) fn commands(
         .iter()
         .chain(&snapshot.context.aliases)
         .chain(&snapshot.context.functions)
-        .cloned()
         .collect();
-    let mut entries: Vec<_> = names
-        .into_iter()
-        .map(|value| {
-            let description = known(snapshot, &value).map(str::to_owned);
-            Entry {
-                value,
-                kind: Kind::Command,
-                description,
-            }
-        })
-        .collect();
-    let early = Set {
-        entries: entries.clone(),
+    let local = Set {
+        entries: names
+            .into_iter()
+            .map(|value| {
+                let description = known(snapshot, value).map(str::to_owned);
+                Entry {
+                    value: value.clone(),
+                    kind: Kind::Command,
+                    description,
+                }
+            })
+            .collect(),
         reason: Some("querying command index".into()),
     };
-    let mut early_answer = select(query.clone(), context, &early, Source::Command, true, false);
+    let mut early_answer = select(query.clone(), context, &local, Source::Command, true, false);
     abbreviations(&mut early_answer, context, snapshot);
     progress(Outcome::Progress {
         answer: early_answer,
@@ -372,82 +352,58 @@ pub(crate) fn commands(
     );
     let indexed = cache.get(&key, Duration::from_secs(5)).unwrap_or_else(|| {
         let index = crate::input_assist::scan_index(&snapshot.context.cwd, context.path.as_deref());
-        let entries = index
-            .names
-            .iter()
-            .map(|value| Entry {
-                value: value.clone(),
-                kind: Kind::Command,
-                description: Some("executable".into()),
-            })
-            .collect();
-        cache.insert(
-            key,
-            Set {
-                entries,
-                reason: index.reason,
-            },
-        )
+        let mut set = Set::lines(
+            index.names.iter().map(String::as_str),
+            Kind::Command,
+            Some("executable"),
+        );
+        set.reason = index.reason.or(set.reason);
+        cache.insert(key, set)
     });
-    let known_names: BTreeSet<_> = entries.iter().map(|entry| entry.value.as_str()).collect();
-    let mut extra: Vec<_> = indexed
-        .entries
-        .iter()
-        .filter(|entry| !known_names.contains(entry.value.as_str()))
-        .filter_map(|entry| {
-            matching::rank(&entry.value, &context.word, true, false)
-                .map(|(score, indices)| (score, entry, indices))
-        })
-        .collect();
-    extra.sort_by(|left, right| (&left.0, &left.1.value).cmp(&(&right.0, &right.1.value)));
-    let mut reason = indexed.reason.clone();
-    let mut verified = 0;
-    for (_, entry, _) in extra {
-        if verified >= MAX_RESULTS {
-            reason.get_or_insert_with(|| "command verification/result limit reached".into());
-            break;
-        }
-        match executable(snapshot, context, &entry.value) {
-            Ok(true) => {
-                entries.push(entry.clone());
-                verified += 1;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                reason.get_or_insert(error);
-            }
-        }
-    }
-    for name in snapshot
+    let hashed: Vec<_> = snapshot
         .context
         .hashed_commands
         .keys()
         .filter(|_| context.path == snapshot.context.path)
-    {
-        if !entries.iter().any(|entry| &entry.value == name)
-            && matching::rank(name, &context.word, true, false).is_some()
-        {
-            match executable(snapshot, context, name) {
-                Ok(true) => entries.push(Entry {
-                    value: name.clone(),
-                    kind: Kind::Command,
-                    description: Some("hashed executable".into()),
-                }),
-                Ok(false) => {}
-                Err(error) => {
-                    reason.get_or_insert(error);
-                }
+        .map(|name| Entry {
+            value: name.clone(),
+            kind: Kind::Command,
+            description: Some("hashed executable".into()),
+        })
+        .collect();
+    let mut seen = BTreeSet::new();
+    let entries = local
+        .entries
+        .iter()
+        .chain(&indexed.entries)
+        .chain(&hashed)
+        .filter(|entry| seen.insert(entry.value.as_str()));
+    let mut answer = Answer {
+        query,
+        candidates: Vec::new(),
+        state: indexed
+            .reason
+            .clone()
+            .map_or(State::Complete, State::Partial),
+    };
+    for (_, entry, indices) in ranked(entries, &context.word, true, false) {
+        if answer.candidates.len() == MAX_RESULTS {
+            if answer.state.is_complete() {
+                answer.state = State::Partial("command verification/result limit reached".into());
             }
+            break;
+        }
+        match executable(snapshot, context, &entry.value) {
+            Ok(true) => {
+                answer
+                    .candidates
+                    .push(candidate(entry, &Source::Command, context, indices))
+            }
+            Ok(false) => {}
+            Err(error) if answer.state.is_complete() => answer.state = State::Partial(error),
+            Err(_) => {}
         }
     }
-    let mut answer = select(
-        query,
-        context,
-        &Set { entries, reason },
-        Source::Command,
-        true,
-        false,
-    );
     abbreviations(&mut answer, context, snapshot);
     Ok(answer)
 }

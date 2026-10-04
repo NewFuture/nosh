@@ -3,7 +3,6 @@ use std::fs;
 use std::path::Path;
 
 use super::*;
-use crate::completion::native;
 
 const MAX_MANIFEST: usize = 2 * 1024 * 1024;
 const YARN_COMMANDS: &[&str] = &[
@@ -62,13 +61,7 @@ pub(super) fn generate(
         let value = if word == prefix {
             index += 1;
             if index == context.index {
-                return Ok(native::paths(
-                    query.clone(),
-                    &value_context(context, &query),
-                    snapshot,
-                    cache,
-                    true,
-                ));
+                return Ok(paths(query, context, snapshot, cache, true));
             }
             Some(
                 context
@@ -88,16 +81,10 @@ pub(super) fn generate(
         index += 1;
     }
     if index == context.index && context.word.starts_with(&format!("{prefix}=")) {
-        return Ok(native::paths(
-            query.clone(),
-            &value_context(context, &query),
-            snapshot,
-            cache,
-            true,
-        ));
+        return Ok(paths(query, context, snapshot, cache, true));
     }
     if index == context.index && context.word.starts_with('-') {
-        return Ok(native::select(
+        return Ok(select(
             query,
             context,
             &entries(
@@ -105,12 +92,10 @@ pub(super) fn generate(
                 Kind::Option,
             ),
             source,
-            false,
-            false,
         ));
     }
     if npm && index == context.index {
-        return Ok(native::select(
+        return Ok(select(
             query,
             context,
             &entries(
@@ -121,8 +106,6 @@ pub(super) fn generate(
                 Kind::Subcommand,
             ),
             source,
-            false,
-            false,
         ));
     }
     let explicit_run = context
@@ -154,7 +137,7 @@ pub(super) fn generate(
     let shortcut = !npm && !explicit_run;
     let key = format!("package-scripts\0{}\0{shortcut}", manifest.display());
     let set = cache.load(key, Duration::from_secs(1), || read(&manifest, shortcut))?;
-    Ok(native::select(query, context, &set, source, false, false))
+    Ok(select(query, context, &set, source))
 }
 
 fn read(path: &Path, shortcut: bool) -> Result<Set, String> {
@@ -167,31 +150,17 @@ fn read(path: &Path, shortcut: bool) -> Result<Set, String> {
     }
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut set = Set {
-        entries: Vec::new(),
-        reason: None,
-    };
-    let mut bytes = 0;
-    for (value, description) in manifest.scripts {
-        if shortcut && YARN_COMMANDS.contains(&value.as_str()) {
-            continue;
-        }
-        if value.len() > MAX_WORD {
-            set.reason
-                .get_or_insert_with(|| "package script name limit reached".into());
-            continue;
-        }
-        let size = value.len() + description.len() + 96;
-        if set.entries.len() >= MAX_SET || bytes + size > MAX_SET_BYTES {
-            set.reason = Some("package script collection limit reached".into());
-            break;
-        }
-        bytes += size;
-        set.entries.push(Entry {
-            value,
-            kind: Kind::Target,
-            description: Some(description),
-        });
-    }
-    Ok(set)
+    Ok(Set::collect(
+        manifest
+            .scripts
+            .into_iter()
+            .filter(|(name, _)| !shortcut || !YARN_COMMANDS.contains(&name.as_str()))
+            .map(|(value, description)| {
+                Ok(Entry {
+                    value,
+                    kind: Kind::Target,
+                    description: Some(description),
+                })
+            }),
+    ))
 }

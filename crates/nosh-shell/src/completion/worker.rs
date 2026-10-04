@@ -210,15 +210,9 @@ impl Server {
             && !context.word.contains('/')
         {
             let brace = context.word.starts_with("${");
-            let prefix = context
-                .word
-                .trim_start_matches('$')
-                .trim_start_matches('{')
-                .trim_end_matches('}');
             let entries = snapshot
                 .variables
                 .iter()
-                .filter(|name| name.starts_with(prefix))
                 .map(|name| Entry {
                     value: if brace {
                         format!("${{{name}}}")

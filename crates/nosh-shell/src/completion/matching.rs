@@ -56,26 +56,25 @@ pub(crate) fn rank(
     };
     let first = matched.first().copied().unwrap_or(0);
     let boundary = first == 0
-        || value
-            .get(..first)
-            .and_then(|prefix| prefix.chars().next_back())
+        || value[..first]
+            .chars()
+            .next_back()
             .is_some_and(|character| !character.is_alphanumeric());
-    let boundaries: Vec<_> = value
-        .grapheme_indices(true)
-        .map(|(offset, _)| offset)
-        .collect();
-    let mut indices: Vec<_> = matched
-        .into_iter()
-        .map(|offset| {
-            boundaries
-                .partition_point(|boundary| *boundary <= offset)
-                .saturating_sub(1)
-        })
-        .collect();
-    indices.dedup();
+    let mut graphemes = value.grapheme_indices(true).enumerate().peekable();
+    let mut index = 0;
+    for offset in &mut matched {
+        while let Some(&(next, (start, _))) = graphemes.peek()
+            && start <= *offset
+        {
+            index = next;
+            graphemes.next();
+        }
+        *offset = index;
+    }
+    matched.dedup();
     Some((
         Score(tier, usize::from(!boundary), gaps, value.len()),
-        indices,
+        matched,
     ))
 }
 
@@ -94,6 +93,22 @@ mod tests {
         assert!(rank("project", "Proj", true, false).is_none());
         assert!(rank("project", "Proj", true, true).is_some());
         assert_eq!(rank("a\u{301}中b", "a中", true, false).unwrap().1, [0, 1]);
+        assert_eq!(
+            rank("a\u{301}中b", "a\u{301}中", true, false).unwrap().1,
+            [0, 1]
+        );
+        assert_eq!(
+            rank("x-👩\u{200d}💻ab", "👩💻b", true, false).unwrap().1,
+            [2, 4]
+        );
+        assert_eq!(
+            rank("x-abc", "ac", true, false).unwrap().0,
+            Score(4, 0, 1, 5)
+        );
+        assert_eq!(
+            rank("xabc", "ac", true, false).unwrap().0,
+            Score(4, 1, 1, 4)
+        );
         assert!(rank("make-target", "mt", false, false).is_none());
     }
 }

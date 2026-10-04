@@ -24,21 +24,38 @@ impl Set {
         kind: Kind,
         description: Option<&str>,
     ) -> Self {
+        Self::collect(values.map(|value| {
+            Ok(Entry {
+                value: value.into(),
+                kind,
+                description: description.map(str::to_owned),
+            })
+        }))
+    }
+
+    pub fn collect(values: impl Iterator<Item = Result<Entry, String>>) -> Self {
         let mut entries = Vec::new();
         let mut bytes = 0;
         let mut reason = None;
         for value in values {
-            let size = value.len() + description.map_or(0, str::len) + 96;
+            let entry = match value {
+                Ok(entry) => entry,
+                Err(error) => {
+                    reason.get_or_insert(error);
+                    continue;
+                }
+            };
+            if entry.value.len() > MAX_WORD {
+                reason.get_or_insert_with(|| "provider word limit reached".into());
+                continue;
+            }
+            let size = entry.value.len() + entry.description.as_ref().map_or(0, String::len) + 96;
             if entries.len() >= MAX_SET || bytes + size > MAX_SET_BYTES {
                 reason = Some("provider collection limit reached".into());
                 break;
             }
             bytes += size;
-            entries.push(Entry {
-                value: value.into(),
-                kind,
-                description: description.map(str::to_owned),
-            });
+            entries.push(entry);
         }
         entries.sort_by(|left, right| left.value.cmp(&right.value));
         entries.dedup_by(|left, right| left.value == right.value);

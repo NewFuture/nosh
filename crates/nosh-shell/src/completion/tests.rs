@@ -91,6 +91,116 @@ fn provider_collection_budgets_remain_partial_after_deduplication() {
     let set = super::cache::Set::lines(std::iter::once(long.as_str()), Kind::Branch, None);
     assert!(set.entries.is_empty());
     assert!(set.reason.is_some());
+    let entry = super::cache::Entry {
+        value: "valid".into(),
+        kind: Kind::Branch,
+        description: None,
+    };
+    let set =
+        super::cache::Set::collect([Err("unreadable entry".into()), Ok(entry.clone())].into_iter());
+    assert_eq!(set.entries[0].value, "valid");
+    assert_eq!(set.reason.as_deref(), Some("unreadable entry"));
+    let oversized = super::cache::Entry {
+        description: Some(long),
+        ..entry
+    };
+    let set = super::cache::Set::collect(std::iter::once(Ok(oversized)));
+    assert!(set.entries.is_empty());
+    assert!(set.reason.is_some());
+}
+
+#[test]
+fn merged_command_sources_keep_precedence_and_exclude_duplicates_and_invalid_executables() {
+    use std::os::unix::fs::PermissionsExt;
+    let (directory, _, mut snapshot) = fixture();
+    for index in 0..300 {
+        let path = directory.path().join(format!("fixture{index:03}"));
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(directory.path().join("fixture-invalid"), "").unwrap();
+    let native = Arc::make_mut(&mut snapshot.native);
+    native.context.path = Some(directory.path().display().to_string());
+    native.context.builtins.insert("fixture010".into());
+    native.context.aliases.insert("fixture020".into());
+    native.context.functions.insert("fixture020".into());
+    native
+        .context
+        .hashed_commands
+        .insert("fixture030".into(), directory.path().join("fixture030"));
+    native
+        .context
+        .hashed_commands
+        .insert("fixture-hash".into(), directory.path().join("fixture030"));
+    let mut server = Server::default();
+    let result = answer(&mut server, query("fixture"), snapshot.clone());
+    assert_eq!(result.candidates.len(), MAX_RESULTS);
+    assert!(matches!(result.state, State::Partial(_)));
+    assert_eq!(
+        result
+            .candidates
+            .iter()
+            .map(|value| &value.value)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        MAX_RESULTS
+    );
+    assert!(
+        !result
+            .candidates
+            .iter()
+            .any(|value| value.value == "fixture-invalid")
+    );
+    for (text, description) in [
+        ("fixture010", "builtin"),
+        ("fixture020", "alias"),
+        ("fixture030", "executable"),
+        ("fixture-hash", "hashed executable"),
+        ("fixture299", "executable"),
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(result.state, State::Complete);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].value, text);
+        assert_eq!(
+            result.candidates[0].description.as_deref(),
+            Some(description)
+        );
+    }
+}
+
+#[test]
+fn directory_collection_retains_symlinks_hidden_names_and_partial_errors() {
+    use std::os::unix::{ffi::OsStringExt, fs::symlink};
+    let (directory, _, snapshot) = fixture();
+    fs::create_dir(directory.path().join("folder")).unwrap();
+    symlink("folder", directory.path().join("linked")).unwrap();
+    symlink("missing", directory.path().join("broken")).unwrap();
+    fs::write(directory.path().join(".hidden"), "").unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![0xff])),
+        "",
+    )
+    .unwrap();
+    let mut server = Server::default();
+    for (text, expected) in [
+        ("cat ", vec!["broken", "folder/", "linked/"]),
+        ("cd ", vec!["folder/", "linked/"]),
+        ("cat .", vec![".hidden"]),
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|value| value.value.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(matches!(result.state, State::Partial(_)));
+    }
 }
 
 #[test]

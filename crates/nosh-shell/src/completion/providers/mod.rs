@@ -11,6 +11,26 @@ use super::cache::{Cache, Entry, Set};
 use super::context::Context;
 use super::types::*;
 
+fn select(query: Query, context: &Context, set: &Set, source: Source) -> Answer {
+    super::native::select(query, context, set, source, false, false)
+}
+
+fn paths(
+    query: Query,
+    context: &Context,
+    snapshot: &NativeSnapshot,
+    cache: &mut Cache,
+    directories: bool,
+) -> Answer {
+    super::native::paths(
+        query.clone(),
+        &value_context(context, &query),
+        snapshot,
+        cache,
+        directories,
+    )
+}
+
 pub(crate) fn generate(
     query: Query,
     context: &Context,
@@ -42,35 +62,31 @@ fn version(
 ) -> Result<(PathBuf, String), String> {
     let executable = program(context, snapshot)?;
     let key = format!("version\0{}", executable.display());
-    if let Some(set) = cache.get(&key, Duration::from_secs(5)) {
-        return Ok((
-            executable,
-            set.entries
-                .first()
-                .ok_or("empty provider version cache")?
-                .value
-                .clone(),
-        ));
-    }
-    let value = output(
-        context,
-        snapshot,
-        &["--version".into()],
-        &snapshot.context.cwd,
-        4096,
-    )?;
-    cache.insert(
-        key,
-        Set {
+    let set = cache.load(key, Duration::from_secs(5), || {
+        let value = output(
+            context,
+            snapshot,
+            &["--version".into()],
+            &snapshot.context.cwd,
+            4096,
+        )?;
+        Ok(Set {
             entries: vec![Entry {
-                value: value.clone(),
+                value,
                 kind: Kind::Value,
                 description: None,
             }],
             reason: None,
-        },
-    );
-    Ok((executable, value))
+        })
+    })?;
+    Ok((
+        executable,
+        set.entries
+            .first()
+            .ok_or("empty provider version cache")?
+            .value
+            .clone(),
+    ))
 }
 
 fn program(context: &Context, snapshot: &NativeSnapshot) -> Result<PathBuf, String> {

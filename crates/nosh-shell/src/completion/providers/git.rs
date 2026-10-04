@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use super::*;
-use crate::completion::native;
 
 const SWITCH_OPTIONS: &[(&str, &str)] = &[
     ("--create", "Create a new branch"),
@@ -88,13 +87,7 @@ pub(super) fn generate(
         || context.word.starts_with("--git-dir=")
         || context.word.starts_with("--work-tree=")
     {
-        return Ok(native::paths(
-            query.clone(),
-            &value_context(context, &query),
-            snapshot,
-            cache,
-            true,
-        ));
+        return Ok(paths(query, context, snapshot, cache, true));
     }
     if context.index == command_index {
         let key = format!(
@@ -115,18 +108,13 @@ pub(super) fn generate(
             )?;
             Ok(Set::lines(data.lines(), Kind::Subcommand, None))
         })?;
-        return Ok(native::select(
-            query,
-            context,
-            &set,
-            Source::Git,
-            false,
-            false,
-        ));
+        return Ok(select(query, context, &set, Source::Git));
     }
     if context.words.get(command_index).map(String::as_str) != Some("switch") {
-        return Ok(Answer { query, candidates: Vec::new(), state: State::Unavailable(
-            "built-in Git parameter completion currently covers switch; load a definition for this subcommand".into()) });
+        return Ok(Answer::unavailable(
+            query,
+            "built-in Git parameter completion currently covers switch; load a definition for this subcommand",
+        ));
     }
     if previous == Some("--conflict") || context.word.starts_with("--conflict=") {
         let mut styles = vec![
@@ -136,26 +124,21 @@ pub(super) fn generate(
         if (numbers[0], numbers[1]) >= (2, 35) {
             styles.push(("zdiff3", "Show compact three-way conflict markers"));
         }
-        return Ok(native::select(
+        return Ok(select(
             query.clone(),
             &value_context(context, &query),
             &entries(&styles, Kind::Value),
             Source::Git,
-            false,
-            false,
         ));
     }
     if matches!(
         previous,
         Some("-c" | "-C" | "--create" | "--force-create" | "--orphan")
     ) {
-        return Ok(Answer {
+        return Ok(Answer::unavailable(
             query,
-            candidates: Vec::new(),
-            state: State::Unavailable(
-                "this option takes a new branch name, not an existing path or branch".into(),
-            ),
-        });
+            "this option takes a new branch name, not an existing path or branch",
+        ));
     }
     let after_double_dash = context.words[command_index + 1..context.index]
         .iter()
@@ -185,14 +168,7 @@ pub(super) fn generate(
                             .is_some_and(|rest| rest.starts_with('='))
                 })
         });
-        return Ok(native::select(
-            query,
-            context,
-            &options,
-            Source::Git,
-            false,
-            false,
-        ));
+        return Ok(select(query, context, &options, Source::Git));
     }
     let remote = context.words[command_index + 1..context.index]
         .iter()
@@ -236,12 +212,5 @@ pub(super) fn generate(
             Some("Git ref"),
         ))
     })?;
-    Ok(native::select(
-        query,
-        context,
-        &set,
-        Source::Git,
-        false,
-        false,
-    ))
+    Ok(select(query, context, &set, Source::Git))
 }

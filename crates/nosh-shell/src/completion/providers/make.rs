@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::*;
-use crate::completion::native;
 
 const OPTIONS: &[(&str, &str)] = &[
     ("--file=", "Read a specified makefile"),
@@ -55,13 +54,7 @@ pub(super) fn generate(
             Some("-C" | "--directory" | "-I" | "--include-dir")
         ) || context.word.starts_with("--directory=")
             || context.word.starts_with("--include-dir=");
-        return Ok(native::paths(
-            query.clone(),
-            &value_context(context, &query),
-            snapshot,
-            cache,
-            directories,
-        ));
+        return Ok(paths(query, context, snapshot, cache, directories));
     }
     if matches!(previous, Some("-j" | "--jobs")) || context.word.starts_with("--jobs=") {
         return Ok(Answer::unavailable(
@@ -71,13 +64,11 @@ pub(super) fn generate(
     }
     let prior = &context.words[1..context.index];
     if context.word.starts_with('-') && !prior.iter().any(|word| word == "--") {
-        return Ok(native::select(
+        return Ok(select(
             query,
             context,
             &entries(OPTIONS, Kind::Option),
             Source::Make,
-            false,
-            false,
         ));
     }
     if context.word.contains('=') {
@@ -134,14 +125,7 @@ pub(super) fn generate(
     let set = cache.load(key, Duration::from_secs(1), || {
         Ok(targets(&cwd, &files, &includes))
     })?;
-    Ok(native::select(
-        query,
-        context,
-        &set,
-        Source::Make,
-        false,
-        false,
-    ))
+    Ok(select(query, context, &set, Source::Make))
 }
 
 fn words(text: &str) -> Result<Vec<String>, &'static str> {
@@ -215,30 +199,23 @@ pub(crate) fn targets(cwd: &Path, files: &[PathBuf], include_dirs: &[PathBuf]) -
             reason.get_or_insert_with(|| "Make include cycle or repeated include omitted".into());
             continue;
         }
-        let file = match fs::File::open(&canonical) {
-            Ok(file) => file,
-            Err(error) => {
-                reason.get_or_insert_with(|| error.to_string());
-                continue;
-            }
-        };
         let mut data = Vec::new();
-        if let Err(error) = file
-            .take((2 * 1024 * 1024 - bytes + 1) as u64)
-            .read_to_end(&mut data)
-        {
-            reason.get_or_insert_with(|| error.to_string());
-            continue;
-        }
+        let read = fs::File::open(&canonical).and_then(|file| {
+            file.take((2 * 1024 * 1024 - bytes + 1) as u64)
+                .read_to_end(&mut data)
+        });
         bytes += data.len();
         if bytes > 2 * 1024 * 1024 {
             reason.get_or_insert_with(|| "Make file byte budget reached".into());
             break;
         }
-        let text = match String::from_utf8(data) {
+        let text = match read
+            .map_err(|error| error.to_string())
+            .and_then(|_| String::from_utf8(data).map_err(|_| "non-UTF-8 Makefile omitted".into()))
+        {
             Ok(text) => text,
-            Err(_) => {
-                reason.get_or_insert_with(|| "non-UTF-8 Makefile omitted".into());
+            Err(error) => {
+                reason.get_or_insert(error);
                 continue;
             }
         };
@@ -300,84 +277,58 @@ pub(crate) fn targets(cwd: &Path, files: &[PathBuf], include_dirs: &[PathBuf]) -
                 }
                 continue;
             }
-            let include = matches!(directive, "include" | "-include" | "sinclude")
-                .then(|| (&trimmed[directive.len()..], directive != "include"));
-            if let Some((rest, optional)) = include {
-                match words(rest) {
-                    Ok(files) => {
-                        for file in files {
-                            if file.contains(['*', '?', '[']) {
-                                reason.get_or_insert_with(|| {
-                                    "dynamic include pattern omitted".into()
-                                });
-                                continue;
-                            }
-                            let direct = cwd.join(&file);
-                            let path = if direct.exists() {
-                                direct
-                            } else {
-                                include_dirs
-                                    .iter()
-                                    .map(|directory| cwd.join(directory).join(&file))
-                                    .find(|path| path.exists())
-                                    .unwrap_or(direct)
-                            };
-                            if queue.len() + seen.len() >= 32 {
-                                reason.get_or_insert_with(|| {
-                                    "Make include queue budget reached".into()
-                                });
-                                break;
-                            }
-                            queue.push_back((path, depth + 1, optional));
-                        }
-                    }
-                    Err(error) => {
-                        reason.get_or_insert_with(|| error.into());
-                    }
-                }
-                continue;
-            }
-            let Some(colon) = delimiter(trimmed, ':') else {
-                continue;
-            };
-            let (left, right) = (&trimmed[..colon], &trimmed[colon + 1..]);
-            if left.contains('=')
-                || right.starts_with('=')
-                || right.starts_with(":=")
-                || right.starts_with("::=")
-            {
-                continue;
-            }
-            let targets = if left.trim() == ".PHONY" {
-                &right[..delimiter(right, ';').unwrap_or(right.len())]
+            let include = matches!(directive, "include" | "-include" | "sinclude");
+            let values = if include {
+                &trimmed[directive.len()..]
             } else {
-                left.trim_end_matches('&')
-            };
-            match words(targets) {
-                Ok(targets) => {
-                    for target in targets {
-                        if target.contains('%') {
-                            reason.get_or_insert_with(|| {
-                                "pattern-generated Make targets omitted".into()
-                            });
-                            continue;
-                        }
-                        if target.starts_with('.') {
-                            continue;
-                        }
-                        if target.contains(['(', ')']) {
-                            reason.get_or_insert_with(|| "archive Make target omitted".into());
-                            continue;
-                        }
-                        names.insert(target);
-                        if names.len() > MAX_SET {
-                            reason.get_or_insert_with(|| "Make target limit reached".into());
-                            break;
-                        }
-                    }
+                let Some(colon) = delimiter(trimmed, ':') else {
+                    continue;
+                };
+                let (left, right) = (&trimmed[..colon], &trimmed[colon + 1..]);
+                if left.contains('=') || right.trim_start_matches(':').starts_with('=') {
+                    continue;
                 }
+                if left.trim() == ".PHONY" {
+                    &right[..delimiter(right, ';').unwrap_or(right.len())]
+                } else {
+                    left.trim_end_matches('&')
+                }
+            };
+            let values = match words(values) {
+                Ok(values) => values,
                 Err(error) => {
                     reason.get_or_insert_with(|| error.into());
+                    continue;
+                }
+            };
+            for value in values {
+                if include {
+                    if value.contains(['*', '?', '[']) {
+                        reason.get_or_insert_with(|| "dynamic include pattern omitted".into());
+                        continue;
+                    }
+                    if queue.len() + seen.len() >= 32 {
+                        reason.get_or_insert_with(|| "Make include queue budget reached".into());
+                        break;
+                    }
+                    let path = std::iter::once(cwd.to_path_buf())
+                        .chain(include_dirs.iter().map(|directory| cwd.join(directory)))
+                        .map(|directory| directory.join(&value))
+                        .find(|path| path.exists())
+                        .unwrap_or_else(|| cwd.join(value));
+                    queue.push_back((path, depth + 1, directive != "include"));
+                } else if value.contains('%') {
+                    reason.get_or_insert_with(|| "pattern-generated Make targets omitted".into());
+                } else if value.starts_with('.') {
+                    continue;
+                } else if value.contains(['(', ')']) {
+                    reason.get_or_insert_with(|| "archive Make target omitted".into());
+                } else {
+                    names.insert(value);
+                    if names.len() > MAX_SET {
+                        reason.get_or_insert_with(|| "Make target limit reached".into());
+                        break;
+                    }
                 }
             }
         }
@@ -385,14 +336,11 @@ pub(crate) fn targets(cwd: &Path, files: &[PathBuf], include_dirs: &[PathBuf]) -
             reason.get_or_insert_with(|| "incomplete Make structure omitted".into());
         }
     }
-    let entries = names
-        .into_iter()
-        .take(MAX_SET)
-        .map(|value| Entry {
-            value,
-            kind: Kind::Target,
-            description: Some("static Make target".into()),
-        })
-        .collect();
-    Set { entries, reason }
+    let mut set = Set::lines(
+        names.iter().map(String::as_str),
+        Kind::Target,
+        Some("static Make target"),
+    );
+    set.reason = reason.or(set.reason);
+    set
 }
