@@ -26,7 +26,8 @@ pub(crate) fn candidate(
         span: context.span.clone(),
         filenames: matches!(entry.kind, Kind::File | Kind::Directory),
         noquote: false,
-        nospace: entry.kind == Kind::Directory || entry.value.ends_with('='),
+        nospace: entry.kind == Kind::Directory
+            || (entry.kind == Kind::Option && entry.value.ends_with('=')),
         matches,
         display: None,
     }

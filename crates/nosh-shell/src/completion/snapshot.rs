@@ -70,6 +70,6 @@ pub(crate) fn capture(
         });
     Ok(Snapshot {
         native: Arc::new(native),
-        script,
+        script: Some(script),
     })
 }

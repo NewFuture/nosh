@@ -1,5 +1,6 @@
 mod git;
 pub(super) mod make;
+mod package;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -20,12 +21,15 @@ pub(crate) fn generate(
     if context.index == 0
         || snapshot.context.aliases.contains(name)
         || snapshot.context.functions.contains(name)
+        || snapshot.context.builtins.contains(name)
     {
         return None;
     }
     let result = match std::path::Path::new(name).file_name()?.to_str()? {
         "git" => git::generate(query.clone(), context, snapshot, cache),
         "make" | "gmake" => make::generate(query.clone(), context, snapshot, cache),
+        "npm" => package::generate(query.clone(), context, snapshot, cache, Source::Npm),
+        "yarn" => package::generate(query.clone(), context, snapshot, cache, Source::Yarn),
         _ => return None,
     };
     Some(result.unwrap_or_else(|error| Answer::failed(query, error)))

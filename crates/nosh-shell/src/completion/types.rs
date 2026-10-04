@@ -59,19 +59,32 @@ pub(crate) struct NativeSnapshot {
     pub variables_complete: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub native: Arc<NativeSnapshot>,
-    pub script: Result<Arc<serde_json::value::RawValue>, String>,
+    pub script: Option<Result<Arc<serde_json::value::RawValue>, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum Install {
-    Native(Arc<NativeSnapshot>),
-    Script {
-        native: Arc<NativeSnapshot>,
-        state: Arc<serde_json::value::RawValue>,
-    },
+impl Snapshot {
+    pub fn validate(&self) -> std::io::Result<()> {
+        if !self.native.context.cwd.is_absolute()
+            || self.script.as_ref().is_some_and(|state| {
+                state
+                    .as_ref()
+                    .is_ok_and(|state| state.get().len() > MAX_SNAPSHOT)
+            })
+        {
+            return Err(std::io::Error::other(
+                "invalid or oversized completion snapshot",
+            ));
+        }
+        crate::input_assist::write_json(
+            &self.native,
+            &mut std::io::sink(),
+            crate::input_assist::MAX_CONTEXT,
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,10 +95,8 @@ pub(crate) enum Outcome {
     },
     Ready {
         answer: Answer,
-        registry: Option<Registry>,
-        checkpoint: Option<Box<serde_json::value::RawValue>>,
+        snapshot: Option<Snapshot>,
     },
-    ScriptRequired(Query),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -121,6 +132,8 @@ pub(crate) enum Source {
     Path,
     Git,
     Make,
+    Npm,
+    Yarn,
     Script(String),
     Variable,
     Abbreviation { name: String, revision: u64 },

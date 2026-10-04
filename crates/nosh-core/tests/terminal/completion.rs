@@ -57,6 +57,21 @@ pub(super) fn probe(mode: &str) {
         "OnlyTarget:\n\t@touch make_executed\n$(unknown):\n",
     )
     .unwrap();
+    if mode.contains("-package") {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = directory.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for name in ["npm", "yarn"] {
+            let executable = bin.join(name);
+            std::fs::write(&executable, "#!/bin/sh\n: > manager_executed\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"scripts":{"task space":"touch script_executed"}}"#,
+        )
+        .unwrap();
+    }
     let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
         interactive: true,
         working_dir: Some(directory.clone()),
@@ -123,6 +138,14 @@ complete -F _empty fixture_empty
     );
     if mode.contains("-partial") {
         assert_eq!(shell.run_user_line("PATH=/usr/bin:/bin").exit_code, 0);
+    }
+    if mode.contains("-package") {
+        assert_eq!(
+            shell
+                .run_user_line(&format!("PATH='{}'", directory.join("bin").display()))
+                .exit_code,
+            0
+        );
     }
     let mut config = nosh_shell::ReplConfig {
         completion: nosh_shell::completion::Config {
@@ -234,6 +257,8 @@ complete -F _empty fixture_empty
             "executed": directory.join("executed").exists(),
             "generated": directory.join("generated").exists(),
             "make_executed": directory.join("make_executed").exists(),
+            "manager_executed": directory.join("manager_executed").exists(),
+            "script_executed": directory.join("script_executed").exists(),
             "late_result": directory.join("late_result").exists(),
             "captured_first": shell.var("CAPTURED_FIRST"),
             "captured_second": shell.var("CAPTURED_SECOND"),
@@ -302,6 +327,25 @@ fn completion_native_nonprefix_commands_and_paths_accept_without_executing() {
             .iter()
             .any(|line| line == "cd my-project/")
     );
+}
+
+#[test]
+fn completion_package_script_names_are_quoted_and_never_executed_on_acceptance() {
+    for command in ["npm run", "yarn run", "yarn"] {
+        let draft = format!("{command} 'task s'\t");
+        let accepted = format!("completion> {command} 'task space'");
+        let (result, _, _) = fixture(
+            "repl-completion-package",
+            &[
+                ("completion> ", draft.as_bytes()),
+                (&accepted, b"\x15exit 0\r"),
+            ],
+        );
+        unexecuted(&result);
+        assert_eq!(result["manager_executed"], false);
+        assert_eq!(result["script_executed"], false);
+        assert_eq!(result["requests"], 0);
+    }
 }
 
 #[test]

@@ -25,8 +25,7 @@ struct Envelope {
 pub(crate) enum Kind {
     Syntax,
     Lookup,
-    CompletionNative,
-    CompletionScript,
+    Completion,
 }
 
 impl Kind {
@@ -34,13 +33,12 @@ impl Kind {
         match self {
             Self::Syntax => "syntax",
             Self::Lookup => "lookup",
-            Self::CompletionNative => "completion-native",
-            Self::CompletionScript => "completion-script",
+            Self::Completion => "completion",
         }
     }
 
     fn completion(self) -> bool {
-        matches!(self, Self::CompletionNative | Self::CompletionScript)
+        matches!(self, Self::Completion)
     }
 }
 
@@ -64,8 +62,7 @@ fn worker_main(kind: &str) -> io::Result<()> {
     let kind = match kind {
         "syntax" => Kind::Syntax,
         "lookup" => Kind::Lookup,
-        "completion-native" => Kind::CompletionNative,
-        "completion-script" => Kind::CompletionScript,
+        "completion" => Kind::Completion,
         _ => return Err(invalid("invalid worker kind")),
     };
     // SAFETY: fcntl only inspects the descriptor; ownership is transferred below
@@ -120,21 +117,13 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
         let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         validate_request(&request)?;
         let response = match (kind, request) {
-            (
-                Kind::CompletionNative | Kind::CompletionScript,
-                Request::Complete { query, install },
-            ) => {
-                let outcome = completion.run(
-                    query,
-                    install,
-                    matches!(kind, Kind::CompletionScript),
-                    &mut |outcome| {
-                        stream.write_all(&frame(&Envelope {
-                            response: Response::Completion(outcome),
-                            retire: false,
-                        })?)
-                    },
-                )?;
+            (Kind::Completion, Request::Complete { query, install }) => {
+                let outcome = completion.run(query, install, &mut |outcome| {
+                    stream.write_all(&frame(&Envelope {
+                        response: Response::Completion(outcome),
+                        retire: false,
+                    })?)
+                })?;
                 Response::Completion(outcome)
             }
             (Kind::Syntax, Request::Analyze(input)) => {
@@ -182,18 +171,7 @@ fn validate_request(request: &Request) -> io::Result<()> {
             crate::completion::types::MAX_FRAME - crate::completion::types::MAX_INPUT,
         )?;
         if let Some(install) = install {
-            let native = match install {
-                crate::completion::types::Install::Native(native) => native,
-                crate::completion::types::Install::Script { native, state } => {
-                    if state.get().len() > crate::completion::types::MAX_SNAPSHOT {
-                        return Err(invalid("completion execution snapshot limit"));
-                    }
-                    native
-                }
-            };
-            if !native.context.cwd.is_absolute() {
-                return Err(invalid("invalid completion cwd"));
-            }
+            install.validate()?;
         }
         return Ok(());
     }
@@ -742,13 +720,6 @@ impl Worker {
             return Err(error);
         }
         self.timeout = match request {
-            Request::Complete {
-                install: Some(crate::completion::types::Install::Script { .. }),
-                ..
-            } => INDEX_TIMEOUT,
-            Request::Complete { .. } if matches!(self.kind, Kind::CompletionScript) => {
-                INDEX_TIMEOUT
-            }
             Request::Complete { .. } => LOOKUP_TIMEOUT,
             Request::Analyze(_) => SYNTAX_TIMEOUT,
             Request::Lookup { .. } | Request::Correction { .. } => LOOKUP_TIMEOUT,
@@ -1095,8 +1066,7 @@ mod tests {
             frame(&Envelope {
                 response: Response::Completion(Outcome::Ready {
                     answer: completion_answer(State::Partial("terminal limit".into())),
-                    registry: None,
-                    checkpoint: None,
+                    snapshot: None,
                 }),
                 retire: true,
             })
@@ -1112,7 +1082,7 @@ mod tests {
         let launch = crate::input_assist::tests::launcher(
             "input_assist::worker::tests::completion_frames_probe",
         );
-        let mut worker = Worker::spawn(&launch, Kind::CompletionNative).unwrap();
+        let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         worker
             .start(&Request::Complete {
                 query: completion_query(),
@@ -1151,7 +1121,7 @@ mod tests {
     fn progress_cannot_retire_and_final_frames_cannot_have_unsolicited_trailers() {
         use crate::completion::types::{Budget, Outcome, State};
         let launch = crate::input_assist::tests::launcher("input_assist::tests::worker_probe");
-        let mut worker = Worker::spawn(&launch, Kind::CompletionNative).unwrap();
+        let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         worker.incoming = frame(&Envelope {
             response: Response::Completion(Outcome::Progress {
                 answer: completion_answer(State::Partial("querying".into())),
@@ -1167,8 +1137,7 @@ mod tests {
         worker.incoming = frame(&Envelope {
             response: Response::Completion(Outcome::Ready {
                 answer: completion_answer(State::Complete),
-                registry: None,
-                checkpoint: None,
+                snapshot: None,
             }),
             retire: false,
         })
@@ -1233,7 +1202,7 @@ mod tests {
         let launch = crate::input_assist::tests::launcher(
             "input_assist::worker::tests::untagged_session_child_probe",
         );
-        let mut worker = Worker::spawn(&launch, Kind::CompletionScript).unwrap();
+        let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         worker
             .start(&Request::Complete {
                 query: completion_query(),
@@ -1292,7 +1261,7 @@ mod tests {
     #[test]
     fn detached_unreaped_helpers_hold_the_leader_and_unrelated_children_are_not_signalled() {
         let launch = crate::input_assist::tests::launcher("input_assist::tests::worker_probe");
-        let mut worker = Worker::spawn(&launch, Kind::CompletionScript).unwrap();
+        let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         let marker = worker.child.lock().unwrap().marker.clone().unwrap();
         let mut command = Command::new("/bin/sleep");
         command.arg("30").env(crate::procs::RUN_VAR, &marker);

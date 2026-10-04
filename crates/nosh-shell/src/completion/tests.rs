@@ -29,10 +29,8 @@ fn query(text: &str) -> Query {
     }
 }
 
-fn answer(server: &mut Server, query: Query, install: Install, script: bool) -> Answer {
-    let outcome = server
-        .run(query, Some(install), script, &mut |_| Ok(()))
-        .unwrap();
+fn answer(server: &mut Server, query: Query, snapshot: Snapshot) -> Answer {
+    let outcome = server.run(query, Some(snapshot), &mut |_| Ok(())).unwrap();
     match outcome {
         Outcome::Ready { answer, .. } => answer,
         other => panic!("unexpected completion outcome: {other:?}"),
@@ -57,12 +55,7 @@ fn native_paths_include_non_prefix_matches_with_exact_and_prefix_priority() {
     for name in ["proj", "project", "projects", "my-project"] {
         fs::create_dir(directory.path().join(name)).unwrap();
     }
-    let result = answer(
-        &mut Server::default(),
-        query("cd proj"),
-        Install::Native(snapshot.native),
-        false,
-    );
+    let result = answer(&mut Server::default(), query("cd proj"), snapshot);
     assert_eq!(
         result
             .candidates
@@ -81,15 +74,7 @@ fn scripts_keep_order_options_session_arrays_and_do_not_mutate_user_shell() {
         "COMP_LINE=original; VALUES=(zebra alpha); custom() { MUTATED=yes; COMPREPLY=(\"${VALUES[0]}\" \"${VALUES[1]}\"); compopt -o nosort -o nospace -o noquote; }; complete -F custom sample"
     ).exit_code, 0);
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
-    let result = answer(
-        &mut Server::default(),
-        query("sample "),
-        Install::Script {
-            native: snapshot.native,
-            state: snapshot.script.unwrap(),
-        },
-        true,
-    );
+    let result = answer(&mut Server::default(), query("sample "), snapshot);
     assert_eq!(result.state, State::Complete);
     assert_eq!(
         result
@@ -118,15 +103,7 @@ fn missing_functions_are_failed_not_authoritative_empty() {
         0
     );
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
-    let result = answer(
-        &mut Server::default(),
-        query("sample "),
-        Install::Script {
-            native: snapshot.native,
-            state: snapshot.script.unwrap(),
-        },
-        true,
-    );
+    let result = answer(&mut Server::default(), query("sample "), snapshot);
     assert!(
         matches!(result.state, State::Failed(_)),
         "{:?}",
@@ -198,6 +175,178 @@ fn provider_versions_are_reused_and_scoped_to_the_executable() {
     assert_eq!(fs::read_to_string(calls).unwrap(), "make\ngmake\n");
 }
 
+fn package_fixture() -> (tempfile::TempDir, Snapshot) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, _, mut snapshot) = fixture();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for name in ["npm", "yarn"] {
+        let executable = bin.join(name);
+        fs::write(&executable, "#!/bin/sh\ntouch manager_executed\nexit 9\n").unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    Arc::make_mut(&mut snapshot.native).context.path = Some(bin.display().to_string());
+    (directory, snapshot)
+}
+
+#[test]
+fn package_scripts_complete_npm_and_yarn_without_running_the_manager_or_scripts() {
+    let (directory, snapshot) = package_fixture();
+    fs::write(
+        directory.path().join("package.json"),
+        r#"{"scripts":{
+        "build":"touch script_executed","build:prod":"build --production","dev":"serve"
+    }}"#,
+    )
+    .unwrap();
+    let mut server = Server::default();
+    for text in ["npm run b", "npm run-script b", "yarn run b", "yarn b"] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(result.state, State::Complete);
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|value| value.value.as_str())
+                .collect::<Vec<_>>(),
+            ["build", "build:prod"]
+        );
+        assert_eq!(
+            result.candidates[0].description.as_deref(),
+            Some("touch script_executed")
+        );
+        assert_eq!(&result.query.text[result.candidates[0].span.clone()], "b");
+    }
+    let verbs = answer(&mut server, query("npm ru"), snapshot);
+    assert_eq!(
+        verbs
+            .candidates
+            .iter()
+            .map(|value| value.value.as_str())
+            .collect::<Vec<_>>(),
+        ["run", "run-script"]
+    );
+    assert!(!directory.path().join("manager_executed").exists());
+    assert!(!directory.path().join("script_executed").exists());
+}
+
+#[test]
+fn package_directory_options_nearest_manifest_and_mid_line_spans_are_respected() {
+    let (directory, snapshot) = package_fixture();
+    fs::write(
+        directory.path().join("package.json"),
+        r#"{"scripts":{"root":"root command"}}"#,
+    )
+    .unwrap();
+    for (text, option) in [("npm --p", "--prefix="), ("yarn --c", "--cwd=")] {
+        let result = answer(&mut Server::default(), query(text), snapshot.clone());
+        assert_eq!(result.candidates[0].value, option);
+        assert!(result.candidates[0].nospace);
+    }
+    let project = directory.path().join("child project");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(project.join("src")).unwrap();
+    fs::write(
+        project.join("package.json"),
+        r#"{"scripts":{"child":"child command"}}"#,
+    )
+    .unwrap();
+    for text in [
+        "npm --prefix 'child project' run ch tail",
+        "npm --prefix='child project' run ch tail",
+        "yarn --cwd 'child project' run ch tail",
+    ] {
+        let mut request = query(text);
+        request.cursor = text.find("ch tail").unwrap() + 2;
+        let result = answer(&mut Server::default(), request, snapshot.clone());
+        assert_eq!(result.candidates[0].value, "child");
+        assert_eq!(&result.query.text[result.candidates[0].span.clone()], "ch");
+        assert!(result.query.text.ends_with(" tail"));
+    }
+    let mut nested = snapshot;
+    Arc::make_mut(&mut nested.native).context.cwd = project.join("src");
+    let result = answer(&mut Server::default(), query("yarn ch"), nested);
+    assert_eq!(result.candidates[0].value, "child");
+}
+
+#[test]
+fn yarn_shortcuts_do_not_shadow_known_commands_and_script_arguments_are_not_guessed() {
+    let (directory, snapshot) = package_fixture();
+    fs::write(
+        directory.path().join("package.json"),
+        r#"{"scripts":{"install":"setup","build":"compile"}}"#,
+    )
+    .unwrap();
+    let mut server = Server::default();
+    let shortcut = answer(&mut server, query("yarn inst"), snapshot.clone());
+    assert!(shortcut.candidates.is_empty());
+    let explicit = answer(&mut server, query("yarn run inst"), snapshot.clone());
+    assert_eq!(explicit.candidates[0].value, "install");
+    for text in [
+        "npm install fi",
+        "npm run build arg",
+        "yarn add arg",
+        "yarn run build --cwd ",
+        "npm run build --prefix=child",
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert!(matches!(result.state, State::Unavailable(_)));
+        assert!(result.candidates.is_empty());
+    }
+}
+
+#[test]
+fn invalid_package_manifests_fail_and_large_script_lists_refilter_the_full_collection() {
+    let (directory, snapshot) = package_fixture();
+    let manifest = directory.path().join("package.json");
+    for text in ["{", r#"{"scripts":{"bad":123}}"#] {
+        fs::write(&manifest, text).unwrap();
+        let result = answer(&mut Server::default(), query("npm run "), snapshot.clone());
+        assert!(
+            matches!(&result.state, State::Failed(message) if message.contains("package.json"))
+        );
+    }
+    fs::write(&manifest, " ".repeat(2 * 1024 * 1024 + 1)).unwrap();
+    let large = answer(&mut Server::default(), query("npm run "), snapshot.clone());
+    assert!(matches!(&large.state, State::Failed(message) if message.contains("read limit")));
+    let scripts: std::collections::BTreeMap<_, _> = (0..300)
+        .map(|index| (format!("task{index:03}"), "echo task"))
+        .collect();
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({"scripts":scripts})).unwrap(),
+    )
+    .unwrap();
+    let mut server = Server::default();
+    let first = answer(&mut server, query("npm run task"), snapshot.clone());
+    assert_eq!(first.candidates.len(), MAX_RESULTS);
+    assert!(matches!(first.state, State::Partial(_)));
+    let narrowed = answer(&mut server, query("npm run task299"), snapshot);
+    assert_eq!(narrowed.state, State::Complete);
+    assert_eq!(narrowed.candidates[0].value, "task299");
+}
+
+#[test]
+fn loaded_package_completion_definitions_override_builtin_script_names() {
+    let (directory, mut shell, _) = fixture();
+    fs::write(
+        directory.path().join("package.json"),
+        r#"{"scripts":{"build":"compile"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        shell
+            .run_user_line("custom() { COMPREPLY=(provided); }; complete -F custom npm")
+            .exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    let result = answer(&mut Server::default(), query("npm run "), snapshot);
+    assert_eq!(result.candidates[0].value, "provided");
+    assert!(matches!(&result.candidates[0].source, Source::Script(name) if name == "npm"));
+}
+
 #[test]
 fn larger_result_sets_are_partial_and_refiltered_from_the_collection() {
     let (directory, _, snapshot) = fixture();
@@ -205,27 +354,17 @@ fn larger_result_sets_are_partial_and_refiltered_from_the_collection() {
         fs::write(directory.path().join(format!("entry{index:03}")), "").unwrap();
     }
     let mut server = Server::default();
-    let first = answer(
-        &mut server,
-        query("cat entry"),
-        Install::Native(snapshot.native.clone()),
-        false,
-    );
+    let first = answer(&mut server, query("cat entry"), snapshot.clone());
     assert_eq!(first.candidates.len(), MAX_RESULTS);
     assert!(matches!(first.state, State::Partial(_)));
-    let result = answer(
-        &mut server,
-        query("cat entry299"),
-        Install::Native(snapshot.native),
-        false,
-    );
+    let result = answer(&mut server, query("cat entry299"), snapshot);
     assert_eq!(result.candidates[0].value, "entry299");
 }
 
 #[test]
 fn raw_execution_snapshot_is_bounded_and_restores_completion_state() {
     let (_, shell, snapshot) = fixture();
-    let state = snapshot.script.unwrap();
+    let state = snapshot.script.unwrap().unwrap();
     assert!(state.get().len() < MAX_SNAPSHOT);
     let root = Arc::new(serde_json::from_str::<serde_json::Value>(state.get()).unwrap());
     assert!(root.get("env").is_some());
@@ -266,12 +405,7 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
     git(&["branch", "feature-one"]);
     fs::write(directory.path().join("feature-unrelated-file"), "").unwrap();
     let mut server = Server::default();
-    let branch = answer(
-        &mut server,
-        query("git switch fe"),
-        Install::Native(snapshot.native.clone()),
-        false,
-    );
+    let branch = answer(&mut server, query("git switch fe"), snapshot.clone());
     assert_eq!(branch.state, State::Complete);
     assert_eq!(
         branch
@@ -290,20 +424,14 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
     let enumeration = answer(
         &mut server,
         query("git switch --conflict=di"),
-        Install::Native(snapshot.native.clone()),
-        false,
+        snapshot.clone(),
     );
     assert_eq!(enumeration.candidates[0].value, "diff3");
     assert_eq!(
         &enumeration.query.text[enumeration.candidates[0].span.clone()],
         "di"
     );
-    let commands = answer(
-        &mut server,
-        query("git sw"),
-        Install::Native(snapshot.native),
-        false,
-    );
+    let commands = answer(&mut server, query("git sw"), snapshot);
     assert_eq!(commands.candidates[0].value, "switch");
 }
 
@@ -366,12 +494,7 @@ fn owner_approved_abbreviations_show_exact_expansion_and_exclude_disabled_rules(
         .into(),
     };
     let snapshot = snapshot::capture(&shell, true, &rules).unwrap();
-    let result = answer(
-        &mut Server::default(),
-        query("gc"),
-        Install::Native(snapshot.native),
-        false,
-    );
+    let result = answer(&mut Server::default(), query("gc"), snapshot);
     let expanded = result
         .candidates
         .iter()
@@ -397,24 +520,14 @@ fn cold_hot_collection_reuse_preserves_candidates_beyond_the_first_screen() {
     }
     let mut server = Server::default();
     let start = std::time::Instant::now();
-    let cold = answer(
-        &mut server,
-        query("cat candidate"),
-        Install::Native(snapshot.native.clone()),
-        false,
-    );
+    let cold = answer(&mut server, query("cat candidate"), snapshot.clone());
     let cold_time = start.elapsed();
     assert_eq!(cold.candidates.len(), MAX_RESULTS);
     assert!(matches!(cold.state, State::Partial(_)));
     let mut hot = Vec::new();
     for _ in 0..20 {
         let start = std::time::Instant::now();
-        let narrowed = answer(
-            &mut server,
-            query("cat candidate4095"),
-            Install::Native(snapshot.native.clone()),
-            false,
-        );
+        let narrowed = answer(&mut server, query("cat candidate4095"), snapshot.clone());
         assert_eq!(narrowed.candidates[0].value, "candidate4095");
         assert_eq!(narrowed.state, State::Complete);
         hot.push(start.elapsed());

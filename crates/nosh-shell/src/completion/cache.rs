@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::types::*;
 
-const WORKER_CACHE_BYTES: usize = MAX_CACHE_BYTES * 3 / 8;
+const WORKER_CACHE_BYTES: usize = MAX_CACHE_BYTES - 2 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Entry {

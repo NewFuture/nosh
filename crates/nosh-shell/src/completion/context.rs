@@ -184,6 +184,13 @@ impl Context {
         }
     }
 
+    pub fn needs_execution(&self, snapshot: &NativeSnapshot) -> bool {
+        self.needs_script(snapshot)
+            || (self.quote != Some('\'')
+                && self.word.contains(['$', '`'])
+                && self.word.contains('/'))
+    }
+
     pub fn script_tokens<'a>(
         &self,
         query: &'a Query,

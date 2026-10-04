@@ -31,7 +31,7 @@ fn unsupported(
 
 #[derive(Default)]
 pub(crate) struct Server {
-    native: Option<Arc<NativeSnapshot>>,
+    snapshot: Option<Snapshot>,
     execution: Option<Execution>,
     cache: Cache,
     session: u64,
@@ -42,11 +42,57 @@ struct Execution {
     runtime: tokio::runtime::Runtime,
 }
 
+impl Execution {
+    fn new(snapshot: &Snapshot) -> std::io::Result<Self> {
+        let state = snapshot
+            .script
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing completion execution snapshot"))?
+            .as_ref()
+            .map_err(|error| std::io::Error::other(error.clone()))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut builtins = brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        for name in ["jobs", "fg", "bg", "wait", "disown"] {
+            if let Some(registration) = builtins.get_mut(name) {
+                registration.execute_func = unsupported;
+            }
+        }
+        let mut shell = runtime
+            .block_on(
+                BrushShell::builder()
+                    .do_not_inherit_env(true)
+                    .skip_well_known_vars(true)
+                    .no_editing(true)
+                    .profile(brush_core::ProfileLoadBehavior::Skip)
+                    .rc(brush_core::RcLoadBehavior::Skip)
+                    .builtins(builtins)
+                    .working_dir(snapshot.native.context.cwd.clone())
+                    .build(),
+            )
+            .map_err(std::io::Error::other)?;
+        shell
+            .restore_completion_state(
+                serde_json::from_str(state.get()).map_err(std::io::Error::other)?,
+            )
+            .map_err(std::io::Error::other)?;
+        if let Ok(marker) = std::env::var(crate::procs::RUN_VAR) {
+            let mut variable = brush_core::ShellVariable::new(marker);
+            variable.export();
+            shell
+                .env_mut()
+                .set_global(crate::procs::RUN_VAR, variable)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(Self { shell, runtime })
+    }
+}
+
 fn ready(answer: Answer) -> Outcome {
     Outcome::Ready {
         answer,
-        registry: None,
-        checkpoint: None,
+        snapshot: None,
     }
 }
 
@@ -54,97 +100,55 @@ impl Server {
     pub fn run(
         &mut self,
         query: Query,
-        install: Option<Install>,
-        script: bool,
+        install: Option<Snapshot>,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
     ) -> std::io::Result<Outcome> {
         if let Some(install) = install {
             if query.session != self.session {
                 self.cache = Cache::default();
             }
+            self.execution = None;
             self.session = query.session;
-            match install {
-                Install::Native(snapshot) if !script => self.native = Some(snapshot),
-                Install::Script { native, state } if script => {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
-                    let mut builtins =
-                        brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
-                    for name in ["jobs", "fg", "bg", "wait", "disown"] {
-                        if let Some(registration) = builtins.get_mut(name) {
-                            registration.execute_func = unsupported;
-                        }
-                    }
-                    let mut shell = runtime
-                        .block_on(
-                            BrushShell::builder()
-                                .do_not_inherit_env(true)
-                                .skip_well_known_vars(true)
-                                .no_editing(true)
-                                .profile(brush_core::ProfileLoadBehavior::Skip)
-                                .rc(brush_core::RcLoadBehavior::Skip)
-                                .builtins(builtins)
-                                .working_dir(native.context.cwd.clone())
-                                .build(),
-                        )
-                        .map_err(std::io::Error::other)?;
-                    let state = serde_json::from_str(state.get()).map_err(std::io::Error::other)?;
-                    shell
-                        .restore_completion_state(state)
-                        .map_err(std::io::Error::other)?;
-                    if let Ok(marker) = std::env::var(crate::procs::RUN_VAR) {
-                        let mut variable = brush_core::ShellVariable::new(marker);
-                        variable.export();
-                        shell
-                            .env_mut()
-                            .set_global(crate::procs::RUN_VAR, variable)
-                            .map_err(std::io::Error::other)?;
-                    }
-                    self.native = Some(native);
-                    self.execution = Some(Execution { shell, runtime });
-                }
-                _ => {
-                    return Err(std::io::Error::other(
-                        "completion snapshot sent to wrong worker",
-                    ));
-                }
-            }
+            self.snapshot = Some(install);
         }
         let snapshot = self
-            .native
+            .snapshot
             .clone()
             .ok_or_else(|| std::io::Error::other("missing completion snapshot"))?;
+        let native = &snapshot.native;
         if query.session != self.session {
             return Err(std::io::Error::other(
                 "completion snapshot version mismatch",
             ));
         }
-        let context = match Context::parse(&query, &snapshot) {
+        let context = match Context::parse(&query, native) {
             Ok(context) => context,
             Err(error) => return Ok(ready(Answer::failed(query, error))),
         };
-        if !script {
-            if context.needs_script(&snapshot)
-                || (context.quote != Some('\'')
-                    && context.word.contains(['$', '`'])
-                    && context.word.contains('/'))
-            {
-                return Ok(Outcome::ScriptRequired(query));
-            }
-            let answer = self.basic(query, &context, &snapshot, progress)?;
+        if !context.needs_execution(native) {
+            let answer = self.basic(query, &context, native, progress)?;
             return Ok(ready(answer));
         }
-        let before = Registry::capture(
-            &self
-                .execution
-                .as_ref()
-                .ok_or_else(|| std::io::Error::other("missing completion execution"))?
-                .shell,
-        );
+        if context.needs_script(native) && !native.scripts {
+            return Ok(ready(Answer::unavailable(
+                query,
+                "programmable completion is disabled",
+            )));
+        }
+        progress(Outcome::Progress {
+            answer: Answer {
+                query: query.clone(),
+                candidates: Vec::new(),
+                state: State::Partial("querying programmable completion".into()),
+            },
+            budget: Budget::Index,
+        })?;
+        if self.execution.is_none() {
+            self.execution = Some(Execution::new(&snapshot)?);
+        }
         UNSUPPORTED.store(false, Ordering::Release);
         let mut loaded = false;
-        let answer = match self.script(&query, &context, &snapshot, &mut loaded, progress) {
+        let answer = match self.script(&query, &context, native, &mut loaded, progress) {
             Ok(answer) => answer,
             Err(error) => Answer::failed(query.clone(), error),
         };
@@ -179,10 +183,18 @@ impl Server {
         } else {
             None
         };
+        let changed = registry != native.registry || checkpoint.is_some();
+        if let Some(current) = &mut self.snapshot {
+            if registry != native.registry {
+                Arc::make_mut(&mut current.native).registry = registry;
+            }
+            if let Some(state) = checkpoint {
+                current.script = Some(Ok(Arc::from(state)));
+            }
+        }
         Ok(Outcome::Ready {
             answer,
-            registry: (before != registry).then_some(registry),
-            checkpoint,
+            snapshot: changed.then(|| self.snapshot.clone()).flatten(),
         })
     }
 
