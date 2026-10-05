@@ -535,7 +535,20 @@ impl OwnedChild {
     fn stop(&mut self) -> io::Result<()> {
         let descendants = self.stop_descendants();
         let killed = self.kill();
-        descendants.and(killed)
+        descendants?;
+        // Darwin can return EPERM when only the zombie group leader remains.
+        // Keep its identity until exit and the absence of descendants are verified.
+        if cfg!(target_os = "macos")
+            && self.marker.is_some()
+            && killed
+                .as_ref()
+                .is_err_and(|error| error.raw_os_error() == Some(libc::EPERM))
+            && self.exited_without_reaping()?
+            && self.residual_children()?.is_empty()
+        {
+            return Ok(());
+        }
+        killed
     }
 
     fn retire(&mut self) -> io::Result<bool> {
@@ -929,24 +942,41 @@ mod tests {
         use crate::input_assist::tests::{Fixture, launcher};
         let fixture = Fixture::new();
         let launch = launcher("input_assist::worker::tests::retiring_worker_probe");
-        let mut worker = Worker::spawn(&launch, Kind::Syntax).unwrap();
-        worker
-            .start(&Request::Analyze(Arc::new(fixture.input("true"))))
-            .unwrap();
-        worker.timeout = Duration::from_secs(3);
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let response = loop {
-            if let Some(result) = worker.poll().unwrap() {
-                break result;
+        for kind in [Kind::Syntax, Kind::Completion] {
+            let mut worker = Worker::spawn(&launch, kind).unwrap();
+            let request = if kind.completion() {
+                completion_request()
+            } else {
+                Request::Analyze(Arc::new(fixture.input("true")))
+            };
+            worker.start(&request).unwrap();
+            worker.timeout = Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let response = loop {
+                if let Some(result) = worker.poll().unwrap() {
+                    break result;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            assert!(
+                matches!(response, Response::Failed(text) if text.len() == TRANSFER_BUDGET * 3)
+            );
+            assert!(worker.stopping);
+            while !worker
+                .child
+                .lock()
+                .unwrap()
+                .exited_without_reaping()
+                .unwrap()
+            {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
             }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        assert!(matches!(response, Response::Failed(text) if text.len() == TRANSFER_BUDGET * 3));
-        assert!(worker.stopping);
-        while !worker.reaped().unwrap() {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(2));
+            while !worker.reaped().unwrap() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
     }
 
