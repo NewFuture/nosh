@@ -62,8 +62,8 @@ fn inline_menu_search_and_acceptance_keep_one_input_owner() {
             ("(main)", b"cat candidate_\t"),
             ("Completion", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
-            ("History search", b"\x1b"),
-            ("touch history_accepted", b"\x15exit 0\r"),
+            ("History search: history_accepted", b"\x1b"),
+            ("❯ touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
     }
@@ -278,7 +278,7 @@ fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
                 ("git status", b"\x15cat candidate_\t"),
                 ("Completion", b"\x1b"),
                 ("Tab", b"\x15\x12history_accepted"),
-                ("History search", b"\x1b"),
+                ("History search: history_accepted", b"\x1b"),
                 ("Tab", b"\x15echo yz"),
                 ("echo yz", b"x"),
                 ("echo yzx", "\x15echo 中e\u{301}".as_bytes()),
@@ -415,9 +415,9 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
             ("Completion", b"@theme-switch"),
             ("\x1b[0;38;2;238;243;248;48;2;41;54;70m", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
-            ("History search", b"@theme-switch"),
+            ("History search: history_accepted", b"@theme-switch"),
             ("\x1b[0;38;2;238;243;248;48;2;20;60;64m", b"\x1b"),
-            ("touch history_accepted", b"\x15exit 0\r"),
+            ("❯ touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
     }
