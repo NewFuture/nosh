@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::types::*;
@@ -23,6 +23,31 @@ pub(crate) fn capture(
         variable_bytes += name.len() + 32;
         variables.insert(name.clone());
     }
+    let mut environment = BTreeMap::new();
+    let mut environment_bytes = 0;
+    for (name, variable) in shell.env().iter_exported() {
+        if !variable.value().is_set()
+            || !(matches!(
+                name.as_str(),
+                "GIT_DIR"
+                    | "GIT_WORK_TREE"
+                    | "GIT_COMMON_DIR"
+                    | "GIT_NAMESPACE"
+                    | "XDG_CONFIG_HOME"
+                    | "MAKEFLAGS"
+                    | "MAKEFILES"
+                    | "LANG"
+            ) || name.starts_with("GIT_CONFIG_"))
+        {
+            continue;
+        }
+        let value = variable.value().to_cow_str(&shell);
+        environment_bytes += name.len() + value.len() + 64;
+        if environment_bytes > crate::input_assist::MAX_CONTEXT {
+            return Err("completion environment limit".into());
+        }
+        environment.insert(name.clone(), value.into_owned());
+    }
     let native = NativeSnapshot {
         context,
         registry: Registry::capture(&shell),
@@ -34,25 +59,7 @@ pub(crate) fn capture(
         scripts,
         abbreviations: abbreviations.clone(),
         nocase_paths: shell.options().case_insensitive_pathname_expansion,
-        environment: [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_COMMON_DIR",
-            "GIT_NAMESPACE",
-            "GIT_CONFIG_PARAMETERS",
-            "GIT_CONFIG_COUNT",
-            "XDG_CONFIG_HOME",
-            "MAKEFLAGS",
-            "MAKEFILES",
-            "LANG",
-        ]
-        .into_iter()
-        .filter_map(|name| {
-            shell
-                .env_str(name)
-                .map(|value| (name.into(), value.into_owned()))
-        })
-        .collect(),
+        environment,
     };
     crate::input_assist::write_json(
         &native,

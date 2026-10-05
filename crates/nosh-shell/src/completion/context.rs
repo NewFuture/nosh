@@ -121,7 +121,7 @@ impl Context {
                 Token::Operator(operator, location)
                     if matches!(
                         operator.as_str(),
-                        ";" | "|" | "||" | "&&" | "&" | "\n" | "("
+                        ";" | "|" | "|&" | "||" | "&&" | "&" | "\n" | "("
                     ) =>
                 {
                     let start = byte(location.start.index);
@@ -205,7 +205,7 @@ impl Context {
     }
 
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {
-        if self.redirect {
+        if self.redirect || !snapshot.scripts {
             return false;
         }
         let registry = &snapshot.registry;

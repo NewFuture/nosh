@@ -42,14 +42,30 @@ fn answer(server: &mut Server, query: Query, snapshot: Snapshot) -> Answer {
 
 #[test]
 fn completion_context_uses_active_command_and_byte_ranges() {
-    let (_, _, snapshot) = fixture();
-    let mut request = query("echo 中; git switch fe tail; echo untouched");
-    request.cursor = "echo 中; git switch fe".len();
-    let context = Context::parse(&request, &snapshot.native).unwrap();
-    assert_eq!(context.command(), Some("git"));
-    assert_eq!(context.words.as_ref(), ["git", "switch", "fe", "tail"]);
-    assert_eq!(context.index, 2);
-    assert_eq!(&request.text[context.span], "fe");
+    let (_, _, mut snapshot) = fixture();
+    for operator in [";", "|", "|&", "||", "&&", "&"] {
+        let prefix = format!("echo 中 {operator} git switch fe");
+        let mut request = query(&format!("{prefix} tail {operator} echo untouched"));
+        request.cursor = prefix.len();
+        let context = Context::parse(&request, &snapshot.native).unwrap();
+        assert_eq!(context.command(), Some("git"), "{operator}");
+        assert_eq!(context.words.as_ref(), ["git", "switch", "fe", "tail"]);
+        assert_eq!(context.index, 2);
+        assert_eq!(&request.text[context.span], "fe");
+    }
+    let native = Arc::make_mut(&mut snapshot.native);
+    native.context.path = None;
+    native
+        .context
+        .functions
+        .insert("nosh_pipeline_fixture".into());
+    let result = answer(
+        &mut Server::default(),
+        query("echo x |& nosh_pipe"),
+        snapshot,
+    );
+    assert_eq!(result.candidates[0].value, "nosh_pipeline_fixture");
+    assert_eq!(result.candidates[0].source, Source::Command);
 }
 
 #[test]
@@ -276,6 +292,109 @@ fn script_options_and_session_isolation() {
         assert_eq!(result.candidates[0].value, "space name");
         assert_eq!(result.candidates[0].noquote, noquote);
     }
+}
+
+#[test]
+fn disabled_scripts_keep_native_sources_and_isolated_path_expansion() {
+    let (directory, mut shell, _) = fixture();
+    fs::write(directory.path().join("native_file"), "").unwrap();
+    assert_eq!(
+        shell.run_user_line(
+            "ROOT=.; nosh_native_fixture() { :; }; scripted() { : > provider_called; COMPREPLY=(scripted); }; \
+             complete -F scripted git sample; complete -D -F scripted; complete -I -F scripted"
+        ).exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, false, &Default::default()).unwrap();
+    let mut server = Server::default();
+    for (text, value, source) in [
+        ("nosh_native_f", "nosh_native_fixture", Source::Command),
+        ("git sw", "switch", Source::Git),
+        ("sample nat", "native_file", Source::Path),
+        ("sample $ROOT/nat", "./native_file", Source::Path),
+    ] {
+        let request = query(text);
+        let context = Context::parse(&request, &snapshot.native).unwrap();
+        assert_eq!(context.requires_execution, text.contains("$ROOT"));
+        let result = answer(&mut server, request, snapshot.clone());
+        assert_eq!(result.state, State::Complete, "{text}");
+        assert!(
+            result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.value == value && candidate.source == source),
+            "{text}: {:?}",
+            result.candidates
+        );
+    }
+    assert!(!directory.path().join("provider_called").exists());
+}
+
+#[test]
+fn plusdirs_preserves_script_order_and_deduplicates_directories() {
+    let (directory, mut shell, _) = fixture();
+    for name in ["alpha", "beta", "zebra"] {
+        fs::create_dir(directory.path().join(name)).unwrap();
+    }
+    assert_eq!(
+        shell.run_user_line(
+            "directories() { COMPREPLY=(zebra alpha/); }; complete -o filenames -o nosort -o plusdirs -F directories sample"
+        ).exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    let result = answer(&mut Server::default(), query("sample "), snapshot);
+    assert_eq!(result.state, State::Complete);
+    assert_eq!(
+        result
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.value.as_str(), candidate.source.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("zebra/", Source::Script),
+            ("alpha/", Source::Script),
+            ("beta/", Source::Path)
+        ]
+    );
+}
+
+#[test]
+fn provider_environment_uses_exported_values_with_bounded_capture() {
+    let (_, mut shell, _) = fixture();
+    assert_eq!(
+        shell.run_user_line(
+            "unset GIT_DIR MAKEFILES GIT_CONFIG_VALUE_1; GIT_DIR=local-only; MAKEFILES=local.mk; \
+             export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
+        ).exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    for name in ["GIT_DIR", "MAKEFILES", "GIT_CONFIG_VALUE_1"] {
+        assert!(!snapshot.native.environment.contains_key(name), "{name}");
+    }
+    assert!(snapshot.native.variables.contains("GIT_DIR"));
+    for (name, value) in [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "core.abbrev"),
+        ("GIT_CONFIG_VALUE_0", "9"),
+    ] {
+        assert_eq!(
+            snapshot.native.environment.get(name).map(String::as_str),
+            Some(value)
+        );
+    }
+    let (_, shared) = shell.shared();
+    let mut oversized =
+        brush_core::ShellVariable::new("x".repeat(crate::input_assist::MAX_CONTEXT));
+    oversized.export();
+    shared
+        .lock()
+        .unwrap()
+        .env_mut()
+        .set_global("GIT_CONFIG_VALUE_0", oversized)
+        .unwrap();
+    assert!(snapshot::capture(&shell, true, &Default::default()).is_err());
 }
 
 #[test]
@@ -577,7 +696,7 @@ fn loaded_package_completion_definitions_override_builtin_script_names() {
 
 #[test]
 fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
-    let (directory, _, snapshot) = fixture();
+    let (directory, mut shell, _) = fixture();
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
@@ -605,6 +724,19 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
         "fixture",
     ]);
     git(&["branch", "feature-one"]);
+    git(&["tag", "feature-tag"]);
+    git(&["update-ref", "refs/remotes/upstream/feature-two", "HEAD"]);
+    assert_eq!(
+        shell
+            .run_user_line(
+                "unset GIT_DIR; GIT_DIR=not-exported; \
+             export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 \
+             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1"
+            )
+            .exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
     fs::write(directory.path().join("feature-unrelated-file"), "").unwrap();
     let mut server = Server::default();
     let branch = answer(&mut server, query("git switch fe"), snapshot.clone());
@@ -623,6 +755,31 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
             .iter()
             .all(|candidate| candidate.kind == Kind::Branch)
     );
+    for (options, prefix, expected) in [
+        ("--track", "up", vec!["upstream/feature-two"]),
+        ("-t", "up", vec!["upstream/feature-two"]),
+        ("--track=direct", "up", vec!["upstream/feature-two"]),
+        ("-c child --track=direct", "fe", vec!["feature-one"]),
+        ("-c child --track=inherit", "fe", vec!["feature-one"]),
+        ("--track --no-track", "fe", vec!["feature-one"]),
+        ("-c child", "fe", vec!["feature-one", "feature-tag"]),
+    ] {
+        let result = answer(
+            &mut server,
+            query(&format!("git switch {options} {prefix}")),
+            snapshot.clone(),
+        );
+        assert_eq!(result.state, State::Complete, "{options}");
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.value.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{options}"
+        );
+    }
     let enumeration = answer(
         &mut server,
         query("git switch --conflict=di"),

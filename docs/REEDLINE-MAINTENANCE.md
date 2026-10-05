@@ -131,7 +131,7 @@ Review and commit nosh edits and the exported patch in **one PR**. Do not edit t
 patch and the generated source independently; an input change blocks export
 rather than guessing which copy wins. Export before changing branches.
 
-For brush, edit `.nosh\brush\brush-core` and run the completion regressions through
+For brush, edit `.nosh/brush/brush-core` and run the completion regressions through
 the root workspace in Linux/macOS/WSL. Export with the checkout's native Git:
 
 ```powershell

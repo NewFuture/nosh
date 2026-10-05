@@ -30,7 +30,7 @@ completion = true
 completion_scripts = true
 ```
 
-`completion_scripts = false` 关闭已加载脚本提供器；它与 `input_assist` 独立。基本终端、非 TTY、脚本和 `-c` 使用原有降级路径。
+`completion_scripts = false` 跳过已加载脚本提供器，使用内置／原生来源；动态路径仍在隔离 worker 中展开。它与 `input_assist` 独立。基本终端、非 TTY、脚本和 `-c` 使用原有降级路径。
 
 ## 执行与资源
 

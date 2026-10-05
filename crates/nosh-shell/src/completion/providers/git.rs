@@ -140,12 +140,10 @@ pub(super) fn generate(
             "this option takes a new branch name, not an existing path or branch",
         ));
     }
-    let after_double_dash = context.words[command_index + 1..context.index]
-        .iter()
-        .any(|word| word == "--");
+    let prior = &context.words[command_index + 1..context.index];
+    let after_double_dash = prior.iter().any(|word| word == "--");
     if context.word.starts_with('-') && !after_double_dash {
         let mut options = entries(SWITCH_OPTIONS, Kind::Option);
-        let prior = &context.words[command_index + 1..context.index];
         let branch_mode = prior.iter().any(|word| {
             matches!(
                 word.as_str(),
@@ -170,20 +168,32 @@ pub(super) fn generate(
         });
         return Ok(select(query, context, &options, Source::Git));
     }
-    let remote = context.words[command_index + 1..context.index]
-        .iter()
-        .any(|word| matches!(word.as_str(), "--track" | "-t"));
-    let start_point = remote
-        || context.words[command_index + 1..context.index]
-            .iter()
-            .any(|word| {
-                matches!(
-                    word.as_str(),
-                    "-c" | "-C" | "--create" | "--force-create" | "--detach" | "-d"
-                )
-            });
+    let tracking = prior.iter().map(String::as_str).rev().find(|word| {
+        matches!(
+            *word,
+            "--track" | "-t" | "--track=direct" | "--track=inherit" | "--no-track"
+        )
+    });
+    let creating = prior.iter().any(|word| {
+        matches!(word.as_str(), "-c" | "-C" | "--create" | "--force-create")
+            || word.starts_with("--create=")
+            || word.starts_with("--force-create=")
+    });
+    let refs: &[&str] = match tracking {
+        Some("--track=inherit") => &["refs/heads"],
+        Some("--track" | "-t" | "--track=direct") if creating => &["refs/heads", "refs/remotes"],
+        Some("--track" | "-t" | "--track=direct") => &["refs/remotes"],
+        _ if creating
+            || prior
+                .iter()
+                .any(|word| matches!(word.as_str(), "--detach" | "-d")) =>
+        {
+            &["refs/heads", "refs/tags", "refs/remotes"]
+        }
+        _ => &["refs/heads"],
+    };
     let key = format!(
-        "git-refs\0{}\0{:?}\0{:?}\0{remote}\0{start_point}",
+        "git-refs\0{}\0{:?}\0{:?}\0{refs:?}",
         executable.display(),
         snapshot.context.cwd,
         prefix
@@ -191,14 +201,7 @@ pub(super) fn generate(
     let set = cache.load(key, Duration::from_secs(1), || {
         let mut args = prefix;
         args.extend(["for-each-ref".into(), "--format=%(refname:strip=2)".into()]);
-        if remote {
-            args.push("refs/remotes".into());
-        } else {
-            args.push("refs/heads".into());
-            if start_point {
-                args.extend(["refs/tags".into(), "refs/remotes".into()]);
-            }
-        }
+        args.extend(refs.iter().map(|reference| (*reference).into()));
         let data = output(
             context,
             snapshot,

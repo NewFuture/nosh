@@ -127,16 +127,10 @@ impl Server {
             let answer = self.basic(query, context, native, progress)?;
             return Ok(ready(answer));
         }
-        if context.needs_script(native) && !native.scripts {
-            return Ok(ready(Answer::unavailable(
-                query,
-                "programmable completion is disabled",
-            )));
-        }
         progress(Outcome::Progress(Answer {
             query: query.clone(),
             candidates: Vec::new(),
-            state: State::Partial("querying programmable completion".into()),
+            state: State::Partial("querying isolated completion".into()),
         }))?;
         if self.execution.is_none() {
             self.execution = Some(Execution::new(&snapshot)?);
@@ -285,7 +279,12 @@ impl Server {
                 .as_mut()
                 .ok_or("missing completion execution")?;
             let shell = &mut execution.shell;
-            let Some(spec) = shell.completion_config().specification(&request).cloned() else {
+            let Some(spec) = shell
+                .completion_config()
+                .specification(&request)
+                .filter(|_| snapshot.scripts)
+                .cloned()
+            else {
                 if context.word.contains(['$', '`']) && context.word.contains('/') {
                     let expanded = execution
                         .runtime
@@ -307,12 +306,6 @@ impl Server {
                     .basic(query.clone(), context, snapshot, progress)
                     .map_err(|error| error.to_string());
             };
-            if !snapshot.scripts {
-                return Ok(Answer::unavailable(
-                    query.clone(),
-                    "programmable completion is disabled",
-                ));
-            }
             if spec
                 .actions
                 .iter()
@@ -389,6 +382,10 @@ impl Server {
                     answer.state = directories.state;
                 }
                 answer.candidates.extend(directories.candidates);
+                seen.clear();
+                answer
+                    .candidates
+                    .retain(|candidate| seen.insert(candidate.value.clone()));
             }
             if empty
                 && answer.candidates.is_empty()
