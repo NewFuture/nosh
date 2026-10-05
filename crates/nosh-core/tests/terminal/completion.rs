@@ -1,5 +1,6 @@
 use super::support::*;
 use nosh_shell::{AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell};
+use std::os::unix::fs::PermissionsExt;
 
 const F3: &[u8] = b"\x1bOR";
 const F4: &[u8] = b"\x1bOS";
@@ -58,7 +59,6 @@ pub(super) fn probe(mode: &str) {
     )
     .unwrap();
     if mode.contains("-package") {
-        use std::os::unix::fs::PermissionsExt;
         let bin = directory.join("bin");
         std::fs::create_dir(&bin).unwrap();
         for name in ["npm", "yarn"] {
@@ -137,7 +137,17 @@ complete -F _empty fixture_empty
         0,
     );
     if mode.contains("-partial") {
-        assert_eq!(shell.run_user_line("PATH=/usr/bin:/bin").exit_code, 0);
+        let executable = directory.join("make");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = --version ] || { : > make_executed; exit 9; }
+printf 'GNU Make 4.4\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(shell.run_user_line("PATH=.").exit_code, 0);
     }
     if mode.contains("-package") {
         assert_eq!(

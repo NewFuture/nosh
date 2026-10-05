@@ -952,6 +952,7 @@ mod tests {
             let service = fixture.service();
             let query = request(&service, "sample ", Trigger::Explicit);
             wait_until(|| fixture.file("started").exists());
+            #[cfg(target_os = "linux")]
             let mut helpers = Vec::new();
             if external {
                 wait_until(|| {
@@ -961,19 +962,22 @@ mod tests {
                     };
                     let owner = child.lock().unwrap();
                     let marker = owner.marker().unwrap();
-                    helpers = crate::procs::owned_procs(owner.id() as i32, marker)
-                        .unwrap()
-                        .into_iter()
-                        .filter_map(|process| {
-                            crate::procs::TaggedProcess::open_in_session(
-                                process,
-                                marker,
-                                owner.id() as i32,
-                            )
-                            .unwrap()
-                        })
-                        .collect();
-                    !helpers.is_empty()
+                    let processes = crate::procs::owned_procs(owner.id() as i32, marker).unwrap();
+                    #[cfg(target_os = "linux")]
+                    {
+                        helpers = processes
+                            .iter()
+                            .filter_map(|&process| {
+                                crate::procs::TaggedProcess::open_in_session(
+                                    process,
+                                    marker,
+                                    owner.id() as i32,
+                                )
+                                .unwrap()
+                            })
+                            .collect();
+                    }
+                    !processes.is_empty()
                 });
             }
             let started = Instant::now();
@@ -982,6 +986,7 @@ mod tests {
             assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
             assert!(service.result(&query).is_none());
             wait_until(|| service.shared.child.lock().unwrap().is_none());
+            #[cfg(target_os = "linux")]
             assert!(helpers.iter().all(|helper| helper.gone().unwrap()));
             eprintln!("completion cancellation external={external}: {elapsed:?}");
             close(service);
