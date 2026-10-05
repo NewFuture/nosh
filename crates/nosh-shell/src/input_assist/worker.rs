@@ -1090,6 +1090,22 @@ mod tests {
         }
         // SAFETY: Worker::spawn installed this descriptor for this test entry.
         let mut stream = unsafe { UnixStream::from_raw_fd(SOCKET_FD) };
+        let capacity: libc::c_int = 1024;
+        // SAFETY: the socket and the integer option value are valid for this call.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&raw const capacity).cast(),
+                    std::mem::size_of_val(&capacity) as libc::socklen_t,
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
         read_frame(&mut stream).unwrap().unwrap();
         stream
             .write_all(
@@ -1173,7 +1189,16 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "coalesced frame watchdog");
-            std::thread::sleep(Duration::from_millis(2));
+            // Fixed sleeps throttle platforms with small Unix socket buffers.
+            filedescriptor::poll(
+                &mut [libc::pollfd {
+                    fd: worker.stream.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                Some(deadline.saturating_duration_since(Instant::now())),
+            )
+            .unwrap();
         }
         assert_eq!(progress, 3);
         stop_completion(&mut worker);
