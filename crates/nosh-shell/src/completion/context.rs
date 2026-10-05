@@ -121,7 +121,7 @@ impl Context {
                 Token::Operator(operator, location)
                     if matches!(
                         operator.as_str(),
-                        ";" | "|" | "|&" | "||" | "&&" | "&" | "\n" | "("
+                        ";" | "|" | "|&" | "||" | "&&" | "&" | "\n" | "(" | ")"
                     ) =>
                 {
                     let start = byte(location.start.index);
@@ -211,6 +211,10 @@ impl Context {
             .first()
             .map(String::as_str)
             .filter(|word| !word.is_empty())
+    }
+
+    pub fn is_variable(&self) -> bool {
+        self.word.starts_with('$') && self.quote != Some('\'') && !self.word.contains('/')
     }
 
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {

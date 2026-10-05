@@ -115,9 +115,6 @@ fn output(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(home) = &snapshot.context.home {
-        command.env("HOME", home);
-    }
     if let Some(marker) = std::env::var_os(crate::procs::RUN_VAR) {
         command.env(crate::procs::RUN_VAR, marker);
     }

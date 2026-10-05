@@ -68,6 +68,12 @@ fn completion_context_uses_active_command_and_byte_ranges() {
         assert_eq!(context.index, 2);
         assert_eq!(&request.text[context.span], "fe");
     }
+    let mut request = query("(git sw)");
+    request.cursor -= 1;
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    assert_eq!(context.words.as_ref(), ["git", "sw"]);
+    assert_eq!(&request.text[context.span], "sw");
+    assert_eq!(context.command_end, request.cursor);
     let native = Arc::make_mut(&mut snapshot.native);
     native.context.path = None;
     native
@@ -323,6 +329,19 @@ fn script_options_and_session_isolation() {
         assert_eq!(result.candidates[0].value, "space name");
         assert_eq!(result.candidates[0].noquote, noquote);
     }
+    assert_eq!(shell.run_user_line(
+        "FALLBACK_VARIABLE=value; empty() { COMPREPLY=(); }; complete -o bashdefault -F empty sample"
+    ).exit_code, 0);
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    for (text, value) in [
+        ("sample $FALLBACK_V", "$FALLBACK_VARIABLE"),
+        ("sample ${FALLBACK_V", "${FALLBACK_VARIABLE}"),
+    ] {
+        let result = answer(&mut Server::default(), query(text), snapshot.clone());
+        assert_eq!(result.state, State::Complete);
+        assert_eq!(candidate_values(&result), [value]);
+        assert_eq!(result.candidates[0].source, Source::Variable);
+    }
 }
 
 #[test]
@@ -396,7 +415,7 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     assert_eq!(
         shell.run_user_line(
             "unset GIT_DIR MAKEFILES GIT_CONFIG_VALUE_1; GIT_DIR=local-only; MAKEFILES=local.mk; \
-             export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
+             export HOME=provider-home GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
         ).exit_code,
         0
     );
@@ -406,6 +425,7 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     }
     assert!(snapshot.native.variables.contains("GIT_DIR"));
     for (name, value) in [
+        ("HOME", "provider-home"),
         ("GIT_CONFIG_COUNT", "1"),
         ("GIT_CONFIG_KEY_0", "core.abbrev"),
         ("GIT_CONFIG_VALUE_0", "9"),
@@ -415,6 +435,13 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
             Some(value)
         );
     }
+    assert_eq!(shell.run_user_line("export -n HOME").exit_code, 0);
+    let unexported = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    assert_eq!(
+        unexported.native.context.home.as_deref(),
+        Some("provider-home")
+    );
+    assert!(!unexported.native.environment.contains_key("HOME"));
     let (_, shared) = shell.shared();
     let mut oversized =
         brush_core::ShellVariable::new("x".repeat(crate::input_assist::MAX_CONTEXT));
@@ -456,7 +483,7 @@ fn provider_process_environment_comes_from_the_snapshot() {
     write_executable(
         directory.path().join("make"),
         "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\n\
-         [ -z \"${GIT_DIR+x}${GIT_WORK_TREE+x}${MAKEFILES+x}\" ] || exit 10\n\
+         [ -z \"${GIT_DIR+x}${GIT_WORK_TREE+x}${MAKEFILES+x}${HOME+x}\" ] || exit 10\n\
          [ \"$NOSH_AGENT_RUN\" = provider-environment-fixture ] || exit 11\n\
          [ \"$GIT_CONFIG_KEY_0\" = core.abbrev ] && [ \"$GIT_CONFIG_VALUE_0\" = 9 ] || exit 12\n\
          printf 'GNU Make 4.4\\n'\n",
@@ -464,7 +491,7 @@ fn provider_process_environment_comes_from_the_snapshot() {
     assert_eq!(
         shell
             .run_user_line(
-                "PATH=.; unset GIT_DIR GIT_WORK_TREE MAKEFILES; \
+                "PATH=.; HOME=provider-home; export -n HOME; unset GIT_DIR GIT_WORK_TREE MAKEFILES; \
          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9"
             )
             .exit_code,
@@ -506,8 +533,19 @@ fn autoloaded_unavailable_definitions_survive_worker_replacement() {
 #[test]
 fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
     let (directory, _, _) = fixture();
-    fs::write(directory.path().join("Makefile"),
-        ".PHONY: clean\nall: input\n\tprintf 'false-target: nope'\ninclude extra.mk\n$(shell touch SIDE_EFFECT):\n").unwrap();
+    fs::write(
+        directory.path().join("Makefile"),
+        concat!(
+            ".PHONY: clean\nall: input\n",
+            "\tprintf '%s' \\\n",
+            "false-target: \\\n",
+            "also-false:\n",
+            "\tprintf '%s' \\\\\n",
+            "real-target:\n",
+            "include extra.mk\n$(shell touch SIDE_EFFECT):\n",
+        ),
+    )
+    .unwrap();
     fs::write(directory.path().join("extra.mk"), "test\\ target:\n").unwrap();
     let set = super::providers::make::targets(directory.path(), &["Makefile".into()], &[]);
     assert_eq!(
@@ -515,7 +553,7 @@ fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
             .iter()
             .map(|entry| entry.value.as_str())
             .collect::<Vec<_>>(),
-        ["all", "clean", "test target"]
+        ["all", "clean", "real-target", "test target"]
     );
     assert!(set.reason.is_some());
     assert!(!directory.path().join("SIDE_EFFECT").exists());
@@ -581,6 +619,35 @@ fn makeflags_include_directories_are_used_for_static_targets() {
         assert!(matches!(result.state, State::Partial(_)), "{flags}");
         assert_eq!(result.candidates[0].value, "local");
     }
+    Arc::make_mut(&mut snapshot.native)
+        .environment
+        .remove("MAKEFLAGS");
+    for text in [
+        "make -Cfirst ",
+        "make -ftargets.mk ",
+        "make -Ifirst ",
+        "make -Cfirst",
+        "make -ftargets.mk",
+        "make -Ifirst",
+        "make -Cfirst --file=",
+        "make -Cfirst --d",
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert!(
+            matches!(result.state, State::Unavailable(_)),
+            "{text}: {:?}",
+            result.state
+        );
+        assert!(result.candidates.is_empty());
+    }
+    fs::write(directory.path().join("-Cfile"), "other_target:\n").unwrap();
+    let result = answer(&mut server, query("make -f -Cfile oth"), snapshot.clone());
+    assert_eq!(result.state, State::Complete);
+    assert_eq!(candidate_values(&result), ["other_target"]);
+    fs::write(directory.path().join("Makefile"), "-Cfirst:\n").unwrap();
+    let result = answer(&mut Server::default(), query("make -- -Cf"), snapshot);
+    assert_eq!(result.state, State::Complete);
+    assert_eq!(candidate_values(&result), ["-Cfirst"]);
 }
 
 #[cfg(unix)]
@@ -859,7 +926,32 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
     );
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
     fs::write(directory.path().join("feature-unrelated-file"), "").unwrap();
+    fs::create_dir(directory.path().join("feature-directory")).unwrap();
     let mut server = Server::default();
+    let directory_value = answer(&mut server, query("git -C fe"), snapshot.clone());
+    assert_eq!(candidate_values(&directory_value), ["feature-directory/"]);
+    for option in [
+        "-c new",
+        "-C new",
+        "--create new",
+        "--force-create new",
+        "--orphan new",
+        "--create=new",
+        "--force-create=new",
+        "--orphan=new",
+    ] {
+        let result = answer(
+            &mut server,
+            query(&format!("git switch {option}")),
+            snapshot.clone(),
+        );
+        assert!(
+            matches!(result.state, State::Unavailable(_)),
+            "{option}: {:?}",
+            result.state
+        );
+        assert!(result.candidates.is_empty());
+    }
     let branch = answer(&mut server, query("git switch fe"), snapshot.clone());
     assert_eq!(branch.state, State::Complete);
     assert_eq!(candidate_values(&branch), ["feature-one"]);

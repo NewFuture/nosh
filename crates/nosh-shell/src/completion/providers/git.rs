@@ -83,9 +83,10 @@ pub(super) fn generate(
         .checked_sub(1)
         .and_then(|index| context.words.get(index))
         .map(String::as_str);
-    if matches!(previous, Some("-C" | "--git-dir" | "--work-tree"))
-        || context.word.starts_with("--git-dir=")
-        || context.word.starts_with("--work-tree=")
+    if context.index <= command_index
+        && (matches!(previous, Some("-C" | "--git-dir" | "--work-tree"))
+            || context.word.starts_with("--git-dir=")
+            || context.word.starts_with("--work-tree="))
     {
         return Ok(paths(query, context, snapshot, cache, true));
     }
@@ -134,7 +135,10 @@ pub(super) fn generate(
     if matches!(
         previous,
         Some("-c" | "-C" | "--create" | "--force-create" | "--orphan")
-    ) {
+    ) || ["--create=", "--force-create=", "--orphan="]
+        .iter()
+        .any(|prefix| context.word.starts_with(prefix))
+    {
         return Ok(Answer::unavailable(
             query,
             "this option takes a new branch name, not an existing path or branch",

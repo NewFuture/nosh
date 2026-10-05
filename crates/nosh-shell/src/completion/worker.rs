@@ -185,10 +185,7 @@ impl Server {
         snapshot: &NativeSnapshot,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
     ) -> std::io::Result<Answer> {
-        if context.word.starts_with('$')
-            && context.quote != Some('\'')
-            && !context.word.contains('/')
-        {
+        if context.is_variable() {
             let brace = context.word.starts_with("${");
             let entries = snapshot
                 .variables
@@ -390,11 +387,14 @@ impl Server {
             if empty
                 && answer.candidates.is_empty()
                 && generation.bash_default
-                && context.index == 0
+                && (context.is_variable() || context.index == 0)
             {
-                answer =
+                answer = if context.is_variable() {
+                    self.basic(query.clone(), context, snapshot, progress)
+                } else {
                     native::commands(query.clone(), context, snapshot, &mut self.cache, progress)
-                        .map_err(|error| error.to_string())?;
+                }
+                .map_err(|error| error.to_string())?;
             }
             if empty && answer.candidates.is_empty() && generation.default {
                 answer = native::paths(query.clone(), context, snapshot, &mut self.cache, false);

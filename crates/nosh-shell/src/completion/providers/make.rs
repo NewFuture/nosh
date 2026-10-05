@@ -37,6 +37,24 @@ pub(super) fn generate(
     if !version.starts_with("GNU Make ") {
         return Err("built-in target completion supports GNU Make; load a definition for this implementation".into());
     }
+    let mut arguments = context.words[1..context.index]
+        .iter()
+        .chain(std::iter::once(&context.word));
+    while let Some(word) = arguments.next() {
+        match word.as_str() {
+            "--" => break,
+            "-C" | "--directory" | "-f" | "--file" | "--makefile" | "-I" | "--include-dir" => {
+                arguments.next();
+            }
+            _ if word.len() > 2 && matches!(word.get(..2), Some("-C" | "-f" | "-I")) => {
+                return Ok(Answer::unavailable(
+                    query,
+                    "attached Make path options require a loaded completion definition",
+                ));
+            }
+            _ => {}
+        }
+    }
     let previous = context
         .index
         .checked_sub(1)
@@ -90,6 +108,9 @@ pub(super) fn generate(
     let mut index = 0;
     while index < prior.len() {
         let word = &prior[index];
+        if word == "--" {
+            break;
+        }
         let (option, value) = if let Some((option, value)) = word.split_once('=') {
             (option, Some(value))
         } else if matches!(
@@ -277,9 +298,12 @@ pub(crate) fn targets(cwd: &Path, files: &[PathBuf], include_dirs: &[PathBuf]) -
         let mut definition = 0_usize;
         let mut conditional = 0_usize;
         let mut recipe = '\t';
+        let mut recipe_continued = false;
         let mut logical = String::new();
         for line in text.lines() {
-            if line.starts_with(recipe) {
+            if recipe_continued || line.starts_with(recipe) {
+                recipe_continued =
+                    line.bytes().rev().take_while(|byte| *byte == b'\\').count() % 2 == 1;
                 continue;
             }
             logical.push_str(line);

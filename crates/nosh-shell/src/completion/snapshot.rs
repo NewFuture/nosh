@@ -29,7 +29,8 @@ pub(crate) fn capture(
         if !variable.value().is_set()
             || !(matches!(
                 name.as_str(),
-                "GIT_DIR"
+                "HOME"
+                    | "GIT_DIR"
                     | "GIT_WORK_TREE"
                     | "GIT_COMMON_DIR"
                     | "GIT_NAMESPACE"
