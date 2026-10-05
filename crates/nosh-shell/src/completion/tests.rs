@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use super::context::Context;
@@ -38,6 +39,20 @@ fn answer(server: &mut Server, query: Query, snapshot: Snapshot) -> Answer {
         Outcome::Ready { answer, .. } => answer,
         other => panic!("unexpected completion outcome: {other:?}"),
     }
+}
+
+fn candidate_values(answer: &Answer) -> Vec<&str> {
+    answer
+        .candidates
+        .iter()
+        .map(|candidate| candidate.value.as_str())
+        .collect()
+}
+
+fn write_executable(path: impl AsRef<std::path::Path>, contents: &str) {
+    let path = path.as_ref();
+    fs::write(path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -165,12 +180,9 @@ fn provider_collection_budgets_remain_partial_after_deduplication() {
 
 #[test]
 fn merged_command_sources_keep_precedence_and_exclude_duplicates_and_invalid_executables() {
-    use std::os::unix::fs::PermissionsExt;
     let (directory, _, mut snapshot) = fixture();
     for index in 0..300 {
-        let path = directory.path().join(format!("fixture{index:03}"));
-        fs::write(&path, "").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(directory.path().join(format!("fixture{index:03}")), "");
     }
     fs::write(directory.path().join("fixture-invalid"), "").unwrap();
     let native = Arc::make_mut(&mut snapshot.native);
@@ -248,14 +260,7 @@ fn directory_collection_retains_symlinks_hidden_names_and_partial_errors() {
         ("cat .", vec![".hidden"]),
     ] {
         let result = answer(&mut server, query(text), snapshot.clone());
-        assert_eq!(
-            result
-                .candidates
-                .iter()
-                .map(|value| value.value.as_str())
-                .collect::<Vec<_>>(),
-            expected
-        );
+        assert_eq!(candidate_values(&result), expected);
         if non_utf8 {
             assert!(matches!(result.state, State::Partial(_)));
         } else {
@@ -272,11 +277,7 @@ fn native_paths_include_non_prefix_matches_with_exact_and_prefix_priority() {
     }
     let result = answer(&mut Server::default(), query("cd proj"), snapshot);
     assert_eq!(
-        result
-            .candidates
-            .iter()
-            .map(|candidate| candidate.value.as_str())
-            .collect::<Vec<_>>(),
+        candidate_values(&result),
         ["proj/", "project/", "projects/", "my-project/"]
     );
     assert_eq!(result.state, State::Complete);
@@ -291,14 +292,7 @@ fn script_options_and_session_isolation() {
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
     let result = answer(&mut Server::default(), query("sample "), snapshot);
     assert_eq!(result.state, State::Complete);
-    assert_eq!(
-        result
-            .candidates
-            .iter()
-            .map(|candidate| candidate.value.as_str())
-            .collect::<Vec<_>>(),
-        ["zebra", "alpha"]
-    );
+    assert_eq!(candidate_values(&result), ["zebra", "alpha"]);
     assert!(
         result
             .candidates
@@ -436,7 +430,6 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
 
 #[test]
 fn provider_process_environment_comes_from_the_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
     if std::env::var_os("NOSH_TEST_PROVIDER_ENV").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -460,20 +453,14 @@ fn provider_process_environment_comes_from_the_snapshot() {
         return;
     }
     let (directory, mut shell, _) = fixture();
-    fs::write(
+    write_executable(
         directory.path().join("make"),
         "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\n\
          [ -z \"${GIT_DIR+x}${GIT_WORK_TREE+x}${MAKEFILES+x}\" ] || exit 10\n\
          [ \"$NOSH_AGENT_RUN\" = provider-environment-fixture ] || exit 11\n\
          [ \"$GIT_CONFIG_KEY_0\" = core.abbrev ] && [ \"$GIT_CONFIG_VALUE_0\" = 9 ] || exit 12\n\
          printf 'GNU Make 4.4\\n'\n",
-    )
-    .unwrap();
-    fs::set_permissions(
-        directory.path().join("make"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    );
     assert_eq!(
         shell
             .run_user_line(
@@ -536,18 +523,11 @@ fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
 
 #[test]
 fn makeflags_include_directories_are_used_for_static_targets() {
-    use std::os::unix::fs::PermissionsExt;
     let (directory, _, mut snapshot) = fixture();
-    fs::write(
+    write_executable(
         directory.path().join("make"),
         "#!/bin/sh\nprintf 'GNU Make 4.4\\n'\n",
-    )
-    .unwrap();
-    fs::set_permissions(
-        directory.path().join("make"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    );
     fs::write(
         directory.path().join("Makefile"),
         "include targets.mk\nlocal:\n",
@@ -606,23 +586,18 @@ fn makeflags_include_directories_are_used_for_static_targets() {
 #[cfg(unix)]
 #[test]
 fn provider_versions_are_reused_and_scoped_to_the_executable() {
-    use std::os::unix::fs::PermissionsExt;
-
     let (directory, _, snapshot) = fixture();
     let bin = directory.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let calls = directory.path().join("versions");
     for (name, version) in [("make", "GNU Make 4.4"), ("gmake", "BSD Make")] {
-        let executable = bin.join(name);
-        fs::write(
-            &executable,
-            format!(
+        write_executable(
+            bin.join(name),
+            &format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\nprintf '{name}\\n' >> '{}'\nprintf '{version}\\n'\n",
                 calls.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        );
     }
     let mut native = snapshot.native.as_ref().clone();
     native.context.path = Some(bin.display().to_string());
@@ -650,15 +625,14 @@ fn provider_versions_are_reused_and_scoped_to_the_executable() {
 }
 
 fn package_fixture() -> (tempfile::TempDir, Snapshot) {
-    use std::os::unix::fs::PermissionsExt;
-
     let (directory, _, mut snapshot) = fixture();
     let bin = directory.path().join("bin");
     fs::create_dir(&bin).unwrap();
     for name in ["npm", "yarn"] {
-        let executable = bin.join(name);
-        fs::write(&executable, "#!/bin/sh\ntouch manager_executed\nexit 9\n").unwrap();
-        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(
+            bin.join(name),
+            "#!/bin/sh\ntouch manager_executed\nexit 9\n",
+        );
     }
     Arc::make_mut(&mut snapshot.native).context.path = Some(bin.display().to_string());
     (directory, snapshot)
@@ -713,14 +687,7 @@ fn package_scripts_complete_npm_and_yarn_without_running_the_manager_or_scripts(
     for text in ["npm run b", "npm run-script b", "yarn run b", "yarn b"] {
         let result = answer(&mut server, query(text), snapshot.clone());
         assert_eq!(result.state, State::Complete);
-        assert_eq!(
-            result
-                .candidates
-                .iter()
-                .map(|value| value.value.as_str())
-                .collect::<Vec<_>>(),
-            ["build", "build:prod"]
-        );
+        assert_eq!(candidate_values(&result), ["build", "build:prod"]);
         assert_eq!(
             result.candidates[0].description.as_deref(),
             Some("touch script_executed")
@@ -728,14 +695,7 @@ fn package_scripts_complete_npm_and_yarn_without_running_the_manager_or_scripts(
         assert_eq!(&result.query.text[result.candidates[0].span.clone()], "b");
     }
     let verbs = answer(&mut server, query("npm ru"), snapshot);
-    assert_eq!(
-        verbs
-            .candidates
-            .iter()
-            .map(|value| value.value.as_str())
-            .collect::<Vec<_>>(),
-        ["run", "run-script"]
-    );
+    assert_eq!(candidate_values(&verbs), ["run", "run-script"]);
     assert!(!directory.path().join("manager_executed").exists());
     assert!(!directory.path().join("script_executed").exists());
 }
@@ -902,14 +862,7 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
     let mut server = Server::default();
     let branch = answer(&mut server, query("git switch fe"), snapshot.clone());
     assert_eq!(branch.state, State::Complete);
-    assert_eq!(
-        branch
-            .candidates
-            .iter()
-            .map(|candidate| candidate.value.as_str())
-            .collect::<Vec<_>>(),
-        ["feature-one"]
-    );
+    assert_eq!(candidate_values(&branch), ["feature-one"]);
     assert!(
         branch
             .candidates
@@ -931,15 +884,7 @@ fn native_git_switch_uses_real_refs_and_enum_values_not_files() {
             snapshot.clone(),
         );
         assert_eq!(result.state, State::Complete, "{options}");
-        assert_eq!(
-            result
-                .candidates
-                .iter()
-                .map(|candidate| candidate.value.as_str())
-                .collect::<Vec<_>>(),
-            expected,
-            "{options}"
-        );
+        assert_eq!(candidate_values(&result), expected, "{options}");
     }
     let enumeration = answer(
         &mut server,
