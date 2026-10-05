@@ -10,6 +10,15 @@ pub(crate) fn rank(
     nocase: bool,
 ) -> Option<(Score, Vec<usize>)> {
     let insensitive = nocase || !query.chars().any(char::is_uppercase);
+    // ASCII folding preserves byte lengths: an equal-length subsequence must match in full.
+    if value.len() < query.len()
+        || (!fuzzy && !value.starts_with(query))
+        || (value.len() == query.len()
+            && value != query
+            && (!insensitive || !value.eq_ignore_ascii_case(query)))
+    {
+        return None;
+    }
     let folded = |character: char| {
         if insensitive {
             character.to_ascii_lowercase()
@@ -17,9 +26,6 @@ pub(crate) fn rank(
             character
         }
     };
-    if !fuzzy && !value.starts_with(query) {
-        return None;
-    }
     let mut wanted = query.chars();
     let mut next = wanted.next();
     let mut matched = Vec::new();
@@ -92,6 +98,11 @@ mod tests {
         );
         assert!(rank("project", "Proj", true, false).is_none());
         assert!(rank("project", "Proj", true, true).is_some());
+        assert!(rank("project", "projects", true, false).is_none());
+        assert!(rank("a中", "中a", true, false).is_none());
+        assert!(rank("a中", "A中", true, false).is_none());
+        assert_eq!(rank("A中", "a中", true, false).unwrap().1, [0, 1]);
+        assert_eq!(rank("a中", "A中", true, true).unwrap().1, [0, 1]);
         assert_eq!(rank("a\u{301}中b", "a中", true, false).unwrap().1, [0, 1]);
         assert_eq!(
             rank("a\u{301}中b", "a\u{301}中", true, false).unwrap().1,
