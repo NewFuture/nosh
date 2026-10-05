@@ -153,8 +153,17 @@ impl Context {
         let cursor = query.cursor - command_start;
         let raw = brush_core::completion::simple_tokenize_by_delimiters(line, &[' ', '\t', '\n']);
         let mut path = snapshot.context.path.clone();
-        let mut skipped = 0;
-        for token in &raw {
+        let mut skipped = raw
+            .iter()
+            .take_while(|token| {
+                token.end() < cursor
+                    && matches!(
+                        token.text,
+                        "if" | "then" | "elif" | "else" | "while" | "until" | "do" | "{" | "!"
+                    )
+            })
+            .count();
+        for token in raw.iter().skip(skipped) {
             if token.end() >= cursor {
                 break;
             }

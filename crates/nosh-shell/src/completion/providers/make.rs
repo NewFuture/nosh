@@ -80,6 +80,13 @@ pub(super) fn generate(
     let mut cwd = snapshot.context.cwd.clone();
     let mut files = Vec::new();
     let mut includes = Vec::new();
+    let mut flags_error = None;
+    if let Some(flags) = snapshot.environment.get("MAKEFLAGS") {
+        match include_flags(flags) {
+            Ok(paths) => includes = paths,
+            Err(error) => flags_error = Some(error),
+        }
+    }
     let mut index = 0;
     while index < prior.len() {
         let word = &prior[index];
@@ -125,7 +132,57 @@ pub(super) fn generate(
     let set = cache.load(key, Duration::from_secs(1), || {
         Ok(targets(&cwd, &files, &includes))
     })?;
-    Ok(select(query, context, &set, Source::Make))
+    let mut answer = select(query, context, &set, Source::Make);
+    if let Some(error) = flags_error {
+        answer.state = State::Partial(error.into());
+    }
+    Ok(answer)
+}
+
+fn include_flags(text: &str) -> Result<Vec<PathBuf>, &'static str> {
+    let mut flags = words(text)?;
+    if let Some(first) = flags.first_mut()
+        && !first.starts_with('-')
+        && !first.contains('=')
+    {
+        first.insert(0, '-');
+    }
+    let mut flags = flags.iter();
+    let mut directories = Vec::new();
+    while let Some(flag) = flags.next() {
+        if flag == "--" {
+            break;
+        }
+        if matches!(
+            flag.as_str(),
+            "-C" | "-f" | "--directory" | "--file" | "--makefile"
+        ) {
+            flags.next();
+            continue;
+        }
+        let value = if matches!(flag.as_str(), "-I" | "--include-dir") {
+            Some(
+                flags
+                    .next()
+                    .ok_or("missing MAKEFLAGS include directory")?
+                    .as_str(),
+            )
+        } else {
+            flag.strip_prefix("--include-dir=")
+                .or_else(|| flag.strip_prefix("-I"))
+        };
+        if let Some(value) = value {
+            if value.is_empty() {
+                return Err("empty MAKEFLAGS include directory");
+            }
+            if value != "-" {
+                directories.push(PathBuf::from(value));
+            }
+        } else if flag.starts_with('-') && !flag.starts_with("--") && flag.contains('I') {
+            return Err("combined MAKEFLAGS include flags are not supported");
+        }
+    }
+    Ok(directories)
 }
 
 fn words(text: &str) -> Result<Vec<String>, &'static str> {
@@ -142,8 +199,6 @@ fn words(text: &str) -> Result<Vec<String>, &'static str> {
             if !word.is_empty() {
                 result.push(std::mem::take(&mut word));
             }
-        } else if character == '#' {
-            break;
         } else if character == '$' {
             return Err("dynamic Make expression omitted");
         } else {

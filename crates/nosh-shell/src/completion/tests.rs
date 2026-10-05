@@ -69,6 +69,43 @@ fn completion_context_uses_active_command_and_byte_ranges() {
 }
 
 #[test]
+fn compound_command_prefixes_preserve_command_and_argument_positions() {
+    let (_, _, snapshot) = fixture();
+    for prefix in [
+        "if ",
+        "if true; then ",
+        "if true; then :; else ",
+        "while true; do ",
+        "until false; do ",
+        "{ ",
+        "if true; then { ! ",
+    ] {
+        for (text, index, word) in [("gi", 0, "gi"), ("git switch fe", 2, "fe")] {
+            let request = query(&format!("{prefix}{text}"));
+            let context = Context::parse(&request, &snapshot.native).unwrap();
+            assert_eq!(
+                context.command(),
+                Some(if index == 0 { "gi" } else { "git" })
+            );
+            assert_eq!(context.index, index, "{prefix}{text}");
+            assert_eq!(&request.text[context.span.clone()], word);
+            assert_eq!(&request.text[context.command_start..], text);
+        }
+    }
+    for (text, command) in [
+        ("echo then gi", "echo"),
+        ("echo '{' gi", "echo"),
+        ("'then' gi", "then"),
+        ("\"do\" gi", "do"),
+        ("\\if gi", "if"),
+        ("X=1 then gi", "then"),
+    ] {
+        let context = Context::parse(&query(text), &snapshot.native).unwrap();
+        assert_eq!(context.command(), Some(command), "{text}");
+    }
+}
+
+#[test]
 fn mid_line_token_ranges() {
     let (_, _, snapshot) = fixture();
     let mut request = query("sample first   tail");
@@ -398,6 +435,61 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
 }
 
 #[test]
+fn provider_process_environment_comes_from_the_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("NOSH_TEST_PROVIDER_ENV").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "completion::tests::provider_process_environment_comes_from_the_snapshot",
+                "--nocapture",
+            ])
+            .env("NOSH_TEST_PROVIDER_ENV", "1")
+            .env("GIT_DIR", "stale-host-directory")
+            .env("GIT_WORK_TREE", "stale-host-worktree")
+            .env("MAKEFILES", "stale-host.mk")
+            .env(crate::procs::RUN_VAR, "provider-environment-fixture")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let (directory, mut shell, _) = fixture();
+    fs::write(
+        directory.path().join("make"),
+        "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\n\
+         [ -z \"${GIT_DIR+x}${GIT_WORK_TREE+x}${MAKEFILES+x}\" ] || exit 10\n\
+         [ \"$NOSH_AGENT_RUN\" = provider-environment-fixture ] || exit 11\n\
+         [ \"$GIT_CONFIG_KEY_0\" = core.abbrev ] && [ \"$GIT_CONFIG_VALUE_0\" = 9 ] || exit 12\n\
+         printf 'GNU Make 4.4\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        directory.path().join("make"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(
+        shell
+            .run_user_line(
+                "PATH=.; unset GIT_DIR GIT_WORK_TREE MAKEFILES; \
+         export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9"
+            )
+            .exit_code,
+        0
+    );
+    let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+    let result = answer(&mut Server::default(), query("make --dry"), snapshot);
+    assert_eq!(result.state, State::Complete);
+    assert_eq!(result.candidates[0].value, "--dry-run");
+}
+
+#[test]
 fn autoloaded_unavailable_definitions_survive_worker_replacement() {
     let (directory, mut shell, _) = fixture();
     assert_eq!(shell.run_user_line(
@@ -440,6 +532,75 @@ fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
     );
     assert!(set.reason.is_some());
     assert!(!directory.path().join("SIDE_EFFECT").exists());
+}
+
+#[test]
+fn makeflags_include_directories_are_used_for_static_targets() {
+    use std::os::unix::fs::PermissionsExt;
+    let (directory, _, mut snapshot) = fixture();
+    fs::write(
+        directory.path().join("make"),
+        "#!/bin/sh\nprintf 'GNU Make 4.4\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        directory.path().join("make"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("Makefile"),
+        "include targets.mk\nlocal:\n",
+    )
+    .unwrap();
+    for (name, target) in [("first", "first_target"), ("second path", "second_target")] {
+        fs::create_dir(directory.path().join(name)).unwrap();
+        fs::write(
+            directory.path().join(name).join("targets.mk"),
+            format!("{target}:\n"),
+        )
+        .unwrap();
+    }
+    Arc::make_mut(&mut snapshot.native).context.path = Some(".".into());
+    let mut server = Server::default();
+    for (flags, expected) in [
+        ("-Ifirst", "first_target"),
+        ("-I first", "first_target"),
+        ("I first", "first_target"),
+        ("ks -I first", "first_target"),
+        ("--include-dir=first", "first_target"),
+        ("--include-dir first", "first_target"),
+        ("-Isecond\\ path", "second_target"),
+        ("--include-dir=second\\ path", "second_target"),
+        ("-C ignored -f ignored.mk -I first", "first_target"),
+        ("-f -Isecond\\ path -I first", "first_target"),
+    ] {
+        Arc::make_mut(&mut snapshot.native)
+            .environment
+            .insert("MAKEFLAGS".into(), flags.into());
+        let result = answer(&mut server, query("make "), snapshot.clone());
+        assert_eq!(result.state, State::Complete, "{flags}");
+        let values: std::collections::BTreeSet<_> = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
+        assert_eq!(values, [expected, "local"].into(), "{flags}");
+    }
+    for flags in [
+        "-I",
+        "--include-dir=",
+        "-kIfirst",
+        "-I$(dynamic)",
+        "-- -Ifirst",
+    ] {
+        Arc::make_mut(&mut snapshot.native)
+            .environment
+            .insert("MAKEFLAGS".into(), flags.into());
+        let result = answer(&mut server, query("make "), snapshot.clone());
+        assert!(matches!(result.state, State::Partial(_)), "{flags}");
+        assert_eq!(result.candidates[0].value, "local");
+    }
 }
 
 #[cfg(unix)]

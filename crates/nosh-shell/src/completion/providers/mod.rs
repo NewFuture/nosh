@@ -106,6 +106,7 @@ fn output(
     command
         .args(args)
         .current_dir(cwd)
+        .env_clear()
         .envs(&snapshot.environment)
         .env("PATH", context.path.as_deref().unwrap_or(""))
         .env("LC_ALL", "C")
@@ -116,6 +117,9 @@ fn output(
         .stderr(Stdio::null());
     if let Some(home) = &snapshot.context.home {
         command.env("HOME", home);
+    }
+    if let Some(marker) = std::env::var_os(crate::procs::RUN_VAR) {
+        command.env(crate::procs::RUN_VAR, marker);
     }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let result = (|| {
