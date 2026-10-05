@@ -755,6 +755,7 @@ impl Worker {
             return Err(error);
         }
         self.timeout = match request {
+            Request::Complete { context, .. } if context.requires_execution => INDEX_TIMEOUT,
             Request::Complete { .. } => LOOKUP_TIMEOUT,
             Request::Analyze(_) => SYNTAX_TIMEOUT,
             Request::Lookup { .. } | Request::Correction { .. } => LOOKUP_TIMEOUT,
@@ -1079,6 +1080,23 @@ mod tests {
         while !worker.reaped().unwrap() {
             assert!(Instant::now() < deadline, "completion cleanup watchdog");
             std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    #[test]
+    fn completion_deadline_is_selected_before_the_first_response() {
+        let launch = crate::input_assist::tests::launcher("input_assist::tests::worker_probe");
+        for (requires_execution, expected) in [(false, LOOKUP_TIMEOUT), (true, INDEX_TIMEOUT)] {
+            let mut request = completion_request();
+            let Request::Complete { context, .. } = &mut request else {
+                unreachable!()
+            };
+            context.requires_execution = requires_execution;
+            let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
+            worker.start(&request).unwrap();
+            let timeout = worker.timeout;
+            stop_completion(&mut worker);
+            assert_eq!(timeout, expected, "requires_execution={requires_execution}");
         }
     }
 
