@@ -178,13 +178,16 @@ fn directory_collection_retains_symlinks_hidden_names_and_partial_errors() {
     symlink("folder", directory.path().join("linked")).unwrap();
     symlink("missing", directory.path().join("broken")).unwrap();
     fs::write(directory.path().join(".hidden"), "").unwrap();
-    fs::write(
+    let non_utf8 = match fs::write(
         directory
             .path()
             .join(std::ffi::OsString::from_vec(vec![0xff])),
         "",
-    )
-    .unwrap();
+    ) {
+        Ok(()) => true,
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("non-UTF-8 filename fixture: {error}"),
+    };
     let mut server = Server::default();
     for (text, expected) in [
         ("cat ", vec!["broken", "folder/", "linked/"]),
@@ -200,7 +203,11 @@ fn directory_collection_retains_symlinks_hidden_names_and_partial_errors() {
                 .collect::<Vec<_>>(),
             expected
         );
-        assert!(matches!(result.state, State::Partial(_)));
+        if non_utf8 {
+            assert!(matches!(result.state, State::Partial(_)));
+        } else {
+            assert_eq!(result.state, State::Complete);
+        }
     }
 }
 

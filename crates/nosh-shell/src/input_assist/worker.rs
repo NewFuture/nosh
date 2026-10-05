@@ -1137,16 +1137,31 @@ mod tests {
         let mut worker = Worker::spawn(&launch, Kind::Completion).unwrap();
         worker.start(&completion_request()).unwrap();
         assert_eq!(worker.timeout, LOOKUP_TIMEOUT);
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let transport_budget = Duration::from_secs(4);
+        let deadline = Instant::now() + transport_budget;
+        let started = worker.started;
         let mut progress = 0;
         loop {
-            if let Some(response) = worker.poll().unwrap() {
+            let response = worker
+                .poll()
+                .unwrap_or_else(|error| panic!("after {progress} progress frames: {error}"));
+            if let Some(response) = response {
                 match response {
                     Response::Completion(Outcome::Progress(_)) => {
                         progress += 1;
                         assert!(worker.busy);
                         assert!(!worker.stopping);
-                        assert_eq!(worker.timeout, INDEX_TIMEOUT);
+                        assert_eq!(
+                            worker.timeout,
+                            if progress == 1 {
+                                INDEX_TIMEOUT
+                            } else {
+                                transport_budget
+                            }
+                        );
+                        assert_eq!(worker.started, started);
+                        // Later progress must preserve the oversized transport fixture's budget.
+                        worker.timeout = transport_budget;
                     }
                     Response::Completion(Outcome::Ready { answer, .. }) => {
                         assert!(matches!(answer.state, State::Partial(_)));
