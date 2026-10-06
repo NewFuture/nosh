@@ -105,9 +105,8 @@ pub(super) fn generate(
             Err(error) => flags_error = Some(error),
         }
     }
-    let mut index = 0;
-    while index < prior.len() {
-        let word = &prior[index];
+    let mut arguments = prior.iter();
+    while let Some(word) = arguments.next() {
         if word == "--" {
             break;
         }
@@ -117,8 +116,7 @@ pub(super) fn generate(
             word.as_str(),
             "-C" | "--directory" | "-f" | "--file" | "--makefile" | "-I" | "--include-dir"
         ) {
-            index += 1;
-            (word.as_str(), prior.get(index).map(String::as_str))
+            (word.as_str(), arguments.next().map(String::as_str))
         } else {
             (word.as_str(), None)
         };
@@ -133,7 +131,6 @@ pub(super) fn generate(
                 _ => {}
             }
         }
-        index += 1;
     }
     if files.is_empty() {
         for name in ["GNUmakefile", "makefile", "Makefile"] {

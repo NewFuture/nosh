@@ -53,12 +53,13 @@ pub(super) fn generate(
 ) -> Result<Answer, String> {
     program(context, snapshot)?;
     let npm = source == Source::Npm;
-    let prefix = if npm { "--prefix" } else { "--cwd" };
+    let prefix = if npm { "--prefix=" } else { "--cwd=" };
+    let option = prefix.trim_end_matches('=');
     let mut cwd = snapshot.context.cwd.clone();
     let mut index = 1;
     while index < context.index {
         let word = &context.words[index];
-        let value = if word == prefix {
+        let value = if word == option {
             index += 1;
             if index == context.index {
                 return Ok(paths(query, context, snapshot, cache, true));
@@ -71,7 +72,7 @@ pub(super) fn generate(
                     .as_str(),
             )
         } else {
-            word.strip_prefix(&format!("{prefix}="))
+            word.strip_prefix(prefix)
         };
         let Some(value) = value else { break };
         if value.contains(['$', '`']) {
@@ -80,17 +81,14 @@ pub(super) fn generate(
         cwd = snapshot.context.cwd.join(value);
         index += 1;
     }
-    if index == context.index && context.word.starts_with(&format!("{prefix}=")) {
+    if index == context.index && context.word.starts_with(prefix) {
         return Ok(paths(query, context, snapshot, cache, true));
     }
     if index == context.index && context.word.starts_with('-') {
         return Ok(select(
             query,
             context,
-            &entries(
-                &[(&format!("{prefix}="), "Project directory")],
-                Kind::Option,
-            ),
+            &entries(&[(prefix, "Project directory")], Kind::Option),
             source,
         ));
     }
