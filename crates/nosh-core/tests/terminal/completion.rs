@@ -207,7 +207,6 @@ printf 'GNU Make 4.4\n'
         };
         let selections = abbreviation_selections.clone();
         config.completion.selection_observer = Some(Arc::new(move |selection| {
-            let nosh_shell::completion::Selection::Abbreviation(selection) = selection;
             selections
                 .lock()
                 .unwrap()

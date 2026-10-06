@@ -100,13 +100,7 @@ pub(super) fn generate(
         let set = cache.load(key, Duration::from_secs(1), || {
             let mut args = prefix.clone();
             args.push("--list-cmds=main,others,nohelpers,alias".into());
-            let data = output(
-                context,
-                snapshot,
-                &args,
-                &snapshot.context.cwd,
-                MAX_SET_BYTES,
-            )?;
+            let data = output(context, snapshot, &args, &executable, MAX_SET_BYTES)?;
             Ok(Set::lines(data.lines(), Kind::Subcommand, None))
         })?;
         return Ok(select(query, context, &set, Source::Git));
@@ -206,13 +200,7 @@ pub(super) fn generate(
         let mut args = prefix;
         args.extend(["for-each-ref".into(), "--format=%(refname:strip=2)".into()]);
         args.extend(refs.iter().map(|reference| (*reference).into()));
-        let data = output(
-            context,
-            snapshot,
-            &args,
-            &snapshot.context.cwd,
-            MAX_SET_BYTES,
-        )?;
+        let data = output(context, snapshot, &args, &executable, MAX_SET_BYTES)?;
         Ok(Set::lines(
             data.lines().filter(|name| !name.ends_with("/HEAD")),
             Kind::Branch,

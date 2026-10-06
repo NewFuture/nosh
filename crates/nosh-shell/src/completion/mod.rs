@@ -14,7 +14,7 @@ pub(crate) mod types;
 pub(crate) mod worker;
 
 pub use crate::input_assist::WorkerCommand;
-pub use editor::{AbbreviationSelection, Completion, Selection, SelectionObserver};
+pub use editor::{AbbreviationSelection, Completion, SelectionObserver};
 
 #[derive(Clone)]
 pub struct Config {

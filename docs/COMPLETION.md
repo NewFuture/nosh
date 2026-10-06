@@ -57,4 +57,4 @@ PATH 名称缓存约 5 秒，其它本地集合约 1 秒，在实际请求时检
 
 新增命令在 `providers/mod.rs` 添加分派及候选函数，复用匹配、路径回填、集合限额和 `Cache::load`。嵌入宿主通过 `completion::Config.worker` 提供 `WorkerCommand`，内部入口调用 `input_assist::run_worker_from_env()`。
 
-缩写所有者提供 `input_assist::Abbreviations` 的版本、适用名称和定义，并通过选择通知处理结果。源码准备与补丁维护见[源码维护](REEDLINE-MAINTENANCE.md)。
+缩写所有者提供 `input_assist::Abbreviations` 的版本、适用名称和定义；`selection_observer` 直接接收 `&AbbreviationSelection`，包含 `name` 和 `revision`。源码准备与补丁维护见[源码维护](REEDLINE-MAINTENANCE.md)。

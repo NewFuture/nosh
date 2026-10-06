@@ -63,13 +63,7 @@ fn version(
     let executable = program(context, snapshot)?;
     let key = format!("version\0{}", executable.display());
     let set = cache.load(key, Duration::from_secs(5), || {
-        let value = output(
-            context,
-            snapshot,
-            &["--version".into()],
-            &snapshot.context.cwd,
-            4096,
-        )?;
+        let value = output(context, snapshot, &["--version".into()], &executable, 4096)?;
         Ok(Set {
             entries: vec![Entry {
                 value,
@@ -99,13 +93,13 @@ fn output(
     context: &Context,
     snapshot: &NativeSnapshot,
     args: &[String],
-    cwd: &std::path::Path,
+    executable: &std::path::Path,
     limit: usize,
 ) -> Result<String, String> {
-    let mut command = Command::new(program(context, snapshot)?);
+    let mut command = Command::new(executable);
     command
         .args(args)
-        .current_dir(cwd)
+        .current_dir(&snapshot.context.cwd)
         .env_clear()
         .envs(&snapshot.environment)
         .env("PATH", context.path.as_deref().unwrap_or(""))

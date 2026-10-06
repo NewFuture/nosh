@@ -27,6 +27,22 @@ const OPTIONS: &[(&str, &str)] = &[
     ("--version", "Print the GNU Make version"),
 ];
 
+#[derive(Clone, Copy)]
+enum PathOption {
+    Directory,
+    Makefile,
+    Include,
+}
+
+fn path_option(name: &str) -> Option<PathOption> {
+    Some(match name {
+        "-C" | "--directory" => PathOption::Directory,
+        "-f" | "--file" | "--makefile" => PathOption::Makefile,
+        "-I" | "--include-dir" => PathOption::Include,
+        _ => return None,
+    })
+}
+
 pub(super) fn generate(
     query: Query,
     context: &Context,
@@ -43,10 +59,10 @@ pub(super) fn generate(
     while let Some(word) = arguments.next() {
         match word.as_str() {
             "--" => break,
-            "-C" | "--directory" | "-f" | "--file" | "--makefile" | "-I" | "--include-dir" => {
+            word if path_option(word).is_some() => {
                 arguments.next();
             }
-            _ if word.len() > 2 && matches!(word.get(..2), Some("-C" | "-f" | "-I")) => {
+            _ if word.len() > 2 && word.get(..2).and_then(path_option).is_some() => {
                 return Ok(Answer::unavailable(
                     query,
                     "attached Make path options require a loaded completion definition",
@@ -60,18 +76,17 @@ pub(super) fn generate(
         .checked_sub(1)
         .and_then(|index| context.words.get(index))
         .map(String::as_str);
-    if matches!(
-        previous,
-        Some("-C" | "--directory" | "-I" | "--include-dir" | "-f" | "--file" | "--makefile")
-    ) || ["--directory=", "--include-dir=", "--file=", "--makefile="]
-        .iter()
-        .any(|prefix| context.word.starts_with(prefix))
-    {
-        let directories = matches!(
-            previous,
-            Some("-C" | "--directory" | "-I" | "--include-dir")
-        ) || context.word.starts_with("--directory=")
-            || context.word.starts_with("--include-dir=");
+    let path_options = [
+        previous.and_then(path_option),
+        context
+            .word
+            .split_once('=')
+            .and_then(|(name, _)| path_option(name)),
+    ];
+    if path_options.iter().any(Option::is_some) {
+        let directories = path_options
+            .iter()
+            .any(|option| matches!(option, Some(PathOption::Directory | PathOption::Include)));
         return Ok(paths(query, context, snapshot, cache, directories));
     }
     if matches!(previous, Some("-j" | "--jobs")) || context.word.starts_with("--jobs=") {
@@ -111,24 +126,23 @@ pub(super) fn generate(
             break;
         }
         let (option, value) = if let Some((option, value)) = word.split_once('=') {
-            (option, Some(value))
-        } else if matches!(
-            word.as_str(),
-            "-C" | "--directory" | "-f" | "--file" | "--makefile" | "-I" | "--include-dir"
-        ) {
-            (word.as_str(), arguments.next().map(String::as_str))
+            (path_option(option), Some(value))
         } else {
-            (word.as_str(), None)
+            let option = path_option(word);
+            (
+                option,
+                option.and_then(|_| arguments.next().map(String::as_str)),
+            )
         };
         if let Some(value) = value {
             if value.contains(['$', '`']) {
                 return Err("dynamic Make paths need a loaded completion definition".into());
             }
             match option {
-                "-C" | "--directory" => cwd = cwd.join(value),
-                "-f" | "--file" | "--makefile" => files.push(PathBuf::from(value)),
-                "-I" | "--include-dir" => includes.push(PathBuf::from(value)),
-                _ => {}
+                Some(PathOption::Directory) => cwd = cwd.join(value),
+                Some(PathOption::Makefile) => files.push(PathBuf::from(value)),
+                Some(PathOption::Include) => includes.push(PathBuf::from(value)),
+                None => {}
             }
         }
     }
@@ -171,23 +185,20 @@ fn include_flags(text: &str) -> Result<Vec<PathBuf>, &'static str> {
         if flag == "--" {
             break;
         }
-        if matches!(
-            flag.as_str(),
-            "-C" | "-f" | "--directory" | "--file" | "--makefile"
-        ) {
-            flags.next();
-            continue;
-        }
-        let value = if matches!(flag.as_str(), "-I" | "--include-dir") {
-            Some(
+        let value = match path_option(flag) {
+            Some(PathOption::Directory | PathOption::Makefile) => {
+                flags.next();
+                continue;
+            }
+            Some(PathOption::Include) => Some(
                 flags
                     .next()
                     .ok_or("missing MAKEFLAGS include directory")?
                     .as_str(),
-            )
-        } else {
-            flag.strip_prefix("--include-dir=")
-                .or_else(|| flag.strip_prefix("-I"))
+            ),
+            None => flag
+                .strip_prefix("--include-dir=")
+                .or_else(|| flag.strip_prefix("-I")),
         };
         if let Some(value) = value {
             if value.is_empty() {

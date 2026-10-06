@@ -21,14 +21,8 @@ pub struct AbbreviationSelection {
     pub revision: u64,
 }
 
-/// A selection notification; it does not execute or expand a rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Selection {
-    Abbreviation(AbbreviationSelection),
-}
-
 /// Called on the editor thread after acceptance; observers must not block.
-pub type SelectionObserver = Arc<dyn Fn(&Selection) + Send + Sync>;
+pub type SelectionObserver = Arc<dyn Fn(&AbbreviationSelection) + Send + Sync>;
 
 // Two generations may overlap during refresh. The other half of each 1 MiB
 // generation covers Reedline's buffer/base copies and derived menu metrics.
@@ -379,7 +373,7 @@ impl Completer for Completion {
             return CompletionAcceptance::Continue;
         };
         if let Some(observer) = &self.config.selection_observer {
-            observer(&Selection::Abbreviation(selection.clone()));
+            observer(selection);
         }
         CompletionAcceptance::SuppressAbbreviationExpansion
     }
@@ -761,10 +755,10 @@ mod tests {
         );
         assert_eq!(
             *notifications.lock().unwrap(),
-            [Selection::Abbreviation(AbbreviationSelection {
+            [AbbreviationSelection {
                 name: "go".into(),
                 revision: 7
-            }),]
+            }]
         );
         rule.source = Source::Abbreviation {
             name: "go".into(),
@@ -791,10 +785,10 @@ mod tests {
         );
         assert_eq!(
             notifications.lock().unwrap()[1],
-            Selection::Abbreviation(AbbreviationSelection {
+            AbbreviationSelection {
                 name: "go".into(),
                 revision: 8,
-            }),
+            },
         );
     }
 
