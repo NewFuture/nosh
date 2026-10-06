@@ -301,6 +301,14 @@ def stop_owned(token: str) -> None:
                     signal.pidfd_send_signal(fd, sig)
             except (FileNotFoundError, ProcessLookupError):
                 pass
+            except PermissionError:
+                if fd is None:
+                    raise
+                # /proc permissions can change during exit; require proof from the retained pidfd.
+                with selectors.DefaultSelector() as exited:
+                    exited.register(fd, selectors.EVENT_READ)
+                    if not exited.select(0.2):
+                        raise
             finally:
                 if fd is not None:
                     os.close(fd)
