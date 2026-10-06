@@ -730,7 +730,7 @@ fn scoped_path_overrides_ignore_stale_command_hashes_for_all_native_sources() {
     let commands = answer(
         &mut server,
         query(&format!("PATH={} np", empty.display())),
-        snapshot,
+        snapshot.clone(),
     );
     assert!(
         commands
@@ -738,6 +738,27 @@ fn scoped_path_overrides_ignore_stale_command_hashes_for_all_native_sources() {
             .iter()
             .all(|candidate| candidate.value != "npm")
     );
+    fs::write(directory.path().join("not-executable"), "").unwrap();
+    for cached in ["missing", "not-executable"] {
+        Arc::make_mut(&mut snapshot.native)
+            .context
+            .hashed_commands
+            .insert("npm".into(), directory.path().join(cached));
+        for check_hash in [false, true] {
+            Arc::make_mut(&mut snapshot.native).context.check_hash = check_hash;
+            let result = answer(&mut server, query("npm run b"), snapshot.clone());
+            if check_hash {
+                assert_eq!(result.state, State::Complete);
+                assert_eq!(candidate_values(&result), ["build"]);
+            } else {
+                assert!(matches!(result.state, State::Failed(_)));
+            }
+            let commands = answer(&mut server, query("np"), snapshot.clone());
+            assert_eq!(candidate_values(&commands).contains(&"npm"), check_hash);
+        }
+    }
+    let explicit = answer(&mut server, query("./npm run b"), snapshot);
+    assert!(matches!(explicit.state, State::Failed(_)));
 }
 
 #[test]
@@ -809,9 +830,29 @@ fn package_directory_options_nearest_manifest_and_mid_line_spans_are_respected()
 #[test]
 fn package_command_boundaries() {
     let (directory, snapshot) = package_fixture();
+    let reserved = [
+        "install",
+        "constraints",
+        "dedupe",
+        "explain",
+        "npm",
+        "patch",
+        "patch-commit",
+        "rebuild",
+        "search",
+        "stage",
+        "unplug",
+        "up",
+        "upgrade-interactive",
+    ];
+    let scripts: std::collections::BTreeMap<_, _> = reserved
+        .iter()
+        .map(|name| (*name, "setup"))
+        .chain(std::iter::once(("build", "compile")))
+        .collect();
     fs::write(
         directory.path().join("package.json"),
-        r#"{"scripts":{"install":"setup","build":"compile"}}"#,
+        serde_json::to_vec(&serde_json::json!({"scripts": scripts})).unwrap(),
     )
     .unwrap();
     let mut server = Server::default();
@@ -819,6 +860,20 @@ fn package_command_boundaries() {
     assert!(shortcut.candidates.is_empty());
     let explicit = answer(&mut server, query("yarn run inst"), snapshot.clone());
     assert_eq!(explicit.candidates[0].value, "install");
+    for name in reserved {
+        let shortcut = answer(
+            &mut server,
+            query(&format!("yarn {name}")),
+            snapshot.clone(),
+        );
+        assert!(shortcut.candidates.is_empty(), "{name}");
+        let explicit = answer(
+            &mut server,
+            query(&format!("yarn run {name}")),
+            snapshot.clone(),
+        );
+        assert!(candidate_values(&explicit).contains(&name), "{name}");
+    }
     for text in [
         "npm install fi",
         "npm run build arg",

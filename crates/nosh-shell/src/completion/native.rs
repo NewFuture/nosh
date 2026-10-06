@@ -276,7 +276,7 @@ pub(super) fn resolve(
             context
                 .path
                 .as_deref()
-                .filter(|_| fixed.is_none())
+                .filter(|_| fixed.is_none() || (snapshot.context.check_hash && !name.contains('/')))
                 .into_iter()
                 .flat_map(|path| path.split(':'))
                 .take(128)
