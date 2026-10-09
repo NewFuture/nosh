@@ -133,7 +133,7 @@ def validate_context(scenario: dict, root: Path, result, evidence: dict | None) 
     if contract["intent"] == "next":
         history = actual.get("recent_executions", [])
         history_turns = [
-            turn for turn in turns[:-1] if turn["input"] not in ("ai auto off", "ai auto on")
+            turn for turn in turns[:-1] if turn["input"] not in ("#auto off", "#auto on")
         ][-3:]
         expected_history = [turn["input"] for turn in history_turns]
         if (not isinstance(history, list) or not all(isinstance(item, dict) for item in history)

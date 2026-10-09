@@ -214,8 +214,8 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
                     and completions[0]["kind"] != "shell"):
                 raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
             if (scenario["check"] in CAPTURE_CHECKS
-                    and not re.fullmatch(r"ai fix(?: .+)?", inputs[-1])):
-                raise ValueError(f"captured diagnosis requires an explicit ai fix input: {sid}")
+                    and not re.fullmatch(r"#fix(?: .+)?", inputs[-1])):
+                raise ValueError(f"captured diagnosis requires an explicit #fix input: {sid}")
         else:
             if any(key in scenario for key in ("inputs", "corrections", "completions")):
                 raise ValueError(f"REPL fields in a CLI scenario: {sid}")

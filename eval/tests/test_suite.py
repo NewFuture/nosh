@@ -178,7 +178,7 @@ class ExpandedContractTests(unittest.TestCase):
     def test_current_tasks_declare_diagnosis_routing_and_short_requests(self):
         diagnosis = SCENARIOS["explain-failure"]
         self.assertEqual(diagnosis["inputs"][0], "python3 broken.py")
-        self.assertTrue(diagnosis["inputs"][1].startswith("ai fix "))
+        self.assertTrue(diagnosis["inputs"][1].startswith("#fix "))
         self.assertEqual(diagnosis["completions"][0]["kind"], "shell")
         short = [s for s in SUITE["scenarios"] if s["group"] == "expanded" and len(s["inputs"]) == 1]
         self.assertEqual(len(short), 12)

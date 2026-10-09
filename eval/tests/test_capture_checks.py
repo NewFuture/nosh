@@ -26,7 +26,7 @@ class DiagnosticContractTests(unittest.TestCase):
 
     def grade(self, answer=None, scenario=None, evidence=None):
         scenario = scenario or self.scenario
-        question = scenario["inputs"][-1].removeprefix("ai fix").strip()
+        question = scenario["inputs"][-1].removeprefix("#fix").strip()
         return checks.judge(
             scenario, self.answer if answer is None else answer, self.facts,
             self.root, fixtures.snapshot(self.root), self.result, self.metrics,
@@ -73,7 +73,7 @@ class DiagnosticContractTests(unittest.TestCase):
                     result.turns[0]["output"] = original.stderr
                     answer = f"REGION 未设置，请配置该环境变量。diagnostic_id: {facts['diagnostic_id']}"
                     evidence = observed_input(original.stderr, metadata,
-                                              scenario["inputs"][-1].removeprefix("ai fix").strip())
+                                              scenario["inputs"][-1].removeprefix("#fix").strip())
                     after = fixtures.snapshot(root)
                     metrics = dict.fromkeys(report.METRICS)
                     metrics.update(self.metrics)
@@ -110,15 +110,18 @@ class DiagnosticContractTests(unittest.TestCase):
                     second = dict(rows[1], final_state=fixtures.fixture_state(scenario, facts, root, changed, result))
                     self.assertFalse(report.repetitions([rows[0], second])[0]["consistent"], mutation)
 
-    def test_current_capture_scenarios_require_explicit_ai_fix(self):
-        data = copy.deepcopy(self.data)
-        scenario = next(item for item in data["scenarios"]
-                        if item["check"] == "captured-diagnosis")
-        scenario["inputs"][-1] = "# explain the failure"
-        path = self.base / "invalid-route.json"
-        path.write_text(json.dumps(data), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "explicit ai fix"):
-            suite.load_suite(path)
+    def test_current_capture_scenarios_require_explicit_prefix_fix(self):
+        for entry in ("# explain the failure", "ai fix explain the failure",
+                      "#fixing explain the failure", "# fix explain the failure"):
+            with self.subTest(entry=entry):
+                data = copy.deepcopy(self.data)
+                scenario = next(item for item in data["scenarios"]
+                                if item["check"] == "captured-diagnosis")
+                scenario["inputs"][-1] = entry
+                path = self.base / "invalid-route.json"
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "explicit #fix"):
+                    suite.load_suite(path)
 
     def test_ordinary_diagnosis_does_not_require_a_random_identifier(self):
         verdict = self.grade("REGION 未设置。请使用 export REGION=所需值 配置环境变量。")
@@ -189,7 +192,7 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertTrue(verdict.details["facts"]["components"]["diagnosis"]["passed"])
         for change in ({"command_id": 2}, {"mixed": True}, {"incomplete": True}, {"state": "unavailable"}):
             with self.subTest(change=change):
-                question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+                question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
                 verdict = self.grade(evidence=observed_input(
                     self.text, dict(self.metadata, **change), question))
                 self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
@@ -199,7 +202,7 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertFalse(self.grade().details["facts"]["components"]["capture"]["passed"])
 
     def test_failed_context_and_fix_question_are_required(self):
-        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
         missing_failure = observed_input(self.text, self.metadata, question)
         missing_failure["inputs"][0]["messages"][0]["text"] = (
             missing_failure["inputs"][0]["messages"][0]["text"].replace("\nexit: 17", "")
@@ -218,13 +221,13 @@ class DiagnosticContractTests(unittest.TestCase):
         )
 
     def test_merged_user_task_headers_are_not_capture_context(self):
-        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
         text = f"[task trigger=failed exit=17]\n[user_output {json.dumps(self.metadata)}]\n{self.text}\n[/user_output]\n{question}"
         evidence = {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": text}]}]}
         self.assertFalse(self.grade(evidence=evidence).details["facts"]["components"]["capture"]["passed"])
 
     def test_system_context_preserves_capture_and_the_separate_request(self):
-        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
         evidence = observed_input(self.text, self.metadata, question)
         self.assertTrue(self.grade(evidence=evidence).passed)
         for role in ("tool", "assistant", "user"):

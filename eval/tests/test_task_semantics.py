@@ -305,7 +305,7 @@ class DatasetRevisionTests(ProjectWorkCase):
         for scenario in revision_four["scenarios"]:
             if scenario["check"] in suite.CAPTURE_CHECKS:
                 scenario["inputs"][-1] = "# 根据刚才的输出诊断"
-        with self.assertRaisesRegex(ValueError, "explicit ai fix"):
+        with self.assertRaisesRegex(ValueError, "explicit #fix"):
             suite.load_suite(self.write_suite(revision_four))
 
         for revision in (0, -1, True, 2.0, "2", None, []):

@@ -104,6 +104,16 @@ class AssistContextTests(unittest.TestCase):
         bad["assistance"][0]["recent_executions"][0]["command"] = "git status"
         self.assertTrue(self.reasons(scenario, result, bad))
 
+    def test_prefix_management_turns_are_not_next_execution_history(self):
+        scenario, result, evidence = self.reference("next-retry-after-prerequisite")
+        self.assertEqual(scenario["inputs"][0], "#auto off")
+        self.assertEqual(scenario["inputs"][2], "#auto on")
+        self.assertEqual(self.reasons(scenario, result, evidence), [])
+        self.assertEqual(
+            [item["command"] for item in evidence["assistance"][0]["recent_executions"]],
+            [scenario["inputs"][1]],
+        )
+
     def test_synchronized_fix_exit_codes_must_match_the_terminal_turn(self):
         for sid in ("auto-fix-archive", "fix-partially-completed-archive"):
             scenario, result, evidence = self.reference(sid)
