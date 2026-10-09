@@ -18,6 +18,7 @@ import unicodedata
 import uuid
 
 PROMPT = "__NOSH_EVAL_PROMPT__ "
+CONTINUATION = "__NOSH_EVAL_CONTINUATION__ "
 OUTPUT_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78=>]")
 SUMMARY = re.compile(r"(?m)^[┃|] ([✔⚠✗+!x]) .*?(\d+) steps [·|] ([\d.]+) s")
@@ -45,6 +46,7 @@ class InteractionTrace:
         self.path = Path(path) if path else None
         self.offset = 0
         self.pending = b""
+        self.sessions_opened = 0
         self.assistance: list[dict] = []
         self.pending_questions: dict[tuple[int, int], dict] = {}
         self._interactive: set[tuple[int, int]] = set()
@@ -65,6 +67,7 @@ class InteractionTrace:
                 self.assistance.append(value)
             return
         if kind == "open":
+            self.sessions_opened += 1
             tools = event.get("tools", [])
             if not isinstance(tools, list):
                 raise DriverError("invalid native tool definitions")
@@ -125,6 +128,8 @@ class Screen:
     def __init__(self, height=40, width=160):
         self.height, self.width = height, width
         self.lines = [[" "] * width for _ in range(height)]
+        self.prefixes = [""] * height
+        self.continuations = [False] * height
         self.row = self.col = 0
         self.saved = (0, 0)
         self.pending = ""
@@ -132,12 +137,34 @@ class Screen:
     def line(self) -> str:
         return "".join(self.lines[self.row]).rstrip()
 
-    def newline(self):
+    def line_prefix(self) -> str:
+        limit = max(len(PROMPT), len(CONTINUATION))
+        return (self.prefixes[self.row] + self.line())[:limit]
+
+    def at_prompt(self) -> bool:
+        prefix = self.line_prefix()
+        return (prefix.startswith(PROMPT.rstrip())
+                or self.continuations[self.row] and prefix.startswith(CONTINUATION.rstrip()))
+
+    def clear_line_origins(self, start: int) -> None:
+        for row in range(start, self.height):
+            self.prefixes[row] = ""
+            self.continuations[row] = False
+
+    def newline(self, wrapped=False):
+        prefix = self.line_prefix() if wrapped else ""
+        continuation = self.continuations[self.row] if wrapped else self.at_prompt()
         self.row += 1
         if self.row >= self.height:
             self.lines.pop(0)
             self.lines.append([" "] * self.width)
+            self.prefixes.pop(0)
+            self.prefixes.append("")
+            self.continuations.pop(0)
+            self.continuations.append(False)
             self.row = self.height - 1
+        self.prefixes[self.row] = prefix
+        self.continuations[self.row] = continuation
 
     def feed(self, text: str) -> bytes:
         text = self.pending + text
@@ -178,14 +205,17 @@ class Screen:
                     elif code == "J":
                         if values[0] in (2, 3):
                             self.lines = [[" "] * self.width for _ in range(self.height)]
+                            self.clear_line_origins(0)
                         elif values[0] == 0:
                             self.lines[self.row][self.col:] = [" "] * (self.width - self.col)
                             for r in range(self.row + 1, self.height):
                                 self.lines[r] = [" "] * self.width
+                            self.clear_line_origins(self.row if self.col == 0 else self.row + 1)
                     elif code == "K":
                         start = 0 if values[0] in (1, 2) else self.col
                         end = self.col + 1 if values[0] == 1 else self.width
                         self.lines[self.row][start:end] = [" "] * (end - start)
+                        self.clear_line_origins(self.row if start == 0 else self.row + 1)
                     elif code == "s":
                         self.saved = (self.row, self.col)
                     elif code == "u":
@@ -217,7 +247,7 @@ class Screen:
                 width = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
                 if self.col + width > self.width:
                     self.col = 0
-                    self.newline()
+                    self.newline(wrapped=True)
                 self.lines[self.row][self.col] = ch
                 if width == 2:
                     self.lines[self.row][self.col + 1] = ""
@@ -436,7 +466,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     contracts = scenario.get("completions")
     if not isinstance(contracts, list) or len(contracts) != len(scenario["inputs"]):
         raise ValueError("each REPL input requires an explicit completion contract")
-    child = Child(argv, cwd, dict(env, PS1=PROMPT), True)
+    child = Child(argv, cwd, dict(env, PS1=PROMPT, PS2=CONTINUATION), True)
     result = child.result
     deadline = child.start + timeout
     approval_offset = 0
@@ -446,7 +476,7 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
     answered = set()
 
     def prompt():
-        return child.screen.line().startswith(PROMPT.rstrip())
+        return child.screen.at_prompt()
 
     def idle_prompt():
         return prompt_matches(child.screen.line())
@@ -492,14 +522,28 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             start = len(result.transcript)
             trace.refresh()
             assist_before = len(trace.assistance)
+            sessions_before = trace.sessions_opened
+            if contract["kind"] == "observe" and trace.path is None:
+                raise DriverError("setup completion requires a native trace")
             child.send(b"\x15" + line.encode() + b"\r")
             correction = (scenario.get("corrections") or [])[i] if scenario.get("corrections") else None
             answers = contract.get("answers", [])
             answer_index = 0
+            assist_draft_cleared = False
 
             def interactions():
-                nonlocal answer_index
+                nonlocal answer_index, assist_draft_cleared
                 trace.refresh()
+                if (contract["kind"] == "assist" and not assist_draft_cleared
+                        and len(trace.assistance) > assist_before):
+                    assistance = trace.assistance[-1]
+                    text = plain(result.transcript[start:])
+                    if (assistance.get("status") == "completed" and assistance.get("kind") == "command"
+                            and assistance.get("background") is False
+                            and SUMMARY.search(text) and STATS.search(text) and not prompt()):
+                        # A long prefill can hide PS1 above the editor viewport.
+                        child.send(b"\x15")  # Clear the completed draft, never submit it.
+                        assist_draft_cleared = True
                 if child.screen.line().strip() in ("answer>", "回答>"):
                     if trace.path is None:
                         raise DriverError("user question requires a native trace")
@@ -547,6 +591,10 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                                  "edit_line": child.screen.line() if correction else None})
             if contract["kind"] == "assist":
                 result.turns[-1]["assistance"] = trace.assistance[-1]
+            if contract["kind"] == "observe":
+                trace.refresh()
+                if trace.sessions_opened != sessions_before or len(trace.assistance) != assist_before:
+                    result.failure = f"input {i + 1}: setup unexpectedly started a model task"
             if contract["kind"] == "shell":
                 if not hint or int(hint[1]) != contract["exit_code"] or SUMMARY.search(output):
                     result.failure = f"input {i + 1}: expected shell exit {contract['exit_code']}, did not observe it"

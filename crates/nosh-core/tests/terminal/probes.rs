@@ -28,7 +28,7 @@ pub(super) fn terminal_probe() {
                 nosh_permissions::ApprovalMode::Auto,
                 nosh_core::ui::Activity::Running,
             );
-            ui.tool_start("run_command", "true", Some(Risk::Safe), "SAFE");
+            ui.tool_start("exec", "true", Some(Risk::Safe), "SAFE");
             ui.output("original tool output\n", false);
             ui.tool_end("exit 0");
             ui.pause();
@@ -172,7 +172,7 @@ pub(super) fn terminal_probe() {
                 ui.tool_start("exec", "echo \u{4e2d}\u{6587}", Some(risk), label);
             }
         }
-        "repl-assist" | "repl-inline-assist" | "repl-question" => {
+        "repl-assist" | "repl-inline-assist" | "repl-generate" => {
             let directory = tempfile::tempdir().unwrap();
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
@@ -181,29 +181,12 @@ pub(super) fn terminal_probe() {
             })
             .unwrap();
             shell.run_user_line("PATH=/usr/bin:/bin; PS1='probe> '");
-            let question = mode == "repl-question";
             let mut ai = nosh_core::ShellAi::new(
                 Box::new(move |_| {
                     Ok(nosh_core::LoadedEngine {
-                        engine: Box::new(nosh_llm::MockChatEngine::with_responder(
-                            move |history| {
-                                let completed = history.iter().any(|message| matches!(message,
-                                nosh_llm::Message::System(text) if text.starts_with("[command_completed]")));
-                                let answered = history.iter().any(|message| {
-                                    matches!(message, nosh_llm::Message::UserAnswer(_))
-                                });
-                                if question && !completed && !answered {
-                                    vec![nosh_llm::mock::call(
-                                        "ask_user",
-                                        serde_json::json!({
-                                            "question":"Which filename?", "choices":["one","two"]
-                                        }),
-                                    )]
-                                } else {
-                                    vec![nosh_llm::mock::text("touch accepted")]
-                                }
-                            },
-                        )),
+                        engine: Box::new(nosh_llm::MockChatEngine::with_responder(|_| {
+                            vec![nosh_llm::mock::text("touch accepted")]
+                        })),
                         description: "mock".into(),
                     })
                 }),

@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "dataset_revision": 16,
+  "dataset_revision": 26,
   "seeds": [0, 1, 2, 3, 4],
   "timeout_s": 120,
   "scenarios": [
-    "next-review-after-tests",
+    "next-retry-after-prerequisite",
     "fix-partially-completed-archive",
     "respect-rename-denial",
     "piped-config-lookup",

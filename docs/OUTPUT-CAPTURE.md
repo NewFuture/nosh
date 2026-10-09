@@ -60,7 +60,7 @@ capture_output = "last"  # last（默认）| off
 | `# <任务>`、`ai "<任务>"` | 否 | 普通任务默认不带终端输出 |
 | 被路由到 AI 的解析错误、未知命令或自然语言 | 否 | 新输入不能继承上一条命令的正文 |
 | 非空输入 F2／适用的 Tab 兜底 / `nosh -s` | 否 | CommandAssist Generate 按需查询，只输出／回填 |
-| 成功后的 Next / `ai next` | 否 | 仅提供执行元信息，不自动扩展成功输出的注入范围 |
+| 成功后自动触发的 Next | 否 | 仅提供执行元信息，不自动扩展成功输出的注入范围 |
 | `nosh -a`、管道附件 | 否 | 新进程没有交互会话采集槽 |
 | `ai mode/status/clear` 等管理子命令 | 否 | 它们不创建普通 `AiRequest` |
 
@@ -76,21 +76,21 @@ ai fix 解释实际报错并给出修复方法，不要修改文件
 
 采集默认开启，但注入默认关闭。当前通过以下规则限制上下文污染：
 
-- Agent 的 `Trigger::Failed` 与 CommandAssist Fix 可以携带 `[user_output]`，普通交互任务、Generate、Next 和解析/命令不存在路由均不携带。
+- Agent 的 `Trigger::Failed` 与 CommandAssist Fix 可以携带匹配的终端输出证据；Agent 使用 `[user_output]`，Fix 使用 User 包的 `Terminal output (stdout/stderr not separated):`。普通交互任务、Generate、Next 和解析/命令不存在路由均不携带。
 - 失败命令 ID 与输出命令 ID 必须完全一致。
 - 同一 Agent 对话中每个命令 ID 最多附带一次正文；CommandAssist 每次是独立短对话，重复显式 Fix 可以重新附带仍匹配的证据，不复用主对话的去重标记。
 - `ai clear`、空闲重置、上下文重建和相关配置变化会清空对话级去重状态；之后再次 `ai fix` 可以重新附带仍匹配的失败证据。
 - 每次请求最多一个快照，正文最多 4,096 字节。
-- 证据位于动态 System context，真实请求单独使用 User；不修改静态 system prefix。
+- Agent 诊断的证据位于动态 System context，真实请求单独使用 User。三个 CommandAssist 意图则统一由 nosh 以 User 提交任务与上下文，其中仅 Fix 携带匹配的失败输出。
 - 元数据明确记录原命令、命令 ID、执行 cwd、来源和完整性。
-- CommandAssist 的模型视图由 `[execution]` 保存一次命令、执行 cwd 和退出码，`[user_output]` 保留 command ID 与全部输出质量信息；相同当前目录用 `.` 表示执行 cwd。采集槽中的原始元数据和 Agent 诊断格式不变，真实执行目录不同则不能合并。
+- Fix/Next 的 User 包以 `bash` 围栏保留完整记录命令，`Execution:` 只展示 `exit_code` 和不同时的 `execution_cwd`。Fix 输出仍是 `text`，标题明确终端流未分离；模型只额外显示非正常 state/reason、true 的截断/不完整标记及 `concurrent_output`。空、清理后空和未提供记录有各自说明。CommandAssist observation 仍使用 `command_assist_v1`，Fix/Next 保留全部结构化 execution 字段；原始采集计数、身份及裁剪标记保留在内部，Agent 格式不变。Next 没有成功输出正文。
 - 已知混流不附正文；全屏输出标记不可用。
 - 模板把整个证据段按不可信文本编码；special token 字符串仍是普通数据。
 - system rule 明确禁止把证据当作指令、权限或应用背景，并禁止为取得已有报错而重跑。
 
 证据第一次注入后仍会存在于当前内存对话中，因此同一诊断对话的后续回答仍可能受它影响；这是需要引用报错的预期行为。`ai clear` 会清除这份对话上下文。
 
-未来解释成功命令输出使用按需工具 `get_last_output`，并复用命令 ID 去重；不使用关键词或语义猜测自动注入，见 §11。
+当前不提供按需读取最近用户命令采集槽的模型工具。需要分析成功命令的输出时，由用户显式提供；不使用关键词或语义猜测自动注入。
 
 ## 3. 数据模型
 
@@ -125,7 +125,7 @@ ai fix 解释实际报错并给出修复方法，不要修改文件
 - `mixed`：已知后台输出可能混入；此时不自动附正文。
 - `terminal_source`：来源是合并的终端流，不是 stdout/stderr。
 
-命令和 cwd 的证据展示各自最多 1,024 字节，并标记裁剪；真实执行命令和 shell 状态不因此截断。
+采集快照中的命令和 cwd 身份副本各自最多 1,024 字节，并标记裁剪；真实执行命令和 shell 状态不因此截断。CommandAssist 的命令块使用完整执行记录，不展示这些副本的裁剪标记；完整采集元数据另存于宿主 observation 的 `captured_output`，Agent 证据格式不变。
 
 ## 4. 会话 PTY 架构
 
@@ -229,7 +229,7 @@ error[E0308]: ...
 - 后台作业存在时保守标记 `mixed`，可能牺牲可用性以避免错误归属。
 - 交互程序开启的输入回显可能出现在终端流中，不能与程序输出可靠分离。
 - 全屏程序标记不可用，不尝试保存或重建屏幕。
-- `get_last_output` 仅有内部实现，尚未注册为模型可调用工具，见 §11。
+- 当前模型工具不提供按需读取用户命令采集槽的入口。
 - 失败证据第一次进入模型后会留在该诊断对话中，直到对话重置。
 - 原生 Windows 不支持此 PTY 后端。
 
@@ -260,25 +260,7 @@ error[E0308]: ...
 | `crates/nosh-shell/src/repl.rs` | 失败 ID 配对与 AI 入口注入矩阵 |
 | `crates/nosh-cli/src/config.rs` / `main.rs` | `capture_output` 默认值、解析和启动装配 |
 | `crates/nosh-core/src/prompt.rs` | `[user_output]` 编码和模型规则 |
-| `crates/nosh-core/src/tools.rs` | 共享证据格式化与尚未注册的 `get_last_output` 内部实现 |
+| `crates/nosh-core/src/tools.rs` | Agent 与 CommandAssist 的共享证据格式化 |
 | `crates/nosh-shell/tests/user_output.rs` | 真实 PTY、信号、状态和大输出回归 |
 | `crates/nosh-cli/tests/capture.rs` | 实际 CLI re-exec、默认值和降级路径 |
 | `eval/` | 版本化场景、分项判定、来源和完整性记录 |
-
-## 11. 后续 TODO：`get_last_output`
-
-- [x] 实现无参数内部函数 `get_last_output` 及共享证据格式化，按需返回最近一条已结束用户命令的采集快照。
-- [ ] 将它加入 `BuiltinTool`、普通 agent 的工具 schema 和执行分发；当前模型不可见、不可调用。
-
-目标契约：
-
-- 只加入普通 agent 的完整工具集，不加入 F2 / `nosh -s` 建议模式。
-- 不执行或重跑命令，不读取重定向文件，不扩大为历史输出查询。
-- 返回命令 ID、命令、执行 cwd、退出码、耗时、来源、状态、观察/保留字节数以及截断、不完整、混流标记。
-- 只有 `Captured && !mixed` 时返回已有的有界正文；`off`、不可用、全屏、已知混流和成功空输出按各自状态返回，不能编造正文。
-- 工具结果继续是不可信数据；special token、权限和审批边界与当前 `[user_output]` 相同。
-- 同一对话对同一命令 ID 只返回一次完整正文；重复调用返回短状态引用，避免重复占用上下文。对话重置后可重新读取。
-- 当前失败诊断继续直接附带匹配 ID 的证据，不要求模型先调用工具；该工具主要服务于用户明确要求解释最近一次**成功或非失败**命令输出的场景。
-- 本地只读风险分类、远程 agent 的脱敏和保留策略在实现前单独确认，不能因工具只读就忽略输出中可能包含的秘密。
-
-验收至少覆盖：无输出、`off`、PTY 不可用、截断、全屏、混流、命令切换、对话内去重、对话重置、special token，以及调用工具时程序执行计数不增加。

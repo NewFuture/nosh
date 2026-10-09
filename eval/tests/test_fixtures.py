@@ -20,6 +20,8 @@ class FixtureTests(unittest.TestCase):
         with fixtures.Workspace(self.base / "work") as workspace:
             scenario = {"id": "project", "fixture": "project"}
             root, _, first = workspace.prepare(scenario)
+            self.assertNotIn(scenario["id"], root.parts)
+            self.assertEqual(root.parent, workspace.case_path(scenario["id"]))
             (root / "main.py").write_text("changed")
             root, _, second = workspace.prepare(scenario)
             self.assertEqual(first, second)
@@ -34,6 +36,23 @@ class FixtureTests(unittest.TestCase):
         second = fixtures.create(b, "history")
         self.assertEqual(first, second)
         self.assertEqual(fixtures.git(a, "rev-list", "--count", "HEAD").strip(), "8")
+
+    def test_directory_snapshots_include_empty_directories_without_following_links(self):
+        root = self.base / "files"
+        root.mkdir()
+        (root / "empty").mkdir()
+        (root / "nested" / "empty").mkdir(parents=True)
+        (root / ".git" / "objects").mkdir(parents=True)
+        outside = self.base / "outside"
+        (outside / "private").mkdir(parents=True)
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(fixtures.directory_snapshot(root), [".git", "empty", "nested", "nested/empty"])
+        self.assertEqual(fixtures.snapshot(root), {"linked": {"symlink": str(outside)}})
+        links = self.base / "links"
+        links.mkdir()
+        (links / ".git").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(fixtures.directory_snapshot(links), [])
+        self.assertEqual(fixtures.snapshot(links), {".git": {"symlink": str(outside)}})
 
     def test_large_files_are_materialized_not_sparse(self):
         root = self.base / "big"
@@ -61,8 +80,9 @@ class FixtureTests(unittest.TestCase):
                     pass
             with self.assertRaises(ValueError):
                 workspace.clean("../outside")
-            (workspace.root / "linked").symlink_to(outsider, target_is_directory=True)
+            workspace.case_path("linked").symlink_to(outsider, target_is_directory=True)
             workspace.clean("linked")
+            self.assertFalse(workspace.case_path("linked").exists())
             self.assertEqual((outsider / "keep").read_text(), "keep")
         with self.assertRaises(ValueError):
             workspace.clean("linked")

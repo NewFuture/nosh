@@ -1,6 +1,79 @@
 use super::support::*;
 
 #[test]
+fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
+    use nosh_shell::{AiHandler, Assistance};
+    use std::time::{Duration, Instant};
+
+    let _guard = setup();
+    let directory = tmpdir("automatic-next");
+    let mut sh = EmbeddedShell::new(ShellOptions {
+        working_dir: Some(directory.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let model = MockChatEngine::new(vec![vec![text("touch suggested")]]);
+    let received = model.received();
+    let specs = model.specs();
+    let mut model = Some(model);
+    let mut ai = ShellAi::new(
+        Box::new(move |_| {
+            Ok(nosh_core::LoadedEngine {
+                engine: Box::new(model.take().unwrap()),
+                description: "mock".into(),
+            })
+        }),
+        AgentConfig::default(),
+        Box::new(Scripted::new([])),
+    );
+    let mut pipeline = Pipeline::new(ReplConfig::default());
+    assert_eq!(
+        pipeline.process(&mut sh, &mut ai, &mut Ui, "printf completed"),
+        LineOutcome::Continue(None)
+    );
+    let command = sh.recent_commands().last().unwrap().clone();
+    let display = ai.assistance().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while display.result().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        matches!(display.result(), Some(Assistance::Command { command_id, intent, program })
+        if command_id == command.id && intent == "next" && program == "touch suggested")
+    );
+    assert!(!directory.join("suggested").exists());
+    let specs = specs.lock().unwrap();
+    let [spec] = specs.as_slice() else {
+        panic!("expected one automatic Next session");
+    };
+    assert_eq!(spec.label, "command_assist.next.background");
+    assert!(!spec.thinking);
+    assert_eq!(spec.max_new_tokens, 512);
+    assert_eq!(spec.sampling.temperature, 1.0);
+    assert_eq!(
+        spec.tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["command_help", "read_file", "grep"]
+    );
+    let received = received.lock().unwrap();
+    let [Message::User(task)] = received[0].as_slice() else {
+        panic!("missing host task");
+    };
+    assert!(task.starts_with("Suggest a continuation of the same task"));
+    assert!(!task.contains("command_id:"));
+    assert!(task.contains(&format!("```bash\n{}\n```", command.line)));
+    assert!(task.contains("exit_code: 0"));
+    assert!(!task.contains("status:"));
+    assert!(!task.contains("Terminal output"));
+    drop(received);
+    drop(specs);
+    drop(ai);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
     use nosh_shell::{AiHandler, Assistance};
     use std::sync::Arc;
@@ -16,8 +89,9 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
     let count = Arc::new(AtomicUsize::new(0));
     let seen = count.clone();
     let model = MockChatEngine::with_responder(move |history| {
-        let assistance =
-            matches!(&history[0], Message::System(s) if s.contains("command assistant"));
+        let assistance = history.iter().any(
+            |message| matches!(message, Message::User(s) if s.starts_with("Suggest a continuation of the same task")),
+        );
         if !assistance {
             return vec![text("agent reply")];
         }
@@ -94,25 +168,23 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
 }
 
 #[test]
-fn generate_and_ctrl_g_use_direct_final_without_target_execution() {
+fn generate_and_suggest_use_direct_final_without_target_execution() {
     use nosh_shell::AiHandler;
     let _g = setup();
     let mut sh = shell();
     let dir = tmpdir("suggest");
     sh.run_user_line(&format!("cd {}", dir.display()));
-    for response in ["touch suggested", "for f in *.txt; do\n  echo \"$f\"\ndone"] {
+    for response in [
+        "touch suggested",
+        "false\ntouch suggested; printf '%s' \"$(touch substitution-suggested)\"",
+        "for f in *.txt; do\n  echo \"$f\"\ndone",
+    ] {
         let mut engine = MockChatEngine::new(vec![vec![text(response)]]);
         let specs = engine.specs();
-        let result = generate(
-            &mut engine,
-            &sh,
-            "suggest",
-            &AgentConfig::default(),
-            &mut NoUserInput,
-        )
-        .unwrap();
+        let result = generate(&mut engine, &sh, "suggest", &AgentConfig::default()).unwrap();
         assert_eq!(result.result, AssistResult::Command(response.into()));
         assert!(!dir.join("suggested").exists());
+        assert!(!dir.join("substitution-suggested").exists());
         assert_eq!(
             specs.lock().unwrap()[0]
                 .tools
@@ -123,7 +195,8 @@ fn generate_and_ctrl_g_use_direct_final_without_target_execution() {
         );
         assert_eq!(specs.lock().unwrap()[0].sampling.temperature, 1.0);
     }
-    let mut engine = Some(MockChatEngine::new(vec![vec![text("touch suggested")]]));
+    let response = "false\ntouch suggested; printf '%s' \"$(touch substitution-suggested)\"";
+    let mut engine = Some(MockChatEngine::new(vec![vec![text(response)]]));
     let mut ai = ShellAi::new(
         Box::new(move |_| {
             Ok(nosh_core::LoadedEngine {
@@ -136,9 +209,10 @@ fn generate_and_ctrl_g_use_direct_final_without_target_execution() {
     );
     assert_eq!(
         ai.suggest(&mut sh, "create suggested").as_deref(),
-        Some("touch suggested")
+        Some(response)
     );
     assert!(!dir.join("suggested").exists());
+    assert!(!dir.join("substitution-suggested").exists());
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -157,14 +231,7 @@ fn generate_uses_focused_help_not_command_discovery() {
         vec![text("echo ok")],
     ]);
     let received = engine.received();
-    let output = generate(
-        &mut engine,
-        &sh,
-        "Print ok.",
-        &AgentConfig::default(),
-        &mut NoUserInput,
-    )
-    .unwrap();
+    let output = generate(&mut engine, &sh, "Print ok.", &AgentConfig::default()).unwrap();
     assert_eq!(output.result, AssistResult::Command("echo ok".into()));
     let results = tool_results(&received.lock().unwrap());
     assert_eq!(results.len(), 1);

@@ -1,7 +1,7 @@
-//! Hand-written MiniCPM5 chat-template renderer, byte-for-byte equivalent to the
-//! branches of the official `chat_template.jinja` that nosh uses. Output is a
-//! list of segments tagged trusted (template skeleton, initial system prompt,
-//! tool definitions: special tokens allowed) or untrusted (dynamic context,
+//! MiniCPM5 chat-template renderer with compact tool guidance before the schemas.
+//! Role framing, calls and tool results follow the official template; the tool
+//! guidance is nosh-specific. Output segments are tagged trusted (template skeleton,
+//! initial system prompt, tool definitions: special tokens allowed) or untrusted (dynamic context,
 //! user input, tool output: plain text that cannot forge turns or tool calls).
 
 use crate::engine::{Message, ToolCall, ToolSpec};
@@ -36,10 +36,10 @@ pub fn concat(segs: &[Seg]) -> String {
     segs.iter().map(|s| s.text.as_str()).collect()
 }
 
-/// The `tool_definitions` block of the template.
+/// Shared call syntax followed by unchanged JSON tool definitions.
 pub fn tool_definitions(tools: &[ToolSpec]) -> String {
     let mut s = String::from(
-        "# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>",
+        "# Tools\n\nTool calls:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\nWrap values containing <, & or newlines in <![CDATA[...]]>.\n\n<tools>",
     );
     for t in tools {
         s.push('\n');
@@ -52,9 +52,7 @@ pub fn tool_definitions(tools: &[ToolSpec]) -> String {
             }
         })));
     }
-    s.push_str(
-        "\n</tools>\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param>",
-    );
+    s.push_str("\n</tools>");
     s
 }
 
@@ -197,7 +195,7 @@ pub fn render_messages(messages: &[Message]) -> Vec<Seg> {
     out
 }
 
-/// Full conversation rendering, equivalent to `apply_chat_template`.
+/// Full conversation rendering with MiniCPM5 framing and nosh tool guidance.
 pub fn render_conversation(
     messages: &[Message],
     tools: &[ToolSpec],
@@ -229,6 +227,7 @@ mod tests {
         add_generation_prompt: bool,
         enable_thinking: Option<bool>,
         expected: String,
+        official_expected: String,
     }
 
     fn to_tool(v: &Value) -> ToolSpec {
@@ -270,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_official_template_golden_cases() {
+    fn matches_compact_template_golden_cases_and_preserves_official_protocol() {
         let cases: Vec<Case> =
             serde_json::from_str(include_str!("../tests/fixtures/template_cases.json")).unwrap();
         assert!(cases.len() >= 5);
@@ -284,7 +283,67 @@ mod tests {
                 c.enable_thinking,
             ));
             assert_eq!(got, c.expected, "case {}", c.name);
+            if tools.is_empty() {
+                assert_eq!(got, c.official_expected, "case {}", c.name);
+            } else {
+                let (system, rest) = got.split_once("<|im_end|>\n").unwrap();
+                let (official_system, official_rest) =
+                    c.official_expected.split_once("<|im_end|>\n").unwrap();
+                assert_eq!(rest, official_rest, "conversation changed in {}", c.name);
+                let schemas = |text: &str| {
+                    text.split_once("<tools>\n")
+                        .unwrap()
+                        .1
+                        .split_once("\n</tools>")
+                        .unwrap()
+                        .0
+                        .to_owned()
+                };
+                assert_eq!(
+                    schemas(system),
+                    schemas(official_system),
+                    "schemas changed in {}",
+                    c.name
+                );
+                assert!(
+                    got.len() < c.official_expected.len(),
+                    "guidance grew in {}",
+                    c.name
+                );
+            }
         }
+    }
+
+    #[test]
+    fn tool_guidance_precedes_schemas_without_scenario_policy() {
+        let tool = ToolSpec {
+            name: "example".into(),
+            description: "An example tool.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        };
+        let rendered = tool_definitions(std::slice::from_ref(&tool));
+        let (guidance, schemas) = rendered.split_once("<tools>\n").unwrap();
+        assert_eq!(
+            guidance,
+            "# Tools\n\nTool calls:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\nWrap values containing <, & or newlines in <![CDATA[...]]>.\n\n"
+        );
+        assert!(schemas.ends_with("\n</tools>"));
+        let definition: Value =
+            serde_json::from_str(schemas.strip_suffix("\n</tools>").unwrap()).unwrap();
+        assert_eq!(
+            definition,
+            json!({
+                "type": "function",
+                "function": {"name": tool.name, "description": tool.description, "parameters": tool.parameters},
+            })
+        );
+        for policy in ["answer normally", "[None]", "Do not execute", "check facts"] {
+            assert!(!guidance.contains(policy));
+        }
+        assert_eq!(
+            concat(&render_system(Some("No tools."), &[])),
+            "<s><|im_start|>system\nNo tools.<|im_end|>\n"
+        );
     }
 
     #[test]

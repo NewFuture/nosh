@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerates template_cases.json by rendering the official MiniCPM5
-chat_template.jinja the way HF `apply_chat_template` does (jinja2 sandbox,
-trim_blocks + lstrip_blocks, json.dumps-based tojson).
+"""Generate official reference text and nosh's compact-tool-layout expectations.
+
+The vendored MiniCPM5 template is not modified. `official_expected` retains its
+HF-compatible rendering; `expected` replaces only its tool-definition block.
 
     python3 gen_template_fixtures.py > template_cases.json
 """
@@ -132,10 +133,30 @@ def render(case):
     return template.render(**kwargs)
 
 
+def compact_layout(case, official):
+    tools = case["tools"]
+    if not tools:
+        return official
+    tool_only = render(dict(
+        tools=tools, messages=[{"role": "user", "content": ""}],
+        add_generation_prompt=False, enable_thinking=False,
+    ))
+    old_block = tool_only.split("<|im_start|>system\n", 1)[1].split("<|im_end|>\n", 1)[0]
+    assert official.count(old_block) == 1
+    guidance = (
+        "# Tools\n\nTool calls:\n"
+        '<function name="function-name"><param name="param-name">param-value</param></function>\n'
+        "Wrap values containing <, & or newlines in <![CDATA[...]]>.\n\n<tools>"
+    )
+    new_block = guidance + "".join("\n" + tojson(tool) for tool in tools) + "\n</tools>"
+    return official.replace(old_block, new_block, 1)
+
+
 out = []
 for case in CASES:
     c = dict(case)
-    c["expected"] = render(case)
+    c["official_expected"] = render(case)
+    c["expected"] = compact_layout(case, c["official_expected"])
     out.append(c)
 json.dump(out, sys.stdout, ensure_ascii=False, indent=1)
 sys.stdout.write("\n")

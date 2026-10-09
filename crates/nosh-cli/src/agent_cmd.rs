@@ -167,17 +167,11 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
     let cancel = loaded.engine.cancel_handle();
     shell.interrupts().on_interrupt(move || cancel.cancel());
     let config = agent_config(cfg, ApprovalMode::Confirm, seed);
-    let r = nosh_core::command_assist::generate(
-        loaded.engine.as_mut(),
-        &shell,
-        &text,
-        &config,
-        &mut nosh_core::user_input::TerminalUserInput,
-    );
+    let r = nosh_core::command_assist::generate(loaded.engine.as_mut(), &shell, &text, &config);
     if shell.interrupts().count() > 0 {
         return 130;
     }
-    use nosh_core::command_assist::AssistResult;
+    use nosh_core::command_assist::{AssistError, AssistResult};
     match r.map(|outcome| outcome.result) {
         Ok(AssistResult::Command(command)) => {
             println!("{command}");
@@ -189,7 +183,11 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
         }
         Err(e) => {
             eprintln!("nosh: {e}");
-            2
+            if matches!(e, AssistError::Cancelled) {
+                130
+            } else {
+                2
+            }
         }
     }
 }

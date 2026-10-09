@@ -86,6 +86,25 @@ class DriverTests(unittest.TestCase):
         screen.feed("\r\x1b[K" + driver.PROMPT + "git status")
         self.assertEqual(screen.line(), driver.PROMPT + "git status")
 
+    def test_logical_prompt_survives_wrapping_scrolling_and_continuation_lines(self):
+        for width in (24, 40, 160):
+            for content in ("a" * 1000, "中文" * 500):
+                with self.subTest(width=width, content=content[:2]):
+                    screen = driver.Screen(height=3, width=width)
+                    screen.feed(driver.PROMPT + content)
+                    self.assertTrue(screen.at_prompt())
+                    self.assertFalse(screen.line().startswith(driver.PROMPT.rstrip()))
+                    screen.feed("\r\n" + driver.CONTINUATION + "second line " * 40)
+                    self.assertTrue(screen.at_prompt())
+                    screen.feed("\r\nordinary output")
+                    self.assertFalse(screen.at_prompt())
+                    screen.feed("\r\n" + driver.CONTINUATION + "not an input")
+                    self.assertFalse(screen.at_prompt())
+                    screen.feed("\x1b[2J\x1b[1;1H" + driver.PROMPT + content)
+                    self.assertTrue(screen.at_prompt())
+                    screen.feed("\r\x1b[2Knot a prompt")
+                    self.assertFalse(screen.at_prompt())
+
     def test_prompt_recognition_accepts_only_the_configured_approval_badge(self):
         self.assertTrue(driver.prompt_matches(driver.PROMPT.rstrip()))
         for content in ("", "git status"):
@@ -236,12 +255,13 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
 
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "tools":[{"name":"ask_user"}]},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
                 {"ev": "step_end", "sid": 1, "tool_calls": [question], "text": "", "usage": {"ttft_s": 0.01},
                  "stop":"end_of_turn", "errors":[]},
-                {"ev": "step_start", "sid": 1, "messages":[{"role":"tool", "text":reply}]},
+                {"ev": "step_start", "sid": 1, "messages":[{"role":"tool", "source":"user",
+                    "text":json.dumps({"question":question["args"]["question"], "choices":[], "answer":reply})}]},
                 {"ev": "step_end", "sid": 1, "tool_calls": [], "text": answer, "usage": {"ttft_s": 0.01},
                  "stop":"end_of_turn", "errors":[]},
             ]
@@ -263,7 +283,7 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
                 self.assertEqual(row["questions"][0]["answer"], reply)
                 self.assertEqual(row["metrics"]["confirmations"], 0)
                 self.assertIn("maths.py", row["file_snapshot"])
-                self.assertFalse((workspace.root / scenario["id"]).exists())
+                self.assertFalse(workspace.case_path(scenario["id"]).exists())
                 self.assertTrue((output / row["logs"] / "engine.jsonl").is_file())
                 report.save({"schema_version": 2, "metadata": meta, "trials": [row]}, output)
 
@@ -296,7 +316,7 @@ assert b"exit 0" in line()
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "trace.jsonl"
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
             ]
             for index in range(3):
@@ -319,7 +339,7 @@ assert b"exit 0" in line()
         meta = {"settings": {"timeout_s": 5}}
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
             ]
@@ -338,7 +358,7 @@ assert b"exit 0" in line()
                 self.assertIsNone(row["metrics"]["ttft_s"])
                 self.assertIsNone(row["grading"]["experience"])
                 self.assertEqual(row["answer"], "")
-                self.assertFalse((workspace.root / scenario["id"]).exists())
+                self.assertFalse(workspace.case_path(scenario["id"]).exists())
 
     def test_trial_records_post_generation_deadline_as_failure(self):
         scenario = SCENARIOS["zh-node-test"]
@@ -347,7 +367,7 @@ assert b"exit 0" in line()
 
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
                 {"ev": "step_end", "sid": 1, "text": "tests passed", "tool_calls": [],

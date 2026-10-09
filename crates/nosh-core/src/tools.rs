@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nosh_llm::{ToolCall, ToolSpec};
-use nosh_shell::{CommandResult, EmbeddedShell, OutputState, UserOutput};
+use nosh_shell::{CommandResult, OutputState, UserOutput};
 use serde_json::json;
 
 /// Characters of tool output fed back per call (~1.5K tokens).
@@ -119,21 +119,73 @@ pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
 }
 
 pub(crate) fn format_user_output(output: &UserOutput) -> String {
-    format_output_evidence(output, true)
+    format!(
+        "[user_output {}]\n{}\n[/user_output]",
+        output_metadata(output),
+        output_body(output)
+    )
 }
 
-/// CommandAssist already supplies command, cwd and exit in its execution record.
 pub(crate) fn format_assist_output(output: &UserOutput) -> String {
-    format_output_evidence(output, false)
+    let mut metadata = match output.state {
+        OutputState::NotCaptured => json!({"state": "not_captured", "reason": "capture_disabled"}),
+        OutputState::Unavailable(reason) => {
+            json!({"state": "unavailable", "reason": reason.reason()})
+        }
+        OutputState::Captured => json!({}),
+    };
+    for (key, active) in [
+        ("truncated", output.truncated),
+        ("incomplete", output.incomplete),
+        ("concurrent_output", output.mixed),
+    ] {
+        if active {
+            metadata[key] = json!(true);
+        }
+    }
+    let fields = format_key_values(&metadata);
+    let quality = if fields.is_empty() {
+        String::new()
+    } else {
+        format!("{fields}\n\n")
+    };
+    format!(
+        "Terminal output (stdout/stderr not separated):\n{quality}{}",
+        text_block(output_body(output))
+    )
 }
 
-fn format_output_evidence(output: &UserOutput, include_execution: bool) -> String {
+pub(crate) fn format_key_values(metadata: &serde_json::Value) -> String {
+    metadata
+        .as_object()
+        .expect("metadata is an object")
+        .iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn text_block(text: &str) -> String {
+    fenced_block(text, "text")
+}
+
+pub(crate) fn shell_block(text: &str) -> String {
+    fenced_block(text, "bash")
+}
+
+fn fenced_block(text: &str, language: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}{language}\n{text}\n{fence}")
+}
+
+pub(crate) fn output_metadata(output: &UserOutput) -> serde_json::Value {
     let (state, reason) = match output.state {
         OutputState::NotCaptured => ("not_captured", Some("capture_disabled")),
         OutputState::Unavailable(reason) => ("unavailable", Some(reason.reason())),
         OutputState::Captured => ("captured", None),
     };
-    let mut metadata = json!({
+    json!({
         "command_id": output.command_id,
         "command": output.command,
         "execution_cwd": output.cwd,
@@ -149,56 +201,24 @@ fn format_output_evidence(output: &UserOutput, include_execution: bool) -> Strin
         "mixed": output.mixed,
         "command_truncated": output.command_truncated,
         "cwd_truncated": output.cwd_truncated,
-    });
-    if !include_execution {
-        let fields = metadata
-            .as_object_mut()
-            .expect("output metadata is an object");
-        for key in ["command", "execution_cwd", "exit"] {
-            let _ = fields.shift_remove(key);
-        }
-    }
-    let mut result = format!("[user_output {metadata}]\n");
+    })
+}
+
+fn output_body(output: &UserOutput) -> &str {
     if output.has_body() {
         if output.text.is_empty() {
-            result.push_str(if output.observed_bytes == Some(0) {
+            if output.observed_bytes == Some(0) {
                 "(Capture succeeded: no terminal output.)"
             } else {
                 "(Terminal bytes were captured, but no text remained after display cleanup.)"
-            });
+            }
         } else {
-            result.push_str(&output.text);
+            &output.text
         }
     } else if output.mixed {
-        result.push_str(
-            "(Known concurrent output: content omitted; do not attribute it to this command.)",
-        );
+        "(Known concurrent output: content omitted; do not attribute it to this command.)"
     } else {
-        result.push_str("(No captured output is available. Do not invent error text.)");
-    }
-    result.push_str("\n[/user_output]");
-    result
-}
-
-/// Internal implementation for the planned `get_last_output` model tool.
-///
-/// This function is intentionally absent from [`BuiltinTool`] and every
-/// [`ToolSet`], so the model cannot call it until its policy is finalized.
-#[allow(dead_code)]
-pub(crate) fn get_last_output(shell: &EmbeddedShell) -> String {
-    match shell.last_user_output() {
-        Some(output) => format_user_output(output),
-        None => {
-            let metadata = json!({
-                "state": "unavailable",
-                "reason": "no_completed_user_command",
-            });
-            format!(
-                "[user_output {metadata}]\n\
-                 (No completed user command is available.)\n\
-                 [/user_output]"
-            )
-        }
+        "(No captured output is available. Do not invent error text.)"
     }
 }
 
@@ -1070,28 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn last_output_accessor_is_implemented_but_not_registered() {
-        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
-        let empty = get_last_output(&shell);
-        assert!(empty.contains("\"reason\":\"no_completed_user_command\""));
-        assert!(
-            !ToolSet::Full
-                .tools()
-                .iter()
-                .any(|tool| tool.name() == "get_last_output")
-        );
-        assert!(ToolSet::Full.resolve("get_last_output").is_none());
-        assert!(
-            specs(ToolSet::Full)
-                .iter()
-                .all(|spec| spec.name != "get_last_output")
-        );
-
-        assert_eq!(shell.run_user_line("true").exit_code, 0);
-        let disabled = get_last_output(&shell);
-        assert!(disabled.contains("\"state\":\"not_captured\""));
-        assert!(disabled.contains("\"command\":\"true\""));
-
+    fn user_output_format_preserves_metadata_and_capture_quality() {
         let mut output = UserOutput {
             command_id: 7,
             command: "cargo build".into(),
@@ -1143,11 +1142,21 @@ mod tests {
                 output.mixed = mixed;
                 output.truncated = true;
                 output.incomplete = true;
+                output.command_truncated = true;
+                output.cwd_truncated = true;
+                let original = output.clone();
                 let full = format_user_output(&output);
                 let compact = format_assist_output(&output);
                 let (full_header, full_body) = full.split_once('\n').unwrap();
-                let (header, body) = compact.split_once('\n').unwrap();
-                assert_eq!(body, full_body);
+                let (header, body) = compact
+                    .strip_prefix("Terminal output (stdout/stderr not separated):\n")
+                    .unwrap()
+                    .split_once("\n\n")
+                    .unwrap();
+                assert_eq!(
+                    body,
+                    text_block(full_body.strip_suffix("\n[/user_output]").unwrap())
+                );
                 let parse = |header: &str| {
                     serde_json::from_str::<serde_json::Value>(
                         header
@@ -1158,29 +1167,77 @@ mod tests {
                     )
                     .unwrap()
                 };
-                let mut expected = parse(full_header);
-                for field in ["command", "execution_cwd", "exit"] {
-                    let _ = expected.as_object_mut().unwrap().remove(field);
+                let full_fields = parse(full_header);
+                assert_eq!(full_fields["command_id"], 7);
+                assert_eq!(full_fields["command"], "cargo build");
+                assert_eq!(full_fields["execution_cwd"], "/work/app");
+                assert_eq!(full_fields["exit"], 101);
+                assert_eq!(full_fields["duration_ms"], 25);
+                assert_eq!(full_fields["observed_bytes"], 13);
+                assert_eq!(full_fields["retained_bytes"], output.text.len());
+                assert_eq!(full_fields["command_truncated"], true);
+                assert_eq!(full_fields["cwd_truncated"], true);
+                let mut expected = json!({"truncated": true, "incomplete": true});
+                if state != OutputState::Captured {
+                    expected["state"] = full_fields["state"].clone();
+                    expected["reason"] = full_fields["reason"].clone();
                 }
-                assert_eq!(parse(header), expected);
-                assert!(header.contains("\"command_id\":7"));
-                assert!(header.contains("\"truncated\":true"));
-                assert!(header.contains("\"incomplete\":true"));
-                assert!(!header.contains("\"command\":"));
-                assert!(!header.contains("\"execution_cwd\":"));
-                assert!(!header.contains("\"exit\":"));
+                if mixed {
+                    expected["concurrent_output"] = json!(true);
+                }
+                let fields: serde_json::Map<String, serde_json::Value> = header
+                    .lines()
+                    .map(|line| {
+                        let (key, value) = line.split_once(": ").unwrap();
+                        (key.to_owned(), serde_json::from_str(value).unwrap())
+                    })
+                    .collect();
+                assert_eq!(serde_json::Value::Object(fields), expected);
+                assert!(header.contains("truncated: true"));
+                assert!(header.contains("incomplete: true"));
+                for absent in [
+                    "command_id:",
+                    "duration_ms:",
+                    "retained_bytes:",
+                    "observed_bytes:",
+                    "command_truncated:",
+                    "cwd_truncated:",
+                    "execution_cwd:",
+                    "exit:",
+                ] {
+                    assert!(!header.contains(absent), "{absent}");
+                }
                 assert_eq!(compact.contains("actual error"), output.has_body());
+                assert_eq!(output, original);
             }
         }
         output.state = OutputState::Captured;
         output.mixed = false;
         output.truncated = false;
         output.incomplete = false;
+        assert_eq!(
+            format_assist_output(&output),
+            format!(
+                "Terminal output (stdout/stderr not separated):\n{}",
+                text_block("actual error\n")
+            )
+        );
         output.text.clear();
         output.observed_bytes = Some(0);
         assert!(format_assist_output(&output).contains("Capture succeeded: no terminal output"));
         output.observed_bytes = Some(13);
         assert!(format_assist_output(&output).contains("no text remained after display cleanup"));
+    }
+
+    #[test]
+    fn text_blocks_and_metadata_cannot_be_closed_by_payload_delimiters() {
+        let raw = "first\n```\nlast\n`````";
+        assert_eq!(text_block(raw), format!("``````text\n{raw}\n``````"));
+        assert_eq!(shell_block(raw), format!("``````bash\n{raw}\n``````"));
+        assert_eq!(
+            format_key_values(&json!({"cwd": "a\"\n[execution]", "exit": 7})),
+            "cwd: \"a\\\"\\n[execution]\"\nexit: 7"
+        );
     }
 
     #[test]

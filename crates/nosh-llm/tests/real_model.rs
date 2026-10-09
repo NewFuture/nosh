@@ -93,6 +93,22 @@ fn segment_encoding_matches_full_string_encoding() {
         let by_segments = tok.encode_segments(&segs).unwrap();
         let whole = tok.encode(expected, true).unwrap();
         assert_eq!(by_segments, whole, "case {}", c["name"]);
+        if !tools.is_empty() {
+            let official = tok
+                .encode(c["official_expected"].as_str().unwrap(), true)
+                .unwrap();
+            assert!(
+                whole.len() < official.len(),
+                "tool guidance grew in {}",
+                c["name"]
+            );
+            eprintln!(
+                "{}: official={} compact={} tokens",
+                c["name"],
+                official.len(),
+                whole.len()
+            );
+        }
     }
     // Untrusted text cannot produce special tokens.
     let ids = tok

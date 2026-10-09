@@ -182,7 +182,7 @@ pub fn unescape(s: &str) -> String {
     while let Some(pos) = rest.find('&') {
         out.push_str(&rest[..pos]);
         let tail = &rest[pos..];
-        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+        let Some(semi) = tail.bytes().take(12).position(|byte| byte == b';') else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -433,6 +433,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.str_arg("command"), Some("grep -c \"a&b\" f < in AB"));
+    }
+
+    #[test]
+    fn entity_scanning_preserves_utf8_at_and_after_the_lookahead_boundary() {
+        for (input, expected) in [
+            ("a&amp;中文中文.txt", "a&中文中文.txt"),
+            ("&amp;🙂🙂🙂", "&🙂🙂🙂"),
+            ("&中文中文中文", "&中文中文中文"),
+            ("&中文中文;尾", "&中文中文;尾"),
+            ("&abcdefghijklmnop;中文", "&abcdefghijklmnop;中文"),
+            ("&#x1f642;中文", "🙂中文"),
+        ] {
+            assert_eq!(unescape(input), expected);
+        }
+        for value in ["a&amp;中文中文.txt", "<![CDATA[a&中文中文.txt]]>"] {
+            let raw = format!(
+                "<function name=\"exec\"><param name=\"command\">{value}</param></function>"
+            );
+            assert_eq!(
+                parse_call(&raw, &tools()).unwrap().str_arg("command"),
+                Some("a&中文中文.txt")
+            );
+        }
     }
 
     #[test]

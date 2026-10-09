@@ -40,9 +40,9 @@ class DeviceTests(unittest.TestCase):
                                  "CUDA-linked binaries need their loader path even for explicit CPU inference")
                 self.assertNotIn("NOSH_DEVICE", env)
 
-    def test_gpu_requests_require_observed_gpu_and_old_cpu_traces_still_work(self):
+    def test_every_device_requires_explicit_matching_native_observations(self):
         events = [
-            {"ev": "engine", "info": {"load_s": 1.0}},
+            {"ev": "engine", "info": {"load_s": 1.0, "device": "cpu"}},
             {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
             {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "task"}]},
             {"ev": "step_end", "sid": 1, "text": "answer", "errors": [], "tool_calls": [],
@@ -56,11 +56,17 @@ class DeviceTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             save()
             observations.observe(result, scenario, trace, seed=0)
+            events[0]["info"].pop("device")
+            save()
+            for expected in ("cpu", "cuda", "auto"):
+                with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, "explicit actual device"):
+                    observations.observe(result, scenario, trace, seed=0, expected_device=expected)
+            events[0]["info"]["device"] = "cpu"
+            save()
             with self.assertRaisesRegex(ValueError, "actual device and selection reason"):
                 observations.observe(result, scenario, trace, seed=0, expected_device="auto")
-            for actual in (None, "cpu", "cuda:1"):
-                if actual is not None:
-                    events[0]["info"]["device"] = actual
+            for actual in ("cpu", "cuda:1"):
+                events[0]["info"]["device"] = actual
                 save()
                 with self.assertRaisesRegex(ValueError, "device mismatch"):
                     observations.observe(result, scenario, trace, seed=0, expected_device="cuda")

@@ -36,7 +36,7 @@ def end(text="", calls=None):
           errors=[], usage={"ttft_s":0.01})
 out("__NOSH_EVAL_PROMPT__ ")
 request = line()
-event("engine", info={"load_s":0.01})
+event("engine", info={"load_s":0.01,"device":"cpu"})
 event("open", label="agent", sampling={"seed":0}, tools=[{"name":"ask_user"}])
 event("step_start", messages=[{"role":"user","text":request}])
 cancelled = False
@@ -50,7 +50,8 @@ for question in QUESTIONS:
     if DUPLICATE_PROMPT:
         out("\r\nanswer> ")
         assert not select.select([0], [], [], 0.2)[0], "duplicate answer received"
-    event("step_start", messages=[{"role":"tool","text":answer}])
+    reply = json.dumps({"question":question["question"],"choices":question.get("choices",[]),"answer":answer})
+    event("step_start", messages=[{"role":"tool","source":"user","text":reply}])
 if not cancelled:
     end(text="好的，已停止处理。")
 event("close")
@@ -93,7 +94,9 @@ class UserQuestionTests(unittest.TestCase):
         self.assertEqual(observed["metrics"]["task_status"], "completed")
         self.assertEqual(observed["answer"], "好的，已停止处理。")
         self.assertEqual(observed["questions"][0]["call"]["args"], question)
-        self.assertEqual(observed["executions"][0]["result"], result.questions[0]["answer"])
+        self.assertEqual(json.loads(observed["executions"][0]["result"]), {
+            "question": question["question"], "choices": [], "answer": result.questions[0]["answer"],
+        })
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"
             facts = fixtures.create(root, "python")
@@ -154,6 +157,26 @@ class UserQuestionTests(unittest.TestCase):
 
 
 class QuestionContractTests(unittest.TestCase):
+    def test_answer_context_binds_question_choices_and_verbatim_reply(self):
+        call = {"name": "ask_user", "args": {"question": "Which copy?", "choices": ["alpha", "beta"]}}
+        question = {"engine": 1, "sid": 1, "step": 1, "call": call,
+                    "input_index": 0, "answer": "  second\nline  ", "state": "answered"}
+        result = driver.Result(questions=[question])
+        reply = dict(call["args"], answer=question["answer"])
+        execution = {"engine": 1, "sid": 1, "step": 1, "call": call,
+                     "state": "returned", "result": json.dumps(reply)}
+        self.assertEqual(observations.question_evidence(result, [execution]), [question])
+        with self.assertRaisesRegex(ValueError, "invalid user answer context"):
+            observations.question_evidence(result, [dict(execution, result=question["answer"])])
+        for field, value in (("question", "Unrelated?"), ("choices", ["beta", "alpha"]),
+                             ("answer", question["answer"].strip())):
+            bad = dict(execution, result=json.dumps(dict(reply, **{field: value})))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "context differs"):
+                observations.question_evidence(result, [bad])
+        for body in (None, "invalid JSON", '{"answer":"second"}', '["second"]'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                observations.question_evidence(result, [dict(execution, result=body)])
+
     def test_interaction_trace_rejects_invalid_session_identity(self):
         for identity in (None, True, -1, 2**64, "1"):
             reader = driver.InteractionTrace(None)

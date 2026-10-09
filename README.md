@@ -104,9 +104,9 @@ f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing
 
 普通 Agent 的操作工具为 `exec`、`read_file` 和 `grep`，有可用交互终端时另提供 `ask_user(question, choices?)`，支持选择或自由回答并在原会话继续。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `exec` 调用 `ls` 等命令。管道附件模式不开放命令执行；提问通过控制终端进行，不读取管道 stdin。
 
-`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的独立短对话，通过 `command_help(name, query?)`、`read_file`、`grep` 查询缺失信息，可交互时用 `ask_user` 补齐必要选择。Generate/Fix/Next 都直接返回完整 shell program 或精确 `[None]`，不使用 `finish`；没有交互终端且缺少必要选择时不猜测命令。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝说明／Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
+`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的内部子会话：nosh 作为协议 User 提交任务与上下文，System 只保留固定规则。Generate/Fix/Next 共用 `command_help(name, query?)`、`read_file`、`grep`，不向终端提问，也不提供 `ask_user`。三种意图直接返回完整 shell program 或精确 `[None]`，不使用 `finish`；证据不足时不捏造命令。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝说明／Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
 
-用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，空白草稿用 F2 接受，回车才执行；继续输入会取消并丢弃旧建议。没有现成候选时，空白 F2 不新增模型请求。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断，`ai next` 显式请求后续建议。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留显式入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
+用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，空白草稿用 F2 接受，回车才执行；继续输入会取消并丢弃旧建议。没有现成候选时，空白 F2 不新增模型请求。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断；Next 只有自动触发，没有手动命令。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留 Generate、显式 Fix 和 Agent 入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
 
 agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。复合命令前面的部分可能已经执行；交接提示会明确警告，请检查当前状态和整条命令后再自行运行，以免重复副作用。
 
@@ -152,7 +152,7 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 | [实时输入解析设计](docs/INPUT-ASSIST.md) | 输入辅助的数据流、判定语义、后台隔离、缓存与资源边界 |
 | [Project context 设计](docs/PROJECT-CONTEXT.md) | 紧凑上下文、项目发现、AGENTS／README 加载和缓存边界 |
 | [LLM tools 设计](docs/LLM-TOOLS.md) | 工具与模式、grep、权限、结果和建议契约 |
-| [CommandAssist 设计](docs/COMMAND-ASSIST.md) | Generate / Fix / Next、简短 instructions、查询工具、finish 协议与后台调度 |
+| [CommandAssist 设计](docs/COMMAND-ASSIST.md) | nosh User 任务协议、Generate / Fix / Next、查询工具、直接终答与后台调度 |
 | [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
 | [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
 | [固定 seed 的真实模型评测](eval/README.md) | 原 27 场景回归、5 场景 CommandAssist 与新增 8 场景真实工作流专项分别运行；历史 main 的 48.0% 不代表当前评分成绩 |

@@ -19,7 +19,7 @@
 | [提示符上方状态行](STATUS-BAR.md) | #36 四区信息条、字段与状态 case、实际键义、验证矩阵及已知宿主限制 |
 | [Project context](PROJECT-CONTEXT.md) | 动态上下文、项目文档与缓存边界 |
 | [LLM tools](LLM-TOOLS.md) | 工具集合、模式与执行契约 |
-| [CommandAssist](COMMAND-ASSIST.md) | Generate/Fix/Next、查询与直接终态、交互澄清、后台完成事件 |
+| [CommandAssist](COMMAND-ASSIST.md) | nosh User 任务协议、Generate/Fix/Next、查询与直接终态、后台完成事件 |
 | [MVP 实施计划](MVP-PLAN.md) | 已完成的 M0/M1 工作记录，保留当时的范围与任务拆分，不作为当前待办清单 |
 | [MVP 报告](MVP-REPORT.md) | 分阶段的实测结果、偏差、已知问题及其来源 |
 | [真实模型评测](../eval/README.md) | 可复现命令、场景、指标口径与版本化基线 |
@@ -355,7 +355,7 @@ SHA-256、精确字节数和 revision 以 [`assets/registry.toml`](../assets/reg
 | `shell.trigger_on_error = false` | 关闭普通解析错误、无法纠错的未知命令自动转 AI | 本地纠错、单词内撇号分流、安全网、显式 AI 入口；执行失败由 `on_failure` 单独控制 |
 | `shell.on_failure = "off"` | 关闭已执行命令的失败提示与自动求助，包括 CJK 输入 | 执行前分流、显式 `ai fix` 等入口 |
 | `ai auto off` | 本会话暂停普通解析错误/未知命令的自动路由，以及命令完成后的 Next/Fix | 本地纠错、单词内撇号分流、安全网、显式入口；配置允许时仍显示失败提示 |
-| `shell.command_assist = false` | 关闭命令完成后的自动 Next/Fix | 显式 F2/Tab 兜底、`-s`、`ai fix`、`ai next` 和 Agent |
+| `shell.command_assist = false` | 关闭命令完成后的自动 Next/Fix | 显式 F2/Tab 兜底、`-s`、`ai fix` 和 Agent |
 | `NOSH_DISABLE_AI=1` / `--safe` | 关闭 nosh AI 输入分流、纠错和自然语言安全网；`--safe` 还跳过 rc | 用户普通 shell 命令照常执行；不是沙箱或危险命令禁用开关 |
 
 因此，`ai auto off` **不是全局禁用 AI**；上述撇号例外是当前实现边界，不应靠该命令保证不会加载模型。
@@ -466,11 +466,11 @@ Windows 用户当前可在 WSL 里运行，或用系统 SSH 登录 Linux 后运�
 | 入口 | 可用工具 | 执行方式 |
 |---|---|---|
 | shell 内（`# <任务>`、自然语言、`ai`、`ai fix <question>`）、无管道附件的 `nosh -a` | exec、read_file、grep | Agent 按审批模式分析／执行（见 §6.3） |
-| CommandAssist Generate（F2/Tab 兜底、`nosh -s`） | command_help、read_file、grep；可交互时增加 ask_user | 按需查询／提问，直接返回命令或 `[None]`；不执行目标 |
-| CommandAssist Fix/Next（裸 `ai fix`、`ai next`、用户命令完成事件） | command_help、read_file、grep | 按需查询，直接返回完整命令或精确 `[None]`；不执行目标 |
+| CommandAssist Generate（F2/Tab 兜底、`nosh -s`） | command_help、read_file、grep | nosh 提交 User 任务，查询后直接返回命令或 `[None]`；不执行目标、不向终端提问 |
+| CommandAssist Fix/Next（裸 `ai fix`、用户命令完成事件；Next 仅自动触发） | command_help、read_file、grep | 按需查询，直接返回完整命令或精确 `[None]`；不执行目标 |
 | `nosh -a` 的管道附件 | `read_file`、`grep` | stdin 的内容截断后作为附件，不注册 `exec` |
 
-**命令辅助边界**：Generate/Fix 最多 4 步、Next 最多 2 步，每步最多 512 个新 token，受更小的配置预算限制。三种意图均校验完整最终文本，不从说明或 Markdown 中猜测命令，不注册 `finish`。Generate 和 Agent 有交互输入能力时提供 `ask_user(question, choices?)`，支持单选和自由输入；回答回填原会话，不代表执行审批。完整设计、后台取消和输出契约见 [CommandAssist](COMMAND-ASSIST.md)。语法／有限名称检查不替代执行前权限分析。
+**命令辅助边界**：Generate/Fix 最多 4 步、Next 最多 2 步，每步最多 512 个新 token，受更小的配置预算限制。System 共用固定规则，nosh 以 User 提交任务和上下文；终答反馈也使用 User，并以 None 解码策略禁用工具。三种意图均校验完整最终文本，不从说明或 Markdown 中猜测命令，不注册 `finish` 或 `ask_user`。Agent 的 `ask_user(question, choices?)` 独立保留，不代表执行审批。完整设计见 [CommandAssist](COMMAND-ASSIST.md)。语法／有限名称检查不替代执行前权限分析。
 
 ### 5.2 对话与任务
 
@@ -525,7 +525,7 @@ for step in 1..=max_steps (默认 10):
 
 ### 5.5 工具
 
-普通 Agent 使用 `exec`、`read_file`、`grep`；管道附件只读。Agent 和前台 Generate 在有输入能力时提供 `ask_user`，直接从控制终端交互，不消费 stdin。CommandAssist 统一使用完整命令／`[None]` 终态，不注册目标执行工具。工具目录与输入能力各自维护声明及准入，未知工具不进入审批或执行，运行次数按真实执行结果计数。
+普通 Agent 使用 `exec`、`read_file`、`grep`；管道附件只读。Agent 在有输入能力时提供 `ask_user`，直接从控制终端交互，不消费 stdin。CommandAssist 不接收终端输入通道，统一使用完整命令／`[None]` 终态，不注册目标执行或提问工具。工具目录与输入能力各自维护声明及准入，未知工具不进入审批或执行，运行次数按真实执行结果计数。
 
 参数、输出、权限、搜索与建议边界统一见 [LLM tools 设计](LLM-TOOLS.md)，实现见 [tools.rs](../crates/nosh-core/src/tools.rs) 和 [user_input.rs](../crates/nosh-core/src/user_input.rs)。`write_file` 及其他扩展仍属后续方案，不在当前工具集中。
 
@@ -742,8 +742,8 @@ Auto 以便利优先、防御破坏性操作为目标，不追求绝对安全。
 - **分段编码，隔离控制标记**：模板骨架允许解析 special token；用户输入、文件内容、命令输出等不可信片段开启 `encode_special_tokens`，按普通文本切分，不把其中的模板标记当作轮次或工具调用边界。这只隔离控制 token，不代表模型不会受文本中的语义指令影响（§6.1）。
 - **增量解码**：流式输出时，遇到不完整的 UTF-8 字节先缓住，不急着输出。
 - **模板**：
-  - 内置一个手写的 MiniCPM5 渲染器，复刻官方 `chat_template.jinja` 中用到的分支：system + tools、user、assistant（含空的 think 块）、合并连续的 tool 结果、generation prompt。
-  - 与仓库中的 [固定 golden 样例](../crates/nosh-llm/tests/fixtures/template_cases.json) 逐字节比较；测试本身不实时调用 HF `apply_chat_template`，也不等同于完整的分词一致性验证。
+  - 内置 MiniCPM5 渲染器，保留官方角色、XML 调用、assistant 空 think 块、连续 tool 结果合并与 generation prompt。工具说明有意简化并前置到 `<tools>` 定义之前，属于 nosh 定制，不声称完整 prompt 与官方文本逐字一致。
+  - [固定 golden 样例](../crates/nosh-llm/tests/fixtures/template_cases.json) 同时保存未经修改的官方 `official_expected` 和当前布局的 `expected`。生成器读取原始 Jinja，仅替换工具说明区；Rust 验证当前全文、原样 schema 和其余对话字节。测试本身不实时调用 HF，也不等同于模型质量验证；使用本地真实 tokenizer 的独立测试检查分段编码与完整文本编码一致。
 
 ### 7.3 采样
 
@@ -1141,7 +1141,7 @@ reason = "Allow project fetches"
 | 下载源 | `NOSH_ENDPOINT`（优先于 `HF_ENDPOINT`）、`NOSH_REGION=cn\|global`、`HTTPS_PROXY` |
 | 终端表现 | `NO_COLOR`、`CLICOLOR`、`TERM`、locale；详见 §9.1 与 README |
 
-`NOSH_EVAL_TRACE` 是显式启用的开发观测入口，记录内容与权限约束见 [评测文档](../eval/README.md#指标与观测协议)，不是默认 agent history/audit。
+`NOSH_EVAL_TRACE` 是显式启用的开发观测入口，记录内容与权限约束见 [评测文档](../eval/README.md#指标与复现)，不是默认 agent history/audit。
 
 ## 12. 工程
 
@@ -1208,7 +1208,7 @@ nosh/
 
 | 改动方向 | 维护入口与约束 |
 |---|---|
-| 新增内置工具 | Agent 在 `tools.rs` 中维护操作工具目录，`user_input.rs` 维护共享提问能力；CommandAssist 在 `command_assist.rs` 维护查询集合与直接终态，复用读取和提问实现但保留独立能力上限。工具声明顺序影响 prompt，不随意调整 |
+| 新增内置工具 | Agent 在 `tools.rs` 中维护操作工具目录，`user_input.rs` 维护 Agent 提问能力；CommandAssist 在 `command_assist.rs` 维护固定查询集合与直接终态，复用读取但不开放终端交互。工具声明顺序影响 prompt，不随意调整 |
 | 对话与上下文 | 在 `conversation.rs` 中处理 token 日志、分组和原子更新，在 `local.rs` 中处理模型、KV 与生成；不将模型格式细节移到 harness；修改 `ChatEngine` 契约时同步 Local、Mock、CLI 观测包装器和调用方 |
 | 输出与采样性能 | 输出内存按保留预算分配，采样 scratch 按单次生成复用；先证明字符预算、模板 token、固定 seed 序列和错误行为未漂移，再比较分配与耗时 |
 | 文档与评测 | README 说明可用功能，本设计说明现状与扩展边界，MVP 报告和版本化基线保留历史事实；不重写历史通过率，不把辅助路径优化等同于真实模型基线改善 |
@@ -1245,7 +1245,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | 类别 | 内容 | 通过标准 |
 |---|---|---|
 | 单元（当前）与 fuzz（规划） | 当前覆盖固定 seed 采样序列与 scratch 复用、增量解码、工具调用与 CDATA、Unicode 截断预算、工具集合准入、对话日志与恢复错误、AI 触发、状态差异；解析器/协议帧 fuzz 留待建设 | 对应集合全部通过，不出现 panic |
-| 推理正确性 | 当前模板对照固定 golden 样例，测试时不调用 HF `apply_chat_template`（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 模板逐字节一致。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
+| 推理正确性 | 当前模板对照固定 golden 样例，测试时不调用 HF `apply_chat_template`（§7.2）；logits 对比参考实现（llama.cpp，或者 KV 用 f32 的自身实现），用真实 prompt 加 teacher forcing | 当前布局与自身 golden 全文一致，工具 schema 和其余对话与官方参考逐字节一致；工具说明为明确的定制。logits 用固定样本（约 3.3K token 的真实 prompt 加 48 步 teacher forcing，共 49 个位置）和以下通过线判定：参考分布 top-1 概率 > 0.5 的位置，top-1 全部一致；平均 KL < 0.03 nats（只改动 1 个最低位的 f32 对照为 0.0110）；真实后续 token 的平均 NLL 与参考相差 < 0.05 nats；余弦的中位数和 prompt 末位置都 > 0.995；top-5 集合一致的位置 ≥ 60%。f16 KV 实测依次为 30/30、0.0106、2.768 对 2.750、0.9982、38/49。不使用"余弦 > 0.999"这条标准（见 §16 #13） |
 | ARM 权重释放（issue #9） | 每个 PR 在 Linux ARM64/macOS 用 Q4K/Q6K 合成矩阵覆盖 m=1..64、prefill 边界及原始数据访问；独立手动工作流 `arm64-memory.yml` 下载并缓存固定模型，比较预重排开/关 | 支持 dotprod 的合格矩阵必须实际释放，其他条件保持原始数据；8K 峰值 RSS ≤ 2.5 GiB；相同 f16 KV 下的 3,329/8,065 token prompt 各加 48 步 teacher forcing，应用上一行的全部通过线。Linux ARM 实测：KL 和 NLL 差均为 0，余弦中位数 1，top-5 均 49/49，高置信 top-1 分别 30/30、48/48 |
 | Shell 兼容 | 当前有本地 shell/CLI 集成测试；完整 scp、rsync、git over ssh、VS Code Remote 和常见 rc 矩阵属于目标覆盖 | 已有用例全部通过；`nosh -c` 保持纯命令输出，不将上游兼容性等同于完整生态验证 |
 | 共享会话与信号 | agent 和用户交替执行时状态连续；Ctrl-C 只中断前台；agent 不能 exit/exec；SIGTTIN 检测 | 全部通过 |
@@ -1339,13 +1339,15 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 You are nosh, an AI shell running fully offline on the user's computer.
 # Tools
 
-You are provided with function signatures within <tools></tools> XML tags:
+Tool calls:
+<function name="function-name"><param name="param-name">param-value</param></function>
+Wrap values containing <, & or newlines in <![CDATA[...]]>.
+
 <tools>
 {"type": "function", "function": {"name": "exec", ...}}
 {"type": "function", "function": {"name": "read_file", ...}}
 </tools>
 
-Tool usage guidelines: ...（官方模板中的固定文本）
 # Environment
 OS: Ubuntu 24.04 (x86_64) | Shell: nosh (bash-compatible) | User: u
 Available:

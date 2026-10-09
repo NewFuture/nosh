@@ -56,15 +56,14 @@ fn ask_user_cancellation_eof_and_missing_terminal_are_not_answers() {
 }
 
 #[test]
-fn ctrl_g_question_returns_to_the_editor_without_executing_the_suggestion() {
+fn f2_returns_to_the_editor_without_dialogue_or_execution() {
     Probe {
-        mode: "repl-question",
+        mode: "repl-generate",
         stdout_tty: true,
         stderr_tty: true,
         input_assist: false,
         steps: &[
-            ("probe> ", b"create a file\x07"),
-            ("answer> ", b"custom\r"),
+            ("probe> ", b"create a file\x1bOQ"),
             ("touch accepted", b"\x15exit\r"),
         ],
         ..Default::default()

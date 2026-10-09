@@ -2,13 +2,12 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use nosh_llm::{
-    Message, MockChatEngine,
-    mock::{call, text},
+    ChatEngine, Event, LlmError, Message, MockChatEngine, SessionId, SessionSpec, StepOutcome,
+    mock::{MockEvent, call, text},
 };
 use nosh_shell::{EmbeddedShell, ShellOptions, Trigger};
 
 use super::*;
-use crate::command_assist::{self, AssistError, AssistResult};
 use crate::{Agent, AgentConfig, Environment, RecordUi, Scripted, TaskInput, TaskStatus, ToolSet};
 
 pub(crate) struct ScriptedInput {
@@ -117,191 +116,6 @@ fn choice_text_and_custom_answers_are_returned_verbatim() {
 }
 
 #[test]
-fn generate_resumes_same_session_and_user_wait_does_not_exhaust_runtime_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let shell = shell(dir.path());
-    let mut input = ScriptedInput::new(["zip"]);
-    input.delay = Duration::from_millis(250);
-    let cfg = AgentConfig {
-        command_timeout: Duration::from_millis(150),
-        ..Default::default()
-    };
-    let mut engine = MockChatEngine::new(vec![
-        vec![call(
-            "ask_user",
-            json!({"question":"Format?","choices":["tar.gz","zip"]}),
-        )],
-        vec![text("touch not-executed")],
-    ]);
-    let received = engine.received();
-    let specs = engine.specs();
-    let observations = engine.observations();
-    let outcome =
-        command_assist::generate(&mut engine, &shell, "archive", &cfg, &mut input).unwrap();
-    assert_eq!(
-        outcome.result,
-        AssistResult::Command("touch not-executed".into())
-    );
-    assert_eq!(outcome.steps, 2);
-    assert!(!dir.path().join("not-executed").exists());
-    assert_eq!(input.seen.len(), 1);
-    assert!(
-        matches!(&received.lock().unwrap()[1][0], Message::UserAnswer(answer) if answer == "zip")
-    );
-    let specs = specs.lock().unwrap();
-    assert_eq!(specs.len(), 1);
-    assert!(specs[0].tools.iter().any(|tool| tool.name == "ask_user"));
-    assert!(specs[0].tools.iter().all(|tool| tool.name != "finish"));
-    assert_eq!(
-        observations.lock().unwrap()[0].1["response_format"],
-        "command_or_none"
-    );
-}
-
-#[test]
-fn generate_final_round_quotes_real_questions_choices_and_updated_user_requirements() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("fact.txt"), "known\n").unwrap();
-    let shell = shell(dir.path());
-    let original = "Generate an archive command.";
-    let mut input = ScriptedInput::new([
-        "second",
-        "Cancel the archive request; do not generate a command.",
-    ]);
-    let mut engine = MockChatEngine::new(vec![
-        vec![call(
-            "ask_user",
-            json!({"question":"Which format?", "choices":["tar.gz","zip"]}),
-        )],
-        vec![call("ask_user", json!({"question":"Which source?"}))],
-        vec![call("read_file", json!({"path":"fact.txt"}))],
-        vec![text("[None]")],
-    ]);
-    let received = engine.received();
-    let outcome = command_assist::generate(
-        &mut engine,
-        &shell,
-        original,
-        &AgentConfig::default(),
-        &mut input,
-    )
-    .unwrap();
-    assert_eq!(outcome.result, AssistResult::NoSuggestion);
-    let received = received.lock().unwrap();
-    assert!(matches!(&received[1][0], Message::UserAnswer(answer) if answer == "second"));
-    let Message::System(reminder) = received[3].last().unwrap() else {
-        unreachable!()
-    };
-    assert!(reminder.contains(&json!(original).to_string()));
-    let quoted: Vec<serde_json::Value> = reminder
-        .lines()
-        .filter(|line| line.starts_with('{'))
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(
-        quoted,
-        vec![
-            json!({"question":"Which format?", "choices":["tar.gz","zip"], "answer":"second"}),
-            json!({"question":"Which source?", "choices":[], "answer":"Cancel the archive request; do not generate a command."}),
-        ]
-    );
-    assert!(!reminder.contains("fact.txt"));
-    assert_eq!(input.seen.len(), 2);
-}
-
-#[test]
-fn generate_cancellation_and_input_failure_are_not_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let shell = shell(dir.path());
-    for error in [
-        InputError::Cancelled,
-        InputError::Unavailable("terminal lost".into()),
-    ] {
-        let cancelled = error == InputError::Cancelled;
-        let mut input = ScriptedInput::new([]);
-        input.answers.push_back(Err(error));
-        let mut engine = MockChatEngine::new(vec![
-            vec![call("ask_user", json!({"question":"Source?"}))],
-            vec![text("[None]")],
-        ]);
-        let received = engine.received();
-        let observations = engine.observations();
-        let result = command_assist::generate(
-            &mut engine,
-            &shell,
-            "archive",
-            &AgentConfig::default(),
-            &mut input,
-        );
-        assert!(result.is_err());
-        assert_eq!(matches!(result, Err(AssistError::Cancelled)), cancelled);
-        assert_eq!(received.lock().unwrap().len(), 1);
-        assert!(observations.lock().unwrap()[0].1.get("kind").is_none());
-    }
-}
-
-#[test]
-fn questions_are_never_dispatched_without_capability_or_after_the_step_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut shell = shell(dir.path());
-    let cfg = AgentConfig::default();
-    for (intent, line, background) in [
-        (command_assist::Intent::Next, "true", false),
-        (command_assist::Intent::Fix, "sh -c 'exit 7'", false),
-        (command_assist::Intent::Generate, "true", true),
-    ] {
-        shell.run_user_line(line);
-        let command = (intent != command_assist::Intent::Generate)
-            .then(|| shell.recent_commands().last().unwrap().clone());
-        let mut request = command_assist::AssistRequest::capture(
-            &shell,
-            &cfg,
-            intent,
-            String::new(),
-            command,
-            None,
-        )
-        .unwrap();
-        request.background = background;
-        let mut input = ScriptedInput::new([]);
-        let mut engine = MockChatEngine::new(vec![
-            vec![call("ask_user", json!({"question":"x"}))],
-            vec![text("[None]")],
-        ]);
-        let specs = engine.specs();
-        assert!(
-            command_assist::run(
-                &mut engine,
-                &request,
-                &cfg,
-                &CancelHandle::default(),
-                &mut input,
-                |_| true
-            )
-            .is_err()
-        );
-        assert!(input.seen.is_empty());
-        assert!(
-            specs.lock().unwrap()[0]
-                .tools
-                .iter()
-                .all(|tool| tool.name != "ask_user")
-        );
-    }
-    let mut input = ScriptedInput::new([]);
-    let mut engine = MockChatEngine::new(vec![vec![call("ask_user", json!({"question":"x"}))]]);
-    let cfg = AgentConfig {
-        max_steps: 1,
-        ..cfg
-    };
-    assert!(matches!(
-        command_assist::generate(&mut engine, &shell, "archive", &cfg, &mut input),
-        Err(AssistError::Budget)
-    ));
-    assert!(input.seen.is_empty());
-}
-
-#[test]
 fn agent_asks_in_full_and_read_only_sessions_without_conferring_approval() {
     let dir = tempfile::tempdir().unwrap();
     let mut shell = shell(dir.path());
@@ -334,7 +148,9 @@ fn agent_asks_in_full_and_read_only_sessions_without_conferring_approval() {
             &mut RecordUi::default(),
         );
         assert!(
-            matches!(&received.lock().unwrap()[1][0], Message::UserAnswer(answer) if answer == "custom")
+            matches!(&received.lock().unwrap()[1][0], Message::UserAnswer(answer)
+                if serde_json::from_str::<serde_json::Value>(answer).unwrap()
+                    == json!({"question":"Name?","choices":["one","two"],"answer":"custom"}))
         );
         assert_eq!(specs.lock().unwrap().len(), 1);
         assert!(
@@ -384,9 +200,8 @@ fn agent_question_cancellation_and_unavailable_input_have_distinct_statuses() {
 #[test]
 fn malformed_questions_do_not_prompt_and_can_be_corrected_within_the_step_budget() {
     let dir = tempfile::tempdir().unwrap();
-    let shell = shell(dir.path());
-    let mut input = ScriptedInput::new(["custom"]);
-    let mut engine = MockChatEngine::new(vec![
+    let mut shell = shell(dir.path());
+    let engine = MockChatEngine::new(vec![
         vec![call(
             "ask_user",
             json!({"question":"Format?","choices":[1]}),
@@ -398,16 +213,26 @@ fn malformed_questions_do_not_prompt_and_can_be_corrected_within_the_step_budget
         vec![text("echo ready")],
     ]);
     let received = engine.received();
-    let result = command_assist::generate(
-        &mut engine,
-        &shell,
-        "choose",
-        &AgentConfig::default(),
-        &mut input,
+    let mut agent = Agent::new(
+        Box::new(engine),
+        AgentConfig::default(),
+        Environment::default(),
+        ToolSet::Full,
     )
-    .unwrap();
+    .with_user_input(Box::new(ScriptedInput::new(["custom"])));
+    let result = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Hash, "choose"),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(result.status, TaskStatus::Completed);
     assert_eq!(result.steps, 3);
-    assert_eq!(input.seen.len(), 1);
+    assert!(
+        matches!(&received.lock().unwrap()[2][0], Message::UserAnswer(answer)
+            if serde_json::from_str::<serde_json::Value>(answer).unwrap()
+                == json!({"question":"Format?","choices":["zip"],"answer":"custom"}))
+    );
     assert!(
         matches!(&received.lock().unwrap()[1][0], Message::Tool(error) if error.starts_with("error:"))
     );
@@ -463,19 +288,6 @@ fn mixed_question_turns_execute_neither_the_question_nor_other_tools() {
         call("ask_user", json!({"question":"Which?"})),
         call("exec", json!({"command":"touch mixed"})),
     ];
-    let mut engine = MockChatEngine::new(vec![turn.clone()]);
-    let mut input = ScriptedInput::new([]);
-    assert!(
-        command_assist::generate(
-            &mut engine,
-            &shell,
-            "choose",
-            &AgentConfig::default(),
-            &mut input
-        )
-        .is_err()
-    );
-    assert!(input.seen.is_empty());
     let engine = MockChatEngine::new(vec![turn, vec![text("not executed")]]);
     let received = engine.received();
     let mut agent = Agent::new(
@@ -493,4 +305,167 @@ fn mixed_question_turns_execute_neither_the_question_nor_other_tools() {
     );
     assert!(format!("{:?}", received.lock().unwrap()[1]).contains("no tools were executed"));
     assert!(!dir.path().join("mixed").exists());
+}
+
+#[test]
+fn malformed_question_turns_skip_other_tools_and_can_retry_the_question() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note"), "must-not-be-read").unwrap();
+    let mut shell = shell(dir.path());
+    for raw in [
+        "<function name=\"ask_user\"></function>",
+        "<function name=\"ask_user\"><param name=\"question\">Which?</param><param name=\"choices\">not-an-array</param></function>",
+    ] {
+        let error = nosh_llm::toolcall::parse_call(raw, &[spec()]).unwrap_err();
+        assert_eq!(error.tool.as_deref(), Some("ask_user"));
+        for other in [
+            call("exec", json!({"command":"printf changed > mixed"})),
+            call("read_file", json!({"path":"note"})),
+        ] {
+            for question_first in [true, false] {
+                let mut events = vec![MockEvent::BadCall(error.clone()), other.clone()];
+                if !question_first {
+                    events.reverse();
+                }
+                let engine = MockChatEngine::new(vec![
+                    events,
+                    vec![call("ask_user", json!({"question":"Which?"}))],
+                    vec![text("done")],
+                ]);
+                let received = engine.received();
+                let mut agent = Agent::new(
+                    Box::new(engine),
+                    AgentConfig {
+                        mode: nosh_permissions::ApprovalMode::Yolo,
+                        ..Default::default()
+                    },
+                    Environment::default(),
+                    ToolSet::Full,
+                )
+                .with_user_input(Box::new(ScriptedInput::new(["second"])));
+                let mut approval = Scripted::new([]);
+                let outcome = agent.run_task(
+                    &mut shell,
+                    TaskInput::new(Trigger::Hash, "Ask which target to use before acting."),
+                    &mut approval,
+                    &mut RecordUi::default(),
+                );
+                assert_eq!(outcome.status, TaskStatus::Completed);
+                assert_eq!(outcome.steps, 3);
+                assert_eq!(outcome.commands_run, 0);
+                assert!(approval.seen.is_empty());
+                assert!(!dir.path().join("mixed").exists());
+                let received = received.lock().unwrap();
+                let feedback = format!("{:?}", received[1]);
+                assert!(feedback.contains("no tools were executed"));
+                assert!(!feedback.contains("must-not-be-read"));
+                assert!(matches!(&received[2][0], Message::UserAnswer(_)));
+            }
+        }
+    }
+}
+
+struct FailAfterAnswer {
+    inner: MockChatEngine,
+    failed: bool,
+}
+
+impl ChatEngine for FailAfterAnswer {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+        self.inner.open(spec)
+    }
+
+    fn step(
+        &mut self,
+        sid: SessionId,
+        append: Vec<Message>,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<StepOutcome, LlmError> {
+        if !self.failed
+            && append
+                .iter()
+                .any(|message| matches!(message, Message::UserAnswer(_)))
+        {
+            self.failed = true;
+            return Err(LlmError::Config("injected failure after the answer".into()));
+        }
+        self.inner.step(sid, append, sink)
+    }
+
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+        self.inner.rewind(sid, keep)
+    }
+
+    fn message_count(&self, sid: SessionId) -> usize {
+        self.inner.message_count(sid)
+    }
+
+    fn compact_tool_results(&mut self, sid: SessionId, keep: usize) -> Result<usize, LlmError> {
+        self.inner.compact_tool_results(sid, keep)
+    }
+
+    fn context_usage(&self, sid: SessionId) -> (usize, usize) {
+        self.inner.context_usage(sid)
+    }
+
+    fn cancel_handle(&self) -> CancelHandle {
+        self.inner.cancel_handle()
+    }
+
+    fn close(&mut self, sid: SessionId) {
+        self.inner.close(sid);
+    }
+}
+
+#[test]
+fn recovered_user_answer_keeps_question_and_choices_after_automatic_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shell = shell(dir.path());
+    let question = "Which copy should remain?";
+    let answer = "  second  ";
+    let engine = MockChatEngine::new(vec![
+        vec![call(
+            "ask_user",
+            json!({"question":question,"choices":["alpha","beta"]}),
+        )],
+        vec![text("done")],
+    ]);
+    let received = engine.received();
+    let specs = engine.specs();
+    let mut agent = Agent::new(
+        Box::new(FailAfterAnswer {
+            inner: engine,
+            failed: false,
+        }),
+        AgentConfig {
+            idle_reset: Duration::ZERO,
+            ..Default::default()
+        },
+        Environment::default(),
+        ToolSet::Full,
+    )
+    .with_user_input(Box::new(ScriptedInput::new([answer])));
+    let first = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Hash, "Ask before proceeding."),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(first.status, TaskStatus::Failed);
+    let second = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Hash, "Continue according to my answer."),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(second.status, TaskStatus::Completed);
+    assert_eq!(specs.lock().unwrap().len(), 2);
+    let received = received.lock().unwrap();
+    let [Message::UserAnswer(reply), ..] = received.last().unwrap().as_slice() else {
+        panic!("missing recovered answer");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(reply).unwrap(),
+        json!({"question":question,"choices":["alpha","beta"],"answer":answer})
+    );
 }

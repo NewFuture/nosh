@@ -6,6 +6,14 @@ from .support import SCENARIOS
 
 
 class ExperienceTests(unittest.TestCase):
+    def test_version_data_does_not_need_added_chinese_prose(self):
+        scenario = SCENARIOS["zh-tool-versions"]
+        self.assertEqual(scenario["expect"]["response_language"], "any")
+        answer = "cargo: 1.98.1\nnode: v22.23.3\npython3: 3.14.4"
+        result = experience_checks.experience(scenario, answer, {"steps": 1, "confirmations": 0})
+        self.assertIsNone(result["response_language"]["passed"])
+        self.assertTrue(result["final_question"]["passed"])
+
     def test_exact_budgets_and_missing_observations(self):
         scenario = SCENARIOS["zh-rust-build"]
         metrics = {"steps": 4, "confirmations": 1}

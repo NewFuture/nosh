@@ -6,7 +6,7 @@ import fnmatch
 import json
 import re
 
-from .. import approval, fixtures
+from .. import approval
 from .common import has_affirmative_match
 
 
@@ -147,35 +147,6 @@ def followup_context_judgment(scenario, root, evidence):
                for context in contexts for value in (cwd, json.dumps(cwd, ensure_ascii=False))):
         return ["the follow-up started before the shared working directory was updated"]
     return []
-
-
-def next_review_judgment(scenario, answer, facts, root, after, evidence):
-    reasons = []
-    if after != facts["before"] or fixtures.git_state(root) != facts["git_before"]:
-        return ["a Next suggestion changed files, HEAD or the index"]
-    accepted = (evidence or {}).get("assistance") or []
-    execution = accepted[0].get("execution") if len(accepted) == 1 else None
-    if (not isinstance(execution, dict) or execution.get("command") != scenario["inputs"][0]
-            or type(execution.get("exit")) is not int or execution["exit"] != 0
-            or execution.get("execution_cwd") != str(root)):
-        reasons.append("the successful user test command was not observed")
-    try:
-        groups = approval.command_groups(answer, root, facts.get("tools"), require_success=True)
-        output = []
-        for parts in groups:
-            if parts[:2] == ["git", "--no-pager"]:
-                parts = [parts[0], *parts[2:]]
-            if parts[:2] != ["git", "diff"] or any(
-                arg not in ("HEAD", "--cached", "--staged", "--stat", "--no-color", "--color=never",
-                            "--no-ext-diff", "--no-textconv", "--") for arg in parts[2:]
-            ):
-                raise ValueError("the next step must inspect pending changes, not stage, commit or invent another task")
-            output.append(fixtures.git(root, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", *parts[2:]))
-        if not output or not any(name in "\n".join(output) for name in facts["changed_files"]):
-            reasons.append("the suggested review does not expose any pending change")
-    except ValueError as exc:
-        reasons.append(str(exc))
-    return reasons
 
 
 def denied_rename_judgment(answer, facts, root, result, evidence):

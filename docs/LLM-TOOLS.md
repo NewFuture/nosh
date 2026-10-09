@@ -1,6 +1,6 @@
 # LLM tools 设计
 
-原则：**Agent 的三个操作工具与独立的用户输入能力分开；CommandAssist 查询后直接交付候选，明确能力、证据和权限。** 操作工具的 schema 与执行准入共用 `BuiltinTool`／`ToolSet`，`ask_user` 由输入能力决定；上下文选择见 [Project context](PROJECT-CONTEXT.md)。
+原则：**Agent 的操作工具与用户输入能力分开；CommandAssist 是 nosh 发起的内部任务服务，查询后直接交付候选。** 操作工具的 schema 与执行准入共用 `BuiltinTool`／`ToolSet`，Agent 的 `ask_user` 由输入能力决定；CommandAssist 不开放终端对话。上下文选择见 [Project context](PROJECT-CONTEXT.md)。
 
 ## 工具与模式
 
@@ -10,11 +10,23 @@
 | `read_file` | `path`，`start_line?`，`end_line?` | 读取带行号的文本；行号从 1 开始，起止均包含，省略 end_line 最多读 400 行。大输出及长行会截断；不列目录 |
 | `grep` | `pattern`，`path?`，`glob?` | 递归搜索**文件内容**，pattern 是默认区分大小写的正则，可用 `(?i)`；glob 筛文件，不搜索文件名。返回 `path:line:text`，最多 200 行，标明不完整扫描 |
 | `command_help` | `name`，`query?` | 仅 CommandAssist 使用。name 可包含子命令（如 `git commit`），受限查询帮助并返回相关原文及状态；query 忽略大小写，关键词／短语按子串匹配、选项保留名称边界，返回原文不改大小写；不是正则或程序参数 |
-| `ask_user` | `question`，`choices?` | 有交互输入能力时提问；可选单选建议始终允许自由输入，返回原文回答并在原会话继续，不授予执行权限 |
+| `ask_user` | `question`，`choices?` | 仅 Agent 有交互输入能力时提供；可选单选建议始终允许自由输入，返回原文回答并在原会话继续，不授予执行权限 |
 
-普通 Agent 的操作工具是 `exec`、`read_file`、`grep`；管道附件仅保留 `read_file`、`grep`。两种 Agent 模式有可用控制终端时均额外提供 `ask_user`，提问不读取 stdin，也不改变只读边界。CommandAssist Generate/Fix/Next 统一注册 `command_help`、`read_file`、`grep`，仅可交互前台 Generate 增加 `ask_user`。三种辅助均直接返回完整候选命令或精确 `[None]`，不注册 `command_info`、`exec` 或 `finish`。帮助查询是真实且受限的执行，详情见 [CommandAssist](COMMAND-ASSIST.md)。
+普通 Agent 的操作工具是 `exec`、`read_file`、`grep`；管道附件仅保留 `read_file`、`grep`。两种 Agent 模式有可用控制终端时均额外提供 `ask_user`，提问不读取 stdin，也不改变只读边界。CommandAssist Generate/Fix/Next 固定注册 `command_help`、`read_file`、`grep`，即使来自交互终端也不增加工具。三种辅助均直接向 nosh 返回完整候选命令或精确 `[None]`，不注册 `ask_user`、`command_info`、`exec` 或 `finish`。帮助查询是真实且受限的执行，详情见 [CommandAssist](COMMAND-ASSIST.md)。
 
-模型可见描述只说明用途和必要的返回形式；参数说明保留含义、必要默认值和简短例子。grep 正则与 command_help 字面搜索明确区分，不提前堆叠实现细节、异常情况或重复告诫。权限和限额仍由宿主强制，截断、无匹配等状态在实际结果中说明。`ask_user` 说明询问缺失信息或用户选择、回答可更新需求，以及等待回答后再调用其他工具，不额外插入重复的 system 指令。背景规则仅把项目背景、文件和命令输出视为数据，不再笼统覆盖用户回答。工具定义直接进入实际模板，未另设模型专用名称或隐含参数别名。
+模型可见描述只说明用途和必要的返回形式；参数说明保留含义、必要默认值和简短例子。grep 正则与 command_help 字面搜索明确区分，不提前堆叠实现细节、异常情况或重复告诫。权限和限额仍由宿主强制，截断、无匹配等状态在实际结果中说明。Agent 的 `ask_user` 说明询问缺失信息或选择、回答可更新需求，以及等待回答后再调用其他工具；背景规则不把真实用户回答当作外部工具数据。工具定义直接进入实际模板，未另设模型专用名称或隐含参数别名。
+
+共享工具区先给出简短调用格式，再列 `<tools>` 中的完整 JSON schema：
+
+```text
+Tool calls:
+<function name="function-name"><param name="param-name">param-value</param></function>
+Wrap values containing <, & or newlines in <![CDATA[...]]>.
+```
+
+这部分只描述语法，不包含“正常回答”、`[None]`、只读或执行策略，因此不会把 CommandAssist 的限制带入 Agent。工具名称、参数转换、CDATA／实体解析和调用数量约束不随文案顺序改变。角色与工具调用格式仍遵循 MiniCPM5；共享说明的文字和位置是明确的 nosh 定制，不再声称完整 prompt 与官方模板逐字相同。
+
+CommandAssist 共用固定 System：建议而不执行、平台、查询协议、数据边界和输出约定。协议 User 是 nosh，三个意图的本次请求与上下文都放进 User 任务包；终答要求和拒绝理由也是 nosh 的 User 反馈，不重复命令或原始需求。终端用户不直接参与此子会话，Agent 的交互与权限独立保留。具体文案见 [CommandAssist](COMMAND-ASSIST.md#instructions-与-prompt)。
 
 `exec` 描述使用 “current shell session”，具体 shell 在会话环境中标为 `nosh (bash-compatible)`，不暗示调用系统 Bash。`command_help` 的简短描述不使用 external 术语，但仍只支持通过宿主检查的外部程序，未扩大执行能力。
 
@@ -22,11 +34,11 @@
 
 `command_help(name="git commit", query="--amend")` 查询提交命令的帮助，不是筛选 Git 顶层概览。name 中的子命令独立传入 argv，不接受额外选项或 shell 代码；普通程序使用 `--help`，Git 子命令使用已知短帮助 `-h`，保留真实的 129 usage 退出码。完整调用仍须通过权限分析与用户规则，未知插件不会仅因追加帮助旗标而获得授权。
 
-`ask_user` 必须是回合中唯一的工具调用，避免回答前就执行依赖它的操作。问题／回答最多 4,096 bytes，可选 choices 最多 20 个互异的非空单行字符串，每项最多 512 bytes；没有默认选项。终端用上下方向键选择，直接输入任意答案（包括数字）不受选项限制；问题及交互只写 stderr，回答原文以 `Message::UserAnswer` 回填，仍渲染为工具回复，但不参与旧工具输出压缩。取消／EOF 中止任务，通道故障明确失败，不伪造答案或授权。Agent 输入能力变化时重开会话，保持同一会话工具前缀稳定。
+`ask_user` 必须是回合中唯一的工具调用，避免回答前就执行依赖它的操作；明确属于 `ask_user` 的解析错误也计入此检查，畸形提问与其他调用混合时整轮不执行。问题／回答最多 4,096 bytes，可选 choices 最多 20 个互异的非空单行字符串，每项最多 512 bytes；没有默认选项。终端用上下方向键选择，直接输入任意答案（包括数字）不受选项限制；问题及交互只写 stderr。回答以 `Message::UserAnswer` 回填，正文是包含 `question`、`choices` 和原文 `answer` 的 JSON，仍按普通文本渲染为工具回复，不参与旧工具输出压缩。这样模型步骤失败后，即使自动重置会话并重放待交付回答，`yes`／`second` 等答案仍保留对应的问题与选项；不新增恢复状态机。取消／EOF 中止任务，通道故障明确失败，不伪造答案或授权。Agent 输入能力变化时重开会话，保持同一会话工具前缀稳定。
 
 `list_dir` 已移除，不保留执行别名。目录／文件名查询用 `exec` 调用 `ls` 等命令；受限模式不因此开放执行。
 
-`get_last_output` 保留内部实现但未注册为模型工具。失败诊断通过明确入口注入匹配的已采集输出，不为拿到已有报错而重跑命令；见[输出采集设计](OUTPUT-CAPTURE.md)。
+失败诊断通过明确入口注入匹配的已采集输出，不为拿到已有报错而重跑命令；当前不提供额外的采集槽读取工具，见[输出采集设计](OUTPUT-CAPTURE.md)。
 
 **Available 是发现时的 shell 命令摘要，不是模型工具表、完整实时清单或权限白名单。** 项目声明的包管理器也不证明当前可以调用。
 

@@ -4,7 +4,6 @@
 pub(super) use std::sync::{Mutex, MutexGuard, Once};
 
 pub(super) use nosh_core::command_assist::{AssistResult, generate};
-pub(super) use nosh_core::user_input::NoUserInput;
 pub(super) use nosh_core::{
     Agent, AgentConfig, ApprovalResponse, Environment, NoTerminal, RecordUi, Scripted, ShellAi,
     TaskInput, TaskStatus, ToolSet,

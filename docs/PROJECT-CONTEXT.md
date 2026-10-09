@@ -12,13 +12,13 @@ Agent 发送 **System 背景 + User 原始请求**，包含 context、最近命�
 
 Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
 
-CommandAssist 共用项目／文档采集器，但使用独立的最小背景：Generate 附真实请求，Fix/Next 附明确的宿主执行事件和候选生成请求，没有用户文本时不伪造请求。它不带入 Agent 全部历史或最近三条命令。Fix 复用匹配的终端证据，并以单一执行记录去重命令／目录／退出码；Next 不自动附成功输出。详见 [CommandAssist](COMMAND-ASSIST.md)。
+CommandAssist 的协议 User 是 nosh，不是终端用户。Generate/Fix/Next 都把本次任务、原始需求／命令、当前 cwd／可选 venv，以及适用的执行记录和失败证据集中在一个 User 任务包中；元数据使用键值段，原文使用安全文本围栏。System 只保留固定规则，终答反馈也由 nosh 以 User 消息发出，强调纯命令格式但不重复原始任务。不提供终端对话或 `ask_user`。Next 仅在用户命令成功后自动触发，没有手动目标入口；可附最多三条早于当前执行的真实用户命令快照，按旧到新排序，不自动推断 Goal 或绑定 Generate。不自动注入 README／AGENTS／manifest／Git 状态或 Agent 历史；原有查询和路径保护仍生效。详见 [CommandAssist](COMMAND-ASSIST.md)。
 
-用户终端输出仅由失败诊断入口按命令 ID 配对后放入背景；普通请求不自动携带。`[user_output]` 保留独立的归属、完整性和 4,096 字节正文预算，同一对话去重；详见[输出采集设计](OUTPUT-CAPTURE.md)。其 JSON 元数据是证据协议，不替代标签化项目 context。
+用户终端输出仅由失败诊断入口按命令 ID 配对；普通请求不自动携带。Agent 继续使用 `[user_output]` 和同一对话去重，Fix 使用 User 包中的 `Terminal output (stdout/stderr not separated):`；二者保留相同的内部归属、完整性和 4,096 字节正文预算。模型视图省略计时、字节计数和冗余身份字段，但不省略异常质量或缺失状态。详见[输出采集设计](OUTPUT-CAPTURE.md)。
 
 会话支持追加 System，不修改或重复初始规则。追加的 System 参与消息计数、回退及缓存前缀复用；步数上限的 System 收尾要求只作用于前一条用户请求，不限制后续任务。真实工具结果继续使用原有工具协议。
 
-## 最小事实
+## Agent 的项目事实
 
 | 保留 | 约定 |
 |---|---|
@@ -31,7 +31,7 @@ CommandAssist 共用项目／文档采集器，但使用独立的最小背景：
 
 内部 `dirty` 仍是布尔／空值；模型视图分别显示 `uncommitted tracked changes present`、`no uncommitted tracked changes`、`tracked-change status unknown`。这些描述不涉及未跟踪文件，也不把未知状态补成无改动；适用项目指引仍保留原文，而不是替模型编造下一步任务。
 
-模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
+Agent 模型可见 context 使用标签行，不再输出 JSON 对象；内部事实仍是结构化数据。多项目重复 `project:` 行；特殊字符值加引号并转义，不能伪造新字段。不输出空告警、重复 manifest 或默认时钟。
 
 ```text
 <|im_start|>system
@@ -45,7 +45,7 @@ lang: zh
 编译<|im_end|>
 ```
 
-## 发现与文档
+## Agent 的发现与文档
 
 从 cwd 向上查找，到 Git/HOME 边界或 32 层停止。最近 manifest 确定项目；解析 Rust、Node、Python 的少量字段，也识别 Go、Maven、Gradle，同层主 manifest 类型可并存。CMake／Make 仅在同层未发现主 manifest 时作为兜底标记。项目根不改变权限工作区。
 
@@ -54,7 +54,7 @@ lang: zh
 | 条件 | 行为 |
 |---|---|
 | 存在适用 AGENTS.md | 根到子目录加载，标明来源；更具体的文件只管其子树，不能覆盖用户请求或安全规则；不加载 README |
-| AGENTS 过大、受保护或不可读 | 明示未加载来源，不截掉规则冒充完整，也不回退 README；agent 收到补读要求，建议模式在调用模型前报错 |
+| AGENTS 过大、受保护或不可读 | Agent 明示未加载来源，不截掉规则冒充完整，也不回退 README，并收到补读要求；CommandAssist 不自动加载这些文档 |
 | 确认没有 AGENTS | 最近 README 的首段简介与带行号章节索引，仅作参考；不展开后续操作段落，不另用 LLM 摘要 |
 
 文档附类型、来源及 `<untrusted_text>…</untrusted_text>` 外部输入边界，不因位于 System 消息中就成为系统指令。AGENTS 约定仍只在其目录作用域内、低于用户请求和安全规则生效；README 仅作参考。文件中与边界相同的字面标签转义展示，原文件与缓存不改写。

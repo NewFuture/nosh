@@ -63,30 +63,15 @@ def index_trace(events: list[dict]) -> tuple[dict, set]:
 
 
 def assistance_observations(events: list[dict]) -> list[dict]:
-    labels, executions, responses = {}, {}, {}
+    labels, responses = {}, {}
     completed = set()
     results = []
     for event in events:
-        if event["ev"] not in ("open", "step_start", "step_end", "observation"):
+        if event["ev"] not in ("open", "step_end", "observation"):
             continue
         key = session_key(event)
         if event.get("ev") == "open":
             labels[key] = event.get("label", "")
-        elif event.get("ev") == "step_start":
-            for message in event.get("messages", []):
-                if message.get("role") == "system":
-                    records = re.findall(r"(?m)^\[execution\]\n([^\n]+)", message.get("text", ""))
-                    if records:
-                        execution = json.loads(records[-1])
-                        if isinstance(execution, dict) and execution.get("execution_cwd") == ".":
-                            cwd = re.match(r"^\[context\]\ncwd: ([^\n]+)(?:\n|$)", message["text"])
-                            current = cwd[1] if cwd else None
-                            if current is not None and current.startswith('"'):
-                                current = json.loads(current)
-                            if not isinstance(current, str) or not PurePosixPath(current).is_absolute():
-                                raise ValueError("relative execution cwd requires an absolute context cwd")
-                            execution = dict(execution, execution_cwd=current)
-                        executions[key] = execution
         elif event.get("ev") == "step_end":
             responses[key] = event
         if event.get("ev") != "observation":
@@ -102,22 +87,46 @@ def assistance_observations(events: list[dict]) -> list[dict]:
             raise ValueError("invalid assistance provenance")
         if value.get("response_format") != "command_or_none":
             raise ValueError("invalid assistance response format")
+        if value.get("input_format") != "command_assist_v1":
+            raise ValueError("assistance requires the current command_assist_v1 input format")
         command_id = value.get("command_id")
         execution = None
         if value["intent"] == "generate":
-            if command_id is not None:
+            if command_id is not None or "execution" in value:
                 raise ValueError("generate result cannot refer to an execution")
         else:
-            execution = executions.get(key, {})
+            execution = value.get("execution")
+            if (not isinstance(execution, dict)
+                    or not isinstance(execution.get("command"), str)
+                    or not execution["command"].strip()
+                    or execution.get("command_truncated") is not False
+                    or execution.get("status") != ("failed" if value["intent"] == "fix" else "succeeded")
+                    or not isinstance(execution.get("execution_cwd"), str)
+                    or not PurePosixPath(execution["execution_cwd"]).is_absolute()):
+                raise ValueError("invalid structured assistance execution")
             if (not isinstance(execution, dict)
                     or type(command_id) is not int or command_id <= 0
+                    or type(execution.get("command_id")) is not int
                     or execution.get("command_id") != command_id
                     or type(execution.get("exit")) is not int
                     or (execution["exit"] == 0) != (value["intent"] == "next")):
                 raise ValueError("assistance result does not match its execution")
-            if ("status" in execution
-                    and execution["status"] != ("succeeded" if execution["exit"] == 0 else "failed")):
-                raise ValueError("execution status contradicts its exit code")
+        if "recent_executions" in value:
+            history = value["recent_executions"]
+            if value["intent"] != "next" or not isinstance(history, list) or len(history) > 3:
+                raise ValueError("invalid recent execution history")
+            previous_id = 0
+            for item in history:
+                if (not isinstance(item, dict) or type(item.get("command_id")) is not int
+                        or not previous_id < item["command_id"] < command_id
+                        or not isinstance(item.get("command"), str) or not item["command"].strip()
+                        or item.get("command_truncated") is not False
+                        or not isinstance(item.get("execution_cwd"), str)
+                        or not PurePosixPath(item["execution_cwd"]).is_absolute()
+                        or type(item.get("exit")) is not int
+                        or item.get("status") != ("succeeded" if item["exit"] == 0 else "failed")):
+                    raise ValueError("recent execution history does not precede the current command")
+                previous_id = item["command_id"]
         if value["status"] == "completed":
             kind, text = value.get("kind"), value.get("text")
             if (kind not in ("command", "none")
@@ -201,9 +210,16 @@ def question_evidence(result: driver.Result, executions: list[dict]) -> list[dic
             raise ValueError("user question does not match its native call")
         seen.add(key)
         if question["state"] == "answered":
-            if (not isinstance(question.get("answer"), str) or actual["state"] != "returned"
-                    or actual["result"] != question["answer"]):
+            if not isinstance(question.get("answer"), str) or actual["state"] != "returned":
                 raise ValueError("scripted answer was not returned to the original model session")
+            try:
+                reply = json.loads(actual["result"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("invalid user answer context") from exc
+            args = actual["call"]["args"]
+            if reply != {"question": args["question"], "choices": args.get("choices", []),
+                         "answer": question["answer"]}:
+                raise ValueError("user answer context differs from the native question or answer")
         elif question.get("answer") is not None:
             raise ValueError("cancelled question cannot contain an answer")
     return list(result.questions)
@@ -287,8 +303,10 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
                     raise ValueError("native engine did not use the declared resident worker")
             elif info.get("execution_mode", "cold") != "cold":
                 raise ValueError("cold trial unexpectedly used a resident engine")
-            # Historical native-v1 traces omitted device and were CPU-only.
-            actual = info.get("device", "cpu")
+            actual = info.get("device")
+            if (not isinstance(actual, str) or actual == "auto"
+                    or inference_device(actual) != actual):
+                raise ValueError("native engine requires an explicit actual device")
             if expected_device == "auto":
                 if (info.get("device_requested") != "auto" or "device" not in info
                         or actual == "auto" or inference_device(actual) != actual

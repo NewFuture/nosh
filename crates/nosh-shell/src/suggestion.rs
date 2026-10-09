@@ -64,13 +64,7 @@ pub(crate) fn validate_view(text: &str, shell: &dyn CommandView) -> bool {
     let Some(program) = shell.parse(text) else {
         return false;
     };
-    if program
-        .complete_commands
-        .iter()
-        .map(|c| c.0.len())
-        .sum::<usize>()
-        != 1
-    {
+    if program.complete_commands.iter().all(|c| c.0.is_empty()) {
         return false;
     }
     Check {

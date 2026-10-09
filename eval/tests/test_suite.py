@@ -38,7 +38,7 @@ class ContractTests(unittest.TestCase):
         for name in suite.BUILTIN_SUITES:
             with self.subTest(name=name):
                 expanded = suite.load_suite(name)
-                self.assertEqual(expanded["dataset_revision"], 16)
+                self.assertEqual(expanded["dataset_revision"], 26)
                 self.assertEqual(expanded, suite.load_suite(runtime.HERE / "suites" / f"{name}.json"))
                 before = copy.deepcopy(expanded)
                 self.assertEqual(suite.validate_suite(expanded), before)
@@ -98,6 +98,38 @@ class ContractTests(unittest.TestCase):
         for bad in ([], [True], [-1], [2**64], [0, 0], ["0"], None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 suite_api.seeds(bad)
+
+    def test_command_assist_plan_has_one_archive_control_and_history_based_next(self):
+        current = suite.load_suite("command-assist")
+        ids = [case["id"] for case in current["scenarios"]]
+        self.assertEqual(len(ids), 8)
+        self.assertNotIn("suggest-archive", ids)
+        self.assertNotIn("generate-clarify", ids)
+        self.assertNotIn("next-review-after-tests", ids)
+        self.assertNotIn("generate-missing-inputs", ids)
+        self.assertIn("generate-archive-default-name", ids)
+        self.assertIn("next-retry-after-prerequisite", ids)
+
+    def test_assist_contracts_do_not_require_internal_tool_calls(self):
+        current = suite.load_suite("command-assist")
+        self.assertTrue(all("require_query" not in s["assistance"] for s in current["scenarios"]))
+        current["scenarios"][0]["assistance"]["require_query"] = True
+        with self.assertRaisesRegex(ValueError, "assistance contract"):
+            suite.validate_suite(current)
+
+    def test_observe_is_only_an_explicit_intermediate_setup_contract(self):
+        for replacement in ({"kind": "observe", "exit_code": 0}, {"kind": "observe", "answers": ["yes"]},
+                            {"kind": "unrecognized"}):
+            current = suite.load_suite("command-assist")
+            case = next(s for s in current["scenarios"] if s["id"] == "next-retry-after-prerequisite")
+            case["completions"][0] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                suite.validate_suite(current)
+        current = suite.load_suite("command-assist")
+        case = next(s for s in current["scenarios"] if s["id"] == "next-retry-after-prerequisite")
+        case["completions"][-1] = {"kind": "observe"}
+        with self.assertRaisesRegex(ValueError, "final REPL input"):
+            suite.validate_suite(current)
 
     def test_invalid_suite_rejected(self):
         original = suite_api.load_suite(runtime.HERE / "suites" / "regression.json")
@@ -254,10 +286,19 @@ class CatalogSuiteTests(unittest.TestCase):
                 self.assertNotIn(scenario["id"], catalog)
                 catalog[scenario["id"]] = scenario
         self.assertEqual(len(catalog), 39)
-        for name, count in (("regression", 27), ("command-assist", 5), ("smoke", 5), ("workflows", 8)):
+        self.assertFalse({"generate-clarify", "generate-missing-inputs", "next-review-after-tests"} & catalog.keys())
+        for name, count in (("regression", 27), ("command-assist", 8), ("smoke", 5), ("workflows", 8)):
             loaded = suite_api.load_suite(runtime.HERE / "suites" / f"{name}.json")
             self.assertEqual(len(loaded["scenarios"]), count)
             for scenario in loaded["scenarios"]:
                 self.assertEqual(scenario, catalog[scenario["id"]])
         smoke = suite_api.load_suite(runtime.HERE / "suites" / "smoke.json")
         self.assertEqual(smoke["seeds"], [0])
+
+    def test_regression_suggestion_alias_has_the_same_assistance_contract(self):
+        regression = suite_api.load_suite("regression")
+        assist = suite_api.load_suite("command-assist")
+        alias = next(s for s in regression["scenarios"] if s["id"] == "suggest-archive")
+        canonical = next(s for s in assist["scenarios"] if s["id"] == "generate-archive")
+        for field in ("mode", "fixture", "input", "assistance", "check", "expect"):
+            self.assertEqual(alias[field], canonical[field], field)

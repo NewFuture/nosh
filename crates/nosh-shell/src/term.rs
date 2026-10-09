@@ -426,7 +426,9 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
         ed.run_edit_commands(&[reedline::EditCommand::InsertString(initial.to_string())]);
         text_result(ed.read_line(&PlainPrompt(prompt.to_string())))
     } else {
-        text_result(read_short_line(prompt, initial, true, None, None).map(|(signal, _)| signal))
+        text_result(
+            read_short_line(prompt, initial, true, None, None, None).map(|(signal, _)| signal),
+        )
     }
 }
 

@@ -156,14 +156,7 @@ impl ShellAi {
         }
         let cancel = agent.engine_mut().cancel_handle();
         cancel.reset();
-        match crate::command_assist::run(
-            agent.engine_mut(),
-            &request,
-            &cfg,
-            &cancel,
-            &mut crate::user_input::TerminalUserInput,
-            |_| true,
-        ) {
+        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel, |_| true) {
             Ok(outcome) => {
                 let mut ui = TermUi::new(false);
                 let prefill = match outcome.result {
@@ -286,20 +279,6 @@ impl AiHandler for ShellAi {
         }
         let sub = args.first().map(String::as_str).unwrap_or("");
         let arg = args.get(1).map(String::as_str);
-        if sub == "next" {
-            let command = shell
-                .recent_commands()
-                .last()
-                .filter(|command| command.exit == 0)
-                .cloned();
-            return self.assist(
-                shell,
-                crate::command_assist::Intent::Next,
-                arg.unwrap_or("").into(),
-                command,
-                None,
-            );
-        }
         let state = self.foreground.as_ref();
         let agent = state.and_then(|state| state.agent.as_ref());
         match sub {

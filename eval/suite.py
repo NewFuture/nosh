@@ -102,12 +102,11 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
         assistance = scenario.get("assistance")
         if assistance is not None:
             if (not isinstance(assistance, dict)
-                    or set(assistance) - {"intent", "result", "automatic", "require_query"}
+                    or set(assistance) - {"intent", "result", "automatic"}
                     or not {"intent", "result", "automatic"} <= set(assistance)
                     or assistance["intent"] not in ("generate", "fix", "next")
                     or assistance["result"] not in ("command", "none")
-                    or type(assistance["automatic"]) is not bool
-                    or ("require_query" in assistance and type(assistance["require_query"]) is not bool)):
+                    or type(assistance["automatic"]) is not bool):
                 raise ValueError("invalid command assistance contract")
             if assistance["automatic"] != (scenario.get("mode") == "repl"):
                 raise ValueError("automatic assistance requires a REPL completion")
@@ -182,7 +181,7 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
                 if not isinstance(completion, dict):
                     raise ValueError(f"invalid completion contract: {sid}")
                 kind = completion.get("kind")
-                if kind not in ("agent", "shell", "correction", "assist"):
+                if kind not in ("agent", "shell", "correction", "assist", "observe"):
                     raise ValueError(f"unknown input completion: {sid}")
                 if kind == "shell":
                     code = completion.get("exit_code")

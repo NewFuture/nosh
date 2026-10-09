@@ -160,7 +160,6 @@ fn serve(
             &job.request,
             &job.cfg,
             &job.cancel,
-            &mut crate::user_input::NoUserInput,
             |result| {
                 let presentation = result
                     .as_ref()

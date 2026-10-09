@@ -32,7 +32,7 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(status, 0, stderr)
             data = json.loads(stdout)
             self.assertEqual((data["trials"], data["seeds"], data["repeat"]), (5, [0], 1))
-            self.assertEqual(data["dataset_revision"], 16)
+            self.assertEqual(data["dataset_revision"], 26)
             self.assertEqual(data["maximum_trial_seconds"], 600)
             self.assertFalse(output.exists())
 

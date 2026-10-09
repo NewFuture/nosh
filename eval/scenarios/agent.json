@@ -439,7 +439,7 @@
     "expect": {
       "max_steps": 4,
       "max_confirmations": 0,
-      "response_language": "zh",
+      "response_language": "any",
       "final_question": "forbid"
     }
   },

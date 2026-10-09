@@ -535,8 +535,12 @@ impl Agent {
             let mut aborted = false;
             let mut handed_off = false;
             let mut fatal = None;
-            let mixed_question = step.tool_calls.iter().any(|call| call.name == "ask_user")
-                && (step.tool_calls.len() != 1 || !step.errors.is_empty());
+            let has_question = step.tool_calls.iter().any(|call| call.name == "ask_user")
+                || step
+                    .errors
+                    .iter()
+                    .any(|error| error.tool.as_deref() == Some("ask_user"));
+            let mixed_question = has_question && step.tool_calls.len() + step.errors.len() > 1;
             if mixed_question {
                 ui.error("ask_user must be the only tool call in its turn; no tools were executed");
             }
@@ -710,7 +714,14 @@ impl Agent {
             ) {
                 Ok(answer) => {
                     ui.tool_end("answered");
-                    Exec::UserAnswer(answer.answer)
+                    Exec::UserAnswer(
+                        serde_json::json!({
+                            "question": answer.question.question,
+                            "choices": answer.question.choices,
+                            "answer": answer.answer,
+                        })
+                        .to_string(),
+                    )
                 }
                 Err(InputError::Cancelled) => {
                     ui.tool_end("cancelled");

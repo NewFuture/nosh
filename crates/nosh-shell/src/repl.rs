@@ -196,7 +196,7 @@ pub enum LineOutcome {
 }
 
 const HANDLER_SUBCOMMANDS: &[&str] = &[
-    "mode", "think", "clear", "ctx", "status", "out", "history", "private", "undo", "model", "next",
+    "mode", "think", "clear", "ctx", "status", "out", "history", "private", "undo", "model",
 ];
 
 /// Decides what to do with each input line and runs it.
@@ -508,11 +508,6 @@ fn builtin_help(name: &str) -> String {
             "fix [question]",
             "生成修复命令；附问题时交给 Agent 诊断",
             "suggest a fix; add a question for Agent diagnosis",
-        ),
-        (
-            "next",
-            "生成上一条成功命令的后续建议",
-            "suggest a next command after success",
         ),
         (
             "out <n>",
@@ -1849,6 +1844,30 @@ mod tests {
         assert_eq!(unquote("\"find big files\""), "find big files");
         assert_eq!(unquote("'x'"), "x");
         assert_eq!(unquote("plain words"), "plain words");
+    }
+
+    #[test]
+    fn next_text_has_no_special_input_completion_rule() {
+        use reedline::Validator;
+
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        let validator = LineValidator {
+            shell: shell.shared().1,
+            prefix: "#".into(),
+        };
+        for line in [
+            "ai next 'unfinished",
+            "ai next $(unfinished",
+            "ai next inspect &&",
+            "echo 'unfinished",
+            "ai 'next unfinished",
+        ] {
+            assert!(matches!(
+                validator.validate(line),
+                ValidationResult::Incomplete
+            ));
+        }
+        assert!(!builtin_help("ai").contains("ai next"));
     }
 
     #[test]

@@ -370,7 +370,7 @@ impl AgentUi for TermUi {
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
-        if tool == "run_command" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        if tool == "exec" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             eprintln!(
                 "{} {}",
                 self.bar,
