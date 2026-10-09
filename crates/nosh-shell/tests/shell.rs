@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use nosh_shell::inline_commands::{ApprovalMode as CommandMode, Command as InlineCommand};
 use nosh_shell::repl::{GuardChoice, LineOutcome, Pipeline, ReplUi};
 use nosh_shell::trigger::{Action, Trigger, TriggerConfig, classify};
 use nosh_shell::{
-    AgentExecOpts, AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, NullSink, ReplConfig,
-    ShellOptions,
+    AgentExecOpts, AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, ManagementCommand,
+    NullSink, ReplConfig, ShellOptions,
 };
 
 /// Agent commands signal new process groups of this process, so tests that
@@ -255,10 +256,7 @@ fn classify_lines() {
     assert_eq!(c(&mut sh, "f() { echo hi; }; f"), Action::Execute);
     assert_eq!(c(&mut sh, "$CMD arg"), Action::Execute);
     assert_eq!(c(&mut sh, "rm all temp files please"), Action::Guard);
-    assert_eq!(
-        c(&mut sh, "ai \"find files\""),
-        Action::AiBuiltin("\"find files\"".into())
-    );
+    assert_eq!(c(&mut sh, "#help"), Action::Inline(InlineCommand::Help));
     // Unterminated quote without word-internal apostrophes is just incomplete.
     assert_eq!(c(&mut sh, "echo 'abc"), Action::Execute);
     let off = TriggerConfig {
@@ -395,9 +393,10 @@ fn capture_is_bounded() {
 #[derive(Default)]
 struct RecordingAi {
     requests: Vec<AiRequest>,
-    builtins: Vec<Vec<String>>,
+    commands: Vec<ManagementCommand>,
     completed: Vec<nosh_shell::UserCommand>,
     reply_prefill: Option<String>,
+    display: Option<nosh_shell::AssistDisplay>,
 }
 
 impl AiHandler for RecordingAi {
@@ -408,14 +407,8 @@ impl AiHandler for RecordingAi {
             exit_code: 0,
         }
     }
-    fn builtin(&mut self, _: &mut EmbeddedShell, args: &[String]) -> AiOutcome {
-        self.builtins.push(args.to_vec());
-        self.requests.push(AiRequest {
-            trigger: Trigger::Builtin,
-            text: format!("builtin:{}", args.join(" ")),
-            failed: None,
-            user_output: None,
-        });
+    fn command(&mut self, _: &mut EmbeddedShell, command: ManagementCommand) -> AiOutcome {
+        self.commands.push(command);
         AiOutcome::default()
     }
     fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
@@ -423,6 +416,9 @@ impl AiHandler for RecordingAi {
     }
     fn badge(&self) -> Badge {
         Badge::default()
+    }
+    fn assistance(&self) -> Option<nosh_shell::AssistDisplay> {
+        self.display.clone()
     }
     fn after_command(
         &mut self,
@@ -501,8 +497,11 @@ fn pipeline_routes_lines() {
     );
     assert_eq!(p.last_failure().map(|c| c.exit), Some(ls_missing));
 
-    // Bare `#` asks about the failure.
+    // Bare `#` is help, even after a failure.
     p.process(&mut sh, &mut ai, &mut ui, "#");
+    assert_eq!(ai.requests.len(), 1);
+    assert!(ui.notices.last().unwrap().contains("#help"));
+    p.process(&mut sh, &mut ai, &mut ui, "#fix");
     assert_eq!(ai.requests.len(), 2);
     assert_eq!(ai.requests[1].trigger, Trigger::Failed { exit: ls_missing });
     assert!(ai.requests[1].failed.is_some());
@@ -517,12 +516,15 @@ fn pipeline_routes_lines() {
     p.process(&mut sh, &mut ai, &mut ui, "echo a | grep -q zzz");
     assert_eq!(ui.notices.len(), n);
 
-    // `ai` builtin: management subcommands and tasks.
-    p.process(&mut sh, &mut ai, &mut ui, "ai mode auto");
-    assert_eq!(ai.requests[3].text, "builtin:mode auto");
-    p.process(&mut sh, &mut ai, &mut ui, "ai \"count lines of code\"");
-    assert_eq!(ai.requests[4].trigger, Trigger::Builtin);
-    assert_eq!(ai.requests[4].text, "count lines of code");
+    p.process(&mut sh, &mut ai, &mut ui, "#mode auto");
+    assert_eq!(
+        ai.commands,
+        [ManagementCommand::Mode(Some(CommandMode::Auto))]
+    );
+    assert_eq!(ai.requests.len(), 3);
+    p.process(&mut sh, &mut ai, &mut ui, "# count lines of code");
+    assert_eq!(ai.requests[3].trigger, Trigger::Hash);
+    assert_eq!(ai.requests[3].text, "count lines of code");
 
     // `exit` ends the session with its status.
     assert_eq!(
@@ -552,7 +554,7 @@ fn pipeline_next_requires_enabled_automatic_assistance_and_success() {
             ..Default::default()
         });
         if paused {
-            pipeline.process(&mut sh, &mut ai, &mut ui, "ai auto off");
+            pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
         }
         pipeline.process(&mut sh, &mut ai, &mut ui, line);
         assert_eq!(ai.completed.len(), expected);
@@ -572,22 +574,22 @@ fn pipeline_next_is_not_a_management_subcommand() {
         notices: Vec::new(),
     };
     let mut p = Pipeline::new(ReplConfig::default());
-    for (line, task) in [
-        ("ai next", "next"),
-        ("ai next sort the records", "next sort the records"),
-        ("ai 'next sort the records'", "next sort the records"),
-        ("ai next; describe the result", "next; describe the result"),
-        ("ai next>report.txt", "next>report.txt"),
+    for line in [
+        "#next",
+        "#next sort the records",
+        "#history",
+        "#private",
+        "#undo",
+        "#model",
     ] {
         let mut ai = RecordingAi::default();
         assert_eq!(
             p.process(&mut sh, &mut ai, &mut ui, line),
             LineOutcome::Continue(None)
         );
-        assert!(ai.builtins.is_empty(), "{line}");
-        assert_eq!(ai.requests.len(), 1, "{line}");
-        assert_eq!(ai.requests[0].trigger, Trigger::Builtin, "{line}");
-        assert_eq!(ai.requests[0].text, task, "{line}");
+        assert!(ai.commands.is_empty(), "{line}");
+        assert!(ai.requests.is_empty(), "{line}");
+        assert!(ui.notices.last().unwrap().contains("#help"), "{line}");
         assert!(sh.recent_commands().is_empty(), "{line}");
     }
 }
@@ -602,21 +604,102 @@ fn pipeline_ai_tasks_and_management_commands_keep_their_routes() {
     };
     let mut p = Pipeline::new(ReplConfig::default());
     for (line, request) in [
-        ("ai 'next sort the records'", "next sort the records"),
-        ("ai nextish sort the records", "nextish sort the records"),
-        ("ai explain the records", "explain the records"),
+        ("# next sort the records", "next sort the records"),
+        ("# nextish sort the records", "nextish sort the records"),
+        ("# explain the records", "explain the records"),
     ] {
         let mut ai = RecordingAi::default();
         p.process(&mut sh, &mut ai, &mut ui, line);
-        assert!(ai.builtins.is_empty(), "{line}");
+        assert!(ai.commands.is_empty(), "{line}");
         assert_eq!(ai.requests.len(), 1, "{line}");
         assert_eq!(ai.requests[0].text, request, "{line}");
         assert!(sh.recent_commands().is_empty(), "{line}");
     }
-    for line in ["ai mode auto", "ai think off", "ai status"] {
+    for (line, expected) in [
+        (
+            "#mode auto",
+            ManagementCommand::Mode(Some(CommandMode::Auto)),
+        ),
+        ("#think off", ManagementCommand::Think(Some(false))),
+        ("#status", ManagementCommand::Status),
+    ] {
         let mut ai = RecordingAi::default();
         p.process(&mut sh, &mut ai, &mut ui, line);
-        assert_eq!(ai.requests[0].text, format!("builtin:{}", &line[3..]));
+        assert!(ai.requests.is_empty(), "{line}");
+        assert_eq!(ai.commands, [expected], "{line}");
+    }
+}
+
+#[test]
+fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ai = RecordingAi::default();
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Cancel,
+        notices: Vec::new(),
+    };
+    let mut pipeline = Pipeline::new(ReplConfig::default());
+    for line in [
+        "#mode bad",
+        "#think maybe",
+        "#auto on extra",
+        "#clear extra",
+        "#out invalid",
+        "#找文件",
+    ] {
+        let notices = ui.notices.len();
+        pipeline.process(&mut sh, &mut ai, &mut ui, line);
+        assert_eq!(ui.notices.len(), notices + 1, "{line}");
+        assert!(ai.commands.is_empty() && ai.requests.is_empty(), "{line}");
+        assert!(sh.recent_commands().is_empty(), "{line}");
+    }
+    sh.run_user_line("ai() { ORDINARY_AI=$*; }");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "ai mode auto");
+    assert_eq!(sh.var("ORDINARY_AI").as_deref(), Some("mode auto"));
+    assert!(ai.commands.is_empty() && ai.requests.is_empty());
+
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto invalid");
+    let before = ai.completed.len();
+    pipeline.process(&mut sh, &mut ai, &mut ui, "true");
+    assert_eq!(ai.completed.len(), before);
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto on");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "true");
+    assert_eq!(ai.completed.len(), before + 1);
+}
+
+#[test]
+fn failure_hints_respect_disabled_and_custom_prefixes() {
+    let _g = serial();
+    for prefix in ["", "##", "问"] {
+        for background in [false, true] {
+            let mut sh = shell();
+            let mut ai = RecordingAi {
+                display: background.then(nosh_shell::AssistDisplay::default),
+                ..Default::default()
+            };
+            let mut ui = ScriptUi {
+                guard: GuardChoice::Cancel,
+                notices: Vec::new(),
+            };
+            let mut pipeline = Pipeline::new(ReplConfig {
+                trigger: TriggerConfig {
+                    ai_prefix: prefix.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            pipeline.process(&mut sh, &mut ai, &mut ui, "sh -c 'exit 17'");
+            let notice = ui.notices.last().unwrap();
+            assert!(notice.contains("exit 17"), "{notice}");
+            if prefix.is_empty() {
+                assert!(!notice.contains("fix"), "{notice}");
+            } else {
+                assert!(notice.contains(&format!("{prefix}fix")), "{notice}");
+            }
+            assert!(ai.requests.is_empty());
+        }
     }
 }
 

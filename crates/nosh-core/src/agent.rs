@@ -26,6 +26,7 @@ use crate::user_input::{self, InputError, NoUserInput, UserInput};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    pub command_prefix: String,
     pub mode: ApprovalMode,
     pub rules: UserRules,
     pub rules_error: Option<String>,
@@ -44,6 +45,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            command_prefix: "#".into(),
             mode: ApprovalMode::default(),
             rules: UserRules::default(),
             rules_error: None,
@@ -145,7 +147,7 @@ pub struct TaskOutcome {
     pub error: Option<String>,
 }
 
-/// Full output of an agent command, for `ai out <id>`.
+/// Full output of an agent command, for `#out <id>`.
 #[derive(Debug, Clone)]
 pub struct OutputRecord {
     pub id: usize,
@@ -256,7 +258,7 @@ impl Agent {
         self.engine.as_mut()
     }
 
-    /// Starts a new conversation (`ai clear`, idle timeout, config change).
+    /// Starts a new conversation (`#clear`, idle timeout, config change).
     pub fn reset_conversation(&mut self) {
         if let Some(sid) = self.sid.take() {
             self.engine.close(sid);
@@ -984,8 +986,11 @@ Approval request: {}; {}.{}",
         if r.interrupted {
             summary.push_str(" · command interrupted; prior effects are not undone");
         }
-        if !r.stdout.is_empty() || !r.stderr.is_empty() {
-            summary.push_str(&format!(" · ai out {id}"));
+        if (!r.stdout.is_empty() || !r.stderr.is_empty()) && !self.cfg.command_prefix.is_empty() {
+            summary.push_str(&format!(
+                " · {}out {id}",
+                nosh_shell::style::visible_text(&self.cfg.command_prefix)
+            ));
         }
         ui.tool_end(&summary);
         let mut text = tools::format_command_result(&r, log.as_deref());

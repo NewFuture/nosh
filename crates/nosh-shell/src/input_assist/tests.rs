@@ -50,7 +50,6 @@ impl Fixture {
             },
             text: text.to_owned(),
             context: Arc::new(self.context()),
-            command_input: false,
         }
     }
 }
@@ -188,28 +187,85 @@ fn ai_configuration_and_abbreviations_do_not_execute_or_rewrite() {
 }
 
 #[test]
-fn ai_builtin_resolution_precedes_interpreting_its_prose() {
+fn ai_is_an_ordinary_shell_command() {
     let fixture = Fixture::new();
     let mut input = fixture.input("ai explain \"unfinished");
     let result = analysis::analyze(&input);
-    assert!(result.ai_candidate);
-    assert_eq!(result.queries.len(), 1);
-    assert!(result.findings.is_empty());
-    assert_eq!(
-        lookup::Lookup::default().run(&input, &result.queries)[0].role,
-        Some(Role::Ai)
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|finding| finding.state == State::Incomplete)
+    );
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.reason, Reason::Ai))
     );
     let path = fixture.root.path().join("bin/ai");
     fs::write(&path, "#!/bin/sh\nexit 99\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(
-        lookup::Lookup::default().run(&input, &result.queries)[0].role,
-        Some(Role::External)
-    );
-    input.command_input = true;
+    input.text = "ai explain".into();
     let result = analysis::analyze(&input);
-    assert!(!result.ai_candidate);
-    assert!(result.findings.iter().any(|f| f.state == State::Incomplete));
+    let observations = lookup::Lookup::default().run(&input, &result.queries);
+    assert!(
+        observations
+            .iter()
+            .any(|observation| observation.role == Some(Role::External))
+    );
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| observation.role == Some(Role::Ai))
+    );
+}
+
+#[test]
+fn inline_command_feedback_is_local_and_uses_the_configured_prefix() {
+    let fixture = Fixture::new();
+    for text in [
+        "#",
+        "#help",
+        "#mode auto",
+        "#think off",
+        "#auto on",
+        "#out 1",
+        "#clear",
+        "#ctx",
+        "#status",
+        "#fix what's \"wrong",
+    ] {
+        let result = analysis::analyze(&fixture.input(text));
+        assert!(result.queries.is_empty(), "{text}");
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|finding| finding.state == State::Error),
+            "{text}"
+        );
+        assert_eq!(role_at(&result, 0), Role::Builtin, "{text}");
+    }
+    let mut input = fixture.input("  问mode bad");
+    Arc::make_mut(&mut input.context).ai_prefix = "问".into();
+    let result = analysis::analyze(&input);
+    assert!(result.queries.is_empty());
+    assert_eq!(
+        role_at(&result, input.text.find("bad").unwrap()),
+        Role::Error
+    );
+    assert!(result.findings.iter().any(|finding| {
+        matches!(&finding.reason, Reason::Syntax(message) if message.contains("问mode"))
+    }));
+    input.text = format!("问{}", "字".repeat(2000));
+    let result = analysis::analyze(&input);
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|finding| finding.reason.bounded())
+    );
 }
 
 #[test]
@@ -682,13 +738,13 @@ fn owned_worker_roundtrip_and_hostile_parser_isolation() {
     };
     assert_eq!(role_at(&result, 0), Role::Builtin);
     worker
-        .start(&Request::Analyze(Arc::new(fixture.input("ai <<E$[\t\t"))))
+        .start(&Request::Analyze(Arc::new(fixture.input("# <<E$[\t\t"))))
         .unwrap();
     let Response::Analysis(result) = await_response(&mut worker).unwrap() else {
         panic!("AI input must not be interpreted as a shell program");
     };
-    assert!(result.ai_candidate);
-    assert!(result.findings.is_empty());
+    assert_eq!(role_at(&result, 0), Role::Ai);
+    assert!(result.queries.is_empty());
     stop_worker(&mut worker);
 
     // Never pass this known non-progress case to an in-process parser.

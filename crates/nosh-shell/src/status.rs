@@ -102,6 +102,11 @@ impl Bindings {
         self.0.get(&Action::Suggest).map(String::as_str)
     }
 
+    pub(crate) fn without_suggestions(mut self) -> Self {
+        self.0.remove(&Action::Suggest);
+        self
+    }
+
     pub(crate) fn enable_correction(&mut self, bindings: &Keybindings) {
         if bindings.get_keybindings().iter().any(|(key, event)| {
             key.modifier.is_empty()

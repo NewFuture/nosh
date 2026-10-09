@@ -7,6 +7,7 @@ const F3: &[u8] = b"\x1bOR";
 struct DraftAi {
     requests: usize,
     agents: usize,
+    managed: Vec<nosh_shell::ManagementCommand>,
     answer: Option<String>,
 }
 
@@ -16,8 +17,13 @@ impl AiHandler for DraftAi {
         AiOutcome::default()
     }
 
-    fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
-        self.agents += 1;
+    fn command(
+        &mut self,
+        _: &mut EmbeddedShell,
+        command: nosh_shell::ManagementCommand,
+    ) -> AiOutcome {
+        self.managed.push(command);
+        eprintln!("editing-management-{}", self.managed.len());
         AiOutcome::default()
     }
 
@@ -54,6 +60,7 @@ pub(super) fn probe(mode: &str) {
     let mut ai = DraftAi {
         requests: 0,
         agents: 0,
+        managed: Vec::new(),
         answer: (!mode.ends_with("-none")).then(|| "touch generated".into()),
     };
     let mut config = nosh_shell::ReplConfig {
@@ -80,6 +87,9 @@ pub(super) fn probe(mode: &str) {
         command_assist: false,
         ..Default::default()
     };
+    if mode.ends_with("-prefix-custom") {
+        config.trigger.ai_prefix = "?".into();
+    }
     if mode.ends_with("-remap") {
         config
             .editing
@@ -140,6 +150,7 @@ pub(super) fn probe(mode: &str) {
         serde_json::json!({
             "requests": ai.requests,
             "agents": ai.agents,
+            "managed": ai.managed.iter().map(|command| format!("{command:?}")).collect::<Vec<_>>(),
             "generated": directory.path().join("generated").exists(),
             "history_executed": directory.path().join("history_executed").exists(),
             "prompts": snapshot.var("PROMPTS").unwrap().parse::<usize>().unwrap(),
@@ -176,6 +187,62 @@ fn run_with_keyboard(
         .unwrap_or_else(|| panic!("{out:?}"))
         .1;
     serde_json::from_str(result.lines().next().unwrap()).unwrap()
+}
+
+#[test]
+fn inline_prefix_help_completion_and_editor_actions_do_not_request_ai() {
+    let result = run(
+        "repl-editing-prefix",
+        "xterm-256color",
+        &[
+            ("editing> ", b"#\r"),
+            ("mode [confirm|auto|yolo]", b"#mo\t"),
+            ("#mode ", b"au\t"),
+            ("#mode auto", b"\r"),
+            ("editing-management-1", b"#unknown"),
+            ("#unknown", F2),
+            ("inline commands do not use AI", b"\t"),
+            ("inline commands do not use AI", b"\x03"),
+            ("editing> ", b"#ctx\r"),
+            ("editing-management-2", b"exit 0\r"),
+        ],
+    );
+    assert_eq!(result["requests"], 0);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(
+        result["managed"],
+        serde_json::json!(["Mode(Some(Auto))", "Ctx"])
+    );
+    assert_eq!(result["generated"], false);
+    assert!(
+        !result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| { line.as_str().unwrap().trim_start().starts_with('#') })
+    );
+}
+
+#[test]
+fn inline_prefix_commands_work_in_a_basic_terminal_with_custom_prefix() {
+    let result = run(
+        "repl-editing-prefix-custom",
+        "dumb",
+        &[
+            ("editing> ", b"?\r"),
+            ("?mode [confirm|auto|yolo]", b"?mode confirm\r"),
+            ("editing-management-1", b"?unknown"),
+            ("?unknown", F2),
+            ("inline commands do not use AI", b"\x03exit 0\r"),
+        ],
+    );
+    assert_eq!(result["requests"], 0);
+    assert_eq!(result["agents"], 0);
+    assert_eq!(
+        result["managed"],
+        serde_json::json!(["Mode(Some(Confirm))"])
+    );
+    assert_eq!(result["generated"], false);
 }
 
 #[test]

@@ -19,7 +19,7 @@ impl AiHandler for CompletionAi {
         AiOutcome::default()
     }
 
-    fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+    fn command(&mut self, _: &mut EmbeddedShell, _: nosh_shell::ManagementCommand) -> AiOutcome {
         self.agents += 1;
         AiOutcome::default()
     }

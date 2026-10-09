@@ -38,10 +38,10 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
     if (fields.count("exit: 17") != 1 or len(commands) != 1
             or commands[0] not in (expected, json.dumps(expected, ensure_ascii=False))):
         reasons.append("captured diagnosis context does not identify the failed command and exit 17")
-    question = scenario["inputs"][-1].removeprefix("ai fix").strip()
+    question = scenario["inputs"][-1].removeprefix("#fix").strip()
     requests = [message for message in messages if message.get("role") == "user"]
     if len(requests) != 1 or requests[0]["text"] != question or messages[-1] != requests[0]:
-        reasons.append("the ai fix question is missing or changed in the first model request")
+        reasons.append("the #fix question is missing or changed in the first model request")
     header, separator, body = context.split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None

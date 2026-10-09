@@ -81,7 +81,7 @@ class CaptureEvaluationTests(unittest.TestCase):
         return capture_trial(self.base, self.scenario)
 
     def evidence(self, text, metadata):
-        question = self.scenario["inputs"][-1].removeprefix("ai fix").strip()
+        question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
         return observed_input(text, metadata, question)
 
     def test_real_one_shot_error_requires_original_engine_input_and_count(self):

@@ -4,7 +4,10 @@
 use nosh_engine::ChatEngine;
 use nosh_permissions::ApprovalMode;
 use nosh_platform::tr;
-use nosh_shell::{AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, Trigger, style};
+use nosh_shell::inline_commands::ApprovalMode as CommandApprovalMode;
+use nosh_shell::{
+    AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, ManagementCommand, Trigger, style,
+};
 
 use crate::agent::{Agent, AgentConfig};
 use crate::approval::ApprovalChannel;
@@ -15,7 +18,7 @@ use crate::ui::{TermUi, approval_label};
 
 pub struct LoadedEngine {
     pub engine: Box<dyn ChatEngine>,
-    /// Shown by `ai status`, e.g. model id and file.
+    /// Shown by `#status`, e.g. model id and file.
     pub description: String,
 }
 
@@ -269,7 +272,7 @@ impl AiHandler for ShellAi {
         }
     }
 
-    fn builtin(&mut self, shell: &mut EmbeddedShell, args: &[String]) -> AiOutcome {
+    fn command(&mut self, _: &mut EmbeddedShell, command: ManagementCommand) -> AiOutcome {
         if let Err(error) = self.reclaim() {
             eprintln!("nosh: {error}");
             return AiOutcome {
@@ -277,24 +280,24 @@ impl AiHandler for ShellAi {
                 exit_code: 2,
             };
         }
-        let sub = args.first().map(String::as_str).unwrap_or("");
-        let arg = args.get(1).map(String::as_str);
         let state = self.foreground.as_ref();
         let agent = state.and_then(|state| state.agent.as_ref());
-        match sub {
-            "mode" => match arg.map(ApprovalMode::parse) {
-                Some(Some(m)) => {
+        match command {
+            ManagementCommand::Mode(mode) => match mode {
+                Some(mode) => {
+                    let m = match mode {
+                        CommandApprovalMode::Confirm => ApprovalMode::Confirm,
+                        CommandApprovalMode::Auto => ApprovalMode::Auto,
+                        CommandApprovalMode::Yolo => ApprovalMode::Yolo,
+                    };
                     self.set_mode(m);
                     say(&approval_label(m));
                 }
-                Some(None) => say("usage: ai mode confirm|auto|yolo"),
                 None => say(&approval_label(self.cfg.mode)),
             },
-            "think" => {
-                match arg {
-                    Some("on") => self.cfg.thinking = true,
-                    Some("off") => self.cfg.thinking = false,
-                    _ => {}
+            ManagementCommand::Think(enabled) => {
+                if let Some(enabled) = enabled {
+                    self.cfg.thinking = enabled;
                 }
                 if let Some(a) = self
                     .foreground
@@ -310,7 +313,7 @@ impl AiHandler for ShellAi {
                     if self.cfg.thinking { "on" } else { "off" }
                 ));
             }
-            "clear" => {
+            ManagementCommand::Clear => {
                 if let Some(a) = self
                     .foreground
                     .as_mut()
@@ -320,14 +323,14 @@ impl AiHandler for ShellAi {
                 }
                 say(tr!("已开始新对话", "started a new conversation"));
             }
-            "ctx" => match agent.and_then(Agent::context_usage) {
+            ManagementCommand::Ctx => match agent.and_then(Agent::context_usage) {
                 Some((used, max)) => say(&format!(
                     "context: {used} / {max} tokens ({}%)",
                     used * 100 / max.max(1)
                 )),
                 None => say(tr!("还没有对话", "no conversation yet")),
             },
-            "status" => {
+            ManagementCommand::Status => {
                 say(&format!(
                     "model: {}",
                     state
@@ -346,14 +349,12 @@ impl AiHandler for ShellAi {
                     say(&format!("context: {used} / {max} tokens"));
                 }
             }
-            "out" => {
+            ManagementCommand::Out(id) => {
                 let Some(agent) = agent else {
                     say(tr!("还没有 agent 命令", "no agent commands yet"));
                     return AiOutcome::default();
                 };
-                let id = arg
-                    .and_then(|a| a.trim_start_matches('#').parse().ok())
-                    .or_else(|| agent.last_output_id());
+                let id = id.or_else(|| agent.last_output_id());
                 match id.and_then(|i| agent.output(i)) {
                     Some(o) => {
                         eprintln!("{}", style::dim(&format!("$ {}", o.command)));
@@ -365,12 +366,7 @@ impl AiHandler for ShellAi {
                     None => say(tr!("没有这个编号的输出", "no output with that number")),
                 }
             }
-            _ => say(tr!(
-                "这个 MVP 版本还不支持该命令",
-                "not available in this version"
-            )),
         }
-        let _ = shell;
         AiOutcome::default()
     }
 
@@ -453,6 +449,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_management_commands_do_not_load_an_engine() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed = loads.clone();
+        let mut ai = ShellAi::new(
+            Box::new(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Err("management must not load a model".into())
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        for command in [
+            ManagementCommand::Mode(None),
+            ManagementCommand::Mode(Some(CommandApprovalMode::Confirm)),
+            ManagementCommand::Think(Some(true)),
+            ManagementCommand::Think(None),
+            ManagementCommand::Clear,
+            ManagementCommand::Ctx,
+            ManagementCommand::Status,
+            ManagementCommand::Out(None),
+            ManagementCommand::Out(Some(1)),
+        ] {
+            ai.command(&mut shell, command);
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        assert_eq!(ai.mode(), ApprovalMode::Confirm);
+        assert!(ai.cfg.thinking);
+        assert!(ai.foreground.as_ref().unwrap().agent.is_none());
+    }
+
+    #[test]
     fn mode_selection_survives_loading_tasks_and_conversation_resets() {
         let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
         let mut ai = ShellAi::new(
@@ -468,12 +500,12 @@ mod tests {
             Box::new(crate::NoTerminal),
         );
         assert_eq!(ai.mode(), ApprovalMode::Auto);
-        for mode in [
-            ApprovalMode::Confirm,
-            ApprovalMode::Yolo,
-            ApprovalMode::Auto,
+        for (mode, command_mode) in [
+            (ApprovalMode::Confirm, CommandApprovalMode::Confirm),
+            (ApprovalMode::Yolo, CommandApprovalMode::Yolo),
+            (ApprovalMode::Auto, CommandApprovalMode::Auto),
         ] {
-            ai.builtin(&mut shell, &["mode".into(), mode.as_str().into()]);
+            ai.command(&mut shell, ManagementCommand::Mode(Some(command_mode)));
             for _ in 0..2 {
                 ai.handle(
                     &mut shell,
@@ -496,7 +528,7 @@ mod tests {
                         .mode,
                     mode
                 );
-                ai.builtin(&mut shell, &["clear".into()]);
+                ai.command(&mut shell, ManagementCommand::Clear);
             }
         }
     }

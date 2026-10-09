@@ -15,6 +15,7 @@ use reedline::{
 
 use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
+use crate::inline_commands::{self, Command};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
 use crate::{editing, input_assist, style, term};
 
@@ -45,8 +46,11 @@ pub struct Badge {
 
 pub trait AiHandler {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome;
-    /// `ai <subcommand> …` management commands (mode, think, clear, ctx, …).
-    fn builtin(&mut self, shell: &mut EmbeddedShell, args: &[String]) -> AiOutcome;
+    fn command(
+        &mut self,
+        shell: &mut EmbeddedShell,
+        command: crate::ManagementCommand,
+    ) -> AiOutcome;
     /// Rewrite the input into a command draft, never submit it.
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String>;
     fn badge(&self) -> Badge;
@@ -74,11 +78,11 @@ impl AiHandler for NoAi {
         }
     }
 
-    fn builtin(&mut self, s: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+    fn command(&mut self, s: &mut EmbeddedShell, _: crate::ManagementCommand) -> AiOutcome {
         self.handle(
             s,
             AiRequest {
-                trigger: Trigger::Builtin,
+                trigger: Trigger::Hash,
                 text: String::new(),
                 failed: None,
                 user_output: None,
@@ -195,10 +199,6 @@ pub enum LineOutcome {
     Exit(i32),
 }
 
-const HANDLER_SUBCOMMANDS: &[&str] = &[
-    "mode", "think", "clear", "ctx", "status", "out", "history", "private", "undo", "model",
-];
-
 /// Decides what to do with each input line and runs it.
 pub struct Pipeline {
     pub cfg: ReplConfig,
@@ -238,10 +238,6 @@ impl Pipeline {
             display.invalidate();
         }
         let tc = self.trigger_cfg();
-        let t = line.trim();
-        if tc.ai_enabled && !tc.ai_prefix.is_empty() && t == tc.ai_prefix {
-            return self.fix(shell, ai, ui);
-        }
         match trigger::classify(line, shell, &tc) {
             Action::Empty => LineOutcome::Continue(None),
             Action::Execute => self.execute(shell, ai, ui, line),
@@ -259,23 +255,16 @@ impl Pipeline {
                 LineOutcome::Continue(Some(corrected))
             }
             Action::Guard => match ui.guard(line) {
-                GuardChoice::Ai => ask(shell, ai, Trigger::Hash, t.to_string(), None),
+                GuardChoice::Ai => ask(shell, ai, Trigger::Hash, line.trim().to_string(), None),
                 GuardChoice::Run => self.execute(shell, ai, ui, line),
-                GuardChoice::Cancel => LineOutcome::Continue(Some(t.to_string())),
+                GuardChoice::Cancel => LineOutcome::Continue(Some(line.trim().to_string())),
             },
-            Action::AiBuiltin(rest) => self.builtin(shell, ai, ui, &rest),
+            Action::Inline(command) => self.command(shell, ai, ui, command),
+            Action::InvalidInline(error) => {
+                ui.notice(&format!("nosh: {}", error.message(&tc.ai_prefix)));
+                LineOutcome::Continue(None)
+            }
         }
-    }
-
-    /// Asks the AI about the last failed command (`ai fix [question]`, bare
-    /// `#` or an explicit `ai fix` request).
-    pub fn fix(
-        &mut self,
-        shell: &mut EmbeddedShell,
-        ai: &mut dyn AiHandler,
-        ui: &mut dyn ReplUi,
-    ) -> LineOutcome {
-        self.fix_with_text(shell, ai, ui, String::new())
     }
 
     fn fix_with_text(
@@ -294,43 +283,35 @@ impl Pipeline {
                 Some(cmd),
             ),
             None => {
-                ui.notice(&style::dim(tr!(
-                    "nosh: 没有失败的命令；用 # 描述任务",
-                    "nosh: no failed command; describe a task after #"
+                let entry = format!(
+                    "{} <task>",
+                    style::visible_text(&self.cfg.trigger.ai_prefix)
+                );
+                ui.notice(&style::dim(&tr!(
+                    format!("nosh: 没有失败的命令；用 {entry} 描述任务"),
+                    format!("nosh: no failed command; use {entry} to describe a task")
                 )));
                 LineOutcome::Continue(None)
             }
         }
     }
 
-    fn builtin(
+    fn command(
         &mut self,
         shell: &mut EmbeddedShell,
         ai: &mut dyn AiHandler,
         ui: &mut dyn ReplUi,
-        rest: &str,
+        command: Command,
     ) -> LineOutcome {
-        let words: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
-        let quoted = rest.starts_with(['"', '\'']);
-        match words.first().map(String::as_str) {
-            None | Some("help") if !quoted => {
-                ui.notice(&builtin_help(&self.cfg.trigger.builtin_name));
+        match command {
+            Command::Help => {
+                ui.notice(&inline_commands::help(&self.cfg.trigger.ai_prefix));
                 LineOutcome::Continue(None)
             }
-            Some("fix") if !quoted => self.fix_with_text(
-                shell,
-                ai,
-                ui,
-                rest.strip_prefix("fix")
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string(),
-            ),
-            Some("auto") if !quoted && words.len() <= 2 => {
-                match words.get(1).map(String::as_str) {
-                    Some("off") => self.auto_paused = true,
-                    Some("on") => self.auto_paused = false,
-                    _ => {}
+            Command::Fix(text) => self.fix_with_text(shell, ai, ui, text),
+            Command::Auto(enabled) => {
+                if let Some(enabled) = enabled {
+                    self.auto_paused = !enabled;
                 }
                 ui.notice(&format!(
                     "auto: {}",
@@ -338,16 +319,9 @@ impl Pipeline {
                 ));
                 LineOutcome::Continue(None)
             }
-            Some(sub) if !quoted && words.len() <= 2 && HANDLER_SUBCOMMANDS.contains(&sub) => {
-                let out = isolate(|| ai.builtin(shell, &words)).unwrap_or_default();
+            Command::Manage(command) => {
+                let out = isolate(|| ai.command(shell, command)).unwrap_or_default();
                 LineOutcome::Continue(out.prefill)
-            }
-            _ => {
-                let text = unquote(rest);
-                if text.is_empty() {
-                    return LineOutcome::Continue(None);
-                }
-                ask(shell, ai, Trigger::Builtin, text, None)
             }
         }
     }
@@ -381,6 +355,20 @@ impl Pipeline {
         }
         let cmd = shell.recent_commands().last().cloned();
         self.last_failure = cmd.clone();
+        let fix_hint = if self.cfg.trigger.ai_prefix.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " {} {}fix",
+                style::glyph("·", "|"),
+                style::visible_text(&self.cfg.trigger.ai_prefix)
+            )
+        };
+        let failure_notice = format!(
+            "{} exit {}{fix_hint}",
+            style::glyph("✗", "x"),
+            run.exit_code
+        );
         if self.cfg.command_assist
             && self.cfg.on_failure != OnFailure::Off
             && !self.auto_paused
@@ -392,12 +380,7 @@ impl Pipeline {
                 .cloned();
             let _ = isolate(|| ai.after_command(shell, command, output));
             if ai.assistance().is_some() {
-                ui.notice(&style::dim(&format!(
-                    "{} exit {} · {} fix",
-                    style::glyph("✗", "x"),
-                    run.exit_code,
-                    style::visible_text(&self.cfg.trigger.builtin_name),
-                )));
+                ui.notice(&style::dim(&failure_notice));
                 return LineOutcome::Continue(None);
             }
         }
@@ -416,13 +399,7 @@ impl Pipeline {
                 cmd,
             ),
             _ => {
-                let code = run.exit_code;
-                ui.notice(&style::dim(&format!(
-                    "{} exit {code} {} {} fix",
-                    style::glyph("✗", "x"),
-                    style::glyph("·", "|"),
-                    style::visible_text(&self.cfg.trigger.builtin_name)
-                )));
+                ui.notice(&style::dim(&failure_notice));
                 LineOutcome::Continue(None)
             }
         }
@@ -480,52 +457,6 @@ pub fn isolate<T>(f: impl FnOnce() -> T) -> Option<T> {
     }
 }
 
-fn unquote(s: &str) -> String {
-    let s = s.trim();
-    for q in ['"', '\''] {
-        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-            return s[1..s.len() - 1].trim().to_string();
-        }
-    }
-    s.to_string()
-}
-
-fn builtin_help(name: &str) -> String {
-    let lines: &[(&str, &str, &str)] = &[
-        ("\"<task>\"", "执行任务", "run a task"),
-        (
-            "mode confirm|auto|yolo",
-            "切换审批模式",
-            "switch approval mode",
-        ),
-        ("think on|off", "开关思考模式", "toggle thinking"),
-        (
-            "auto on|off",
-            "出错时自动触发 AI",
-            "auto-trigger AI on errors",
-        ),
-        (
-            "fix [question]",
-            "生成修复命令；附问题时交给 Agent 诊断",
-            "suggest a fix; add a question for Agent diagnosis",
-        ),
-        (
-            "out <n>",
-            "查看 agent 命令的完整输出",
-            "show full output of an agent command",
-        ),
-        ("clear", "新建对话", "start a new conversation"),
-        ("ctx", "查看上下文占用", "show context usage"),
-        ("status", "查看运行状态", "show status"),
-    ];
-    let mut s = String::new();
-    for (cmd, zh, en) in lines {
-        s.push_str(&format!("  {name} {cmd:<24} {}\n", tr!(*zh, *en)));
-    }
-    s.pop();
-    s
-}
-
 pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
 
 #[derive(Clone, Default)]
@@ -563,6 +494,7 @@ struct ReplPrompt {
     continuation: String,
     input_assist: Option<input_assist::InputAssist>,
     command_assist: Option<crate::AssistDisplay>,
+    inline_prefix: Option<String>,
 }
 
 impl ReplPrompt {
@@ -617,6 +549,7 @@ impl ReplPrompt {
             continuation: shell.continuation_prompt(),
             input_assist: None,
             command_assist: None,
+            inline_prefix: None,
         }
     }
 }
@@ -624,6 +557,10 @@ impl ReplPrompt {
 impl Prompt for ReplPrompt {
     fn update_context(&self, context: PromptContext<'_>) {
         let theme = self.theme.snapshot();
+        let command_input = self
+            .inline_prefix
+            .as_ref()
+            .is_some_and(|prefix| inline_commands::is_command(context.buffer, prefix, true));
         let mut feedback = self
             .input_assist
             .as_ref()
@@ -631,7 +568,17 @@ impl Prompt for ReplPrompt {
         let assistance = self
             .command_assist
             .as_ref()
+            .filter(|_| !command_input)
             .and_then(|assist| assist.result());
+        let bindings = self
+            .editor
+            .editing
+            .as_ref()
+            .map_or(&self.editor.bindings, |maps| {
+                maps.hints(&context.edit_mode, context.interaction)
+            });
+        let command_bindings = command_input.then(|| bindings.clone().without_suggestions());
+        let bindings = command_bindings.as_ref().unwrap_or(bindings);
         let completion = self.editor.completion.try_lock();
         let unavailable = completion
             .as_ref()
@@ -666,13 +613,7 @@ impl Prompt for ReplPrompt {
                 failed_exit: self.failed_exit,
                 approval: &self.approval,
                 note: self.note.as_deref(),
-                bindings: self
-                    .editor
-                    .editing
-                    .as_ref()
-                    .map_or(&self.editor.bindings, |maps| {
-                        maps.hints(&context.edit_mode, context.interaction)
-                    }),
+                bindings,
                 color: style::stdout().color,
                 color_depth: crate::status::color_depth(),
                 unicode: style::stdout().unicode,
@@ -714,13 +655,7 @@ impl Prompt for ReplPrompt {
             };
             let command_status =
                 if matches!(context.interaction, reedline::PromptInteraction::Editing) {
-                    crate::assist_display::status_text(
-                        assistance.as_ref(),
-                        self.editor.editing.as_ref().map_or_else(
-                            || self.editor.bindings.suggest_key(),
-                            |maps| maps.ai_key(&context.edit_mode),
-                        ),
-                    )
+                    crate::assist_display::status_text(assistance.as_ref(), bindings.suggest_key())
                 } else {
                     String::new()
                 };
@@ -915,15 +850,18 @@ fn open_quote(line: &str, pos: usize) -> Option<char> {
 struct LineValidator {
     shell: Arc<Mutex<BrushShell>>,
     prefix: String,
+    ai_enabled: bool,
 }
 
 impl reedline::Validator for LineValidator {
     fn validate(&self, line: &str) -> ValidationResult {
-        let t = line.trim_start();
-        if !self.prefix.is_empty() && t.starts_with(&self.prefix) {
+        if !matches!(
+            inline_commands::parse(line, &self.prefix, self.ai_enabled),
+            inline_commands::Input::Shell
+        ) {
             return ValidationResult::Complete;
         }
-        if trigger::apostrophe_prose(line.trim()) {
+        if self.ai_enabled && trigger::apostrophe_prose(line.trim()) {
             return ValidationResult::Complete;
         }
         let sh = self.shell.lock().unwrap_or_else(|e| e.into_inner());
@@ -998,6 +936,7 @@ fn build_editor(
         .with_validator(Box::new(LineValidator {
             shell: sh.clone(),
             prefix: cfg.trigger.ai_prefix.clone(),
+            ai_enabled: cfg.trigger.ai_enabled,
         }))
         .with_highlighter(Box::new(NoHighlight));
     let repaint = editor.repaint_signal();
@@ -1023,6 +962,11 @@ fn build_editor(
     let repaint = editor.repaint_signal();
     let mut completion_config = cfg.completion.clone();
     completion_config.abbreviations = cfg.input_abbreviations.clone();
+    completion_config.inline_prefix = cfg
+        .trigger
+        .ai_enabled
+        .then(|| cfg.trigger.ai_prefix.clone())
+        .filter(|prefix| !prefix.is_empty());
     let completion = crate::completion::Completion::new(
         completion_config,
         state.completion.clone(),
@@ -1143,6 +1087,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let validator = LineValidator {
         shell: shell.shared().1,
         prefix: cfg.trigger.ai_prefix.clone(),
+        ai_enabled: cfg.trigger.ai_enabled,
     };
     let mut pipeline = Pipeline::new(cfg);
     let status_supported = pipeline.cfg.status_bar.enabled && crate::status::supported();
@@ -1155,6 +1100,12 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         prompt.status_feedback = pipeline.cfg.status_bar.enabled;
         prompt.theme = pipeline.cfg.status_bar.theme.clone();
         prompt.editor = editor_state.clone();
+        prompt.inline_prefix = pipeline
+            .cfg
+            .trigger
+            .ai_enabled
+            .then(|| pipeline.cfg.trigger.ai_prefix.clone())
+            .filter(|prefix| !prefix.is_empty());
         if let Some(completion) = &editor_state.completion_controller {
             completion.prepare(shell);
         }
@@ -1222,6 +1173,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                         || plain_draft.clone(),
                         |ed| ed.current_buffer_contents().to_owned(),
                     );
+                    if inline_commands::is_command(
+                        &buf,
+                        &pipeline.cfg.trigger.ai_prefix,
+                        pipeline.cfg.trigger.ai_enabled,
+                    ) {
+                        let _ = suggest_draft(shell, ai, &pipeline.cfg, &mut ui, &buf);
+                        continue;
+                    }
                     if command == editing::COMPLETION_AI_COMMAND {
                         let snapshot = editor_state.completion.try_lock();
                         let cursor = editor.as_ref().map(|ed| ed.current_completion_point());
@@ -1311,6 +1270,21 @@ fn suggest_draft(
         ui.notice(tr!("nosh: AI 已禁用", "nosh: AI is disabled"));
         return None;
     }
+    let input = inline_commands::parse(draft, &cfg.trigger.ai_prefix, true);
+    let request = match &input {
+        inline_commands::Input::Command(_) | inline_commands::Input::Error(_) => {
+            if let Some(display) = ai.assistance() {
+                display.invalidate();
+            }
+            ui.notice(tr!(
+                "nosh: 内置命令不使用 AI 建议；请使用 Tab 补全或回车提交",
+                "nosh: inline commands do not use AI suggestions; use Tab or Enter"
+            ));
+            return None;
+        }
+        inline_commands::Input::Task(text) => *text,
+        inline_commands::Input::Shell => draft,
+    };
     if draft.trim().is_empty() {
         if let Some(display) = ai.assistance()
             && let Some(crate::Assistance::Command {
@@ -1335,16 +1309,26 @@ fn suggest_draft(
             ));
             return None;
         }
-        ui.notice(tr!(
-            "nosh: 没有可采用的建议；输入请求或使用 ai fix",
-            "nosh: no ready suggestion; enter a request or use ai fix"
-        ));
+        let message = if cfg.trigger.ai_prefix.is_empty() {
+            tr!(
+                "nosh: 没有可采用的建议；请输入请求",
+                "nosh: no ready suggestion; enter a request"
+            )
+            .to_owned()
+        } else {
+            let fix = format!("{}fix", style::visible_text(&cfg.trigger.ai_prefix));
+            tr!(
+                format!("nosh: 没有可采用的建议；输入请求或使用 {fix}"),
+                format!("nosh: no ready suggestion; enter a request or use {fix}")
+            )
+        };
+        ui.notice(&message);
         return None;
     }
     if let Some(display) = ai.assistance() {
         display.invalidate();
     }
-    let Some(program) = isolate(|| ai.suggest(shell, draft)).flatten() else {
+    let Some(program) = isolate(|| ai.suggest(shell, request)).flatten() else {
         ui.notice(tr!(
             "nosh: 没有建议；保留原输入",
             "nosh: no suggestion; draft unchanged"
@@ -1371,18 +1355,20 @@ mod tests {
         struct CandidateAi {
             display: crate::AssistDisplay,
             requests: usize,
+            suggestion: Option<String>,
         }
         impl AiHandler for CandidateAi {
             fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
                 self.requests += 1;
                 AiOutcome::default()
             }
-            fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+            fn command(&mut self, _: &mut EmbeddedShell, _: crate::ManagementCommand) -> AiOutcome {
                 self.requests += 1;
                 AiOutcome::default()
             }
-            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+            fn suggest(&mut self, _: &mut EmbeddedShell, text: &str) -> Option<String> {
                 self.requests += 1;
+                self.suggestion = Some(text.into());
                 None
             }
             fn badge(&self) -> Badge {
@@ -1412,6 +1398,7 @@ mod tests {
         let mut ai = CandidateAi {
             display: crate::AssistDisplay::default(),
             requests: 0,
+            suggestion: None,
         };
         let mut ui = Notices(Vec::new());
         for (command_id, program) in [(latest + 1, "echo stale"), (latest, "echo '")] {
@@ -1442,6 +1429,53 @@ mod tests {
         }
         assert_eq!(ai.requests, 0);
         assert_eq!(ui.0.len(), 4);
+        for draft in [
+            "#",
+            "#help",
+            "#fix",
+            "#mode auto",
+            "#mode bad",
+            "#unknown",
+            "#找文件",
+        ] {
+            let version = ai.display.invalidate();
+            assert!(ai.display.publish(
+                version,
+                Some(crate::Assistance::Command {
+                    command_id: latest,
+                    intent: "next".into(),
+                    program: "echo background".into(),
+                })
+            ));
+            assert_eq!(
+                suggest_draft(&mut shell, &mut ai, &ReplConfig::default(), &mut ui, draft),
+                None
+            );
+            assert!(ai.display.result().is_none(), "{draft}");
+            assert_eq!(ai.requests, 0, "{draft}");
+        }
+        let no_prefix = ReplConfig {
+            trigger: TriggerConfig {
+                ai_prefix: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            suggest_draft(&mut shell, &mut ai, &no_prefix, &mut ui, ""),
+            None
+        );
+        assert!(!ui.0.last().unwrap().contains("fix"));
+        assert_eq!(ai.requests, 0);
+        suggest_draft(
+            &mut shell,
+            &mut ai,
+            &ReplConfig::default(),
+            &mut ui,
+            "# 描述任务",
+        );
+        assert_eq!(ai.suggestion.as_deref(), Some("描述任务"));
+        assert_eq!(ai.requests, 1);
     }
 
     fn status_prompt(custom: bool) -> ReplPrompt {
@@ -1485,6 +1519,7 @@ mod tests {
             continuation: "PS2> ".into(),
             input_assist: None,
             command_assist: None,
+            inline_prefix: Some("#".into()),
         }
     }
 
@@ -1723,10 +1758,11 @@ mod tests {
     }
 
     #[test]
-    fn unquoting() {
-        assert_eq!(unquote("\"find big files\""), "find big files");
-        assert_eq!(unquote("'x'"), "x");
-        assert_eq!(unquote("plain words"), "plain words");
+    fn help_uses_only_latest_input_syntax() {
+        let help = inline_commands::help("?");
+        assert!(help.contains("?help") && help.contains("?fix"));
+        assert!(help.contains("? <task>"));
+        assert!(!help.contains("ai ") && !help.contains("?next"));
     }
 
     #[test]
@@ -1737,6 +1773,7 @@ mod tests {
         let validator = LineValidator {
             shell: shell.shared().1,
             prefix: "#".into(),
+            ai_enabled: true,
         };
         for line in [
             "ai next 'unfinished",
@@ -1750,7 +1787,37 @@ mod tests {
                 ValidationResult::Incomplete
             ));
         }
-        assert!(!builtin_help("ai").contains("ai next"));
+        assert!(!inline_commands::help("#").contains("#next"));
+    }
+
+    #[test]
+    fn inline_validation_obeys_disabled_ai_and_literal_shell_boundaries() {
+        use reedline::Validator;
+        let shell = EmbeddedShell::new(Default::default()).unwrap();
+        let mut validator = LineValidator {
+            shell: shell.shared().1,
+            prefix: "?".into(),
+            ai_enabled: true,
+        };
+        for line in ["?mode bad", "?fix what's \"wrong", "? explain \"unfinished"] {
+            assert!(matches!(
+                validator.validate(line),
+                ValidationResult::Complete
+            ));
+        }
+        assert!(matches!(
+            validator.validate("echo '?mode \"unfinished"),
+            ValidationResult::Incomplete
+        ));
+        validator.ai_enabled = false;
+        assert!(matches!(
+            validator.validate("? explain \"unfinished"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("what's unfinished"),
+            ValidationResult::Incomplete
+        ));
     }
 
     #[test]

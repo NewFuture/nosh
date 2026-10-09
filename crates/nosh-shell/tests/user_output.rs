@@ -34,7 +34,7 @@ impl AiHandler for RecordingAi {
         self.0.push(request);
         AiOutcome::default()
     }
-    fn builtin(&mut self, _: &mut EmbeddedShell, _: &[String]) -> AiOutcome {
+    fn command(&mut self, _: &mut EmbeddedShell, _: nosh_shell::ManagementCommand) -> AiOutcome {
         AiOutcome::default()
     }
     fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
@@ -195,7 +195,7 @@ fn pty_probe() {
                 &mut shell,
                 &mut ai,
                 &mut QuietUi,
-                "ai fix cite the diagnostic id",
+                "#fix cite the diagnostic id",
             );
             let request = &ai.0[0];
             assert_eq!(request.text, "cite the diagnostic id");
@@ -217,7 +217,7 @@ fn pty_probe() {
             );
 
             pipeline.process(&mut shell, &mut ai, &mut QuietUi, "sh -c 'exit 17'");
-            pipeline.process(&mut shell, &mut ai, &mut QuietUi, "#");
+            pipeline.process(&mut shell, &mut ai, &mut QuietUi, "#fix");
             let empty = ai.0.last().unwrap().user_output.as_ref().unwrap();
             assert_eq!(empty.state, OutputState::Captured);
             assert_eq!(empty.observed_bytes, Some(0));
@@ -248,7 +248,7 @@ fn pty_probe() {
                 pipeline.process(&mut shell, &mut ai, &mut QuietUi, command);
                 assert!(pipeline.last_failure().is_none());
                 let before = ai.0.len();
-                pipeline.fix(&mut shell, &mut ai, &mut QuietUi);
+                pipeline.process(&mut shell, &mut ai, &mut QuietUi, "#fix");
                 assert_eq!(before, ai.0.len(), "stale failure after {command}");
             }
             shell.run_user_line("sleep 0.1 & printf foreground");

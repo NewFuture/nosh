@@ -4,7 +4,8 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 
 > 只维护当前版本。支持范围与限制见[系统设计](docs/DESIGN.md#03-实现状态)。
 
-- **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`#` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
+- **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`# 任务` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
+- **前缀命令**：`#` 显示帮助，`#help`、`#mode auto` 等管理命令本地解析；`#fix` 请求修复建议。`#` 子命令和固定参数支持本地 Tab 补全，未知命令或错误参数不转交模型。完整语法见[交互命令](docs/DESIGN.md#91-shell-界面)。
 - **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
 - **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
 - **上下文补全**：命令与路径默认 smart-case 模糊；内置 Git `switch`、GNU Make 静态目标及 `npm run`／Yarn 项目脚本补全，保留已加载定义的语义。共用一个有界、可取消的补全进程；覆盖和限制见[补全说明](docs/COMPLETION.md)。
@@ -14,7 +15,8 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 
 ```bash
 nosh                                   # 进入 nosh shell
-# 找出当前目录下最大的 10 个文件         # 以 # 开头，交给 AI
+#help                                  # nosh 提示符内查看帮助
+# 找出当前目录下最大的 10 个文件         # 前缀后加空白，交给 AI
 nosh -a "把 logs 里 7 天前的日志打包"   # 一次性任务
 nosh -s "解压 foo.tar.zst 到 /tmp"     # 只输出命令
 ```
@@ -33,11 +35,11 @@ cargo build --release                  # rust-toolchain.toml 固定 Rust 1.98.1
 
 常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
 
-AI 任务默认显示 **`审批: 自动`**；可用 `ai mode confirm|auto|yolo` 切换。用户 deny 始终优先，有效用户白名单三档免审批，并可覆盖内置禁止；未获白名单覆盖的内置禁止在询问模式须键入 `yes`，自动 / YOLO 直接拒绝。YOLO 对其他操作免逐次审批，不绕过工具范围或外部认证。
+AI 任务默认显示 **`审批: 自动`**；可用 `#mode confirm|auto|yolo` 切换。用户 deny 始终优先，有效用户白名单三档免审批，并可覆盖内置禁止；未获白名单覆盖的内置禁止在询问模式须键入 `yes`，自动 / YOLO 直接拒绝。YOLO 对其他操作免逐次审批，不绕过工具范围或外部认证。
 
 自动模式以**便利优先、防御破坏**为目标：普通 `mv` / `cp` 默认执行，危险目标、破坏性效果与用户 deny 仍拦截；不要求原子不覆盖或备份证明。常见构建 / 测试 / 检查也默认执行，明确接受未知项目代码风险，不代表沙箱隔离或可恢复保证。规则采用 TOML 条目，例如 `deny = [{ command_prefix = "docker system prune" }]`，不再使用旧字符串 glob 数组。完整矩阵、作用域及限制见 [审批说明](docs/APPROVAL-MODES.md)。
 
-`ai auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc）。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
+`#auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc），此时也不拦截前缀命令。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
 
 ## 实时输入提示与语法高亮
 
@@ -64,8 +66,8 @@ Agent 使用 `exec`、`read_file`、`grep`，有交互终端时可提问；管�
 
 | 意图 | 入口与行为 |
 |---|---|
-| Generate | `nosh -s`、非空 F2、适用的 Tab 兜底；输出或预填完整命令 |
-| Fix | 用户命令失败后的后台建议，或裸 `ai fix`；`ai fix <question>` 仍进入 Agent 诊断 |
+| Generate | `nosh -s`、非管理输入的非空 F2、适用的 Tab 兜底；输出或预填完整命令 |
+| Fix | 用户命令失败后的后台建议，或 `#fix`；`#fix <question>` 进入 Agent 诊断 |
 | Next | 用户命令成功后的后台建议；没有合理下一步可以不建议，无手动入口 |
 
 空白草稿用 F2 接受已有候选，回车才执行；没有候选时不额外请求模型，继续输入会取消旧建议。`[shell] command_assist = false` 关闭自动辅助，但保留 Generate、显式 Fix 和 Agent 入口。完整协议、命令校验与调度见[CommandAssist](docs/COMMAND-ASSIST.md)；静态校验不能证明动态命令安全。

@@ -58,40 +58,31 @@ pub(super) fn analyze(input: &Input) -> Analysis {
         a.limit();
         return a.result;
     }
-    let trimmed = input.text.trim_start();
     let ctx = &input.context;
-    if ctx.ai_enabled
-        && ((!ctx.ai_prefix.is_empty() && trimmed.starts_with(&ctx.ai_prefix))
-            || trigger::apostrophe_prose(input.text.trim()))
-    {
-        a.paint(0..input.text.len(), Role::Ai);
-        a.find(0..input.text.len(), State::Known, Reason::Ai);
-    } else {
-        let ai_head = ctx.ai_enabled
-            && !input.command_input
-            && !ctx.ai_builtin.is_empty()
-            && !ctx.ai_builtin_shadowed
-            && !ctx.abbreviations.applicable.contains(&ctx.ai_builtin)
-            && trimmed
-                .strip_prefix(&ctx.ai_builtin)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
-        if ai_head {
-            // Resolve the host command before interpreting its possibly non-shell
-            // prose. A real executable with this name still shadows the AI entry.
-            let start = input.text.len() - trimmed.len();
-            let range = start..start + ctx.ai_builtin.len();
-            a.result.ai_candidate = true;
-            a.paint(range.clone(), Role::Command);
-            a.query(Query {
-                range,
-                word: ctx.ai_builtin.clone(),
-                kind: QueryKind::Command {
-                    path: ctx.path.clone(),
-                    ai_on_missing: true,
-                },
-                definite: true,
-            });
-        } else {
+    match crate::inline_commands::parse(&input.text, &ctx.ai_prefix, ctx.ai_enabled) {
+        crate::inline_commands::Input::Command(_) => {
+            a.paint(0..input.text.len(), Role::Builtin);
+        }
+        crate::inline_commands::Input::Error(error) => {
+            a.paint(0..input.text.len(), Role::Builtin);
+            a.paint(error.span.clone(), Role::Error);
+            a.find(
+                error.span.clone(),
+                State::Error,
+                Reason::Syntax(error.message(&ctx.ai_prefix).chars().take(256).collect()),
+            );
+        }
+        crate::inline_commands::Input::Task(_) => {
+            a.paint(0..input.text.len(), Role::Ai);
+            a.find(0..input.text.len(), State::Known, Reason::Ai);
+        }
+        crate::inline_commands::Input::Shell
+            if ctx.ai_enabled && trigger::apostrophe_prose(input.text.trim()) =>
+        {
+            a.paint(0..input.text.len(), Role::Ai);
+            a.find(0..input.text.len(), State::Known, Reason::Ai);
+        }
+        crate::inline_commands::Input::Shell => {
             let mut scope = Scope {
                 dynamic: ctx.command_traps,
                 files_changed: ctx.command_traps,

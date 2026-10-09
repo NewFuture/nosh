@@ -1,12 +1,12 @@
 //! Deciding what to do with a line typed at the prompt (design §4.2): valid
-//! commands run as-is; `#` lines, unparseable prose and unknown command names
-//! go to the AI; typos that match a known command are corrected locally.
+//! commands run as-is; prefix commands are parsed locally, while spaced prefix
+//! tasks, prose and unknown names may go to AI. Typos are corrected locally.
 
 use brush_parser::ast;
 
 use crate::backend::{EmbeddedShell, Resolution};
 use crate::command_context::{self, Scope};
-use crate::{guard, spell};
+use crate::{guard, inline_commands, spell};
 
 /// Internal reason the AI was invoked; not exposed in the model's task header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +15,6 @@ pub enum Trigger {
     ParseError,
     NotFound,
     Failed { exit: i32 },
-    Builtin,
     Cli,
     Pipe,
 }
@@ -27,7 +26,6 @@ impl Trigger {
             Trigger::ParseError => "parse_error",
             Trigger::NotFound => "not_found",
             Trigger::Failed { .. } => "failed",
-            Trigger::Builtin => "ai",
             Trigger::Cli => "cli",
             Trigger::Pipe => "pipe",
         }
@@ -50,14 +48,13 @@ pub enum Action {
     },
     /// Destructive command with prose-like arguments: ask first.
     Guard,
-    /// `ai …` builtin; the rest of the line after the name.
-    AiBuiltin(String),
+    Inline(inline_commands::Command),
+    InvalidInline(inline_commands::Error),
 }
 
 #[derive(Debug, Clone)]
 pub struct TriggerConfig {
     pub ai_prefix: String,
-    pub builtin_name: String,
     pub trigger_on_error: bool,
     pub nl_guard: bool,
     pub ai_enabled: bool,
@@ -67,7 +64,6 @@ impl Default for TriggerConfig {
     fn default() -> Self {
         Self {
             ai_prefix: "#".into(),
-            builtin_name: "ai".into(),
             trigger_on_error: true,
             nl_guard: true,
             ai_enabled: true,
@@ -502,23 +498,16 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
     if !cfg.ai_enabled {
         return Action::Execute;
     }
-    if !cfg.ai_prefix.is_empty() && t.starts_with(&cfg.ai_prefix) {
-        let text = t[cfg.ai_prefix.len()..].trim();
-        return if text.is_empty() {
-            Action::Empty
-        } else {
-            Action::Ai {
+    match inline_commands::parse(line, &cfg.ai_prefix, cfg.ai_enabled) {
+        inline_commands::Input::Shell => {}
+        inline_commands::Input::Task(text) => {
+            return Action::Ai {
                 trigger: Trigger::Hash,
-                text: text.to_string(),
-            }
-        };
-    }
-    if let Some(rest) = t.strip_prefix(cfg.builtin_name.as_str())
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-        && !cfg.builtin_name.is_empty()
-        && shell.resolve(&cfg.builtin_name) == Resolution::NotFound
-    {
-        return Action::AiBuiltin(rest.trim().to_string());
+                text: text.to_owned(),
+            };
+        }
+        inline_commands::Input::Command(command) => return Action::Inline(command),
+        inline_commands::Input::Error(error) => return Action::InvalidInline(error),
     }
     let prog = match shell.parse(t) {
         Ok(p) => p,

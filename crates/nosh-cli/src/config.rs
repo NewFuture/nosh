@@ -20,7 +20,6 @@ pub struct Config {
     pub command_assist: bool,
     pub editing: nosh_shell::editing::Config,
     pub nl_guard: bool,
-    pub builtin_name: String,
     pub approval: ApprovalMode,
     pub max_steps: usize,
     pub command_timeout_sec: u64,
@@ -56,7 +55,6 @@ impl Default for Config {
             command_assist: true,
             editing: Default::default(),
             nl_guard: true,
-            builtin_name: "ai".into(),
             approval: ApprovalMode::default(),
             max_steps: 10,
             command_timeout_sec: 60,
@@ -94,7 +92,6 @@ const KNOWN: &[(&str, &[&str])] = &[
             "status_bar",
             "command_assist",
             "nl_guard",
-            "builtin_name",
             "edit_mode",
             "keybindings",
         ],
@@ -251,7 +248,14 @@ impl Config {
             }
         }
         if let Some(v) = r.str("shell", "ai_prefix") {
-            c.ai_prefix = v;
+            if v.starts_with(char::is_whitespace) {
+                r.warnings.push(
+                    "shell.ai_prefix: must not start with whitespace; using the default prefix"
+                        .into(),
+                );
+            } else {
+                c.ai_prefix = v;
+            }
         }
         if let Some(v) = r.bool("shell", "trigger_on_error") {
             c.trigger_on_error = v;
@@ -291,9 +295,6 @@ impl Config {
                 "off" => c.nl_guard = false,
                 _ => r.warnings.push("shell.nl_guard: destructive | off".into()),
             }
-        }
-        if let Some(v) = r.str("shell", "builtin_name") {
-            c.builtin_name = v;
         }
         let mut editing_errors = Vec::new();
         if let Some(value) = r.get("shell", "edit_mode") {
@@ -595,6 +596,52 @@ on = true
         assert_eq!(c.ai_prefix, "#");
         assert_eq!(c.warnings.len(), 1);
         assert!(c.safety_error.is_some());
+    }
+
+    #[test]
+    fn inline_prefix_is_the_only_supported_command_entry_setting() {
+        let config = Config::parse("[shell]\nai_prefix = '?'\nbuiltin_name = 'ask'");
+        assert_eq!(config.ai_prefix, "?");
+        assert_eq!(config.warnings, ["unknown key shell.builtin_name"]);
+        let empty = Config::parse("[shell]\nai_prefix = ''");
+        assert!(empty.ai_prefix.is_empty() && empty.warnings.is_empty());
+    }
+
+    #[test]
+    fn inline_prefix_rejects_leading_whitespace_without_disabling_commands() {
+        for prefix in [" ", "\t", "\n#", " ?", "\u{3000}?", "\u{00a0}#"] {
+            let config = Config::parse(&format!(
+                "[shell]\nai_prefix = {}",
+                serde_json::to_string(prefix).unwrap()
+            ));
+            assert_eq!(config.ai_prefix, "#", "{prefix:?}");
+            assert_eq!(config.warnings.len(), 1, "{prefix:?}");
+            assert!(config.warnings[0].contains("shell.ai_prefix"), "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn inline_prefix_accepts_empty_and_recognizable_custom_values() {
+        for prefix in ["", "#", "?", "##", "问", "# "] {
+            let config = Config::parse(&format!(
+                "[shell]\nai_prefix = {}",
+                serde_json::to_string(prefix).unwrap()
+            ));
+            assert_eq!(config.ai_prefix, prefix);
+            assert!(config.warnings.is_empty(), "{prefix:?}");
+            if !prefix.is_empty() {
+                assert!(matches!(
+                    nosh_shell::inline_commands::parse(
+                        &format!("{prefix}help"),
+                        &config.ai_prefix,
+                        true,
+                    ),
+                    nosh_shell::inline_commands::Input::Command(
+                        nosh_shell::inline_commands::Command::Help,
+                    ),
+                ));
+            }
+        }
     }
 
     #[test]

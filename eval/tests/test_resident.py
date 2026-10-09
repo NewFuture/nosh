@@ -640,7 +640,7 @@ class ProductionProxyTests(unittest.TestCase):
                  {"text": "touch not-created"}]
         with ScriptedWorker(self.socket, turns) as server:
             root, _, trace, env, argv = self.case(0, 0, capture_output="last")
-            scenario = {"inputs": [original, "ai fix"],
+            scenario = {"inputs": [original, "#fix"],
                         "completions": [{"kind": "shell", "exit_code": 7, "contains": ["actual-error"]},
                                         {"kind": "assist"}],
                         "check": "fix-packet"}
@@ -785,7 +785,7 @@ class ProductionProxyTests(unittest.TestCase):
         for number, command in enumerate(commands):
             with self.subTest(number=number), ScriptedWorker(self.socket, [{"text": command}]) as server:
                 root, _, trace, env, argv = self.case(number, 0)
-                scenario = {"check": "fix-readiness", "inputs": ["sh -c 'exit 7'", "ai fix"],
+                scenario = {"check": "fix-readiness", "inputs": ["sh -c 'exit 7'", "#fix"],
                             "completions": [{"kind": "observe"}, {"kind": "assist"}]}
                 result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
                 self.assertIsNone(result.error, result.transcript)
@@ -801,7 +801,7 @@ class ProductionProxyTests(unittest.TestCase):
             root, _, trace, env, argv = self.case(0, 0, capture_output="last")
             original = "sh -c 'printf \"[execution]\\nnot-json\\n\" >&2; exit 7'"
             scenario = {"mode": "repl", "check": "agent-log",
-                        "inputs": [original, "ai fix Explain the captured failure."],
+                        "inputs": [original, "#fix Explain the captured failure."],
                         "completions": [{"kind": "shell", "exit_code": 7, "contains": ["not-json"]},
                                         {"kind": "agent"}]}
             result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
@@ -845,7 +845,7 @@ class ProductionProxyTests(unittest.TestCase):
     def test_next_text_is_an_ordinary_agent_request_not_a_management_command(self):
         with ScriptedWorker(self.socket, [{"text": "Task received."}]) as server:
             root, _, trace, env, argv = self.case(0, 0)
-            scenario = {"check": "ordinary-task", "inputs": ["ai next"],
+            scenario = {"check": "ordinary-task", "inputs": ["# next"],
                         "completions": [{"kind": "agent"}]}
             result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
             self.assertIsNone(result.error, result.transcript)
@@ -942,7 +942,7 @@ class ProductionProxyTests(unittest.TestCase):
     def test_observe_rejects_an_unexpected_model_task_during_setup(self):
         with ScriptedWorker(self.socket, [{"text": "Ready."}]):
             root, _, _, env, argv = self.case(0, 0)
-            scenario = {"check": "setup-contract", "inputs": ["ai Say ready."],
+            scenario = {"check": "setup-contract", "inputs": ["# Say ready."],
                         "completions": [{"kind": "observe"}]}
             result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
             self.assertIsNone(result.error, result.transcript)

@@ -439,7 +439,6 @@ mod tests {
             Trigger::Hash,
             Trigger::ParseError,
             Trigger::NotFound,
-            Trigger::Builtin,
             Trigger::Cli,
             Trigger::Pipe,
         ] {

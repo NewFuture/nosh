@@ -412,6 +412,74 @@ impl Completer for Completion {
             );
             return CompletionResult::Unavailable { message };
         }
+        if let Some(prefix) = &self.config.inline_prefix
+            && crate::inline_commands::is_command(line, prefix, true)
+        {
+            self.service.cancel();
+            self.current = None;
+            self.selections.clear();
+            let query = Query {
+                text: line.into(),
+                cursor,
+                session: self.service.session(),
+                epoch: 0,
+                trigger: if self.explicit {
+                    Trigger::Explicit
+                } else {
+                    Trigger::Refresh
+                },
+            };
+            self.explicit = false;
+            if line.len() > MAX_INPUT || line.get(..cursor).is_none() {
+                let message = tr!(
+                    "内置命令补全输入无效或超限",
+                    "invalid or oversized inline command completion input"
+                )
+                .to_string();
+                self.status(&query, Phase::Unavailable, Some(message.clone()), 0);
+                return CompletionResult::Unavailable { message };
+            }
+            let scope = crate::inline_commands::completion_scope(line, cursor, prefix)
+                .expect("command completion scope");
+            let mut candidates = scope
+                .values
+                .iter()
+                .filter_map(|(value, description)| {
+                    let (rank, matches) = super::matching::rank(value, scope.word, true, false)?;
+                    Some((
+                        rank,
+                        Candidate {
+                            source: Source::Command,
+                            value: (*value).into(),
+                            kind: if scope.command_name {
+                                Kind::Subcommand
+                            } else {
+                                Kind::Value
+                            },
+                            description: description.map(str::to_owned),
+                            span: scope.span.clone(),
+                            noquote: true,
+                            nospace: false,
+                            matches,
+                            display: None,
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|a, b| (&a.0, &a.1.value).cmp(&(&b.0, &b.1.value)));
+            let answer = Answer {
+                query,
+                candidates: candidates
+                    .into_iter()
+                    .map(|(_, candidate)| candidate)
+                    .collect(),
+                state: State::Complete,
+            };
+            self.values = suggestions(&answer);
+            self.status(&answer.query, Phase::Complete, None, self.values.len());
+            return CompletionResult::fresh(self.values.clone())
+                .with_partial(Some(self.partial(&answer.query)));
+        }
         let changed = self.current.as_ref().is_none_or(|query| {
             !query.matches(line, cursor) || query.session != self.service.session()
         });
@@ -534,6 +602,83 @@ mod tests {
             matches: Vec::new(),
             display: None,
         }
+    }
+
+    #[test]
+    fn inline_commands_complete_locally_without_a_worker_or_escaping_prefixes() {
+        for (prefix, line, value, completed) in [
+            ("#", "#mo", "mode", "#mode"),
+            ("##", "##th", "think", "##think"),
+            ("问", "  问he", "help", "  问help"),
+        ] {
+            let state = Arc::new(Mutex::new(None));
+            let mut completer = Completion::new(
+                Config {
+                    inline_prefix: Some(prefix.into()),
+                    ..Default::default()
+                },
+                state.clone(),
+                Arc::new(|| {}),
+            );
+            let CompletionResult::Fresh { suggestions, .. } = completer.complete(line, line.len())
+            else {
+                panic!("local command completion did not finish");
+            };
+            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions[0].value, value);
+            let mut text = line.to_owned();
+            text.replace_range(suggestions[0].span.start..suggestions[0].span.end, value);
+            assert_eq!(text, completed);
+            assert!(matches!(
+                completer.poll_completion(),
+                CompletionStatus::Idle
+            ));
+            assert_eq!(
+                state.lock().unwrap().as_ref().unwrap().phase,
+                Phase::Complete
+            );
+            assert!(completer.current.is_none());
+        }
+    }
+
+    #[test]
+    fn inline_fixed_arguments_and_empty_results_are_authoritative() {
+        let mut completer = Completion::new(
+            Config {
+                inline_prefix: Some("#".into()),
+                ..Default::default()
+            },
+            Default::default(),
+            Arc::new(|| {}),
+        );
+        for (line, expected) in [
+            ("#", 9),
+            ("# ", 9),
+            ("#mode ", 3),
+            ("#think ", 2),
+            ("#auto ", 2),
+            ("#mode au", 1),
+            ("#out invalid", 0),
+            ("#fix explain", 0),
+            ("#unknown", 0),
+        ] {
+            let CompletionResult::Fresh { suggestions, .. } = completer.complete(line, line.len())
+            else {
+                panic!("non-authoritative inline completion: {line}");
+            };
+            assert_eq!(suggestions.len(), expected, "{line}");
+            for suggestion in suggestions.iter() {
+                assert!(
+                    line.get(suggestion.span.start..suggestion.span.end)
+                        .is_some()
+                );
+                assert!(!suggestion.value.contains('\\'));
+            }
+        }
+        assert!(matches!(
+            completer.complete("#mode ", 999),
+            CompletionResult::Unavailable { .. }
+        ));
     }
 
     #[test]
