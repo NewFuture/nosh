@@ -59,7 +59,7 @@ fn interactive(home: &std::path::Path, safe: bool) -> Vec<u8> {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
                 &raw mut size,
             )
         },
