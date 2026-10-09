@@ -568,6 +568,26 @@ mod tests {
 
     #[test]
     fn command_lock_outlives_dependency_managers() {
+        // Other tests' fork/exec windows must not inherit this test's lock.
+        const PROBE: &str = "NOSH_SOURCE_LOCK_PROBE";
+        if std::env::var_os(PROBE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "source::tests::command_lock_outlives_dependency_managers",
+                    "--nocapture",
+                ])
+                .env(PROBE, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         for dependency in Dependency::ALL {
@@ -581,6 +601,6 @@ mod tests {
             assert!(lock_root(root, &[dependency]).is_err());
         }
         drop(lock);
-        assert!(lock_root(root, &Dependency::ALL).is_ok());
+        lock_root(root, &Dependency::ALL).unwrap();
     }
 }
