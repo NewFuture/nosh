@@ -104,23 +104,21 @@ pub(crate) fn paths(
         directory.display(),
         component.starts_with('.')
     );
-    let set = cache.get(&key, Duration::from_secs(1)).unwrap_or_else(|| {
-        let set = match fs::read_dir(&directory) {
-            Ok(entries) => Set::collect(entries.take(65_537).enumerate().filter_map(
-                |(visited, entry)| {
-                    if visited == 65_536 {
-                        return Some(Err("directory enumeration limit reached".into()));
-                    }
-                    directory_entry(entry, component.starts_with('.'), directories).transpose()
-                },
-            )),
-            Err(error) => Set {
-                entries: Vec::new(),
-                reason: Some(format!("{}: {error}", directory.display())),
+    let set = match cache.load(key, Duration::from_secs(1), || {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        Ok(Set::collect(entries.take(65_537).enumerate().filter_map(
+            |(visited, entry)| {
+                if visited == 65_536 {
+                    return Some(Err("directory enumeration limit reached".into()));
+                }
+                directory_entry(entry, component.starts_with('.'), directories).transpose()
             },
-        };
-        cache.insert(key, set)
-    });
+        )))
+    }) {
+        Ok(set) => set,
+        Err(error) => return Answer::unavailable(query, error),
+    };
     let component_context = Context {
         word: component.into(),
         ..context.clone()

@@ -340,6 +340,11 @@ fn directory_collection_retains_symlinks_hidden_names_and_partial_errors() {
             assert_eq!(result.state, State::Complete);
         }
     }
+    for text in ["cat missing/", "cat .hidden/"] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert!(matches!(result.state, State::Unavailable(_)), "{text}");
+        assert!(result.candidates.is_empty());
+    }
 }
 
 #[test]
@@ -460,7 +465,7 @@ fn plusdirs_preserves_script_order_and_deduplicates_directories() {
         0
     );
     let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
-    let result = answer(&mut Server::default(), query("sample "), snapshot);
+    let result = answer(&mut Server::default(), query("sample "), snapshot.clone());
     assert_eq!(result.state, State::Complete);
     assert_eq!(
         result
@@ -474,6 +479,9 @@ fn plusdirs_preserves_script_order_and_deduplicates_directories() {
             ("beta/", Source::Path)
         ]
     );
+    let result = answer(&mut Server::default(), query("sample missing/"), snapshot);
+    assert!(matches!(result.state, State::Partial(_)));
+    assert_eq!(candidate_values(&result), ["zebra/", "alpha/"]);
 }
 
 #[test]
@@ -482,7 +490,8 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     assert_eq!(
         shell.run_user_line(
             "unset GIT_DIR MAKEFILES GIT_CONFIG_VALUE_1; GIT_DIR=local-only; MAKEFILES=local.mk; \
-             export HOME=provider-home GNUMAKEFLAGS='-I first' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
+             export HOME=provider-home GNUMAKEFLAGS='-I first' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1; \
+             export GIT_CEILING_DIRECTORIES=/fixture/ceiling GIT_DISCOVERY_ACROSS_FILESYSTEM=0"
         ).exit_code,
         0
     );
@@ -494,6 +503,8 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     for (name, value) in [
         ("HOME", "provider-home"),
         ("GNUMAKEFLAGS", "-I first"),
+        ("GIT_CEILING_DIRECTORIES", "/fixture/ceiling"),
+        ("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0"),
         ("GIT_CONFIG_COUNT", "1"),
         ("GIT_CONFIG_KEY_0", "core.abbrev"),
         ("GIT_CONFIG_VALUE_0", "9"),

@@ -123,13 +123,18 @@ _sleep() {
     /bin/sh -c 'echo $$ > sleep_pid; : > provider_started; exec /bin/sleep 10'
     : > late_result; COMPREPLY=(late-only)
 }
+_failed() {
+    printf 'call\n' >> calls_failed
+    complete -F missing_fixture_provider fixture_failed
+    return 124
+}
 _empty() { printf 'call\n' >> calls_empty; COMPREPLY=(); }
 complete -F _one fixture_one
 complete -F _many fixture_many
 complete -F _background fixture_background
 complete -F _loop fixture_loop
 complete -F _sleep fixture_sleep
-complete -F missing_fixture_provider fixture_failed
+complete -F _failed fixture_failed
 complete -F _empty fixture_empty
 "#
             )
@@ -275,6 +280,7 @@ printf 'GNU Make 4.4\n'
             "calls_many": calls("calls_many"),
             "calls_background": calls("calls_background"),
             "calls_slow": calls("calls_slow"),
+            "calls_failed": calls("calls_failed"),
             "calls_empty": calls("calls_empty"),
             "abbreviation_selections": *abbreviation_selections.lock().unwrap(),
         })
@@ -526,12 +532,15 @@ fn completion_failure_and_empty_results() {
         "repl-completion",
         &[
             ("completion> ", b"fixture_failed q\t"),
+            ("Completion unavailable", b"\x1b"),
+            ("completion> fixture_failed q", b"\t"),
             ("Completion unavailable", b"\t\r"),
             ("completion> fixture_failed q", b"\x15exit 0\r"),
         ],
     );
     unexecuted(&result);
     assert_eq!(result["requests"], 0);
+    assert_eq!(result["calls_failed"], 2);
 
     let (result, _, _) = fixture(
         "repl-completion",

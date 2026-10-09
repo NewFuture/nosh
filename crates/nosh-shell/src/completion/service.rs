@@ -847,7 +847,7 @@ mod tests {
         let service = fixture.service();
         complete(&service, "cd ");
         let original = service.shared.child.lock().unwrap().clone().unwrap();
-        for text in ["make --jobs 4", "jobsample "] {
+        for text in ["make --jobs 4", "jobsample ", "cat missing/"] {
             let query = request(&service, text, Trigger::Explicit);
             wait_answer(&service, &query, |answer| {
                 matches!(answer.state, State::Unavailable(_))

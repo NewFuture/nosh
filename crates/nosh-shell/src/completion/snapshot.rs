@@ -34,6 +34,8 @@ pub(crate) fn capture(
                     | "GIT_WORK_TREE"
                     | "GIT_COMMON_DIR"
                     | "GIT_NAMESPACE"
+                    | "GIT_CEILING_DIRECTORIES"
+                    | "GIT_DISCOVERY_ACROSS_FILESYSTEM"
                     | "XDG_CONFIG_HOME"
                     | "GNUMAKEFLAGS"
                     | "MAKEFLAGS"

@@ -374,7 +374,12 @@ impl Server {
                 let directories =
                     native::paths(query.clone(), context, snapshot, &mut self.cache, true);
                 if !directories.state.is_complete() {
-                    answer.state = directories.state;
+                    answer.state = match directories.state {
+                        State::Unavailable(reason) if !answer.candidates.is_empty() => {
+                            State::Partial(reason)
+                        }
+                        state => state,
+                    };
                 }
                 answer.candidates.extend(directories.candidates);
                 seen.clear();
