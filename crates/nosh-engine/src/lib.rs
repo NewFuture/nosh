@@ -1,13 +1,30 @@
 //! Engine-facing types: messages in, structured events out. Nothing here
 //! exposes template text, special tokens or tool-call syntax.
 
+pub mod mock;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::LlmError;
+pub use mock::MockChatEngine;
+
+/// Recoverable protocol errors and opaque, source-preserving backend failures.
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("{0}")]
+    Config(String),
+    #[error("context is full ({used} of {max} tokens)")]
+    ContextFull { used: usize, max: usize },
+    #[error("unknown session {0}")]
+    UnknownSession(SessionId),
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
 
 /// A tool the model may call. `parameters` is a JSON Schema object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,6 +81,20 @@ pub enum Message {
     Tool(String),
     /// A standalone tool reply supplied by the user; never compacted as tool output.
     UserAnswer(String),
+}
+
+/// One-line stand-in for an old tool result (keeps the status header).
+pub fn shorten_tool_result(content: &str) -> String {
+    const KEEP: usize = 200;
+    let count = content.chars().count();
+    if count <= KEEP + 40 {
+        return content.to_string();
+    }
+    let end = content.char_indices().nth(KEEP).expect("long result").0;
+    format!(
+        "{}\n[\u{2026} older output omitted to save context ({count} chars)]",
+        &content[..end]
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,15 +245,15 @@ impl CancelHandle {
     }
 }
 
-/// Messages in, events out (design §3.4). Implementations: in-process
-/// [`crate::LocalChatEngine`] and the scripted [`crate::MockChatEngine`].
+/// Messages in, events out (design §3.4). Implemented by inference adapters
+/// and the scripted [`MockChatEngine`], without requiring a model runtime.
 pub trait ChatEngine: Send {
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError>;
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError>;
 
     /// One-step decoding policy, reset to Auto after the next step.
     /// None disables tool calls; Required/Named return one call, not prose.
-    fn set_tool_choice(&mut self, _sid: SessionId, _choice: ToolChoice) -> Result<(), LlmError> {
-        Err(LlmError::Config(
+    fn set_tool_choice(&mut self, _sid: SessionId, _choice: ToolChoice) -> Result<(), EngineError> {
+        Err(EngineError::Config(
             "engine does not support tool choice".into(),
         ))
     }
@@ -234,11 +265,11 @@ pub trait ChatEngine: Send {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError>;
+    ) -> Result<StepOutcome, EngineError>;
 
     /// Keeps the first `keep` appended/generated messages, including system context.
     /// The initial system prefix is never removed.
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError>;
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError>;
 
     /// Number of appended/generated messages, excluding only the initial system prefix.
     fn message_count(&self, sid: SessionId) -> usize;
@@ -251,7 +282,7 @@ pub trait ChatEngine: Send {
         &mut self,
         sid: SessionId,
         keep_recent: usize,
-    ) -> Result<usize, LlmError>;
+    ) -> Result<usize, EngineError>;
 
     /// `(used, max)` context tokens.
     fn context_usage(&self, sid: SessionId) -> (usize, usize);
@@ -263,9 +294,65 @@ pub trait ChatEngine: Send {
     }
 
     /// Optional host observations, separate from model input and output.
-    fn record_observation(&mut self, _sid: SessionId, _value: Value) -> Result<(), LlmError> {
+    fn record_observation(&mut self, _sid: SessionId, _value: Value) -> Result<(), EngineError> {
         Ok(())
     }
 
     fn close(&mut self, sid: SessionId);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortening_preserves_unicode_and_the_existing_marker() {
+        let short = "\u{4e2d}".repeat(240);
+        assert_eq!(shorten_tool_result(&short), short);
+        let long = "\u{4e2d}".repeat(241);
+        assert_eq!(
+            shorten_tool_result(&long),
+            format!(
+                "{}\n[\u{2026} older output omitted to save context (241 chars)]",
+                "\u{4e2d}".repeat(200)
+            )
+        );
+    }
+
+    #[test]
+    fn cancellation_is_shared_and_resettable() {
+        let cancel = CancelHandle::default();
+        let worker = cancel.clone();
+        std::thread::spawn(move || worker.cancel()).join().unwrap();
+        assert!(cancel.is_cancelled());
+        let observer = cancel.clone();
+        cancel.reset();
+        assert!(!observer.is_cancelled());
+    }
+
+    #[test]
+    fn protocol_serialization_preserves_existing_shapes() {
+        let message = Message::UserAnswer("keep backups".into());
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value, serde_json::json!({"UserAnswer": "keep backups"}));
+        assert_eq!(serde_json::from_value::<Message>(value).unwrap(), message);
+        for (choice, expected) in [
+            (ToolChoice::Auto, serde_json::json!({"type": "auto"})),
+            (ToolChoice::None, serde_json::json!({"type": "none"})),
+            (
+                ToolChoice::Required,
+                serde_json::json!({"type": "required"}),
+            ),
+            (
+                ToolChoice::Named("exec".into()),
+                serde_json::json!({"type": "named", "name": "exec"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&choice).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<ToolChoice>(expected).unwrap(),
+                choice
+            );
+        }
+    }
 }

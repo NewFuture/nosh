@@ -87,6 +87,20 @@ class DriverTests(unittest.TestCase):
         screen.feed("\r\x1b[K" + driver.PROMPT + "git status")
         self.assertEqual(screen.line(), driver.PROMPT + "git status")
 
+    def test_draft_clearing_waits_for_an_editor_repaint_after_task_stats(self):
+        stats = "\r\n┃ stats: prompt 10\r\n"
+        for incomplete in (
+            "\x1b[?25h",
+            "\x1b[?25h" + stats,
+            stats + "\x1b[6n",
+            stats + "\x1b[?25l" + "draft" * 2000 + "\x1b[?25",
+        ):
+            with self.subTest(incomplete=incomplete[:40]):
+                self.assertFalse(driver.editor_repainted_after_stats(incomplete))
+        frame = stats + "\x1b[6n\x1b[?25l" + "中文" * 1800 + "\x1b[?25h"
+        self.assertTrue(driver.editor_repainted_after_stats(frame))
+        self.assertTrue(driver.editor_repainted_after_stats(frame + "\x1b[6n"))
+
     def test_logical_prompt_survives_wrapping_scrolling_and_continuation_lines(self):
         for width in (24, 40, 160):
             for content in ("a" * 1000, "中文" * 500):

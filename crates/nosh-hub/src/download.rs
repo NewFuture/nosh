@@ -88,7 +88,7 @@ fn acquire_lock(
             Err(std::fs::TryLockError::WouldBlock) => {
                 if !waiting {
                     waiting = true;
-                    progress.note(&crate::tr!(
+                    progress.note(&nosh_platform::tr!(
                         format!(
                             "另一个 nosh 进程正在下载 {}，等待其完成…（Ctrl-C 取消）",
                             file.name
@@ -208,7 +208,7 @@ fn download_file_with(
     let mut hasher = Sha256::new();
     if offset > 0 {
         let mb = offset as f64 / 1e6;
-        progress.note(&crate::tr!(
+        progress.note(&nosh_platform::tr!(
             format!("从 {mb:.1} MB 处续传 {}（校验已下载部分）", file.name),
             format!(
                 "resuming {} from {mb:.1} MB (verifying existing part)",
@@ -271,7 +271,7 @@ fn download_file_with(
                     failures += 1;
                 }
                 let next = &cands[(idx + 1) % cands.len()];
-                progress.note(&crate::tr!(
+                progress.note(&nosh_platform::tr!(
                     format!("{} 失败：{e}；切换到 {}", c.hub, next.hub),
                     format!("{} failed: {e}; switching to {}", c.hub, next.hub)
                 ));
@@ -330,7 +330,7 @@ fn fetch_chunk(
             part.seek(SeekFrom::Start(0))?;
             *hasher = Sha256::new();
             *offset = 0;
-            progress.note(&crate::tr!(
+            progress.note(&nosh_platform::tr!(
                 format!("{} 不支持断点续传，从头下载", c.hub),
                 format!("{} ignores Range; restarting from zero", c.hub)
             ));

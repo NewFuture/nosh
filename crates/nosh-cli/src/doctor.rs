@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant};
 
 use nosh_hub::sources::{Endpoints, candidates};
-use nosh_hub::{ModelEntry, ModelHub, net, tr};
+use nosh_hub::{ModelEntry, ModelHub, net};
+use nosh_platform::tr;
 use nosh_shell::style;
 
 use crate::config::Config;
@@ -97,7 +98,7 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
                 context_length: setup.context_length,
                 ..Default::default()
             };
-            opts.select_device(model)
+            opts.select_device(&model.weights)
                 .map(|(_, selection)| format!(
                     "{} · CUDA compiled: {} · requested {}: {}",
                     selection.actual, cfg!(feature = "cuda"), selection.requested, selection.reason,

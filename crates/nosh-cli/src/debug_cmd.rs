@@ -3,10 +3,9 @@
 use std::io::Write;
 
 use clap::Subcommand;
-use nosh_llm::{
-    ChatEngine, Event, KvDtype, LocalChatEngine, LocalEngineOptions, Message, SessionSpec,
-    ToolSpec, rss_mb,
-};
+use nosh_engine::{ChatEngine, Event, Message, SessionSpec, ToolSpec};
+use nosh_llm::{KvDtype, LocalChatEngine, LocalEngineOptions};
+use nosh_platform::process::rss_mb;
 use nosh_shell::style;
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -95,7 +94,7 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                 }
             };
             let mut engine = match LocalChatEngine::load(
-                &resolved,
+                crate::engine::model_source(&resolved),
                 LocalEngineOptions {
                     device,
                     context_length: ctx,

@@ -3,8 +3,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use nosh_llm::{
-    CancelHandle, ChatEngine, LlmError, Message, SessionSpec, StopReason, ToolCall, ToolSpec, Usage,
+use nosh_engine::{
+    CancelHandle, ChatEngine, EngineError, Message, SessionSpec, StopReason, ToolCall, ToolSpec,
+    Usage,
 };
 use nosh_permissions::{Context, Decision, Risk, SessionAllowList, assess_read, evaluate};
 use nosh_shell::{CommandSnapshot, EmbeddedShell, UserCommand, UserOutput};
@@ -64,7 +65,7 @@ pub enum AssistError {
     #[error("command assistance: {0}")]
     Protocol(String),
     #[error(transparent)]
-    Engine(#[from] LlmError),
+    Engine(#[from] EngineError),
 }
 
 #[derive(Debug, Clone)]
@@ -293,39 +294,24 @@ pub fn generate(
     run(engine, &request, cfg, &cancel, |_| true)
 }
 
-fn direct_final(
-    intent: Intent,
-    text: &str,
-    commands: &CommandSnapshot,
-) -> Result<AssistResult, AssistError> {
-    const INVALID_TEXT: &str =
-        "expected a command or exact [None], not an empty or invalid final response";
-    const INVALID_PROGRAM: &str =
-        "final response did not contain a valid complete shell program or exact [None]";
+fn direct_final(text: &str, commands: &CommandSnapshot) -> Result<AssistResult, AssistError> {
     let final_text = text.trim();
-    let (detail, legacy) = if text.len() > 16 * 1024 {
-        ("reply exceeds the 16384-byte limit", INVALID_TEXT)
+    let reason = if text.len() > 16 * 1024 {
+        "reply exceeds the 16384-byte limit"
     } else if final_text.is_empty() {
-        ("reply is empty", INVALID_TEXT)
+        "reply is empty"
     } else if final_text.chars().any(nosh_shell::style::is_hidden) {
-        ("reply contains hidden characters", INVALID_TEXT)
+        "reply contains hidden characters"
     } else if final_text == "[None]" {
         return Ok(AssistResult::NoSuggestion);
     } else if final_text.contains("```") {
-        ("reply contains Markdown fences", INVALID_PROGRAM)
+        "reply contains Markdown fences"
     } else if !commands.validate(final_text) {
-        ("reply is not valid complete shell input", INVALID_PROGRAM)
+        "reply is not valid complete shell input"
     } else {
         return Ok(AssistResult::Command(final_text.into()));
     };
-    Err(AssistError::Protocol(
-        if intent == Intent::Fix {
-            detail
-        } else {
-            legacy
-        }
-        .into(),
-    ))
+    Err(AssistError::Protocol(reason.into()))
 }
 
 /// Cancellation belongs to this request, so superseded background jobs cannot
@@ -404,7 +390,7 @@ pub(crate) fn run(
 
 fn run_session(
     engine: &mut dyn ChatEngine,
-    sid: nosh_llm::SessionId,
+    sid: nosh_engine::SessionId,
     request: &AssistRequest,
     cfg: &AgentConfig,
     cancel: &CancelHandle,
@@ -432,9 +418,9 @@ fn run_session(
         engine.set_tool_choice(
             sid,
             if final_response {
-                nosh_llm::ToolChoice::None
+                nosh_engine::ToolChoice::None
             } else {
-                nosh_llm::ToolChoice::Auto
+                nosh_engine::ToolChoice::Auto
             },
         )?;
         let out = engine.step(sid, std::mem::take(&mut pending), &mut |_| {})?;
@@ -460,7 +446,7 @@ fn run_session(
             ));
         }
         if out.tool_calls.is_empty() {
-            let result = match direct_final(request.intent, &out.text, &request.commands) {
+            let result = match direct_final(&out.text, &request.commands) {
                 Ok(result) => result,
                 Err(error) if !final_response => {
                     rejection = Some(error.to_string());

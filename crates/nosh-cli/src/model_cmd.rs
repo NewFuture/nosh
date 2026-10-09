@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use nosh_hub::{BarProgress, FileState, HubError, ModelHub, PullOptions, SourceSelection, net, tr};
+use nosh_hub::{BarProgress, FileState, HubError, ModelHub, PullOptions, SourceSelection, net};
+use nosh_platform::tr;
 use nosh_shell::style;
 
 #[derive(Debug, Subcommand)]

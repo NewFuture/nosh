@@ -5,10 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::LlmError;
-use crate::engine::{
-    CallError, CallErrorKind, CancelHandle, ChatEngine, Event, Message, SessionId, SessionSpec,
-    StepOutcome, StopReason, ToolCall, Usage,
+use crate::{
+    CallError, CallErrorKind, CancelHandle, ChatEngine, EngineError, Event, Message, SessionId,
+    SessionSpec, StepOutcome, StopReason, ToolCall, Usage,
 };
 
 #[derive(Debug, Clone)]
@@ -112,9 +111,9 @@ fn approx_tokens(msgs: &[Message]) -> usize {
 }
 
 impl ChatEngine for MockChatEngine {
-    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), LlmError> {
+    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), EngineError> {
         if !self.sessions.contains_key(&sid) {
-            return Err(LlmError::UnknownSession(sid));
+            return Err(EngineError::UnknownSession(sid));
         }
         self.observations.lock().unwrap().push((sid, value));
         Ok(())
@@ -124,15 +123,15 @@ impl ChatEngine for MockChatEngine {
         &mut self,
         sid: SessionId,
         choice: crate::ToolChoice,
-    ) -> Result<(), LlmError> {
+    ) -> Result<(), EngineError> {
         if !self.sessions.contains_key(&sid) {
-            return Err(LlmError::UnknownSession(sid));
+            return Err(EngineError::UnknownSession(sid));
         }
         self.tool_choices.lock().unwrap().push((sid, choice));
         Ok(())
     }
 
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
         let id = self.next_id;
         self.next_id += 1;
         self.sessions
@@ -146,12 +145,12 @@ impl ChatEngine for MockChatEngine {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError> {
+    ) -> Result<StepOutcome, EngineError> {
         self.received.lock().unwrap().push(append.clone());
         let history = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         history.extend(append);
         let events = match (&mut self.responder, self.turns.pop_front()) {
             (_, Some(t)) => t,
@@ -201,11 +200,11 @@ impl ChatEngine for MockChatEngine {
         Ok(out)
     }
 
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
         let h = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         h.truncate(keep.saturating_add(1));
         Ok(())
     }
@@ -218,16 +217,16 @@ impl ChatEngine for MockChatEngine {
         &mut self,
         sid: SessionId,
         keep_recent: usize,
-    ) -> Result<usize, LlmError> {
+    ) -> Result<usize, EngineError> {
         let h = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         let n = h.len();
         let mut changed = 0;
         for m in h.iter_mut().take(n.saturating_sub(keep_recent)) {
             if let Message::Tool(c) = m {
-                let s = crate::conversation::shorten_tool_result(c);
+                let s = crate::shorten_tool_result(c);
                 if &s != c {
                     *c = s;
                     changed += 1;
@@ -259,7 +258,7 @@ impl ChatEngine for MockChatEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::SamplingParams;
+    use crate::SamplingParams;
     use serde_json::json;
 
     fn spec() -> SessionSpec {
@@ -323,7 +322,7 @@ mod tests {
         let mut engine = MockChatEngine::new(vec![]);
         assert!(matches!(
             engine.compact_tool_results(99, 0),
-            Err(LlmError::UnknownSession(99))
+            Err(EngineError::UnknownSession(99))
         ));
         let sid = engine.open(spec()).unwrap();
         engine
@@ -343,7 +342,7 @@ mod tests {
         engine.close(sid);
         assert!(matches!(
             engine.compact_tool_results(sid, 0),
-            Err(LlmError::UnknownSession(_))
+            Err(EngineError::UnknownSession(_))
         ));
     }
 }

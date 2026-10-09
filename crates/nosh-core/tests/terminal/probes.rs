@@ -120,7 +120,7 @@ pub(super) fn terminal_probe() {
         }
         "ask-user" | "ask-user-pipe" | "ask-user-cancel" => {
             use nosh_core::user_input::{TerminalUserInput, UserInput, UserQuestion};
-            let cancel = nosh_llm::CancelHandle::default();
+            let cancel = nosh_engine::CancelHandle::default();
             let cancellation = if mode == "ask-user-cancel" {
                 let handle = cancel.clone();
                 Some(thread::spawn(move || {
@@ -185,8 +185,8 @@ pub(super) fn terminal_probe() {
             let mut ai = nosh_core::ShellAi::new(
                 Box::new(move |_| {
                     Ok(nosh_core::LoadedEngine {
-                        engine: Box::new(nosh_llm::MockChatEngine::with_responder(|_| {
-                            vec![nosh_llm::mock::text("touch accepted")]
+                        engine: Box::new(nosh_engine::MockChatEngine::with_responder(|_| {
+                            vec![nosh_engine::mock::text("touch accepted")]
                         })),
                         description: "mock".into(),
                     })

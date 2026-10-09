@@ -3,7 +3,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use nosh_llm::CancelHandle;
+use nosh_engine::CancelHandle;
 use nosh_shell::{AssistDisplay, Assistance};
 
 use crate::command_assist::{self, AssistError, AssistOutcome, AssistRequest, AssistResult};

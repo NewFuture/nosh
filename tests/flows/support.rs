@@ -8,8 +8,8 @@ pub(super) use nosh_core::{
     Agent, AgentConfig, ApprovalResponse, Environment, NoTerminal, RecordUi, Scripted, ShellAi,
     TaskInput, TaskStatus, ToolSet,
 };
-pub(super) use nosh_llm::mock::{bad_call, call, text};
-pub(super) use nosh_llm::{CallErrorKind, Message, MockChatEngine};
+pub(super) use nosh_engine::mock::{bad_call, call, text};
+pub(super) use nosh_engine::{CallErrorKind, Message, MockChatEngine};
 pub(super) use nosh_permissions::{ApprovalMode, Risk};
 pub(super) use nosh_shell::repl::{GuardChoice, LineOutcome, Pipeline, ReplUi};
 pub(super) use nosh_shell::{EmbeddedShell, ReplConfig, ShellOptions, Trigger};

@@ -114,7 +114,6 @@ const KNOWN: &[(&str, &[&str])] = &[
         &["id", "path", "context_length", "device", "thinking"],
     ),
     ("download", &["auto", "source_selection"]),
-    ("engine", &["shared", "idle_exit_minutes", "kv_budget"]),
     (
         "safety",
         &["allow", "deny", "protected_paths", "fallback_shell"],
@@ -201,7 +200,7 @@ impl Reader<'_> {
 impl Config {
     /// Loads the user config (missing file = defaults).
     pub fn load() -> Self {
-        Self::load_from(nosh_hub::paths::config_file())
+        Self::load_from(nosh_platform::paths::config_file())
     }
 
     /// A missing file means defaults; a file that cannot be read also gets
@@ -360,11 +359,7 @@ impl Config {
             match v.as_str() {
                 "on" => c.thinking = true,
                 "off" => c.thinking = false,
-                "auto" => {
-                    r.warnings
-                        .push("model.thinking = auto is not implemented; using off".into());
-                }
-                _ => r.warnings.push("model.thinking: off | on | auto".into()),
+                _ => r.warnings.push("model.thinking: off | on".into()),
             }
         }
         if let Some(v) = r.str("download", "auto") {
@@ -440,6 +435,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documented_configuration_uses_supported_settings() {
+        let document = include_str!("../../../docs/DESIGN.md").replace("\r\n", "\n");
+        let example = document
+            .split_once("```toml\n")
+            .expect("configuration example")
+            .1
+            .split_once("\n```")
+            .expect("closed configuration example")
+            .0;
+        let config = Config::parse(example);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert!(config.safety_error.is_none(), "{:?}", config.safety_error);
+    }
+
+    #[test]
+    fn unsupported_configuration_is_reported_instead_of_reserved() {
+        let config = Config::parse(
+            "[engine]\nshared = true\nidle_exit_minutes = 15\nkv_budget = 25\n\
+             [model]\nthinking = 'auto'\n",
+        );
+        assert!(!config.thinking);
+        assert_eq!(
+            config.warnings,
+            ["unknown section [engine]", "model.thinking: off | on"]
+        );
+        for (value, expected) in [("on", true), ("off", false)] {
+            let config = Config::parse(&format!("[model]\nthinking = '{value}'"));
+            assert_eq!(config.thinking, expected);
+            assert!(config.warnings.is_empty());
+        }
+    }
 
     #[test]
     fn editing_settings_are_typed_and_invalid_groups_fall_back_without_losing_other_settings() {

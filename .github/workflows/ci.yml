@@ -68,6 +68,8 @@ jobs:
       - name: current npm
         run: npm install --global npm@12.1.0 --ignore-scripts --no-audit --no-fund
       - name: evaluation runner tests (no model)
+        env:
+          NOSH_TEST_BINARY: ${{ github.workspace }}/target/debug/nosh
         run: python3 -m unittest eval.tests -v
       - name: cpu features and kernel paths
         if: success() || failure()
@@ -140,6 +142,8 @@ jobs:
           workspaces: |
             tools/source -> target
             .nosh/reedline -> ../../target/reedline
+      - name: engine and platform contracts
+        run: cargo test -p nosh-engine -p nosh-platform --locked
       - name: source lifecycle
         run: cargo test --manifest-path tools/source/Cargo.toml --locked
       - name: patched editor regressions

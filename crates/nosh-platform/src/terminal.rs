@@ -1,4 +1,4 @@
-//! Output capabilities, shared by progress bars and the shell UI.
+//! Host output capabilities, shared by progress bars and the shell UI.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;

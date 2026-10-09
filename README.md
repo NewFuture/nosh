@@ -2,14 +2,14 @@
 
 nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）、可以断网运行的 AI shell。
 
-> 状态：Linux 上的 MVP 已完成，结果见 [MVP 报告](docs/MVP-REPORT.md)。
+> 只维护当前版本。支持范围与限制见[系统设计](docs/DESIGN.md#03-实现状态)。
 
 - **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`#` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
 - **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
 - **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
 - **上下文补全**：命令与路径默认 smart-case 模糊；内置 Git `switch`、GNU Make 静态目标及 `npm run`／Yarn 项目脚本补全，保留已加载定义的语义。共用一个有界、可取消的补全进程；覆盖和限制见[补全说明](docs/COMPLETION.md)。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。每次任务附上当前项目类型、manifest 基本信息及 Git 状态；切换项目或进入普通目录后重新判断，不沿用上一项目的描述。
-- **本地推理**：基于 candle + GGUF。首次使用时自动下载模型，之后可以完全离线。默认模型在 8K 上下文下常驻内存约 2.7 GiB（x86 AVX2/VNNI；详见 [MVP 报告 §5.3](docs/MVP-REPORT.md)）。
+- **本地推理**：基于 candle + GGUF。首次使用时按下载策略准备模型，之后可以完全离线；设备选择与运行限制见[推理说明](docs/INFERENCE.md)。
 - **安全**：agent 发起的命令要经过风险分级和审批。
 
 ```bash
@@ -41,73 +41,34 @@ AI 任务默认显示 **`审批: 自动`**；可用 `ai mode confirm|auto|yolo` 
 
 ## 实时输入提示与语法高亮
 
-正常交互终端默认启用 `input_assist`，无需插件或模型；`--safe` / `NOSH_DISABLE_AI=1` 不会关闭这项输入辅助。命令、字符串、变量、操作符和注释按结构显示；待完成、查询中和暂不可用等状态会在输入行上方提示。配置的 AI 前缀和 `ai` 入口保留原有语义，不把自然语言正文当作 Bash 脚本诊断。
-
-未识别命令停止输入约 1 秒后用红色删除线标记命令词；配置启用状态栏时，也会在已有反馈区提供文字原因，因此 `NO_COLOR` / `CLICOLOR=0` 下仍可取得含义。PATH 中被确认无搜索权限的目录会按快照缓存，并继续查找其他目录；所有候选均缺失或不可执行时，可以判定当前用户没有可执行命令，但不宣称文件不存在。真正的 I/O 故障、未检查完或动态行为才保留未知／暂不可用。状态栏复用这些已有事实提供摘要和无颜色反馈；不会修改系统 PATH 或要求提权。
-
-路径下划线表示当前快照中存在，不代表可读写或已经批准执行。普通参数不存在不报文件错误；`echo hello > new.txt` 允许新目标，`touch input; cat < input` 不把执行前缺失误报为执行必失败。动态命令名、条件定义或无法确定的展开保持未知。
-
-可在用户配置中关闭：
+正常交互终端默认启用 `input_assist`，无需插件或模型；`--safe` / `NOSH_DISABLE_AI=1` 不会关闭它。输入按语法高亮，命令与路径状态异步查询；未知或动态行为不伪装成确定错误，路径存在不代表已获执行授权。可在用户配置中关闭：
 
 ```toml
 [shell]
 input_assist = false
 ```
 
-语法分析和文件查询由两个有界辅助进程隔离；超时或超出预算会明确降级，而不是等待查询完成或无限重启。`NO_COLOR` 关闭输入样式，不关闭已启用的状态栏文字反馈。基本终端和非 TTY 不启用实时输入提示。数据流、判定规则、资源边界、恢复条件及可复现对照见 [实时输入解析设计](docs/INPUT-ASSIST.md)。
+基本终端和非 TTY 不启用实时输入提示；`NO_COLOR` 关闭样式，但保留已启用的状态栏文字反馈。判定规则、两个有界辅助进程、资源预算和恢复条件见[实时输入辅助](docs/INPUT-ASSIST.md)。
 
 ## 可选 NVIDIA CUDA 推理
 
-默认设备为 **`auto`**：根据构建能力、可见 GPU 和当前可用显存，在加载时选择 GPU 或 CPU。普通构建仍是 CPU-only，不需要 CUDA；使用 GPU 需在 Linux/WSL 上有 NVIDIA 驱动与 CUDA toolkit（`nvcc`、头文件及 cuBLAS 等运行库），并显式构建 CUDA 版本：
-
-```bash
-export PATH=/usr/local/cuda/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-cargo build --release --locked -p nosh-cli --features cuda
-./target/release/nosh --offline doctor
-./target/release/nosh debug gen "Explain a shell pipeline." --temp 0
-./target/release/nosh -s "列出当前目录"
-# 显式覆盖自动选择
-CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda -s "列出当前目录"
-./target/release/nosh --device cpu -s "列出当前目录"
-```
-
-`--device auto|cpu|cuda|cuda:N` 对交互 shell、Agent、CommandAssist、debug 和 doctor 一致生效，覆盖 `[model] device = "auto"`（默认）。`auto` 通过 CUDA API 检查设备及空闲显存，根据实际 GGUF 权重、配置上下文、prefill 块和 attention/KV 临时张量估算预算，并保留至少 512 MiB 余量；在满足预算的 GPU 中选择空闲显存最多的一张，相同则取较低逻辑序号。没有 CUDA 构建支持、驱动／设备不可用、显存不足或选择 f32 KV 时使用 CPU，并在诊断／引擎状态／原生 trace 中报告原因。它依据显存快照，不是 GPU 利用率调度器，不保证共享 GPU 没有计算负载。
-
-显式 `cpu` 强制 CPU；显式 `cuda`／`cuda:N` 强制 GPU，初始化或加载失败会报错，**不会退回 CPU**。`N` 是 `CUDA_VISIBLE_DEVICES` 筛选后的逻辑序号：只暴露物理卡 1 时仍用 `cuda:0`。自动选择在初始化 CUDA 库后再次核对空闲显存，但不预留显存；之后若其他进程抢占导致加载失败，明确报错，不用宽泛重试掩盖模型损坏、shape 或算子错误。选择只在加载时进行，不迁移正在运行的模型。CUDA 版依赖的动态库必须能被系统加载；若动态链接器在进程启动前报缺库，程序无法回退，应使用 CPU-only 产物。
-
-量化 GGUF 权重、embedding、RoPE、GQA、KV cache 和前馈层均在单张 GPU 上，跳过 CPU prepack；分词、调度和采样留在 CPU。GPU KV 当前**仅开放默认 f16**，支持分块 prefill 和前缀回退，但使用张量拼接，未实现 FlashAttention、多 GPU 或 Metal。`--device cuda --kv f32` 会在权重／分词器加载前明确报错，不会偷偷改用 f16 或 CPU；CPU 的 f32 KV 不变。不同后端的量化内核会有数值差异，固定 seed 不保证 CPU/GPU 输出逐字相同。debug、加载说明与原生评估 trace 会报告实际设备；debug 的 RSS 仅为主机内存，显存和利用率请用 `nvidia-smi` 观测。CUDA 版本产物依赖匹配的 NVIDIA 动态库，默认 CPU 产物不受影响。
-
-f32 限制来自 MiniCPM5-2B Q4_K_M、1212 token prompt＋32 步 teacher forcing 的验收：同为 f32 KV 时，CPU/GPU 的 top-5 完整集合一致率为 18/33，未达到既有 60% 门槛（KL 0.02841、可信 top-1 30/30）；跨 dtype 的 CUDA f32 对 CPU f16 另有 KL 0.04083，超过 0.03。CPU Q8K 与 CUDA Q8_1 激活量化是已发现的不等价因素，**不是已完全确认的根因**。没有放宽阈值或宣称 f32 已验收；默认 f16 的同 dtype 对照通过。
-
-首次使用 CUDA 内核可能触发驱动 PTX/JIT 编译，首 token 明显更慢；后续新进程可能复用驱动缓存。测速必须区分首次 JIT 冷启动、驱动缓存已暖的新进程和同一进程的 KV 复用，不能统称“冷启动”。`NOSH_PROFILE` 的 CUDA 分算子计时仅反映异步提交开销；debug 的整体 prefill/decode 计时会等待 GPU 完成。
-
-为保持历史基线，评估器默认仍显式选择 CPU。GPU 评估传 `python3 -m eval --device cuda ...`；验证自动选择可传 `--device auto`，逐 trial 记录实际设备和选择原因，不依赖宿主配置，见[评估说明](eval/README.md)。
-
-实测源码 `780b952`：Ubuntu、单张 RTX 4090 24 GB、驱动 615.71.09、CUDA 13.4、Rust 1.98.1，MiniCPM5-2B Q4_K_M、f16 KV、seed 42、temperature 0、1457 token 输入／128 token 输出。两次均为新进程、无 KV 命中：
-
-| 驱动缓存状态 | 总墙钟（含加载） | TTFT | Prefill | Decode |
-|---|---:|---:|---:|---:|
-| 显式空 CUDA 缓存，首次 JIT | 16.153 s | 13.60 s | 107.1 tok/s | 169.5 tok/s |
-| 同一驱动缓存已暖 | 2.170 s | 0.19 s | 7490.4 tok/s | 178.7 tok/s |
-
-`nvidia-smi` 捕获到 nosh 的实际 GPU PID，峰值 95% 利用率、2210 MiB 显存。主机推理线程为 4、实际 nice 为 19，另有 CPU 28 线程评估并行运行，**不是无干扰 CPU/GPU 受控对照**。同构建五场景 smoke 原样得到 **2 pass／3 fail／0 error**：本地纠错与 Next 无建议通过；Agent 文件事实／预算及 Generate、Fix 的 finish 字段校验失败，未重抽或改判。四个载模场景均原生记录 `cuda:0`／`F16`；这证明 GPU 入口连通，不代表模型任务质量全通过。
+默认构建是 CPU-only；CUDA 构建的 `auto` 根据可见设备与可用显存选择后端。显式 `--device cuda[:N]` 失败不会回退 CPU，GPU 当前仅支持 f16 KV。构建步骤、设备选择和运行限制见[本地推理与 CUDA](docs/INFERENCE.md)。
 
 ## 命令建议与终端交接
 
-交互 shell 使用**提示符上方、随输入内容流移动的单行信息条**，分为环境、状态、操作提示、模式附注四区：分别承载默认目录/分支、当前输入反馈或命令辅助、只读的“按键＋动作”和实际模式，审批模式仅在有余量时作为末尾弱提示。空区不占位，输入行只保留原提示符符号和草稿；自定义 PS1/PS2 不拆改、不重复注入目录/分支。长路径不能挤掉关键诊断和必要操作，长输入允许整行自然滚出可见区；提交后保留当时的提示符快照。AI、审批和下载沿用各自的正文或进度区，前台程序接管时停止提示符刷新，不预留屏底区域。
+交互 shell 在**提示符上方**显示环境、输入状态、操作提示与模式，不预留屏底区域；`[shell] status_bar = false` 可关闭。**tmux 的未提交草稿历史残留仍未解决**。布局、主题注入和兼容边界见[状态行设计](docs/STATUS-BAR.md)。
 
-实现使用固定基版的 Reedline 0.52.0 及局部渲染修补，不再包含固定底栏写入或按宿主名称设置的旧禁用表。`[shell] status_bar = false` 可关闭信息条，默认目录/分支回到原提示符；基础终端、非交互、不同输出 TTY 或已知后台 job 写入时沿用原显示路径。**tmux 的未提交草稿历史残留仍未解决，不保证所有宿主上的严格历史门禁通过**；功能 case、验证范围和兼容边界见[状态行设计](docs/STATUS-BAR.md)。
+Agent 使用 `exec`、`read_file`、`grep`，有交互终端时可提问；管道附件模式不开放命令执行，也不从管道读取提问回答。项目指引优先使用适用的 `AGENTS.md`，否则使用 README 简介与索引。详见[工具契约](docs/LLM-TOOLS.md)和[项目上下文](docs/PROJECT-CONTEXT.md)。
 
-嵌入宿主可通过 `ReplConfig.status_bar.theme` 注入和替换语义配色；默认外观保持不变，更新只请求现有编辑器重绘。当前没有用户主题切换命令或主题库，接口示例与后续 [#45](https://github.com/NewFuture/nosh/issues/45) 的范围见[主题扩展说明](docs/STATUS-BAR.md#32-内部主题注入与更新入口)。
+**CommandAssist 只建议，不自动执行：**
 
-标签化背景用独立 System 消息，真实请求用 User；背景正文按普通文本编码。Available 按能力分组，规则保持简短。项目指引优先加载适用的 `AGENTS.md`；没有 AGENTS.md 时才附 README 首段简介与章节索引，不默认要求读完原文。文档来源相对 cwd 显示，任务开始和工具执行后的目录变化会刷新适用文档；读取仍受路径保护和预算约束。
+| 意图 | 入口与行为 |
+|---|---|
+| Generate | `nosh -s`、非空 F2、适用的 Tab 兜底；输出或预填完整命令 |
+| Fix | 用户命令失败后的后台建议，或裸 `ai fix`；`ai fix <question>` 仍进入 Agent 诊断 |
+| Next | 用户命令成功后的后台建议；没有合理下一步可以不建议，无手动入口 |
 
-普通 Agent 的操作工具为 `exec`、`read_file` 和 `grep`，有可用交互终端时另提供 `ask_user(question, choices?)`，支持选择或自由回答并在原会话继续。`grep` 内嵌 ripgrep 的 Rust 实现，不依赖系统 `rg`，只搜索文件内容；目录与文件名查询使用 `exec` 调用 `ls` 等命令。管道附件模式不开放命令执行；提问通过控制终端进行，不读取管道 stdin。
-
-`nosh -s`、F2 和适用的 Tab 兜底使用 **CommandAssist Generate** 的内部子会话：nosh 作为协议 User 提交任务与上下文，System 只保留固定规则。Generate/Fix/Next 共用 `command_help(name, query?)`、`read_file`、`grep`，不向终端提问，也不提供 `ask_user`。三种意图直接返回完整 shell program 或精确 `[None]`，不使用 `finish`；证据不足时不捏造命令。只有经 brush 语法和可确认命令名检查的 program 才会输出或预填，从不自动执行。拒绝说明／Markdown 命令块、不完整语法和隐藏控制字符；动态行为无法确认不等于安全，执行前仍需检查。
-
-用户命令执行成功后默认在后台生成 **Next** 后续建议，失败时生成 **Fix** 修正建议；没有合理下一步可以不建议。正常终端显示在提示符上方，空白草稿用 F2 接受，回车才执行；继续输入会取消并丢弃旧建议。没有现成候选时，空白 F2 不新增模型请求。裸 `ai fix` 生成修复命令，`ai fix <question>` 保留 Agent 诊断；Next 只有自动触发，没有手动命令。Agent 内部命令仍由原 Agent 继续处理，不触发新的辅助任务。可通过 `[shell] command_assist = false` 关闭自动辅助，保留 Generate、显式 Fix 和 Agent 入口。完整契约见 [CommandAssist 设计](docs/COMMAND-ASSIST.md)。
+空白草稿用 F2 接受已有候选，回车才执行；没有候选时不额外请求模型，继续输入会取消旧建议。`[shell] command_assist = false` 关闭自动辅助，但保留 Generate、显式 Fix 和 Agent 入口。完整协议、命令校验与调度见[CommandAssist](docs/COMMAND-ASSIST.md)；静态校验不能证明动态命令安全。
 
 agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。复合命令前面的部分可能已经执行；交接提示会明确警告，请检查当前状态和整条命令后再自行运行，以免重复副作用。
 
@@ -122,11 +83,9 @@ agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交
 capture_output = "last"  # last（默认）| off
 ```
 
-`last` 使用会话级中转 PTY，在原样转发终端字节的同时，只在内存保留最近一条用户命令的 **4,096 字节文本尾部**。输出只在 `ai fix [question]`、失败后的快捷求助或自动失败诊断中按命令 ID 附带；普通 `#`、`ai "<任务>"` 和自然语言请求默认不带入。同一对话对同一命令只附正文一次，有报错证据时无需为获取同一报错重跑命令。它不改变失败提示/自动求助策略，也不改变建议模式的仅回填契约。完整注入矩阵和 PTY 协议见[输出采集设计](docs/OUTPUT-CAPTURE.md)。
+`last` 原样转发终端字节，只在内存保留最近用户命令的 **4,096 字节文本尾部**，按命令 ID 用于失败诊断，普通任务默认不带入。它是合并的终端输出，不是分离的 stdout/stderr；不改变文件重定向，不额外写完整日志。`off`、`-c`、脚本和一次性 `-a/-s` 不进入中转路径。
 
-PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`cmd > file` 仍只写文件；成功采集到空输出与未采集/不可用分开记录。超限保留尾部并标明截断，全屏或无法解释的终端控制标记不可用/不完整；已知后台混流不自动附带正文，不保证识别全部写入者。无法建立兼容 PTY 时会警告并保留原 shell 路径，不改成管道采集。`off`、`-c`、脚本和一次性 `-a/-s` 不进入中转路径。
-
-不会额外写入 history、agent 输出文件或完整终端日志；已发送的证据遵守既有内存对话生命周期。**这不是脱敏功能**：显式启用的 `NOSH_EVAL_TRACE` 仍会按原契约记录模型输入中的证据。
+**这不是脱敏功能**：显式启用的 `NOSH_EVAL_TRACE` 仍可能记录已注入的证据。注入矩阵、去重、混流、不可用状态和 PTY 降级规则统一见[输出采集设计](docs/OUTPUT-CAPTURE.md)。
 
 ### 显示与输入
 
@@ -148,17 +107,10 @@ PTY 合并的数据称为“终端输出”，不是分离的 stdout/stderr。`c
 
 | 文档 | 内容 |
 |---|---|
-| [设计文档](docs/DESIGN.md) | 架构、当前实现边界、配置与后续方案；先读 [实现状态](docs/DESIGN.md#03-实现状态) |
-| [输出采集设计](docs/OUTPUT-CAPTURE.md) | 最近用户命令输出的使用时机、上下文边界、PTY 协议、状态和兼容性 |
-| [实时输入解析设计](docs/INPUT-ASSIST.md) | 输入辅助的数据流、判定语义、后台隔离、缓存与资源边界 |
-| [Project context 设计](docs/PROJECT-CONTEXT.md) | 紧凑上下文、项目发现、AGENTS／README 加载和缓存边界 |
-| [LLM tools 设计](docs/LLM-TOOLS.md) | 工具与模式、grep、权限、结果和建议契约 |
-| [CommandAssist 设计](docs/COMMAND-ASSIST.md) | nosh User 任务协议、Generate / Fix / Next、查询工具、直接终答与后台调度 |
-| [MVP 实施计划](docs/MVP-PLAN.md) | 已完成的历史范围和任务分解，不是当前待办 |
-| [MVP 报告](docs/MVP-REPORT.md) | 分阶段实测、设计偏差、已知问题和数据来源 |
-| [固定 seed 的真实模型评测](eval/README.md) | 原 27 场景回归、5 场景 CommandAssist 与新增 8 场景真实工作流专项分别运行；历史 main 的 48.0% 不代表当前评分成绩 |
-
-开发入口见 [维护与扩展约定](docs/DESIGN.md#123-维护与扩展约定)：工具目录、对话日志、推理执行各自维护边界；错误显式传递，性能结论区分辅助路径优化与真实模型实测。
+| [文档导航](docs/README.md) | 当前设计、功能契约与测试评测的完整入口 |
+| [代码架构与维护](docs/ARCHITECTURE.md) | crate 依赖、接口边界、实现与测试组织、开发命令 |
+| [系统设计](docs/DESIGN.md) | 当前行为、配置与实现限制 |
+| [真实模型评测](eval/README.md) | 当前运行器、场景、观测与报告契约 |
 
 ## 许可
 

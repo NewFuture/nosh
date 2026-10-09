@@ -1,5 +1,5 @@
 use super::*;
-use nosh_llm::{
+use nosh_engine::{
     MockChatEngine,
     mock::{call, text},
 };
@@ -159,7 +159,7 @@ fn generate_rejects_unavailable_tools_and_accepts_commands_or_none() {
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|(_, choice)| *choice == nosh_llm::ToolChoice::Auto)
+                .all(|(_, choice)| *choice == nosh_engine::ToolChoice::Auto)
         );
     }
 }
@@ -642,54 +642,31 @@ fn generate_query_turns_allow_narration_and_read_only_batches() {
 }
 
 #[test]
-fn final_response_rejections_are_specific_only_for_fix() {
+fn final_response_rejections_share_specific_reasons_across_intents() {
     let dir = tempfile::tempdir().unwrap();
     let shell = shell(dir.path());
     let commands = CommandSnapshot::capture(&shell).unwrap();
     let oversized = " ".repeat(16 * 1024 + 1);
-    let invalid_text = "expected a command or exact [None], not an empty or invalid final response";
-    let invalid_program =
-        "final response did not contain a valid complete shell program or exact [None]";
-    for (reply, detail, legacy) in [
-        (" \n\t", "reply is empty", invalid_text),
-        (
-            oversized.as_str(),
-            "reply exceeds the 16384-byte limit",
-            invalid_text,
-        ),
-        (
-            "echo \u{202e}hidden",
-            "reply contains hidden characters",
-            invalid_text,
-        ),
+    for (reply, reason) in [
+        (" \n\t", "reply is empty"),
+        (oversized.as_str(), "reply exceeds the 16384-byte limit"),
+        ("echo \u{202e}hidden", "reply contains hidden characters"),
         (
             "Explanation:\n```bash\necho ready\n```",
             "reply contains Markdown fences",
-            invalid_program,
         ),
         (
             "Here is the corrected command.",
             "reply is not valid complete shell input",
-            invalid_program,
         ),
-        (
-            "echo ready &&",
-            "reply is not valid complete shell input",
-            invalid_program,
-        ),
+        ("echo ready &&", "reply is not valid complete shell input"),
         (
             "nosh_missing_command",
             "reply is not valid complete shell input",
-            invalid_program,
         ),
     ] {
         for intent in [Intent::Generate, Intent::Fix, Intent::Next] {
-            let reason = if intent == Intent::Fix {
-                detail
-            } else {
-                legacy
-            };
-            let error = direct_final(intent, reply, &commands).unwrap_err();
+            let error = direct_final(reply, &commands).unwrap_err();
             assert_eq!(error.to_string(), format!("command assistance: {reason}"));
             let Message::User(feedback) = final_message(intent, Some(&error.to_string())) else {
                 panic!("missing final feedback");
@@ -749,7 +726,7 @@ fn early_invalid_text_gets_one_bounded_final_turn_for_every_intent() {
             assert_eq!(outcome.steps, 2);
             assert_eq!(
                 outcome.result,
-                direct_final(intent, final_text, &request.commands).unwrap()
+                direct_final(final_text, &request.commands).unwrap()
             );
             assert_eq!(
                 outcome.usage.completion_tokens,
@@ -758,8 +735,8 @@ fn early_invalid_text_gets_one_bounded_final_turn_for_every_intent() {
             assert_eq!(
                 choices.lock().unwrap().as_slice(),
                 [
-                    (1, nosh_llm::ToolChoice::Auto),
-                    (1, nosh_llm::ToolChoice::None)
+                    (1, nosh_engine::ToolChoice::Auto),
+                    (1, nosh_engine::ToolChoice::None)
                 ]
             );
             let received = received.lock().unwrap();
@@ -834,9 +811,9 @@ fn query_errors_survive_early_finalization() {
     assert_eq!(
         choices.lock().unwrap().as_slice(),
         [
-            (1, nosh_llm::ToolChoice::Auto),
-            (1, nosh_llm::ToolChoice::Auto),
-            (1, nosh_llm::ToolChoice::None),
+            (1, nosh_engine::ToolChoice::Auto),
+            (1, nosh_engine::ToolChoice::Auto),
+            (1, nosh_engine::ToolChoice::None),
         ]
     );
 }
@@ -989,7 +966,10 @@ fn early_finalization_preserves_parser_cancellation_and_timeout_failures() {
             match failure {
                 "parse" => vec![
                     text("[None]"),
-                    nosh_llm::mock::bad_call(nosh_llm::CallErrorKind::Malformed, "invalid call"),
+                    nosh_engine::mock::bad_call(
+                        nosh_engine::CallErrorKind::Malformed,
+                        "invalid call",
+                    ),
                 ],
                 "cancel" => {
                     model_cancel.cancel();
@@ -1130,7 +1110,7 @@ fn fix_and_next_use_direct_final_without_finish_or_execution() {
             assert!(specs[0].tools.iter().all(|tool| tool.name != "finish"));
             assert_eq!(
                 choices.lock().unwrap().as_slice(),
-                [(1, nosh_llm::ToolChoice::Auto)]
+                [(1, nosh_engine::ToolChoice::Auto)]
             );
             assert_eq!(
                 observations.lock().unwrap()[0].1["response_format"],
@@ -1229,8 +1209,8 @@ fn early_finalization_preserves_host_task_without_repeating_it() {
     assert_eq!(
         choices.lock().unwrap().as_slice(),
         [
-            (1, nosh_llm::ToolChoice::Auto),
-            (1, nosh_llm::ToolChoice::None),
+            (1, nosh_engine::ToolChoice::Auto),
+            (1, nosh_engine::ToolChoice::None),
         ]
     );
 }
@@ -1356,8 +1336,8 @@ fn direct_query_turns_keep_narration_and_allow_bounded_read_only_batches() {
     assert_eq!(
         choices.lock().unwrap().as_slice(),
         [
-            (1, nosh_llm::ToolChoice::Auto),
-            (1, nosh_llm::ToolChoice::None)
+            (1, nosh_engine::ToolChoice::Auto),
+            (1, nosh_engine::ToolChoice::None)
         ]
     );
 }
@@ -1530,9 +1510,9 @@ fn final_round_reuses_the_output_instruction_for_every_intent_and_budget() {
                 assert_eq!(
                     choices[index].1,
                     if index + 1 == steps {
-                        nosh_llm::ToolChoice::None
+                        nosh_engine::ToolChoice::None
                     } else {
-                        nosh_llm::ToolChoice::Auto
+                        nosh_engine::ToolChoice::Auto
                     }
                 );
             }
@@ -1641,7 +1621,7 @@ fn direct_final_cannot_turn_query_parse_cancel_or_budget_errors_into_none() {
     );
     let mut engine = MockChatEngine::new(vec![vec![
         text("[None]"),
-        nosh_llm::mock::bad_call(nosh_llm::CallErrorKind::Malformed, "invalid call"),
+        nosh_engine::mock::bad_call(nosh_engine::CallErrorKind::Malformed, "invalid call"),
     ]]);
     assert!(matches!(
         run(

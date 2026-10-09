@@ -5,15 +5,12 @@
 
 pub mod download;
 pub mod hash;
-pub mod lang;
 pub mod net;
-pub mod paths;
 pub mod progress;
 pub mod registry;
 pub mod select;
 pub mod sources;
 pub mod store;
-pub mod terminal;
 #[cfg(any(test, feature = "test-server"))]
 pub mod testserver;
 
@@ -21,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nosh_platform::{fs::FileStamp, paths, tr};
 use serde::{Deserialize, Serialize};
 
 pub use progress::{BarProgress, DownloadStatus, NoProgress, Progress, SharedProgress};
@@ -51,7 +49,7 @@ pub enum HubError {
         actual: String,
     },
     /// The file changed (or could not be read) while it was being hashed.
-    #[error("{0}: {msg}", msg = crate::tr!("校验期间文件有变化，请重试", "it changed while it was being verified; try again"))]
+    #[error("{0}: {msg}", msg = nosh_platform::tr!("校验期间文件有变化，请重试", "it changed while it was being verified; try again"))]
     Changed(String),
     #[error("not enough disk space: need {needed} bytes, {available} available")]
     InsufficientSpace { needed: u64, available: u64 },
@@ -403,7 +401,7 @@ impl ModelHub {
         let mut all_ok = true;
         for f in &entry.files {
             let path = dir.join(&f.name);
-            let before = store::FileStamp::of(&path);
+            let before = FileStamp::of(&path);
             let res = match hash::sha256_file(&path, |_| {}) {
                 Ok(sha) if sha.eq_ignore_ascii_case(&f.sha256) => {
                     // As in `store::check_dir`: a change while hashing fails;

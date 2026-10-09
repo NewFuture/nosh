@@ -3,8 +3,8 @@
 
 use std::io::Write;
 
-use nosh_hub::tr;
 use nosh_permissions::{ApprovalMode, Risk};
+use nosh_platform::tr;
 use nosh_shell::{OutputSink, style};
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ impl TaskSummary {
     /// One line of engine statistics (`NOSH_STATS=1`).
     pub fn stats_line(&self) -> String {
         let sep = style::glyph(" · ", " | ");
-        let rss = nosh_llm::rss_mb()
+        let rss = nosh_platform::process::rss_mb()
             .map(|(cur, peak)| format!("{sep}rss {cur:.0}/{peak:.0} MB"))
             .unwrap_or_default();
         format!(

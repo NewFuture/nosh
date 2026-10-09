@@ -338,7 +338,7 @@ impl EmbeddedShell {
         );
         let name = opts.name.clone().unwrap_or_else(|| "nosh".to_string());
         let histfile = (opts.interactive && std::env::var_os("HISTFILE").is_none())
-            .then(|| nosh_hub::paths::state_dir().join("shell_history"));
+            .then(|| nosh_platform::paths::state_dir().join("shell_history"));
         let mut builtins = brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
         if opts.interactive || opts.catch_sigint {
             crate::yielding::wrap(&mut builtins);
@@ -362,7 +362,7 @@ impl EmbeddedShell {
                 .builtins(builtins);
             if let Some(h) = histfile {
                 if let Some(parent) = h.parent() {
-                    let _ = nosh_hub::paths::ensure_private_dir(parent);
+                    let _ = nosh_platform::paths::ensure_private_dir(parent);
                 }
                 builder = builder.var("HISTFILE", ShellVariable::new(h.to_string_lossy().as_ref()));
             }

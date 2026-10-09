@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use nosh_llm::{CancelHandle, ToolCall, ToolSpec};
+use nosh_engine::{CancelHandle, ToolCall, ToolSpec};
 use nosh_permissions::{
     Context, Decision, Risk, SessionAllowList, assess_command_with_lookup, assess_read, evaluate,
 };

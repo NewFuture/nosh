@@ -4,8 +4,8 @@
 //! initial system prompt, tool definitions: special tokens allowed) or untrusted (dynamic context,
 //! user input, tool output: plain text that cannot forge turns or tool calls).
 
-use crate::engine::{Message, ToolCall, ToolSpec};
 use crate::pyjson;
+use nosh_engine::{Message, ToolCall, ToolSpec};
 
 pub const TOOL_DEF_SEP: &str = "<tool_def_sep>";
 pub const BOS: &str = "<s>";
@@ -152,11 +152,11 @@ pub fn generation_prompt(thinking: Option<bool>) -> Seg {
 }
 
 /// Host-selected opening only. The parser still validates the generated call.
-pub fn tool_choice_prefix(choice: &crate::ToolChoice) -> Vec<Seg> {
+pub fn tool_choice_prefix(choice: &nosh_engine::ToolChoice) -> Vec<Seg> {
     match choice {
-        crate::ToolChoice::Auto | crate::ToolChoice::None => vec![],
-        crate::ToolChoice::Required => vec![Seg::t("<function name=\"")],
-        crate::ToolChoice::Named(name) => {
+        nosh_engine::ToolChoice::Auto | nosh_engine::ToolChoice::None => vec![],
+        nosh_engine::ToolChoice::Required => vec![Seg::t("<function name=\"")],
+        nosh_engine::ToolChoice::Named(name) => {
             vec![Seg::t("<function name=\""), Seg::u(name), Seg::t("\">")]
         }
     }

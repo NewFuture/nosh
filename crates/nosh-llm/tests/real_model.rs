@@ -4,13 +4,11 @@
 
 use candle_core::Device;
 use candle_core::quantized::{GgmlDType, gguf_file};
+use nosh_engine::{ChatEngine, Event, Message, SamplingParams, SessionSpec, StopReason, ToolSpec};
 use nosh_llm::model::llama::{Llama, LoadOptions};
 use nosh_llm::template::{self, concat};
 use nosh_llm::tokenizer::Tok;
-use nosh_llm::{
-    ChatEngine, Event, KvDtype, LocalChatEngine, LocalEngineOptions, Message, SamplingParams,
-    SessionSpec, StopReason, ToolSpec,
-};
+use nosh_llm::{KvDtype, LocalChatEngine, LocalEngineOptions, ModelSource};
 use serde_json::{Value, json};
 
 fn resolved() -> nosh_hub::ResolvedModel {
@@ -23,6 +21,22 @@ fn resolved() -> nosh_hub::ResolvedModel {
     hub.find(None)
         .expect("model store")
         .expect("default model not installed; run `nosh model pull`")
+}
+
+fn model_source(model: &nosh_hub::ResolvedModel) -> ModelSource<'_> {
+    ModelSource {
+        id: &model.entry.id,
+        arch: &model.entry.arch,
+        weights: &model.weights,
+        tokenizer: &model.tokenizer,
+        eog_ids: &model.entry.eog_ids,
+        sampling: SamplingParams {
+            temperature: model.entry.sampling.temperature,
+            top_p: model.entry.sampling.top_p,
+            min_p: model.entry.sampling.min_p,
+            ..SamplingParams::default()
+        },
+    }
 }
 
 fn run_tool() -> ToolSpec {
@@ -73,7 +87,7 @@ fn segment_encoding_matches_full_string_encoding() {
                             .as_array()
                             .into_iter()
                             .flatten()
-                            .map(|tc| nosh_llm::ToolCall {
+                            .map(|tc| nosh_engine::ToolCall {
                                 name: tc["function"]["name"].as_str().unwrap().into(),
                                 args: tc["function"]["arguments"].as_object().unwrap().clone(),
                             })
@@ -121,7 +135,8 @@ fn segment_encoding_matches_full_string_encoding() {
 #[test]
 #[ignore = "needs the real model"]
 fn named_tool_choice_returns_one_call_without_prose() {
-    let mut engine = LocalChatEngine::load(&resolved(), LocalEngineOptions::default()).unwrap();
+    let mut engine =
+        LocalChatEngine::load(model_source(&resolved()), LocalEngineOptions::default()).unwrap();
     let sid = engine
         .open(spec(
             "Respond with the requested shell command.",
@@ -130,11 +145,11 @@ fn named_tool_choice_returns_one_call_without_prose() {
         .unwrap();
     assert!(
         engine
-            .set_tool_choice(sid, nosh_llm::ToolChoice::Named("missing".into()))
+            .set_tool_choice(sid, nosh_engine::ToolChoice::Named("missing".into()))
             .is_err()
     );
     engine
-        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("exec".into()))
+        .set_tool_choice(sid, nosh_engine::ToolChoice::Named("exec".into()))
         .unwrap();
     let output = engine
         .step(
@@ -153,7 +168,7 @@ fn named_tool_choice_returns_one_call_without_prose() {
 
 fn engine() -> LocalChatEngine {
     LocalChatEngine::load(
-        &resolved(),
+        model_source(&resolved()),
         LocalEngineOptions {
             seed: Some(42),
             ..LocalEngineOptions::default()
@@ -414,7 +429,7 @@ fn validation_ids(tok: &mut Tok, doc: String) -> Vec<u32> {
 fn f16_kv_matches_f32_kv() {
     let r = resolved();
     let mut tok = Tok::load(&r.tokenizer).unwrap();
-    let doc: String = include_str!("../../../docs/MVP-PLAN.md")
+    let doc: String = include_str!("../../../tests/fixtures/model_context.txt")
         .chars()
         .take(7000)
         .collect();
@@ -446,7 +461,7 @@ fn cuda_matches_cpu_logits_and_reuses_prefix() {
     let mut tok = Tok::load(&r.tokenizer).unwrap();
     let ids = validation_ids(
         &mut tok,
-        include_str!("../../../docs/MVP-PLAN.md")
+        include_str!("../../../tests/fixtures/model_context.txt")
             .chars()
             .take(2400)
             .collect(),
@@ -519,7 +534,7 @@ fn prepacked_weights_match_retained_weights() {
     );
     std::fs::create_dir_all(&dir).unwrap();
     let mut tok = Tok::load(&r.tokenizer).unwrap();
-    let doc = include_str!("../../../docs/MVP-PLAN.md");
+    let doc = include_str!("../../../tests/fixtures/model_context.txt");
     let short = validation_ids(&mut tok, doc.chars().take(7000).collect());
     let mut long = validation_ids(&mut tok, doc.repeat(4));
     assert!(long.len() >= 8065 + 48);

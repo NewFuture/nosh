@@ -1,4 +1,4 @@
-//! Well-known nosh directories.
+//! Well-known nosh directories, shared across application components.
 
 use std::path::PathBuf;
 

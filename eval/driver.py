@@ -35,6 +35,11 @@ def prompt_matches(line: str, content: str = "") -> bool:
     return line.startswith(prefix) and line[len(prefix):].strip() in ("", "confirm", "Approval: Confirm")
 
 
+def editor_repainted_after_stats(text: str) -> bool:
+    repaint_end = text.rfind("\x1b[?25h")
+    return repaint_end >= 0 and bool(STATS.search(plain(text[:repaint_end])))
+
+
 class DriverError(RuntimeError):
     pass
 
@@ -548,8 +553,10 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                     text = plain(result.transcript[start:])
                     if (assistance.get("status") == "completed" and assistance.get("kind") == "command"
                             and assistance.get("background") is False
-                            and SUMMARY.search(text) and STATS.search(text) and not prompt()):
-                        # A long prefill can hide PS1 above the editor viewport.
+                            and SUMMARY.search(text) and not prompt()
+                            and editor_repainted_after_stats(result.transcript[start:])):
+                        # Wait for the editor repaint: startup cursor queries can consume keys.
+                        # A long prefill can hide PS1 above the viewport.
                         child.send(b"\x15")  # Clear the completed draft, never submit it.
                         assist_draft_cleared = True
                 if child.screen.line().strip() in ("answer>", "回答>"):

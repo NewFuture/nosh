@@ -14,6 +14,8 @@ publish = false
 
 [workspace.dependencies]
 nosh-core = { path = "crates/nosh-core" }
+nosh-engine = { path = "crates/nosh-engine" }
+nosh-platform = { path = "crates/nosh-platform" }
 nosh-shell = { path = "crates/nosh-shell" }
 nosh-permissions = { path = "crates/nosh-permissions" }
 nosh-llm = { path = "crates/nosh-llm" }

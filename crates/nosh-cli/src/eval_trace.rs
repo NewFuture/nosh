@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nosh_llm::{
-    CancelHandle, ChatEngine, Event, LlmError, Message, SessionId, SessionSpec, StepOutcome,
+use nosh_engine::{
+    CancelHandle, ChatEngine, EngineError, Event, Message, SessionId, SessionSpec, StepOutcome,
     StopReason,
 };
 use serde_json::{Value, json};
@@ -106,14 +106,14 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
     fn set_tool_choice(
         &mut self,
         sid: SessionId,
-        choice: nosh_llm::ToolChoice,
-    ) -> Result<(), LlmError> {
+        choice: nosh_engine::ToolChoice,
+    ) -> Result<(), EngineError> {
         self.inner.set_tool_choice(sid, choice.clone())?;
         self.record(json!({"ev": "tool_choice", "sid": sid, "choice": choice}))?;
         Ok(())
     }
 
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
         let p = spec.sampling;
         let mut event = json!({
             "ev": "open", "system": spec.system, "tools": spec.tools,
@@ -136,7 +136,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError> {
+    ) -> Result<StepOutcome, EngineError> {
         self.record(json!({
             "ev": "step_start", "sid": sid,
             "messages": append.iter().map(message).collect::<Vec<_>>(),
@@ -170,7 +170,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
         result
     }
 
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
         self.record(json!({"ev": "rewind", "sid": sid, "keep": keep}))?;
         self.inner.rewind(sid, keep)
     }
@@ -183,7 +183,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
         &mut self,
         sid: SessionId,
         keep_recent: usize,
-    ) -> Result<usize, LlmError> {
+    ) -> Result<usize, EngineError> {
         let changed = self.inner.compact_tool_results(sid, keep_recent)?;
         self.record(json!({
             "ev": "compact", "sid": sid, "keep_recent": keep_recent, "changed": changed,
@@ -208,7 +208,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
         self.record_infallible(json!({"ev": "close", "sid": sid}));
     }
 
-    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), LlmError> {
+    fn record_observation(&mut self, sid: SessionId, value: Value) -> Result<(), EngineError> {
         self.record(json!({"ev": "observation", "sid": sid, "value": value}))?;
         Ok(())
     }
@@ -217,7 +217,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nosh_llm::{MockChatEngine, SamplingParams, mock};
+    use nosh_engine::{MockChatEngine, SamplingParams, mock};
     use std::io::Cursor;
 
     #[test]
@@ -249,11 +249,11 @@ mod tests {
         let mut engine = TracedEngine::new(Box::new(mock), Cursor::new(Vec::new()));
         let sid = engine.open(spec()).unwrap();
         engine
-            .set_tool_choice(sid, nosh_llm::ToolChoice::None)
+            .set_tool_choice(sid, nosh_engine::ToolChoice::None)
             .unwrap();
         assert_eq!(
             choices.lock().unwrap().as_slice(),
-            [(sid, nosh_llm::ToolChoice::None)]
+            [(sid, nosh_engine::ToolChoice::None)]
         );
         let data = String::from_utf8(engine.writer.into_inner()).unwrap();
         let row: Value = serde_json::from_str(data.lines().last().unwrap()).unwrap();
@@ -349,7 +349,7 @@ mod tests {
         );
         assert!(matches!(
             engine.step(999, vec![], &mut |_| {}),
-            Err(LlmError::UnknownSession(999))
+            Err(EngineError::UnknownSession(999))
         ));
         let data = String::from_utf8(engine.writer.into_inner()).unwrap();
         assert!(data.contains("step_error"));
@@ -363,7 +363,7 @@ mod tests {
         );
         assert!(matches!(
             engine.compact_tool_results(999, 0),
-            Err(LlmError::UnknownSession(999))
+            Err(EngineError::UnknownSession(999))
         ));
         assert!(engine.writer.get_ref().is_empty());
     }
