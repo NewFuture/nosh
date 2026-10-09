@@ -166,9 +166,21 @@ pub(super) fn framed(output: &str) -> String {
 
 pub(super) type KeyStep<'a> = (&'a str, &'a [u8]);
 
+pub(super) fn input_worker_command() -> nosh_shell::input_assist::WorkerCommand {
+    nosh_shell::input_assist::WorkerCommand {
+        program: std::env::current_exe().unwrap(),
+        args: vec![
+            "--exact".into(),
+            "input_worker_probe".into(),
+            "--nocapture".into(),
+        ],
+    }
+}
+
 pub(super) struct ProbeTimings {
     pub(super) startup: Duration,
     pub(super) input: Vec<Duration>,
+    pub(super) exit: Duration,
     pub(super) frames: Vec<super::screen::Frame>,
     pub(super) printed: Vec<super::screen::Printed>,
 }
@@ -228,7 +240,17 @@ impl Probe<'_> {
             self.resizes.is_empty() || self.track_frames,
             "resize testing requires screen acknowledgement"
         );
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("nosh-pty-")
+            .tempdir_in(".")
+            .unwrap();
+        let home_path = home.path().canonicalize().unwrap();
+        // AI workspaces must not inherit NOSH_HOME's protected-data scope.
+        let workspaces = tempfile::Builder::new()
+            .prefix("nosh-pty-workspace-")
+            .tempdir_in(".")
+            .unwrap();
+        let workspace_path = workspaces.path().canonicalize().unwrap();
         let stdout = self.stdout_tty.then(|| Pty::new(80));
         let stderr = self.stderr_tty.then(|| Pty::new(self.columns));
         let input = stderr.as_ref().or(stdout.as_ref());
@@ -246,8 +268,9 @@ impl Probe<'_> {
             .env_remove("LANG")
             .env("NO_COLOR", self.no_color)
             .env("NOSH_LANG", "en")
-            .env("NOSH_HOME", home.path())
-            .env("HOME", home.path())
+            .env("NOSH_HOME", &home_path)
+            .env("HOME", &home_path)
+            .env("TMPDIR", &workspace_path)
             .env_remove("CLICOLOR")
             .env_remove("COLORTERM")
             .env_remove("WT_SESSION")
@@ -412,19 +435,17 @@ impl Probe<'_> {
                             true
                         } else if *needle == "@worker-blocked" {
                             marker.exists()
+                        } else if let Some(path) = needle.strip_prefix("@file:") {
+                            home_path.join(path).exists()
+                        } else if let Some(milliseconds) = needle.strip_prefix("@delay:") {
+                            sent.elapsed() >= Duration::from_millis(milliseconds.parse().unwrap())
                         } else {
-                            String::from_utf8_lossy(&observed.lock().unwrap()[observed_start..])
-                                .contains(needle)
+                            let observed = observed.lock().unwrap();
+                            let output = String::from_utf8_lossy(&observed[observed_start..]);
+                            output.contains(needle) || style::strip_ansi(&output).contains(needle)
                         };
                         if ready {
-                            if *needle == "@worker-blocked" {
-                                blocked_at = Some(Instant::now());
-                            } else {
-                                timings.push(sent.elapsed());
-                            }
-                            observed_start = observed.lock().unwrap().len();
-                            sent = Instant::now();
-                            if let Some((_, columns)) =
+                            let resize_ready = if let Some((_, columns)) =
                                 self.resizes.iter().find(|(index, _)| *index == step_index)
                             {
                                 let tracking = tracking.as_ref().expect("resizes require tracking");
@@ -435,26 +456,38 @@ impl Probe<'_> {
                                     resize(input.as_raw_fd(), *columns);
                                     resize_requested = Some(step_index);
                                 }
-                                if tracking.acknowledged_columns.load(Ordering::Acquire)
-                                    != usize::from(*columns)
-                                {
-                                    thread::sleep(Duration::from_millis(5));
-                                    continue;
-                                }
-                            }
-                            if *bytes == b"@theme-switch" {
-                                assert_eq!(self.mode, "repl-inline-theme");
-                                theme_revision += 1;
-                                std::fs::write(
-                                    home.path().join(format!("theme-request-{theme_revision}")),
-                                    "",
-                                )
-                                .unwrap();
+                                tracking.acknowledged_columns.load(Ordering::Acquire)
+                                    == usize::from(*columns)
                             } else {
-                                input.write_all(bytes).unwrap();
+                                true
+                            };
+                            if resize_ready {
+                                if *needle == "@worker-blocked" {
+                                    blocked_at = Some(Instant::now());
+                                } else {
+                                    timings.push(sent.elapsed());
+                                }
+                                observed_start = observed.lock().unwrap().len();
+                                sent = Instant::now();
+                                if let Some(path) = std::str::from_utf8(bytes)
+                                    .ok()
+                                    .and_then(|bytes| bytes.strip_prefix("@file:"))
+                                {
+                                    std::fs::write(home_path.join(path), "").unwrap();
+                                } else if *bytes == b"@theme-switch" {
+                                    assert_eq!(self.mode, "repl-inline-theme");
+                                    theme_revision += 1;
+                                    std::fs::write(
+                                        home.path().join(format!("theme-request-{theme_revision}")),
+                                        "",
+                                    )
+                                    .unwrap();
+                                } else {
+                                    input.write_all(bytes).unwrap();
+                                }
+                                next = steps.next();
+                                step_index += 1;
                             }
-                            next = steps.next();
-                            step_index += 1;
                         }
                     }
                 }
@@ -501,6 +534,7 @@ impl Probe<'_> {
             ProbeTimings {
                 startup: startup.unwrap_or_default(),
                 input: timings,
+                exit: exited.duration_since(sent),
                 frames: observation.frames,
                 printed: observation.printed,
             },
@@ -509,5 +543,7 @@ impl Probe<'_> {
 }
 
 pub(super) fn blocked_input_marker(parent: u32) -> std::path::PathBuf {
-    std::path::PathBuf::from("/tmp").join(format!("nosh-pty-input-blocked-{parent}"))
+    std::env::current_dir()
+        .unwrap()
+        .join(format!(".nosh-pty-input-blocked-{parent}"))
 }

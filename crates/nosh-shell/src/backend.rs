@@ -1121,6 +1121,7 @@ impl EmbeddedShell {
         let abbreviations = input_assist::Abbreviations {
             revision: abbreviations.revision,
             applicable: names(abbreviations.applicable.iter(), &mut remaining)?,
+            definitions: BTreeMap::new(),
         };
         let options = sh.parser_options();
         let context = input_assist::Context {

@@ -14,6 +14,9 @@ pub(crate) fn text(path: &Path) -> Result<&str> {
 
 fn command(dir: &Path) -> Command {
     let mut command = Command::new(env::var_os("NOSH_GIT").unwrap_or_else(|| "git".into()));
+    if !dir.join(".git").exists() && dir.join("HEAD").is_file() && dir.join("objects").is_dir() {
+        command.arg("--git-dir").arg(dir);
+    }
     command
         .arg("-C")
         .arg(dir)

@@ -1,11 +1,11 @@
 mod source;
 mod worktree;
 
-use source::Manager;
+use source::{Dependency, Manager};
 use std::{env, error::Error, path::PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: cargo source prepare|check|export|provenance|upgrade [--offline] [--root PATH] [--cache REPOSITORY] [--rev SHA] [--resolved CANDIDATE]";
+const USAGE: &str = "usage: cargo source prepare|check|export|provenance|upgrade [--dependency reedline|brush-core] [--offline] [--root PATH] [--cache REPOSITORY] [--rev SHA] [--resolved CANDIDATE]";
 
 enum Action {
     Prepare,
@@ -36,6 +36,7 @@ fn run() -> Result<()> {
     let mut offline = false;
     let mut revision = None;
     let mut resolved = None;
+    let mut dependency = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--help" | "-h" => {
@@ -43,7 +44,7 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             "--offline" => offline = true,
-            "--root" | "--cache" | "--resolved" | "--rev" => {
+            "--root" | "--cache" | "--resolved" | "--rev" | "--dependency" => {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{argument} needs a value"))?;
@@ -52,6 +53,7 @@ fn run() -> Result<()> {
                     "--cache" => cache = Some(dunce::canonicalize(value)?),
                     "--resolved" => resolved = Some(PathBuf::from(value)),
                     "--rev" => revision = Some(value),
+                    "--dependency" => dependency = Some(Dependency::parse(&value)?),
                     _ => unreachable!(),
                 }
             }
@@ -69,30 +71,48 @@ fn run() -> Result<()> {
     if matches!(action, Action::Upgrade) && revision.is_none() {
         return Err("upgrade requires --rev".into());
     }
-    let root = match root {
+    let root = dunce::canonicalize(match root {
         Some(root) => root,
         None => env::current_dir()?,
+    })?;
+    let dependencies = if let Some(dependency) = dependency {
+        vec![dependency]
+    } else if matches!(action, Action::Upgrade) {
+        vec![Dependency::REEDLINE]
+    } else {
+        Dependency::ALL.into_iter().collect()
     };
-    let manager = Manager::new(root, cache, offline)?;
-    match action {
-        Action::Prepare => manager.prepare(),
-        Action::Export => manager.export(),
-        Action::Upgrade => manager.upgrade(
-            revision.as_deref().expect("upgrade revision was checked"),
-            resolved.as_deref(),
-        ),
-        Action::Check => {
-            manager.check()?;
-            println!(
-                "Prepared Reedline matches the committed-source inputs; no unexported changes."
-            );
-            Ok(())
-        }
-        Action::Provenance => {
-            println!("{}", serde_json::to_string_pretty(&manager.check()?)?);
-            Ok(())
+    let _lock = source::lock_root(&root, &dependencies)?;
+    let mut states = std::collections::BTreeMap::new();
+    for dependency in dependencies {
+        let manager = Manager::new(root.clone(), cache.clone(), offline, dependency);
+        match action {
+            Action::Prepare => manager.prepare()?,
+            Action::Export => manager.export()?,
+            Action::Upgrade => manager.upgrade(
+                revision.as_deref().expect("upgrade revision was checked"),
+                resolved.as_deref(),
+            )?,
+            Action::Check | Action::Provenance => {
+                states.insert(dependency.key, manager.check()?);
+            }
         }
     }
+    if matches!(action, Action::Provenance) {
+        if states.len() == 1 {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    states.values().next().expect("checked one dependency")
+                )?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&states)?);
+        }
+    } else if matches!(action, Action::Check) {
+        println!("Prepared sources match the committed-source inputs; no unexported changes.");
+    }
+    Ok(())
 }
 
 fn main() {

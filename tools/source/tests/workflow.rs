@@ -111,6 +111,23 @@ impl Fixture {
                 &format!("160000,{revision},third_party/reedline-upstream"),
             ],
         );
+        write(
+            &root,
+            "patches/brush-core/source.toml",
+            &format!(
+                "repository = \"https://github.com/reubeno/brush.git\"\nrevision = \"{revision}\"\n"
+            ),
+        );
+        write(&root, "patches/brush-core/nosh.patch", "");
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{revision},third_party/brush-upstream"),
+            ],
+        );
         Self {
             _temporary: temporary,
             root,
@@ -255,6 +272,12 @@ fn archive_materialization_has_identical_provenance_without_gitlink_contents() {
         archive_root.join("patches/reedline/nosh.patch"),
     )
     .unwrap();
+    write(
+        &archive_root,
+        "patches/brush-core/source.toml",
+        &fs::read_to_string(fixture.root.join("patches/brush-core/source.toml")).unwrap(),
+    );
+    write(&archive_root, "patches/brush-core/nosh.patch", "");
     let run = |verb| {
         Command::new(env!("CARGO_BIN_EXE_nosh-source"))
             .args([verb, "--offline", "--root"])

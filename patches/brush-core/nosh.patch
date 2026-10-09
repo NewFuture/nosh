@@ -1,0 +1,766 @@
+diff --git a/NOSH_COMPLETION_PATCH.md b/NOSH_COMPLETION_PATCH.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..49b731a6abbcdbd611b6e78dab82160b06a39bc5
+--- /dev/null
++++ b/NOSH_COMPLETION_PATCH.md
+@@ -0,0 +1,31 @@
++# nosh completion delta
++
++Based on official `reubeno/brush` commit
++`96a26d0c66cbc018a1517e9562944418fef5b272`
++(`brush-core-v0.5.0`). The parser remains at its matching official 0.4.0 source.
++The original MIT license is retained.
++
++The delta exposes specification selection and existing completion tokenization,
++allows specification generation without silently appending fallback candidates,
++and returns effective `compopt` settings. nosh decides candidate sources before
++matching; native enumeration and fuzzy ranking are not injected into scripts.
++
++Completion function errors and exhausted restart limits propagate instead of
++becoming empty successful results. Temporary `COMP_*`, `COMPREPLY`, trap delivery
++and in-flight option state are restored. Dynamic `nosort` is honored; directory
++fallback is conditional rather than always mixed into a nonempty specification.
++
++`-C` output is bounded while reading. Failed completion commands and output
++overflow are real errors. The normal command-substitution output API remains
++unchanged.
++
++The serde completion execution snapshot borrows environment/functions rather
++than cloning them in the live shell. Restore occurs only in a separate completion
++host, with its own builtin implementations, null I/O, no history/job control and
++no inherited custom descriptors. Actual state includes arrays, attributes,
++function source information, aliases, options, traps, completion configuration,
++hashes, positional arguments and cwd. nosh owns snapshot size limits, workers,
++process ownership, cancellation, health and cache policy.
++
++These APIs do not sandbox arbitrary programmable completion. No changes are
++made to ordinary user command execution or the maintained parser's grammar.
+diff --git a/brush-core/src/commands.rs b/brush-core/src/commands.rs
+index 077c4ac2c2a71670495192afa4892e682945bb82..f21d0fe6bf3ee29590b954dbfa7858fad3d409e6 100644
+--- a/brush-core/src/commands.rs
++++ b/brush-core/src/commands.rs
+@@ -754,6 +754,24 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
+     shell: &mut Shell<impl extensions::ShellExtensions>,
+     params: &ExecutionParameters,
+     s: String,
++) -> Result<String, error::Error> {
++    invoke_subshell_output(shell, params, s, None).await
++}
++
++pub(crate) async fn invoke_completion_command(
++    shell: &mut Shell<impl extensions::ShellExtensions>,
++    params: &ExecutionParameters,
++    command: String,
++    limit: usize,
++) -> Result<String, error::Error> {
++    invoke_subshell_output(shell, params, command, Some(limit)).await
++}
++
++async fn invoke_subshell_output(
++    shell: &mut Shell<impl extensions::ShellExtensions>,
++    params: &ExecutionParameters,
++    s: String,
++    limit: Option<usize>,
+ ) -> Result<String, error::Error> {
+     // Instantiate a subshell to run the command in.
+     let mut subshell = shell.clone();
+@@ -776,11 +794,30 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
+ 
+     let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
+ 
+-    let output_str = async_reader.read_to_string().await?;
++    let output = match limit {
++        Some(limit) => async_reader.read_limited(limit).await,
++        None => async_reader.read_to_string().await,
++    };
++    let output_str = match output {
++        Ok(output) => output,
++        Err(error) => {
++            if limit.is_some() {
++                cmd_join_handle.abort();
++            }
++            return Err(error.into());
++        }
++    };
+ 
+     // Now observe the command's completion.
+     let run_result = cmd_join_handle.await?;
+     let cmd_result = run_result?;
++    if limit.is_some() && !cmd_result.is_success() {
++        return Err(std::io::Error::other(format!(
++            "completion command failed: {}",
++            u8::from(cmd_result.exit_code)
++        ))
++        .into());
++    }
+ 
+     // Store the status.
+     shell.set_last_exit_status(cmd_result.exit_code.into());
+diff --git a/brush-core/src/completion.rs b/brush-core/src/completion.rs
+index 9884a8c7b88a022a60c8e44c96b4a99e57e1b233..9b39a3d78d1ecedde694ade068fd8a30c098cf75 100644
+--- a/brush-core/src/completion.rs
++++ b/brush-core/src/completion.rs
+@@ -1,11 +1,7 @@
+ //! Implements programmable command completion support.
+ 
+ use clap::ValueEnum;
+-use std::{
+-    borrow::Cow,
+-    collections::HashMap,
+-    path::{Path, PathBuf},
+-};
++use std::{borrow::Cow, collections::HashMap, path::Path};
+ use strum::IntoEnumIterator;
+ 
+ use crate::{
+@@ -289,11 +285,45 @@ impl Spec {
+     ///
+     /// * `shell` - The shell instance to use for completion generation.
+     /// * `context` - The context in which completion is being generated.
+-    #[expect(clippy::too_many_lines)]
+     pub async fn get_completions(
+         &self,
+         shell: &mut Shell<impl extensions::ShellExtensions>,
+         context: &Context<'_>,
++    ) -> Result<Answer, crate::error::Error> {
++        self.generate(shell, context, true).await
++    }
++
++    /// Generates specification candidates without adding fallback directories or files.
++    /// The returned processing options include the effective `compopt` settings.
++    pub async fn get_completions_without_fallback(
++        &self,
++        shell: &mut Shell<impl extensions::ShellExtensions>,
++        context: &Context<'_>,
++    ) -> Result<Answer, crate::error::Error> {
++        self.generate(shell, context, false).await
++    }
++
++    async fn generate(
++        &self,
++        shell: &mut Shell<impl extensions::ShellExtensions>,
++        context: &Context<'_>,
++        fallback: bool,
++    ) -> Result<Answer, crate::error::Error> {
++        let previous = shell
++            .completion_config_mut()
++            .current_completion_options
++            .take();
++        let result = self.generate_inner(shell, context, fallback).await;
++        shell.completion_config_mut().current_completion_options = previous;
++        result
++    }
++
++    #[expect(clippy::too_many_lines)]
++    async fn generate_inner(
++        &self,
++        shell: &mut Shell<impl extensions::ShellExtensions>,
++        context: &Context<'_>,
++        fallback: bool,
+     ) -> Result<Answer, crate::error::Error> {
+         // Store the current options in the shell; this is needed since the compopt
+         // built-in has the ability of modifying the options for an in-flight
+@@ -407,9 +437,10 @@ impl Spec {
+             treat_as_filenames: options.file_names,
+             no_autoquote_filenames: options.no_quote,
+             no_trailing_space_at_end_of_line: options.no_space,
++            generation: Some(options.clone()),
+         };
+ 
+-        if options.plus_dirs || options.dir_names {
++        if fallback && (options.plus_dirs || (options.dir_names && candidates.is_empty())) {
+             // Also add dir name completion.
+             let mut dir_candidates = get_file_completions(
+                 shell,
+@@ -422,16 +453,21 @@ impl Spec {
+ 
+         // If we still have no candidates, and bashdefault completions were requested, then generate
+         // those.
+-        if candidates.is_empty() && options.bash_default {
+-            // TODO(completions): it's not clear what default "bash" completions means. From basic
+-            // testing, this doesn't seem to include basic file and directory name
+-            // completion.
+-            tracing::debug!(target: trace_categories::COMPLETION, "unimplemented: complete -o bashdefault");
++        if fallback && candidates.is_empty() && options.bash_default {
++            if let Some(Answer::Candidates(values, opts)) =
++                try_get_variable_completions(shell, context.token_to_complete)
++            {
++                candidates = values;
++                processing_options.treat_as_filenames = opts.treat_as_filenames;
++            } else if context.token_index == 0 {
++                add_command_completions(shell, context.token_to_complete, &mut candidates);
++                processing_options.treat_as_filenames = false;
++            }
+         }
+ 
+         // If we still have no candidates, and default completions were requested, then generate
+         // those.
+-        if candidates.is_empty() && options.default {
++        if fallback && candidates.is_empty() && options.default {
+             // N.B. We approximate "default" readline completion behavior by getting file and
+             // dir completions.
+             let must_be_dir = options.dir_names;
+@@ -446,7 +482,7 @@ impl Spec {
+         }
+ 
+         // Sort, unless blocked by options.
+-        if !self.options.no_sort {
++        if !options.no_sort {
+             candidates.sort();
+         }
+ 
+@@ -704,7 +740,7 @@ impl Spec {
+         // Run the command.
+         let params = shell.default_exec_params();
+         let output =
+-            commands::invoke_command_in_subshell_and_get_output(&mut shell, &params, command_line)
++            commands::invoke_completion_command(&mut shell, &params, command_line, 4 * 1024 * 1024)
+                 .await?;
+ 
+         // Split results.
+@@ -722,7 +758,6 @@ impl Spec {
+         function_name: &str,
+         context: &Context<'_>,
+     ) -> Result<Answer, error::Error> {
+-        // TODO(completions): Don't pollute the persistent environment with these?
+         let vars_and_values: Vec<(&str, ShellValueLiteral)> = vec![
+             ("COMP_LINE", context.input_line.into()),
+             ("COMP_POINT", context.cursor_index.to_string().into()),
+@@ -743,79 +778,72 @@ impl Spec {
+         tracing::debug!(target: trace_categories::COMPLETION, "[calling completion func '{function_name}']: {}",
+             vars_and_values.iter().map(|(k, v)| std::format!("{k}={v}")).collect::<Vec<String>>().join(" "));
+ 
+-        let mut vars_to_remove = Vec::with_capacity(vars_and_values.len());
+-        for (var, value) in vars_and_values {
++        let saved: Vec<_> = vars_and_values
++            .iter()
++            .map(|(name, _)| *name)
++            .chain(std::iter::once("COMPREPLY"))
++            .map(|name| {
++                (
++                    name,
++                    shell
++                        .env()
++                        .get(name)
++                        .map(|(scope, var)| (scope, var.clone())),
++                )
++            })
++            .collect();
++        let result = async {
++            for (var, value) in vars_and_values {
++                shell.env_mut().update_or_add(
++                    var,
++                    value,
++                    |_| Ok(()),
++                    env::EnvironmentLookup::Anywhere,
++                    env::EnvironmentScope::Global,
++                )?;
++            }
+             shell.env_mut().update_or_add(
+-                var,
+-                value,
++                "COMPREPLY",
++                ShellValueLiteral::from(Vec::<&str>::new()),
+                 |_| Ok(()),
+                 env::EnvironmentLookup::Anywhere,
+                 env::EnvironmentScope::Global,
+             )?;
+-
+-            vars_to_remove.push(var);
+-        }
+-
+-        let mut args = vec![
+-            context.command_name.unwrap_or(""),
+-            context.token_to_complete,
+-        ];
+-        if let Some(preceding_token) = context.preceding_token {
+-            args.push(preceding_token);
+-        }
+-
+-        // Suppress trap delivery during completion function invocation.
+-        // N.B. We use manual acquire/release rather than an RAII guard because an
+-        // RAII guard would need to hold `&mut Shell`, preventing the mutable borrow
+-        // required by `invoke_function()`. This is safe because `invoke_result` is
+-        // captured into a variable (never early-returned with `?`), so
+-        // `release_trap_delivery_block()` always runs.
+-        shell.acquire_trap_delivery_block();
+-
+-        let params = shell.default_exec_params();
+-        let invoke_result = shell
+-            .invoke_function(function_name, args.iter(), &params)
+-            .await;
+-
+-        tracing::debug!(target: trace_categories::COMPLETION, "[completion function '{function_name}' returned: {invoke_result:?}]");
+-
+-        shell.release_trap_delivery_block();
+-
+-        // Make a best-effort attempt to unset the temporary variables.
+-        for var_name in vars_to_remove {
+-            let _ = shell.env_mut().unset(var_name);
++            let mut args = vec![
++                context.command_name.unwrap_or(""),
++                context.token_to_complete,
++            ];
++            if let Some(preceding_token) = context.preceding_token {
++                args.push(preceding_token);
++            }
++            shell.acquire_trap_delivery_block();
++            let params = shell.default_exec_params();
++            let invoked = shell
++                .invoke_function(function_name, args.iter(), &params)
++                .await;
++            shell.release_trap_delivery_block();
++            if invoked? == 124 {
++                return Ok(Answer::RestartCompletionProcess);
++            }
++            let candidates = match shell.env().get("COMPREPLY").map(|(_, reply)| reply.value()) {
++                Some(variables::ShellValue::IndexedArray(values)) => {
++                    values.values().cloned().collect()
++                }
++                Some(variables::ShellValue::String(value)) => vec![value.clone()],
++                _ => Vec::new(),
++            };
++            Ok(Answer::Candidates(candidates, ProcessingOptions::default()))
+         }
+-
+-        let result = invoke_result.unwrap_or_else(|e| {
+-            tracing::warn!(target: trace_categories::COMPLETION, "error while running completion function '{function_name}': {e}");
+-            1 // Report back a non-zero exit code.
+-        });
+-
+-        // When the function returns the special value 124, then it's a request
+-        // for us to restart the completion process.
+-        if result == 124 {
+-            Ok(Answer::RestartCompletionProcess)
+-        } else {
+-            if let Some(reply) = shell.env_mut().unset("COMPREPLY")? {
+-                tracing::debug!(target: trace_categories::COMPLETION, "[completion function yielded: {reply:?}]");
+-
+-                match reply.value() {
+-                    variables::ShellValue::IndexedArray(values) => {
+-                        return Ok(Answer::Candidates(
+-                            values.values().map(|v| v.to_owned()).collect(),
+-                            ProcessingOptions::default(),
+-                        ));
+-                    }
+-                    variables::ShellValue::String(s) => {
+-                        let candidates = vec![s.to_owned()];
+-                        return Ok(Answer::Candidates(candidates, ProcessingOptions::default()));
+-                    }
+-                    _ => (),
++        .await;
++        for (name, previous) in saved {
++            match previous {
++                Some((scope, variable)) => shell.env_mut().add(name, variable, scope)?,
++                None => {
++                    shell.env_mut().unset(name)?;
+                 }
+             }
+-
+-            Ok(Answer::Candidates(Vec::new(), ProcessingOptions::default()))
+         }
++        result
+     }
+ }
+ 
+@@ -835,7 +863,8 @@ pub struct Completions {
+ }
+ 
+ /// Options governing how command completion candidates are processed after being generated.
+-#[derive(Debug)]
++#[derive(Debug, Clone)]
++#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub struct ProcessingOptions {
+     /// Treat completions as file names.
+     pub treat_as_filenames: bool,
+@@ -843,6 +872,8 @@ pub struct ProcessingOptions {
+     pub no_autoquote_filenames: bool,
+     /// Don't append a trailing space to completions at the end of the input line.
+     pub no_trailing_space_at_end_of_line: bool,
++    /// Effective generation settings, including changes made by `compopt`.
++    pub generation: Option<GenerationOptions>,
+ }
+ 
+ /// Represents a token in the input line being completed.
+@@ -872,6 +903,7 @@ impl Default for ProcessingOptions {
+             treat_as_filenames: true,
+             no_autoquote_filenames: false,
+             no_trailing_space_at_end_of_line: false,
++            generation: None,
+         }
+     }
+ }
+@@ -1020,6 +1052,13 @@ impl Config {
+         position: usize,
+     ) -> Result<Completions, error::Error> {
+         const MAX_RESTARTS: u32 = 10;
++        if !input.is_char_boundary(position) {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "invalid completion cursor",
++            )
++            .into());
++        }
+ 
+         // Make a best-effort attempt to tokenize.
+         let tokens = Self::tokenize_input_for_completion(shell, input);
+@@ -1102,7 +1141,7 @@ impl Config {
+ 
+             result = self
+                 .get_completions_for_token(shell, completion_context)
+-                .await;
++                .await?;
+ 
+             restart_count += 1;
+         }
+@@ -1114,16 +1153,14 @@ impl Config {
+                 candidates,
+                 options,
+             }),
+-            Answer::RestartCompletionProcess => Ok(Completions {
+-                insertion_index,
+-                delete_count: 0,
+-                candidates: Vec::new(),
+-                options: ProcessingOptions::default(),
+-            }),
++            Answer::RestartCompletionProcess => {
++                Err(std::io::Error::other("completion restart limit reached").into())
++            }
+         }
+     }
+ 
+-    fn tokenize_input_for_completion<'a>(
++    /// Splits a completion line using the current `COMP_WORDBREAKS`.
++    pub fn tokenize_input_for_completion<'a>(
+         shell: &Shell<impl extensions::ShellExtensions>,
+         input: &'a str,
+     ) -> Vec<CompletionToken<'a>> {
+@@ -1138,53 +1175,36 @@ impl Config {
+         simple_tokenize_by_delimiters(input, delimiters.as_slice())
+     }
+ 
+-    async fn get_completions_for_token(
+-        &self,
+-        shell: &mut Shell<impl extensions::ShellExtensions>,
+-        context: Context<'_>,
+-    ) -> Answer {
+-        // See if we can find a completion spec matching the current command.
+-        let mut found_spec: Option<&Spec> = None;
+-
++    /// Selects a specification without running it or inferring its source from candidates.
++    pub fn specification(&self, context: &Context<'_>) -> Option<&Spec> {
+         if let Some(command_name) = context.command_name {
+             if context.token_index == 0 {
+-                if let Some(spec) = &self.initial_word {
+-                    found_spec = Some(spec);
+-                }
++                self.initial_word.as_ref()
+             } else {
+-                if let Some(spec) = shell.completion_config().commands.get(command_name) {
+-                    found_spec = Some(spec);
+-                } else if let Some(file_name) = PathBuf::from(command_name).file_name() {
+-                    if let Some(spec) = shell
+-                        .completion_config()
+-                        .commands
+-                        .get(&file_name.to_string_lossy().to_string())
+-                    {
+-                        found_spec = Some(spec);
+-                    }
+-                }
+-
+-                if found_spec.is_none() {
+-                    if let Some(spec) = &self.default {
+-                        found_spec = Some(spec);
+-                    }
+-                }
++                self.commands
++                    .get(command_name)
++                    .or_else(|| {
++                        Path::new(command_name)
++                            .file_name()
++                            .and_then(|name| name.to_str())
++                            .and_then(|name| self.commands.get(name))
++                    })
++                    .or(self.default.as_ref())
+             }
+         } else {
+-            if let Some(spec) = &self.empty_line {
+-                found_spec = Some(spec);
+-            }
++            self.empty_line.as_ref()
+         }
++    }
+ 
+-        // Try to generate completions.
+-        if let Some(spec) = found_spec {
+-            spec.to_owned()
+-                .get_completions(shell, &context)
+-                .await
+-                .unwrap_or_else(|_err| Answer::Candidates(Vec::new(), ProcessingOptions::default()))
++    async fn get_completions_for_token(
++        &self,
++        shell: &mut Shell<impl extensions::ShellExtensions>,
++        context: Context<'_>,
++    ) -> Result<Answer, error::Error> {
++        if let Some(spec) = shell.completion_config().specification(&context).cloned() {
++            spec.get_completions(shell, &context).await
+         } else {
+-            // If we didn't find a spec, then fall back to basic completion.
+-            get_completions_using_basic_lookup(shell, &context).await
++            Ok(get_completions_using_basic_lookup(shell, &context).await)
+         }
+     }
+ }
+@@ -1400,7 +1420,7 @@ async fn get_completions_using_basic_lookup(
+ /// are emitted as tokens. Consecutive non-whitespace delimiters are grouped into a single
+ /// token. Whitespace delimiters separate tokens but are not emitted themselves.
+ #[allow(clippy::string_slice, reason = "used indices come from char_indices")]
+-fn simple_tokenize_by_delimiters<'a>(
++pub fn simple_tokenize_by_delimiters<'a>(
+     input: &'a str,
+     delimiters: &[char],
+ ) -> Vec<CompletionToken<'a>> {
+@@ -1425,7 +1445,7 @@ fn simple_tokenize_by_delimiters<'a>(
+         } else {
+             if c == '\\' {
+                 escaped = true;
+-            } else if word_start.is_none() && (c == '\'' || c == '\"') {
++            } else if c == '\'' || c == '\"' {
+                 // start a new quote.
+                 quote_char = Some(c);
+             } else {
+@@ -1648,18 +1668,22 @@ mod tests {
+ 
+         assert_matches!(
+             simple_tokenize_by_delimiters("one'two", &['\'']).as_slice(),
++            [CompletionToken {
++                text: "one'two",
++                start: 0,
++            },]
++        );
++
++        assert_matches!(
++            simple_tokenize_by_delimiters("key=\"two words\" next", &[' ', '\t']).as_slice(),
+             [
+                 CompletionToken {
+-                    text: "one",
+-                    start: 0,
+-                },
+-                CompletionToken {
+-                    text: "'",
+-                    start: 3,
++                    text: "key=\"two words\"",
++                    start: 0
+                 },
+                 CompletionToken {
+-                    text: "two",
+-                    start: 4,
++                    text: "next",
++                    start: 16
+                 },
+             ]
+         );
+diff --git a/brush-core/src/lib.rs b/brush-core/src/lib.rs
+index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..7c386580971a44c8f4383bb4f8be6ec5309ca40b 100644
+--- a/brush-core/src/lib.rs
++++ b/brush-core/src/lib.rs
+@@ -32,6 +32,8 @@ mod prompt;
+ mod regex;
+ pub mod results;
+ mod shell;
++#[cfg(feature = "serde")]
++pub use shell::CompletionState;
+ pub mod sourceinfo;
+ pub mod sys;
+ pub mod terminal;
+diff --git a/brush-core/src/shell.rs b/brush-core/src/shell.rs
+index 82dbca4601fd33e2d1b29de735be17b345ae08a6..5e365fbe0fd1b17958cdc783e26dbb003a50e2bc 100644
+--- a/brush-core/src/shell.rs
++++ b/brush-core/src/shell.rs
+@@ -45,6 +45,8 @@ mod state;
+ mod traps;
+ 
+ pub use builder::{CreateOptions, ShellBuilder, ShellBuilderState};
++#[cfg(feature = "serde")]
++pub use completion::CompletionState;
+ pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
+ pub use state::ShellState;
+ 
+diff --git a/brush-core/src/shell/completion.rs b/brush-core/src/shell/completion.rs
+index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd58081068290 100644
+--- a/brush-core/src/shell/completion.rs
++++ b/brush-core/src/shell/completion.rs
+@@ -2,7 +2,121 @@
+ 
+ use crate::{completion, error, extensions};
+ 
++#[cfg(feature = "serde")]
++#[derive(serde::Serialize, serde::Deserialize)]
++/// Execution state for an isolated completion host, excluding jobs, history and descriptors.
++pub struct CompletionState {
++    working_dir: std::path::PathBuf,
++    env: crate::env::ShellEnvironment,
++    funcs: crate::functions::FunctionEnv,
++    options: crate::options::RuntimeOptions,
++    aliases: std::collections::HashMap<String, String>,
++    completion_config: completion::Config,
++    program_location_cache: crate::pathcache::PathCache,
++    args: Vec<String>,
++    name: Option<String>,
++    directory_stack: Vec<std::path::PathBuf>,
++    last_exit_status: u8,
++    builtins: std::collections::HashMap<String, bool>,
++    unsupported_process_state: bool,
++    traps: crate::traps::TrapHandlerConfig,
++}
++
+ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
++    /// Expands a completion path without executing command substitutions.
++    pub async fn expand_completion_path(&mut self, input: &str) -> Result<String, error::Error> {
++        let params = self.default_exec_params();
++        crate::expansion::basic_expand_word_with_options(
++            self,
++            &params,
++            input,
++            &crate::expansion::ExpanderOptions {
++                execute_command_substitutions: false,
++                ..Default::default()
++            },
++        )
++        .await
++    }
++
++    /// Borrows completion execution state without copying the environment or function bodies.
++    #[cfg(feature = "serde")]
++    pub fn completion_state(&self) -> impl serde::Serialize + '_ {
++        #[derive(serde::Serialize)]
++        struct View<'a> {
++            working_dir: &'a std::path::Path,
++            env: &'a crate::env::ShellEnvironment,
++            funcs: &'a crate::functions::FunctionEnv,
++            options: &'a crate::options::RuntimeOptions,
++            aliases: &'a std::collections::HashMap<String, String>,
++            completion_config: &'a completion::Config,
++            program_location_cache: &'a crate::pathcache::PathCache,
++            args: &'a [String],
++            name: &'a Option<String>,
++            directory_stack: &'a [std::path::PathBuf],
++            last_exit_status: u8,
++            builtins: std::collections::HashMap<&'a str, bool>,
++            unsupported_process_state: bool,
++            traps: &'a crate::traps::TrapHandlerConfig,
++        }
++        View {
++            working_dir: &self.working_dir,
++            env: &self.env,
++            funcs: &self.funcs,
++            options: &self.options,
++            aliases: &self.aliases,
++            completion_config: &self.completion_config,
++            program_location_cache: &self.program_location_cache,
++            args: &self.args,
++            name: &self.name,
++            directory_stack: &self.directory_stack,
++            last_exit_status: self.last_exit_status,
++            builtins: self
++                .builtins
++                .iter()
++                .map(|(name, reg)| (name.as_str(), reg.disabled))
++                .collect(),
++            unsupported_process_state: self.open_files.iter_fds().any(|(fd, _)| fd > 2),
++            traps: &self.traps,
++        }
++    }
++
++    /// Restores a snapshot into a host with its own builtin implementations and null standard I/O.
++    #[cfg(feature = "serde")]
++    pub fn restore_completion_state(&mut self, state: CompletionState) -> Result<(), error::Error> {
++        if state.unsupported_process_state
++            || state
++                .builtins
++                .keys()
++                .any(|name| !self.builtins.contains_key(name))
++        {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::Unsupported,
++                "completion snapshot needs custom descriptors or builtin implementations",
++            )
++            .into());
++        }
++        self.working_dir = state.working_dir;
++        self.env = state.env;
++        self.funcs = state.funcs;
++        self.options = state.options;
++        self.options.interactive = false;
++        self.options.enable_job_control = false;
++        self.options.enable_command_history = false;
++        self.options.external_cmd_leads_session = false;
++        self.aliases = state.aliases;
++        self.completion_config = state.completion_config;
++        self.program_location_cache = state.program_location_cache;
++        self.args = state.args;
++        self.name = state.name;
++        self.directory_stack = state.directory_stack;
++        self.last_exit_status = state.last_exit_status;
++        self.traps = state.traps;
++        for (name, registration) in &mut self.builtins {
++            registration.disabled = state.builtins.get(name).copied().unwrap_or(true);
++        }
++        Ok(())
++    }
++
+     /// Generates command completions for the shell.
+     ///
+     /// # Arguments
+diff --git a/brush-core/src/sys/stubs/async_pipe.rs b/brush-core/src/sys/stubs/async_pipe.rs
+index 6b6ca14c464ab0077bf22b6196bfb1e14408b28c..41cde833136ed6307b710fbc54d3f20d5d7a3458 100644
+--- a/brush-core/src/sys/stubs/async_pipe.rs
++++ b/brush-core/src/sys/stubs/async_pipe.rs
+@@ -27,4 +27,21 @@ impl AsyncPipeReader {
+         .await
+         .map_err(io::Error::other)?
+     }
++
++    pub(crate) async fn read_limited(&mut self, limit: usize) -> io::Result<String> {
++        let reader = self
++            .inner
++            .take()
++            .ok_or_else(|| io::Error::other("completion pipe already consumed"))?;
++        tokio::task::spawn_blocking(move || {
++            let mut bytes = Vec::new();
++            reader.take((limit + 1) as u64).read_to_end(&mut bytes)?;
++            if bytes.len() > limit {
++                return Err(io::Error::other("completion output limit reached"));
++            }
++            String::from_utf8(bytes).map_err(io::Error::other)
++        })
++        .await
++        .map_err(io::Error::other)?
++    }
+ }
+diff --git a/brush-core/src/sys/unix/async_pipe.rs b/brush-core/src/sys/unix/async_pipe.rs
+index f9511cf75d560e115aaeef404614ce52f107152d..26d434b4381271c35e1137fb718272675b4c1456 100644
+--- a/brush-core/src/sys/unix/async_pipe.rs
++++ b/brush-core/src/sys/unix/async_pipe.rs
+@@ -20,4 +20,21 @@ impl AsyncPipeReader {
+         self.0.read_to_string(&mut s).await?;
+         Ok(s)
+     }
++
++    pub(crate) async fn read_limited(&mut self, limit: usize) -> io::Result<String> {
++        use tokio::io::AsyncReadExt;
++        let mut bytes = Vec::new();
++        let mut chunk = [0; 8192];
++        loop {
++            let size = self.0.read(&mut chunk).await?;
++            if size == 0 {
++                break;
++            }
++            if bytes.len() + size > limit {
++                return Err(io::Error::other("completion output limit reached"));
++            }
++            bytes.extend_from_slice(&chunk[..size]);
++        }
++        String::from_utf8(bytes).map_err(io::Error::other)
++    }
+ }

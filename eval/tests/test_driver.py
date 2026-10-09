@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -139,6 +140,32 @@ class DriverTests(unittest.TestCase):
             result = driver.run_cli([sys.executable, "-c", "print('x' * 10000)"],
                                     Path.cwd(), {"PATH": "/usr/bin:/bin"}, 5)
         self.assertIn("output exceeded", result.error)
+
+    def test_cleanup_handles_exit_during_owner_revalidation(self):
+        for exited in (True, False):
+            with self.subTest(exited=exited), subprocess.Popen(
+                [sys.executable, "-c", "import sys; sys.stdin.read()"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin"},
+            ) as child:
+                fd = os.pidfd_open(child.pid)
+                try:
+                    if exited:
+                        child.stdin.close()
+                        child.wait(timeout=5)
+                    with patch.object(driver, "owned_pids", side_effect=[[child.pid], []]), \
+                         patch.object(os, "pidfd_open", return_value=fd), \
+                         patch.object(Path, "read_bytes", side_effect=PermissionError("blocked environ")), \
+                         patch.object(driver.signal, "pidfd_send_signal") as send:
+                        if exited:
+                            driver.stop_owned("fixture")
+                        else:
+                            with self.assertRaisesRegex(PermissionError, "blocked environ"):
+                                driver.stop_owned("fixture")
+                        send.assert_not_called()
+                finally:
+                    child.stdin.close()
+                    child.wait(timeout=5)
 
     def test_cleanup_finds_a_detached_owned_descendant(self):
         code = (

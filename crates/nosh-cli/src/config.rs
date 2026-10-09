@@ -14,6 +14,8 @@ pub struct Config {
     pub on_failure: OnFailure,
     pub capture_output: CaptureOutput,
     pub input_assist: bool,
+    pub completion: bool,
+    pub completion_scripts: bool,
     pub status_bar: bool,
     pub command_assist: bool,
     pub editing: nosh_shell::editing::Config,
@@ -48,6 +50,8 @@ impl Default for Config {
             on_failure: OnFailure::Hint,
             capture_output: CaptureOutput::Last,
             input_assist: true,
+            completion: true,
+            completion_scripts: true,
             status_bar: true,
             command_assist: true,
             editing: Default::default(),
@@ -85,6 +89,8 @@ const KNOWN: &[(&str, &[&str])] = &[
             "on_failure",
             "capture_output",
             "input_assist",
+            "completion",
+            "completion_scripts",
             "status_bar",
             "command_assist",
             "nl_guard",
@@ -253,6 +259,12 @@ impl Config {
         }
         if let Some(v) = r.bool("shell", "input_assist") {
             c.input_assist = v;
+        }
+        if let Some(value) = r.bool("shell", "completion") {
+            c.completion = value;
+        }
+        if let Some(value) = r.bool("shell", "completion_scripts") {
+            c.completion_scripts = value;
         }
         if let Some(v) = r.bool("shell", "status_bar") {
             c.status_bar = v;
@@ -590,6 +602,32 @@ on = true
                 .warnings
                 .iter()
                 .any(|w| w.contains("shell.input_assist: expected true or false"))
+        );
+    }
+
+    #[test]
+    fn completion_switches_are_real_booleans_independent_of_input_assist() {
+        let defaults = Config::default();
+        assert!(defaults.completion && defaults.completion_scripts);
+        let disabled = Config::parse(
+            "[shell]\ncompletion = false\ncompletion_scripts = false\ninput_assist = true",
+        );
+        assert!(!disabled.completion && !disabled.completion_scripts);
+        assert!(disabled.input_assist);
+        assert!(disabled.warnings.is_empty());
+        let invalid = Config::parse("[shell]\ncompletion = \"off\"\ncompletion_scripts = 1");
+        assert!(invalid.completion && invalid.completion_scripts);
+        assert!(
+            invalid
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("shell.completion"))
+        );
+        assert!(
+            invalid
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("shell.completion_scripts"))
         );
     }
 

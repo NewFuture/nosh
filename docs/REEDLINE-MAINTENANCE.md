@@ -1,10 +1,8 @@
 # Reedline source maintenance
 
-Reedline is maintained in this repository as an **official upstream submodule,
-one reviewable patch, and an ignored editable build copy**. No nosh-owned remote
-fork or two-repository release is required. Normal Rust development needs Rust,
-Git (with `git archive --mtime` support), and the usual platform linker; Python,
-Node, npm, `patch`, and `tar` are not source-preparation dependencies.
+Reedline and brush each use an **official upstream submodule, a maintained patch,
+and an ignored editable build copy**. Source preparation requires Rust, Git
+(with `git archive --mtime` support), and the platform linker.
 
 ## Layout and source of truth
 
@@ -18,12 +16,16 @@ Node, npm, `patch`, and `tar` are not source-preparation dependencies.
 | `.nosh/reedline` | Ignored, patched source used directly by Cargo and editable in the same IDE |
 | `.nosh/reedline/.git/nosh` | Generated input snapshots and provenance, not another maintained source |
 | `.nosh/cache/reedline.git` | Optional official Git object cache when the submodule is absent |
+| `third_party/brush-upstream` | Clean official `reubeno/brush` gitlink at the brush-core 0.5.0 release |
+| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo and the completion-only maintained delta |
+| `.nosh/brush` | Ignored editable monorepo; Cargo overrides core and parser to its matching crate subdirectories |
+| `.nosh/cache/brush-core.git` | Per-checkout brush object cache |
 
 The exact path-and-version dependency cannot silently fall back to registry
 Reedline. Never modify Cargo's shared registry, edit the clean submodule, or
 expect a gitlink to contain uncommitted submodule edits.
 
-The source tool checks the **index** gitlink, so an upgrade can be reviewed before
+The source tool checks each **index** gitlink, so an upgrade can be reviewed before
 committing. Source archives lack an index; their tracked `source.toml` pins the
 same commit. Git's object identity, patch SHA256, upstream/patched Git trees and
 fixed-mtime patched archive SHA256 are recorded by `provenance`. Text input
@@ -93,6 +95,15 @@ cargo source check
 cargo source provenance
 ```
 
+`prepare`, `check`, `export` and default `provenance` cover both fixed dependencies.
+Default provenance is an object keyed by `reedline` and `brush-core`, recording
+the build inputs used by source verification and evaluation.
+
+Use `--dependency reedline` or `--dependency brush-core` for a focused operation,
+or for separate read-only offline caches. A focused provenance retains the
+single-dependency state shape. `upgrade` without a selector preserves its original
+Reedline target; use `--dependency brush-core --rev <SHA>` for brush.
+
 Repeated clean preparation is a no-op. Missing offline objects, invalid patches,
 dirty upstream checkouts, mismatched gitlinks and unexported edits are explicit
 errors. There is no unpatched fallback. Build output under the generated library's
@@ -119,6 +130,14 @@ replacing the patch. It does not edit the upstream checkout or the main index.
 Review and commit nosh edits and the exported patch in **one PR**. Do not edit the
 patch and the generated source independently; an input change blocks export
 rather than guessing which copy wins. Export before changing branches.
+
+For brush, edit `.nosh/brush/brush-core` and run the completion regressions through
+the root workspace in Linux/macOS/WSL. Export with the checkout's native Git:
+
+```powershell
+cargo source export --dependency brush-core
+cargo source check
+```
 
 ## Upgrading upstream
 
@@ -153,8 +172,9 @@ new upstream behavior. Export is recomputed from the new base, so absorbed
 changes disappear naturally, including an entirely empty patch. No heuristic
 silently skips a failed hunk. Candidates remain available for inspection.
 
-Source commands take a per-checkout exclusive lock. Do not edit the source while
-preparing/upgrading it. Interrupted installs retain `.nosh/previous-reedline` and
+Source commands hold one per-checkout exclusive lock across all selected
+dependencies. Do not edit the source while preparing/upgrading it.
+Interrupted installs retain `.nosh/previous-reedline` and
 refuse another replacement until it has been inspected; never delete it without
 preserving any wanted work. Invalid/incomplete state is an error, not permission
 to overwrite an existing source directory.
@@ -169,7 +189,8 @@ fail without retry; `--index` is never removed.
 
 ## Changing the maintenance tool
 
-The tool is specific to Reedline, not a generic dependency manager. Modify the
+The tool explicitly manages these two known official dependencies, not a generic
+dependency manager or plugin framework. Modify the
 smallest owning module rather than adding another wrapper or preparation route:
 
 | Change | Location |

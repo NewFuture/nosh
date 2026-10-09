@@ -28,6 +28,9 @@ mod command_assist;
 #[path = "terminal/editing.rs"]
 mod editing;
 
+#[path = "terminal/completion.rs"]
+mod completion;
+
 #[path = "terminal/status.rs"]
 mod status;
 

@@ -2,17 +2,15 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use nosh_hub::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    ColumnarMenu, CompletionResult, KeyCode, MenuBuilder, Prompt, PromptContext, PromptEditMode,
-    PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineMenu, Signal, Suggestion,
-    ValidationResult,
+    ColumnarMenu, KeyCode, MenuBuilder, Prompt, PromptContext, PromptEditMode, PromptHistorySearch,
+    PromptHistorySearchStatus, Reedline, ReedlineMenu, Signal, ValidationResult,
 };
 
 use crate::UserOutput;
@@ -126,6 +124,7 @@ pub struct ReplConfig {
     pub editing: editing::Config,
     pub input_assist: input_assist::Config,
     pub input_abbreviations: input_assist::Abbreviations,
+    pub completion: crate::completion::Config,
 }
 
 impl Default for ReplConfig {
@@ -138,6 +137,7 @@ impl Default for ReplConfig {
             editing: Default::default(),
             input_assist: Default::default(),
             input_abbreviations: Default::default(),
+            completion: Default::default(),
         }
     }
 }
@@ -534,6 +534,7 @@ struct EditorState {
     bindings: crate::status::Bindings,
     editing: Option<Arc<editing::Compiled>>,
     _theme_subscription: Option<crate::status::ThemeSubscription>,
+    completion_controller: Option<crate::completion::Completion>,
 }
 
 struct RenderedPrompt {
@@ -640,6 +641,7 @@ impl Prompt for ReplPrompt {
                 cursor: context.completion_cursor,
                 error: Some(tr!("补全状态暂不可用", "Completion state unavailable").into()),
                 count: 0,
+                phase: crate::completion::Phase::Unavailable,
             });
         let completion = match &completion {
             Ok(snapshot) => snapshot.as_ref().filter(|snapshot| {
@@ -887,74 +889,7 @@ pub fn git_branch(cwd: &Path) -> Option<String> {
     None
 }
 
-struct ShellCompleter {
-    rt: Arc<tokio::runtime::Runtime>,
-    shell: Arc<Mutex<BrushShell>>,
-    input_assist: Option<input_assist::InputAssist>,
-    state: Arc<Mutex<Option<crate::status::Completion>>>,
-}
-
-impl ShellCompleter {
-    fn lock(&self) -> MutexGuard<'_, BrushShell> {
-        self.shell.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl reedline::Completer for ShellCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
-        let rt = self.rt.clone();
-        let mut sh = self.lock();
-        let wd = sh.working_dir().to_path_buf();
-        let completion = rt.block_on(sh.complete(line, pos));
-        drop(sh);
-        if let Some(assist) = &self.input_assist {
-            assist.after_completion(&self.shell);
-        }
-        let c = match completion {
-            Ok(completion) => completion,
-            Err(error) => {
-                *self.state.lock().unwrap_or_else(|error| error.into_inner()) =
-                    Some(crate::status::Completion {
-                        input: line.to_owned(),
-                        cursor: pos,
-                        error: Some(format!(
-                            "{}: {}",
-                            tr!("补全暂不可用", "completion unavailable"),
-                            style::visible_text(&error.to_string())
-                        )),
-                        count: 0,
-                    });
-                return CompletionResult::fresh(Vec::new());
-            }
-        };
-        let quote = open_quote(line, pos);
-        let at_end = pos == line.len();
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for cand in c.candidates {
-            if !seen.insert(cand.clone()) {
-                continue;
-            }
-            let cand = postprocess(cand, &c.options, &wd, at_end, quote);
-            out.push(to_suggestion(
-                line,
-                cand,
-                c.insertion_index,
-                c.delete_count,
-                &c.options,
-            ));
-        }
-        *self.state.lock().unwrap_or_else(|error| error.into_inner()) =
-            Some(crate::status::Completion {
-                input: line.to_owned(),
-                cursor: pos,
-                error: None,
-                count: out.len(),
-            });
-        CompletionResult::fresh(out)
-    }
-}
-
+#[cfg(test)]
 fn open_quote(line: &str, pos: usize) -> Option<char> {
     let mut q = None;
     let mut esc = false;
@@ -975,82 +910,6 @@ fn open_quote(line: &str, pos: usize) -> Option<char> {
         }
     }
     q
-}
-
-fn postprocess(
-    mut cand: String,
-    opts: &brush_core::completion::ProcessingOptions,
-    wd: &Path,
-    at_end: bool,
-    quote: Option<char>,
-) -> String {
-    use brush_core::sys::fs::ends_with_path_separator;
-    if opts.treat_as_filenames {
-        if !ends_with_path_separator(&cand) {
-            let p = Path::new(&cand);
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                wd.join(p)
-            };
-            if abs.is_dir() {
-                cand.push('/');
-            }
-        }
-        if !opts.no_autoquote_filenames {
-            let mode = match quote {
-                Some('\'') => brush_core::escape::QuoteMode::SingleQuote,
-                Some('"') => brush_core::escape::QuoteMode::DoubleQuote,
-                _ => brush_core::escape::QuoteMode::BackslashEscape,
-            };
-            cand = brush_core::escape::quote_if_needed(&cand, mode).to_string();
-        }
-    }
-    if at_end
-        && !opts.no_trailing_space_at_end_of_line
-        && (!opts.treat_as_filenames || !ends_with_path_separator(&cand))
-    {
-        cand.push(' ');
-    }
-    cand
-}
-
-fn to_suggestion(
-    line: &str,
-    mut cand: String,
-    mut start: usize,
-    mut delete: usize,
-    opts: &brush_core::completion::ProcessingOptions,
-) -> Suggestion {
-    let mut style = Style::new();
-    if opts.treat_as_filenames {
-        if brush_core::sys::fs::ends_with_path_separator(&cand) {
-            style = style.fg(Color::Green);
-        }
-        if start + delete <= line.len()
-            && let Some(removed) = line.get(start..start + delete)
-            && let Some(sep) = brush_core::sys::fs::rfind_path_separator(removed)
-            && cand.starts_with(removed)
-        {
-            cand = cand.split_off(sep + 1);
-            start += sep + 1;
-            delete -= sep + 1;
-        }
-    }
-    let append_whitespace = cand.ends_with(' ');
-    if append_whitespace {
-        cand.pop();
-    }
-    Suggestion {
-        value: cand,
-        style: Some(style),
-        span: reedline::Span {
-            start,
-            end: start + delete,
-        },
-        append_whitespace,
-        ..Suggestion::default()
-    }
 }
 
 struct LineValidator {
@@ -1080,7 +939,7 @@ fn build_editor(
     cfg: &ReplConfig,
     command_assist: Option<crate::AssistDisplay>,
 ) -> (Reedline, Option<input_assist::InputAssist>, EditorState) {
-    let (rt, sh) = shell.shared();
+    let (_, sh) = shell.shared();
     let enhanced = if cfg.editing.needs_enhanced_keyboard()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
@@ -1112,9 +971,12 @@ fn build_editor(
             .clone(),
         editing: Some(compiled),
         _theme_subscription: None,
+        completion_controller: None,
     };
     let menu = ColumnarMenu::default()
         .with_name("completion_menu")
+        .with_preserve_case(true)
+        .with_input_mode(reedline::InputMode::FullBuffer)
         .with_marker("")
         .with_columns(10)
         .with_selected_text_style(Color::Blue.bold().reverse())
@@ -1128,6 +990,7 @@ fn build_editor(
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_quick_completions(true)
+        .with_partial_completions(true)
         .with_contextual_input(true)
         .use_kitty_keyboard_enhancement(enhanced)
         .with_menu_submit_protection(true)
@@ -1157,12 +1020,16 @@ fn build_editor(
         Some(assist) => assist.hinter(hinter),
         None => Box::new(hinter),
     });
-    editor = editor.with_completer(Box::new(ShellCompleter {
-        rt,
-        shell: sh,
-        input_assist: assist.clone(),
-        state: state.completion.clone(),
-    }));
+    let repaint = editor.repaint_signal();
+    let mut completion_config = cfg.completion.clone();
+    completion_config.abbreviations = cfg.input_abbreviations.clone();
+    let completion = crate::completion::Completion::new(
+        completion_config,
+        state.completion.clone(),
+        Arc::new(move || repaint.request_repaint()),
+    );
+    state.completion_controller = Some(completion.clone());
+    editor = editor.with_completer(Box::new(completion));
     let edit_mode: Box<dyn reedline::EditMode> = if let Some(assist) = &assist {
         editor = editor.with_highlighter(assist.highlighter());
         assist.edit_mode(native_mode)
@@ -1288,6 +1155,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         prompt.status_feedback = pipeline.cfg.status_bar.enabled;
         prompt.theme = pipeline.cfg.status_bar.theme.clone();
         prompt.editor = editor_state.clone();
+        if let Some(completion) = &editor_state.completion_controller {
+            completion.prepare(shell);
+        }
         *editor_state
             .completion
             .lock()
@@ -1361,7 +1231,10 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                             ui.notice(error);
                             continue;
                         }
-                        if result.is_none() {
+                        if !result.is_some_and(|snapshot| {
+                            snapshot.phase == crate::completion::Phase::Complete
+                                && snapshot.count == 0
+                        }) {
                             ui.notice(tr!(
                                 "nosh: 补全结果暂不可确认；未请求 AI",
                                 "nosh: completion result unavailable; AI was not requested"
@@ -1378,6 +1251,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                             set_buffer(ed, &program);
                         } else {
                             plain_draft = program;
+                        }
+                    }
+                    if needs_model {
+                        if let Some(completion) = &editor_state.completion_controller {
+                            completion.prepare(shell);
+                        }
+                        if let Ok(mut completion) = editor_state.completion.try_lock() {
+                            *completion = None;
                         }
                     }
                     if needs_model && let Some(assist) = &input_assist {
@@ -1589,6 +1470,7 @@ mod tests {
                 bindings: crate::status::Bindings::from_editor(&keys),
                 editing: None,
                 _theme_subscription: None,
+                completion_controller: None,
             },
             rendered: RefCell::new(None),
             left: if custom {
@@ -1812,6 +1694,7 @@ mod tests {
                         cursor: buffer.len(),
                         error: Some("completion failed ".repeat(40)),
                         count: 0,
+                        phase: crate::completion::Phase::Unavailable,
                     });
                 prompt.approval = if index % 2 == 0 {
                     "Approval: Auto".into()

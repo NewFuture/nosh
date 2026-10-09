@@ -22,7 +22,7 @@ nosh-hub = { path = "crates/nosh-hub" }
 anyhow = "1.0.104"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 toml = "1.1.6"
 clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
@@ -81,6 +81,10 @@ print_stderr = "allow"
 # source links against it. See third_party/candle-core/NOSH_PATCH.md.
 [patch."https://github.com/huggingface/candle"]
 candle-core = { path = "third_party/candle-core" }
+
+[patch.crates-io]
+brush-core = { path = ".nosh/brush/brush-core" }
+brush-parser = { path = ".nosh/brush/brush-parser" }
 
 # gemm-f16's aarch64 kernels are `#[target_feature(enable = "fp16")]` functions
 # calling `#[inline]` helpers whose asm (`fmla v.8h`) needs fp16. Unoptimized,
