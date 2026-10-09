@@ -38,14 +38,14 @@ impl BarProgress {
 
 impl Progress for BarProgress {
     fn start(&self, name: &str, total: u64, already: u64) {
-        let terminal = crate::terminal::stderr();
+        let terminal = nosh_platform::terminal::stderr();
         if !terminal.ansi {
             *self.bar.lock().unwrap() = None;
-            eprintln!("{} {name}", crate::tr!("下载", "downloading"));
+            eprintln!("{} {name}", nosh_platform::tr!("下载", "downloading"));
             return;
         }
         let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
-        let tpl = if crate::lang::zh() {
+        let tpl = if nosh_platform::lang::zh() {
             "{msg:24!} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} 剩余 {eta}"
         } else {
             "{msg:24!} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} ETA {eta}"

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use nosh_llm::{
-    ChatEngine, Event, LlmError, Message, MockChatEngine, SessionId, SessionSpec, StepOutcome,
+use nosh_engine::{
+    ChatEngine, EngineError, Event, Message, MockChatEngine, SessionId, SessionSpec, StepOutcome,
     mock::{MockEvent, call, text},
 };
 use nosh_shell::{EmbeddedShell, ShellOptions, Trigger};
@@ -371,7 +371,7 @@ struct FailAfterAnswer {
 }
 
 impl ChatEngine for FailAfterAnswer {
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
         self.inner.open(spec)
     }
 
@@ -380,19 +380,21 @@ impl ChatEngine for FailAfterAnswer {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError> {
+    ) -> Result<StepOutcome, EngineError> {
         if !self.failed
             && append
                 .iter()
                 .any(|message| matches!(message, Message::UserAnswer(_)))
         {
             self.failed = true;
-            return Err(LlmError::Config("injected failure after the answer".into()));
+            return Err(EngineError::Config(
+                "injected failure after the answer".into(),
+            ));
         }
         self.inner.step(sid, append, sink)
     }
 
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
         self.inner.rewind(sid, keep)
     }
 
@@ -400,7 +402,7 @@ impl ChatEngine for FailAfterAnswer {
         self.inner.message_count(sid)
     }
 
-    fn compact_tool_results(&mut self, sid: SessionId, keep: usize) -> Result<usize, LlmError> {
+    fn compact_tool_results(&mut self, sid: SessionId, keep: usize) -> Result<usize, EngineError> {
         self.inner.compact_tool_results(sid, keep)
     }
 

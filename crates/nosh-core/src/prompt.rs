@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use nosh_llm::Message;
+use nosh_engine::Message;
 use nosh_shell::{EmbeddedShell, Trigger, UserCommand, UserOutput};
 
 use crate::tools::ToolSet;

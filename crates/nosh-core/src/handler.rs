@@ -1,9 +1,9 @@
 //! [`ShellAi`]: the REPL's AI handler. Loads the engine on first use and
 //! runs tasks in the shared session.
 
-use nosh_hub::tr;
-use nosh_llm::ChatEngine;
+use nosh_engine::ChatEngine;
 use nosh_permissions::ApprovalMode;
+use nosh_platform::tr;
 use nosh_shell::{AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, Trigger, style};
 
 use crate::agent::{Agent, AgentConfig};
@@ -458,8 +458,8 @@ mod tests {
         let mut ai = ShellAi::new(
             Box::new(|_| {
                 Ok(LoadedEngine {
-                    engine: Box::new(nosh_llm::MockChatEngine::with_responder(|_| {
-                        vec![nosh_llm::mock::text("done")]
+                    engine: Box::new(nosh_engine::MockChatEngine::with_responder(|_| {
+                        vec![nosh_engine::mock::text("done")]
                     })),
                     description: "fixture".into(),
                 })

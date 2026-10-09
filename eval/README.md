@@ -404,7 +404,9 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 
 正式测量前固定源码、二进制、模型、套件、seed、预算和裁判；每个计划身份都要记录，通过、模型失败、基础设施错误和缺失分别统计。禁止为追求通过率重抽失败样本或把本地纠错、重复条目混入模型能力分母。
 
-结果写入新目录，记录当前协议和哈希；不同裁判版本或 cold/resident 模式的分数不直接合并。已有只读证据位于 [baselines/](baselines/)，其独立归档复核工具不属于当前运行接口，不使用新评分器改写旧结果。
+结果写入独立输出目录，记录当前协议和哈希；不同裁判版本或 cold/resident 模式的分数不直接合并。仓库只维护当前套件、观测和报告结构，不保留历史基线副本或独立归档复核工具；旧材料由 Git 历史保存。
+
+源码构建只接受当前受管布局：Reedline 路径依赖、brush-core / brush-parser 路径覆盖，以及两个依赖各自的 pin。默认 provenance 必须同时包含 `reedline` 和 `brush-core`；缺项、额外项、单依赖对象或不支持的 schema 明确拒绝，不自动适配。源码 revision、锁文件和二进制哈希仍用于精确复现，不表示兼容任意历史布局。
 
 ## 开发与无模型自测
 
@@ -428,14 +430,15 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 新增场景优先复用既有 check：在 `scenarios/` 定义一次并加入所需 `suites/`。只有新增判定类型才扩展 `contracts.py`、对应评分器、必要的夹具／审批实现及正反例；不在加载器、运行器和评分入口各维护一份关系表。评分统一通过 `checks.judge`；其余函数直接从各职责模块导入，不设置兼容转发层。
 
 ```bash
-python3 -m unittest eval.tests -v
+cargo build -p nosh-cli --locked
+NOSH_TEST_BINARY="$PWD/target/debug/nosh" python3 -m unittest eval.tests -v
 
 # 按职责选择无模型回归
 python3 -m unittest eval.tests.test_cli eval.tests.test_suite eval.tests.test_observations
 python3 -m unittest eval.tests.test_agent_checks eval.tests.test_command_assist
 
-# 从 archive.json 的地址下载 ZIP 后，可选地完整复核证据
-python3 eval/baselines/main-78b7e50-expanded/reproduce.py --archive PATH_TO_ZIP --check
 ```
 
-测试使用真正的无依赖小项目构建/测试、脚本化 PTY、当前协议正反例及归档完整性检查，不加载模型，也不要求当前判定器复现旧分数。统一使用 `eval.tests` 包入口，避免把运行时子包作为顶层包加载。CLI 观测的 Rust 回归可运行 `cargo test -p nosh-cli --locked`。无模型测试不能替代真实模型基线。
+测试使用真正的无依赖小项目构建/测试、脚本化 PTY、当前协议正反例和构建来源完整性检查，不加载模型。设置 `NOSH_TEST_BINARY` 后还运行真实 CLI/PTY 与脚本化 worker 的集成用例；CI 默认启用，不设置时会明确跳过这些用例。长草稿可能遮住提示符，驱动须等任务完成后的编辑器重绘再清空草稿，避免启动光标查询吞掉按键；不缩短输入或放宽超时掩盖交接问题。
+
+统一使用 `eval.tests` 包入口，避免把运行时子包作为顶层包加载。CLI 观测的 Rust 回归可运行 `cargo test -p nosh-cli --locked`。无模型测试不能替代真实模型测量；需要的 Node/npm 等工具仍须按上方工具链说明准备。

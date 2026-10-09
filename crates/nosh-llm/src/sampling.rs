@@ -4,7 +4,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::engine::SamplingParams;
+use nosh_engine::SamplingParams;
 
 const REP_WINDOW: usize = 256;
 const REP_NGRAM: usize = 16;

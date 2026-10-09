@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use nosh_hub::tr;
+use nosh_platform::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
     EditContext, EditMode, EventStatus, Highlighter, Hinter, History, PromptContext,
@@ -415,10 +415,10 @@ impl InputAssist {
                 correction: None,
             }),
         );
-        self.set_legacy_display(text);
+        self.set_fallback_display(text);
     }
 
-    fn set_legacy_display(&self, text: &str) {
+    fn set_fallback_display(&self, text: &str) {
         if let Ok(mut status) = self.shared.display.try_lock() {
             if status.as_str() == text {
                 return;
@@ -648,7 +648,7 @@ impl Highlighter for InputHighlighter {
                 .delay_repaint_until(input.version, requested + MISSING_COMMAND_IDLE);
         }
         self.assist
-            .set_legacy_display(&status_text(&cache.findings, cursor));
+            .set_fallback_display(&status_text(&cache.findings, cursor));
         self.assist.set_feedback(
             cache.input.clone(),
             primary_finding(&cache.findings, cursor, reveal_missing_commands)

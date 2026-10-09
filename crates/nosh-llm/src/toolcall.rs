@@ -5,8 +5,8 @@
 
 use serde_json::{Map, Value};
 
-use crate::engine::{CallError, CallErrorKind, ToolCall, ToolSpec};
 use crate::tokenizer::{Tok, Utf8Stream};
+use nosh_engine::{CallError, CallErrorKind, ToolCall, ToolSpec};
 
 pub const THINK_OPEN: u32 = 8;
 pub const THINK_CLOSE: u32 = 9;
@@ -542,10 +542,10 @@ mod tests {
     #[test]
     fn host_prefilled_tool_opening_is_parsed_with_generated_arguments() {
         let prefix = crate::template::concat(&crate::template::tool_choice_prefix(
-            &crate::ToolChoice::Named("exec".into()),
+            &nosh_engine::ToolChoice::Named("exec".into()),
         ));
         assert_eq!(prefix, "<function name=\"exec\">");
-        assert!(crate::template::tool_choice_prefix(&crate::ToolChoice::Auto).is_empty());
+        assert!(crate::template::tool_choice_prefix(&nosh_engine::ToolChoice::Auto).is_empty());
         let mut parser = StreamParser::new(tools(), false);
         assert!(parser.push_bytes(FUNCTION_OPEN, b"").is_empty());
         assert!(

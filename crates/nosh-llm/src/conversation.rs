@@ -2,9 +2,9 @@
 //! Mutations that need tokenization are prepared before changing the log.
 
 use crate::LlmError;
-use crate::engine::{Message, SessionSpec};
 use crate::template;
 use crate::tokenizer::Tok;
+use nosh_engine::{Message, SessionSpec, shorten_tool_result};
 
 enum Entry {
     Message(Vec<u32>),
@@ -37,7 +37,7 @@ impl Entry {
 
 pub(crate) struct Conversation {
     pub(crate) spec: SessionSpec,
-    pub(crate) tool_choice: crate::ToolChoice,
+    pub(crate) tool_choice: nosh_engine::ToolChoice,
     prefix: Vec<u32>,
     entries: Vec<Entry>,
 }
@@ -48,7 +48,7 @@ impl Conversation {
             tok.encode_segments(&template::render_system(Some(&spec.system), &spec.tools))?;
         Ok(Self {
             spec,
-            tool_choice: crate::ToolChoice::Auto,
+            tool_choice: nosh_engine::ToolChoice::Auto,
             prefix,
             entries: Vec::new(),
         })
@@ -167,24 +167,10 @@ impl Conversation {
     }
 }
 
-/// One-line stand-in for an old tool result (keeps the status header).
-pub fn shorten_tool_result(content: &str) -> String {
-    const KEEP: usize = 200;
-    let count = content.chars().count();
-    if count <= KEEP + 40 {
-        return content.to_string();
-    }
-    let end = content.char_indices().nth(KEEP).expect("long result").0;
-    format!(
-        "{}\n[\u{2026} older output omitted to save context ({count} chars)]",
-        &content[..end]
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::SamplingParams;
+    use nosh_engine::SamplingParams;
     use tokenizers::models::wordlevel::WordLevel;
     use tokenizers::pre_tokenizers::whitespace::WhitespaceSplit;
     use tokenizers::{AddedToken, Tokenizer};
@@ -279,7 +265,7 @@ mod tests {
     fn tool_definitions_stay_in_the_prefix_across_history_changes() {
         let mut tok = tokenizer();
         let mut spec = conversation(&mut tok).spec;
-        spec.tools.push(crate::ToolSpec {
+        spec.tools.push(nosh_engine::ToolSpec {
             name: "read_file".into(),
             description: "Read a text file.".into(),
             parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
@@ -497,19 +483,5 @@ mod tests {
         assert!(session.compact_tool_results(0, &mut broken).is_err());
         assert_eq!(session.tokens(&[]), before);
         assert_eq!(session.message_count(), 3);
-    }
-
-    #[test]
-    fn shortening_preserves_unicode_and_the_existing_marker() {
-        let short = "\u{4e2d}".repeat(240);
-        assert_eq!(shorten_tool_result(&short), short);
-        let long = "\u{4e2d}".repeat(241);
-        assert_eq!(
-            shorten_tool_result(&long),
-            format!(
-                "{}\n[\u{2026} older output omitted to save context (241 chars)]",
-                "\u{4e2d}".repeat(200)
-            )
-        );
     }
 }

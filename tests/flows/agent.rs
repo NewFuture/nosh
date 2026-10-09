@@ -50,8 +50,8 @@ fn multi_step_task_uses_tool_results() {
 
 #[test]
 fn compaction_failure_preserves_executed_results_for_the_next_task() {
-    use nosh_llm::{
-        CancelHandle, ChatEngine, Event, LlmError, SessionId, SessionSpec, StepOutcome,
+    use nosh_engine::{
+        CancelHandle, ChatEngine, EngineError, Event, SessionId, SessionSpec, StepOutcome,
     };
 
     struct Engine {
@@ -62,7 +62,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
     }
 
     impl ChatEngine for Engine {
-        fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+        fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
             self.inner.open(spec)
         }
 
@@ -71,14 +71,14 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
             sid: SessionId,
             append: Vec<Message>,
             sink: &mut dyn FnMut(Event),
-        ) -> Result<StepOutcome, LlmError> {
+        ) -> Result<StepOutcome, EngineError> {
             self.steps += 1;
             if self.steps == 2 {
                 // Fail after the append, without a completed assistant turn.
                 let after_append = self.inner.message_count(sid) + append.len();
                 self.inner.step(sid, append, &mut |_| {})?;
                 self.inner.rewind(sid, after_append)?;
-                return Err(LlmError::ContextFull {
+                return Err(EngineError::ContextFull {
                     used: 8193,
                     max: 8192,
                 });
@@ -86,7 +86,7 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
             self.inner.step(sid, append, sink)
         }
 
-        fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+        fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
             self.inner.rewind(sid, keep)
         }
 
@@ -98,9 +98,11 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
             &mut self,
             sid: SessionId,
             keep_recent: usize,
-        ) -> Result<usize, LlmError> {
+        ) -> Result<usize, EngineError> {
             if std::mem::take(&mut self.fail_compaction) {
-                Err(LlmError::Tokenizer("one-time compaction failure".into()))
+                Err(EngineError::Backend(
+                    std::io::Error::other("tokenizer error: one-time compaction failure").into(),
+                ))
             } else {
                 self.inner.compact_tool_results(sid, keep_recent)
             }

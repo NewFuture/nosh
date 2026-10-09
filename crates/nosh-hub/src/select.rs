@@ -177,7 +177,7 @@ pub fn order_by_preference(cands: &[Candidate], preferred: &[Hub]) -> Vec<Candid
 }
 
 pub fn format_probe_summary(probes: &[ProbeResult]) -> String {
-    let terminal = crate::terminal::stderr();
+    let terminal = nosh_platform::terminal::stderr();
     let mut sorted: Vec<&ProbeResult> = probes.iter().collect();
     sorted.sort_by(|a, b| {
         b.throughput
@@ -201,7 +201,7 @@ fn short(s: &str) -> String {
         format!(
             "{}{}",
             s.chars().take(40).collect::<String>(),
-            crate::terminal::stderr().glyph("…", "...")
+            nosh_platform::terminal::stderr().glyph("…", "...")
         )
     } else {
         s.to_string()
@@ -360,7 +360,7 @@ mod tests {
             s,
             format!(
                 "modelscope.cn 21.4 MB/s{}huggingface.co 3.1 MB/s",
-                crate::terminal::stderr().glyph(" · ", " | ")
+                nosh_platform::terminal::stderr().glyph(" · ", " | ")
             )
         );
     }

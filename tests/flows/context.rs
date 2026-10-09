@@ -326,7 +326,7 @@ fn incomplete_guidance_does_not_suppress_its_restored_version() {
 
 #[test]
 fn cancelled_generation_resends_guidance_on_the_next_task() {
-    use nosh_llm::{CancelHandle, ChatEngine};
+    use nosh_engine::{CancelHandle, ChatEngine};
     use std::sync::{Arc, OnceLock};
 
     let _g = setup();

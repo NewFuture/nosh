@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nosh_hub::store::FileStamp;
 use nosh_permissions::{Context, PathClass, classify_path_real};
+use nosh_platform::fs::FileStamp;
 use serde_json::json;
 
 const GUIDANCE_CHARS: usize = 4000;

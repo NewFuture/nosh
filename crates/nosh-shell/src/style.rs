@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-pub use nosh_hub::terminal::{Terminal, stderr, stdout};
+pub use nosh_platform::terminal::{Terminal, stderr, stdout};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 

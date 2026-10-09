@@ -7,8 +7,8 @@ use nosh_core::{
     Agent, AgentConfig, AgentUi, Attachment, Environment, JsonUi, TaskInput, TermUi,
     TerminalApproval, ToolSet,
 };
-use nosh_hub::tr;
 use nosh_permissions::{ApprovalMode, UserRules};
+use nosh_platform::tr;
 use nosh_shell::{EmbeddedShell, ShellOptions, Trigger};
 
 use crate::config::Config;

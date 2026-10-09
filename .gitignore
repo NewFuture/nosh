@@ -9,5 +9,4 @@
 .idea/
 .vscode/
 /eval/results/
-/eval/baselines/*/logs/
 **/__pycache__/

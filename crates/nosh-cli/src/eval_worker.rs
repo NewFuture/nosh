@@ -15,8 +15,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use nosh_llm::{
-    CancelHandle, ChatEngine, Event, LlmError, Message, SessionId, SessionSpec, StepOutcome,
+use nosh_engine::{
+    CancelHandle, ChatEngine, EngineError, Event, Message, SessionId, SessionSpec, StepOutcome,
     ToolChoice,
 };
 use serde::{Deserialize, Serialize};
@@ -65,17 +65,17 @@ enum Fault {
     Failed(String),
 }
 
-impl From<LlmError> for Fault {
-    fn from(error: LlmError) -> Self {
+impl From<EngineError> for Fault {
+    fn from(error: EngineError) -> Self {
         match error {
-            LlmError::ContextFull { used, max } => Self::ContextFull { used, max },
-            LlmError::UnknownSession(sid) => Self::UnknownSession(sid),
+            EngineError::ContextFull { used, max } => Self::ContextFull { used, max },
+            EngineError::UnknownSession(sid) => Self::UnknownSession(sid),
             error => Self::Failed(error.to_string()),
         }
     }
 }
 
-impl From<Fault> for LlmError {
+impl From<Fault> for EngineError {
     fn from(error: Fault) -> Self {
         match error {
             Fault::ContextFull { used, max } => Self::ContextFull { used, max },
@@ -220,9 +220,9 @@ impl Proxy {
         request: &Request,
         sink: &mut dyn FnMut(Event),
         step: bool,
-    ) -> Result<Reply, LlmError> {
+    ) -> Result<Reply, EngineError> {
         if let Some(error) = &self.failed {
-            return Err(LlmError::Config(error.clone()));
+            return Err(EngineError::Config(error.clone()));
         }
         let result = (|| -> io::Result<Reply> {
             write_frame(&mut self.stream, request)?;
@@ -274,7 +274,7 @@ impl Proxy {
                 let error = format!("evaluation worker transport: {error}");
                 self.failed = Some(error.clone());
                 let _ = self.stream.shutdown(Shutdown::Both);
-                Err(LlmError::Config(error))
+                Err(EngineError::Config(error))
             }
         }
     }
@@ -283,14 +283,14 @@ impl Proxy {
         &mut self,
         request: Request,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<Answer, LlmError> {
+    ) -> Result<Answer, EngineError> {
         let step = matches!(request, Request::Step { .. });
         match self.exchange(&request, sink, step)? {
             Reply::Done(Ok(answer)) => {
                 self.sessions.insert(answer.sid, answer.state.clone());
                 Ok(answer)
             }
-            _ => Err(LlmError::Config(
+            _ => Err(EngineError::Config(
                 "invalid evaluation worker response".into(),
             )),
         }
@@ -298,7 +298,7 @@ impl Proxy {
 }
 
 impl ChatEngine for Proxy {
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
         Ok(self.command(Request::Open { spec }, &mut |_| {})?.sid)
     }
     fn step(
@@ -306,16 +306,16 @@ impl ChatEngine for Proxy {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError> {
+    ) -> Result<StepOutcome, EngineError> {
         self.command(Request::Step { sid, append }, sink)?
             .outcome
-            .ok_or_else(|| LlmError::Config("evaluation worker omitted step outcome".into()))
+            .ok_or_else(|| EngineError::Config("evaluation worker omitted step outcome".into()))
     }
-    fn set_tool_choice(&mut self, sid: SessionId, choice: ToolChoice) -> Result<(), LlmError> {
+    fn set_tool_choice(&mut self, sid: SessionId, choice: ToolChoice) -> Result<(), EngineError> {
         self.command(Request::Choice { sid, choice }, &mut |_| {})
             .map(|_| ())
     }
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
         self.command(Request::Rewind { sid, keep }, &mut |_| {})
             .map(|_| ())
     }
@@ -323,7 +323,7 @@ impl ChatEngine for Proxy {
         &mut self,
         sid: SessionId,
         keep_recent: usize,
-    ) -> Result<usize, LlmError> {
+    ) -> Result<usize, EngineError> {
         Ok(self
             .command(Request::Compact { sid, keep_recent }, &mut |_| {})?
             .changed)
@@ -383,7 +383,7 @@ fn serve(
                 &Reply::Status(json!({
                     "pid": std::process::id(), "connections": totals.connections,
                     "closed_sessions": totals.closed_sessions, "active_sessions": 0,
-                    "rss_mib": nosh_llm::rss_mb(),
+                    "rss_mib": nosh_platform::process::rss_mb(),
                 })),
             )?;
             return Ok(false);
@@ -470,7 +470,7 @@ fn serve(
                 };
                 let mut output_error = None;
                 let mut fatal = false;
-                let response = (|| -> Result<Answer, LlmError> {
+                let response = (|| -> Result<Answer, EngineError> {
                     if let Request::Open { spec } = request {
                         let actual = engine.open(spec)?;
                         let sid = next_id;
@@ -484,9 +484,9 @@ fn serve(
                         | Request::Rewind { sid, .. }
                         | Request::Compact { sid, .. }
                         | Request::Close { sid } => *sid,
-                        _ => return Err(LlmError::Config("unexpected worker operation".into())),
+                        _ => return Err(EngineError::Config("unexpected worker operation".into())),
                     };
-                    let actual = *sessions.get(&sid).ok_or(LlmError::UnknownSession(sid))?;
+                    let actual = *sessions.get(&sid).ok_or(EngineError::UnknownSession(sid))?;
                     let mut response = answer(engine, sid, actual);
                     match request {
                         Request::Step { append, .. } => {
@@ -503,7 +503,8 @@ fn serve(
                             fatal = out.as_ref().err().is_some_and(|error| {
                                 !matches!(
                                     error,
-                                    LlmError::ContextFull { .. } | LlmError::UnknownSession(_)
+                                    EngineError::ContextFull { .. }
+                                        | EngineError::UnknownSession(_)
                                 )
                             });
                             response.outcome = Some(out?);
@@ -627,7 +628,7 @@ pub fn run(path: &Path, setup: &crate::engine::EngineSetup) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nosh_llm::{MockChatEngine, SamplingParams, StopReason, mock};
+    use nosh_engine::{MockChatEngine, SamplingParams, StopReason, mock};
     use std::sync::Mutex;
 
     fn spec(seed: u64) -> SessionSpec {
@@ -644,7 +645,7 @@ mod tests {
         }
     }
 
-    fn hello(client: &mut Proxy, config: Value) -> Result<Reply, LlmError> {
+    fn hello(client: &mut Proxy, config: Value) -> Result<Reply, EngineError> {
         client.exchange(
             &Request::Hello {
                 version: VERSION,
@@ -791,13 +792,13 @@ mod tests {
                 assert_eq!(info["worker_connection"], index + 1);
                 assert!(matches!(
                     client.rewind(1, 0),
-                    Err(LlmError::UnknownSession(1))
+                    Err(EngineError::UnknownSession(1))
                 ));
                 let sid = client.open(spec(seed)).unwrap();
                 assert_eq!(sid, 1, "connection-local identity");
                 assert!(matches!(
                     client.rewind(2, 0),
-                    Err(LlmError::UnknownSession(2))
+                    Err(EngineError::UnknownSession(2))
                 ));
                 let mut events = Vec::new();
                 assert_eq!(
@@ -838,7 +839,7 @@ mod tests {
         for sid in 1..=3 {
             assert!(matches!(
                 engine.step(sid, vec![], &mut |_| {}),
-                Err(LlmError::UnknownSession(_))
+                Err(EngineError::UnknownSession(_))
             ));
         }
     }
@@ -981,7 +982,7 @@ mod tests {
             let mut client = Proxy::new(client).unwrap();
             assert!(matches!(
                 client.step(1, vec![Message::User("append".into())], &mut |_| {}),
-                Err(LlmError::ContextFull { used: 99, max: 80 })
+                Err(EngineError::ContextFull { used: 99, max: 80 })
             ));
             assert_eq!(client.message_count(1), 4);
             assert_eq!(client.context_usage(1), (99, 80));

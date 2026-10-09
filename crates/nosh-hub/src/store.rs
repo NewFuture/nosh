@@ -2,21 +2,19 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use nosh_platform::fs::FileStamp;
 use serde::{Deserialize, Serialize};
 
 use crate::HubError;
 use crate::hash;
 use crate::registry::{FileEntry, FileRole, ModelEntry};
 
-/// Version 2 records a [`FileStamp`] per file; older manifests only kept the
-/// modification time in seconds and are not trusted (files are re-hashed once).
+/// Current cache format. Unsupported or incomplete manifests cannot vouch for hashes.
 pub const MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
-    #[serde(default)]
     pub version: u32,
     pub id: String,
     pub files: Vec<ManifestFile>,
@@ -27,64 +25,19 @@ pub struct ManifestFile {
     pub name: String,
     pub size: u64,
     pub sha256: String,
-    #[serde(default)]
     pub source: String,
-    #[serde(default)]
     pub revision: String,
     /// Identity of the file when its hash was verified.
     #[serde(default)]
     pub stamp: Option<FileStamp>,
 }
 
-/// What identifies one version of a file without reading it: size and
-/// nanosecond modification time, plus on Unix the device/inode and the
-/// status-change time (which tools cannot set, unlike mtime). Replacing or
-/// rewriting the file changes at least one of them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileStamp {
-    pub size: u64,
-    pub mtime_ns: u64,
-    /// Unix ctime; elsewhere the creation time (0 when unavailable).
-    pub ctime_ns: u64,
-    /// Unix device and inode numbers (0 elsewhere).
-    pub dev: u64,
-    pub ino: u64,
-}
-
-impl FileStamp {
-    pub fn of(path: &Path) -> Option<Self> {
-        let m = fs::metadata(path).ok()?;
-        let ns = |t: SystemTime| {
-            t.duration_since(UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-        };
-        let mut s = FileStamp {
-            size: m.len(),
-            mtime_ns: ns(m.modified().ok()?),
-            ..FileStamp::default()
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            s.ctime_ns = u64::try_from(m.ctime())
-                .map_or(0, |secs| secs.saturating_mul(1_000_000_000))
-                .saturating_add(u64::try_from(m.ctime_nsec()).unwrap_or(0));
-            s.dev = m.dev();
-            s.ino = m.ino();
-        }
-        #[cfg(not(unix))]
-        {
-            s.ctime_ns = m.created().map_or(0, ns);
-        }
-        Some(s)
-    }
-}
-
 pub const MANIFEST: &str = "manifest.json";
 
 pub fn read_manifest(dir: &Path) -> Option<Manifest> {
     let s = fs::read_to_string(dir.join(MANIFEST)).ok()?;
-    serde_json::from_str(&s).ok()
+    let manifest: Manifest = serde_json::from_str(&s).ok()?;
+    (manifest.version == MANIFEST_VERSION).then_some(manifest)
 }
 
 pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), HubError> {
@@ -126,9 +79,7 @@ pub fn record_verified_as(
     if FileStamp::of(&dir.join(&file.name)).as_ref() != Some(stamp) {
         return Ok(false);
     }
-    let mut m = read_manifest(dir)
-        .filter(|m| m.version == MANIFEST_VERSION)
-        .unwrap_or_default();
+    let mut m = read_manifest(dir).unwrap_or_default();
     m.version = MANIFEST_VERSION;
     m.id = id.to_string();
     m.files.retain(|f| f.name != file.name);
@@ -347,35 +298,35 @@ mod tests {
     }
 
     #[test]
-    fn version_1_manifests_force_one_reverification() {
-        let (e, dir) = tiny_entry("store-v1");
-        let secs = fs::metadata(dir.join(&e.weights().name))
-            .unwrap()
-            .modified()
-            .unwrap()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let v1 = serde_json::json!({
-            "id": e.id,
-            "files": e.files.iter().map(|f| serde_json::json!({
-                "name": f.name, "size": f.size, "sha256": f.sha256,
-                "source": "hf", "revision": "main", "mtime": secs,
-            })).collect::<Vec<_>>(),
-        });
-        fs::write(dir.join(MANIFEST), v1.to_string()).unwrap();
-        let m = read_manifest(&dir).unwrap();
-        assert_eq!(m.version, 0);
-        assert!(!verified(&dir, &e), "a v1 entry vouches for nothing");
-        // A tampered file hiding behind a v1 entry is caught by the re-hash.
-        fs::write(dir.join(&e.weights().name), b"weights-bytez").unwrap();
-        assert!(check_dir(&dir, &e).is_err());
-        fs::write(dir.join(&e.weights().name), b"weights-bytes").unwrap();
+    fn unsupported_or_incomplete_manifests_require_reverification() {
+        let (e, dir) = tiny_entry("store-invalid-manifest");
         check_dir(&dir, &e).unwrap().unwrap();
-        let m = read_manifest(&dir).unwrap();
-        assert_eq!(m.version, MANIFEST_VERSION);
-        assert!(m.files.iter().all(|f| f.stamp.is_some()));
-        assert!(verified(&dir, &e));
+        let current = serde_json::to_value(read_manifest(&dir).unwrap()).unwrap();
+        let mut unsupported = current.clone();
+        unsupported["version"] = serde_json::json!(MANIFEST_VERSION + 1);
+        let mut missing_version = current.clone();
+        missing_version.as_object_mut().unwrap().remove("version");
+        let mut incomplete = current;
+        incomplete["files"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        for invalid in [unsupported, missing_version, incomplete] {
+            fs::write(dir.join(MANIFEST), invalid.to_string()).unwrap();
+            assert!(read_manifest(&dir).is_none());
+            assert!(!verified(&dir, &e));
+            fs::write(dir.join(&e.weights().name), b"weights-bytez").unwrap();
+            assert!(matches!(
+                check_dir(&dir, &e),
+                Err(HubError::ChecksumMismatch { .. })
+            ));
+            fs::write(dir.join(&e.weights().name), b"weights-bytes").unwrap();
+            check_dir(&dir, &e).unwrap().unwrap();
+            let m = read_manifest(&dir).unwrap();
+            assert_eq!(m.version, MANIFEST_VERSION);
+            assert!(m.files.iter().all(|f| f.stamp.is_some()));
+            assert!(verified(&dir, &e));
+        }
     }
 
     #[test]

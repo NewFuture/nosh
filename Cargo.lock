@@ -2030,9 +2030,11 @@ dependencies = [
  "clap",
  "libc",
  "nosh-core",
+ "nosh-engine",
  "nosh-hub",
  "nosh-llm",
  "nosh-permissions",
+ "nosh-platform",
  "nosh-shell",
  "serde",
  "serde_json",
@@ -2050,9 +2052,11 @@ dependencies = [
  "ignore",
  "libc",
  "memchr",
+ "nosh-engine",
  "nosh-hub",
  "nosh-llm",
  "nosh-permissions",
+ "nosh-platform",
  "nosh-shell",
  "serde_json",
  "tempfile",
@@ -2062,12 +2066,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nosh-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nosh-hub"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "fs4",
  "indicatif",
+ "nosh-platform",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2084,6 +2097,7 @@ dependencies = [
  "candle-nn",
  "gemm",
  "half",
+ "nosh-engine",
  "nosh-hub",
  "num_cpus",
  "serde",
@@ -2103,6 +2117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nosh-platform"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nosh-shell"
 version = "0.1.0"
 dependencies = [
@@ -2112,7 +2136,7 @@ dependencies = [
  "crossterm",
  "filedescriptor",
  "libc",
- "nosh-hub",
+ "nosh-platform",
  "nu-ansi-term",
  "reedline",
  "serde",
@@ -2131,7 +2155,7 @@ name = "nosh-tests"
 version = "0.1.0"
 dependencies = [
  "nosh-core",
- "nosh-llm",
+ "nosh-engine",
  "nosh-permissions",
  "nosh-shell",
  "serde_json",

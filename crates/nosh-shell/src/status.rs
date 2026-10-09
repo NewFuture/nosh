@@ -9,7 +9,7 @@ pub use theme::ThemeHandle;
 
 use std::collections::BTreeMap;
 
-use nosh_hub::tr;
+use nosh_platform::tr;
 use reedline::{
     EditCommand, KeyCode, KeyModifiers, Keybindings, PromptContext, PromptInteraction,
     ReedlineEvent,

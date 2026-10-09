@@ -1,4 +1,4 @@
-//! Bilingual UI strings: Chinese when the locale is `zh*`, English otherwise.
+//! Shared bilingual UI strings: Chinese when the locale is `zh*`, English otherwise.
 
 use std::sync::OnceLock;
 

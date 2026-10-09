@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use nosh_core::{LoadMode, LoadedEngine};
-use nosh_hub::{
-    BarProgress, HubError, ModelHub, PullOptions, ResolvedModel, SourceSelection, net, tr,
-};
-use nosh_llm::{LocalChatEngine, LocalEngineOptions};
+use nosh_engine::SamplingParams;
+use nosh_hub::{BarProgress, HubError, ModelHub, PullOptions, ResolvedModel, SourceSelection, net};
+use nosh_llm::{LocalChatEngine, LocalEngineOptions, ModelSource};
+use nosh_platform::tr;
 use nosh_shell::{style, term};
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct EngineSetup {
 }
 
 fn declined_marker() -> PathBuf {
-    nosh_hub::paths::state_dir().join("download-declined")
+    nosh_platform::paths::state_dir().join("download-declined")
 }
 
 fn gb(bytes: u64) -> String {
@@ -39,6 +39,23 @@ pub fn locate(setup: &EngineSetup) -> Result<Option<ResolvedModel>, HubError> {
     match path {
         Some(p) => hub.resolve_path(&p, setup.model_id.as_deref()).map(Some),
         None => hub.find(setup.model_id.as_deref()),
+    }
+}
+
+pub(crate) fn model_source(model: &ResolvedModel) -> ModelSource<'_> {
+    let sampling = &model.entry.sampling;
+    ModelSource {
+        id: &model.entry.id,
+        arch: &model.entry.arch,
+        weights: &model.weights,
+        tokenizer: &model.tokenizer,
+        eog_ids: &model.entry.eog_ids,
+        sampling: SamplingParams {
+            temperature: sampling.temperature,
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
+            ..SamplingParams::default()
+        },
     }
 }
 
@@ -93,7 +110,8 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
         match term::read_text(&question, "") {
             Some(a) if a.trim().is_empty() || a.trim().to_lowercase().starts_with('y') => {}
             _ => {
-                let _ = nosh_hub::paths::ensure_private_dir(&nosh_hub::paths::state_dir());
+                let _ =
+                    nosh_platform::paths::ensure_private_dir(&nosh_platform::paths::state_dir());
                 let _ = std::fs::write(declined_marker(), "");
                 return Err(tr!(
                     "已取消下载；之后可以运行 `nosh model pull`",
@@ -168,7 +186,7 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
     } else {
         let (engine, description, metadata) = load_local(setup, mode)?;
         (
-            Box::new(engine) as Box<dyn nosh_llm::ChatEngine>,
+            Box::new(engine) as Box<dyn nosh_engine::ChatEngine>,
             description,
             metadata,
         )
@@ -219,7 +237,7 @@ pub(crate) fn load_local(
         }
     }
     let engine = LocalChatEngine::load(
-        &resolved,
+        model_source(&resolved),
         LocalEngineOptions {
             device,
             context_length: setup.context_length,
@@ -271,6 +289,35 @@ pub(crate) fn load_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_source_preserves_registry_metadata_and_sampling_defaults() {
+        let mut entry = nosh_hub::Registry::builtin().default_model().clone();
+        entry.sampling.temperature = 0.4;
+        entry.sampling.top_p = 0.8;
+        entry.sampling.min_p = 0.1;
+        let model = ResolvedModel {
+            entry,
+            dir: "model".into(),
+            weights: "weights.gguf".into(),
+            tokenizer: "tokenizer.json".into(),
+        };
+        let source = model_source(&model);
+        assert_eq!(source.id, model.entry.id);
+        assert_eq!(source.arch, model.entry.arch);
+        assert_eq!(source.weights, model.weights);
+        assert_eq!(source.tokenizer, model.tokenizer);
+        assert_eq!(source.eog_ids, model.entry.eog_ids);
+        assert_eq!(
+            source.sampling,
+            SamplingParams {
+                temperature: 0.4,
+                top_p: 0.8,
+                min_p: 0.1,
+                ..SamplingParams::default()
+            }
+        );
+    }
 
     fn setup(model_path: PathBuf) -> EngineSetup {
         EngineSetup {

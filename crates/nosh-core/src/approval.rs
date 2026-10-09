@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 use std::io::Write;
 
-use nosh_hub::tr;
 use nosh_permissions::{ApprovalMode, Risk};
+use nosh_platform::tr;
 use nosh_shell::{style, term};
 
 #[derive(Debug, Clone)]

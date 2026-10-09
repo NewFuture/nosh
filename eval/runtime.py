@@ -57,12 +57,21 @@ def resolve_source_revision(source_ref: str = "main", revision: str = "", cwd: P
 def source_tool_command(source: Path) -> list[str]:
     """Use the selected archive's tool and pin, not the harness checkout's submodule."""
     manifest = tomllib.loads(source.joinpath("Cargo.toml").read_text(encoding="utf-8"))
-    dependency = manifest["workspace"]["dependencies"]["reedline"]
-    pin = source / "patches" / "reedline" / "source.toml"
-    managed = isinstance(dependency, dict) and dependency.get("path") == ".nosh/reedline"
+    expected_paths = {
+        ("workspace", "dependencies", "reedline"): ".nosh/reedline",
+        ("patch", "crates-io", "brush-core"): ".nosh/brush/brush-core",
+        ("patch", "crates-io", "brush-parser"): ".nosh/brush/brush-parser",
+    }
+    for keys, path in expected_paths.items():
+        dependency = manifest
+        for key in keys:
+            dependency = dependency.get(key) if isinstance(dependency, dict) else None
+        if not isinstance(dependency, dict) or dependency.get("path") != path:
+            raise ValueError("selected source has an incomplete managed dependency layout")
     tool = source / "tools" / "source" / "Cargo.toml"
-    if not managed or not pin.is_file() or not tool.is_file():
-        raise ValueError("selected source has an incomplete managed Reedline layout")
+    if not tool.is_file() or any(not source.joinpath("patches", name, "source.toml").is_file()
+                                 for name in ("reedline", "brush-core")):
+        raise ValueError("selected source has an incomplete managed dependency layout")
     return ["cargo", "run", "--manifest-path", str(tool), "--locked", "--"]
 
 
@@ -72,16 +81,14 @@ def source_dependency_provenance(source: Path) -> dict:
         [*command, "provenance", "--root", str(source)], cwd=source, text=True))
     if not isinstance(data, dict):
         raise ValueError("selected source tool returned invalid dependency provenance")
-    managed = {"reedline": data} if data.get("schema_version") == 1 else data
-    expected = ["reedline"]
-    if source.joinpath("patches", "brush-core").exists():
-        expected.append("brush-core")
-    if set(managed) != set(expected):
+    expected = ("reedline", "brush-core")
+    if set(data) != set(expected):
         raise ValueError("selected source tool returned incomplete dependency provenance")
     for dependency in expected:
-        state = managed[dependency]
+        state = data[dependency]
         pin = tomllib.loads(source.joinpath("patches", dependency, "source.toml").read_text(encoding="utf-8"))
-        if (not isinstance(state, dict) or state.get("schema_version") != 1
+        if (not isinstance(state, dict) or type(state.get("schema_version")) is not int
+                or state["schema_version"] != 1
                 or state.get("upstream_revision") != pin["revision"]
                 or state.get("upstream_repository") != pin["repository"]
                 or any(not isinstance(state.get(field), str)
@@ -91,7 +98,7 @@ def source_dependency_provenance(source: Path) -> dict:
                        or not re.fullmatch(r"[0-9a-f]{40}", state[field])
                        for field in ("upstream_tree", "prepared_tree"))):
             raise ValueError("selected source tool returned invalid dependency provenance")
-    return {"schema_version": 1, "layout": "managed", "managed_sources": managed}
+    return {"schema_version": 1, "layout": "managed", "managed_sources": data}
 
 
 def prepare_source_dependencies(source: Path) -> dict:

@@ -100,9 +100,10 @@ Default provenance is an object keyed by `reedline` and `brush-core`, recording
 the build inputs used by source verification and evaluation.
 
 Use `--dependency reedline` or `--dependency brush-core` for a focused operation,
-or for separate read-only offline caches. A focused provenance retains the
-single-dependency state shape. `upgrade` without a selector preserves its original
-Reedline target; use `--dependency brush-core --rev <SHA>` for brush.
+or for separate read-only offline caches. Focused provenance returns that
+dependency's state object; the default command returns the two-dependency map.
+`upgrade` without a selector targets Reedline; use
+`--dependency brush-core --rev <SHA>` for brush.
 
 Repeated clean preparation is a no-op. Missing offline objects, invalid patches,
 dirty upstream checkouts, mismatched gitlinks and unexported edits are explicit

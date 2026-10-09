@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use brush_core::escape::QuoteMode;
-use nosh_hub::tr;
+use nosh_platform::tr;
 use reedline::{
     Completer, CompletionAcceptance, CompletionResult, CompletionStatus, Partial, Span, Suggestion,
     Suggestions,

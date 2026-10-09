@@ -2,8 +2,8 @@
 
 use std::io::Write;
 
-use nosh_hub::tr;
-use nosh_llm::{CancelHandle, ToolCall, ToolSpec};
+use nosh_engine::{CancelHandle, ToolCall, ToolSpec};
+use nosh_platform::tr;
 use nosh_shell::{style, term};
 use serde_json::json;
 

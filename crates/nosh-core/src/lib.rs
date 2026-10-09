@@ -1,5 +1,5 @@
 //! The agent harness (design §5): prompts, the task loop, tools, approvals
-//! and rendering. Engine-agnostic: runs against [`nosh_llm::ChatEngine`].
+//! and rendering. Engine-agnostic: runs against [`nosh_engine::ChatEngine`].
 
 pub mod agent;
 pub mod approval;

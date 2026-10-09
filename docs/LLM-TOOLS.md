@@ -74,16 +74,10 @@ CommandAssist 共用固定 System：建议而不执行、平台、查询协议�
 
 CommandAssist 从调用方 `AgentConfig` 构造明确权限 context，复用用户规则，不构造默认策略替代调用方配置。
 
-## 后续设计，不代表已实现
-
-| 方向 | 约束 |
-|---|---|
-| 按需 help | 先使用现有命令工具查询；有重复查询／用法错误证据后，再评估独立封装，不能自动给每个命令查询帮助或盲拼 `-h` |
-
-未来帮助缓存须绑定真实命令解析身份、文件版本、查询参数及相关环境，保持当前权限、超时与输出预算；PATH 名称缓存不等于帮助正文缓存。当前不新增 `help` 工具。
+## 维护与测试
 
 工具变化需验证接口、权限、错误、过滤／截断与固定 seed 全量回归。正确率、步数、确认次数和输入成本分别报告；裁判缺陷独立处理，不用工具或 prompt 特例绕过评分。
 
-主提示、建议提示和 `exec` 说明均以当前目录、持久会话为准；保留合法 `cd`，执行器不改写命令。已有定向无模型验证，真实模型效果仍待测量，不把展示变短当作行为改善。
+主提示、建议提示和 `exec` 说明均以当前目录、持久会话为准；保留合法 `cd`，执行器不改写命令。无模型回归与真实模型测量分开运行，不把展示变短当作行为改善。
 
 实现入口：[tools.rs](../crates/nosh-core/src/tools.rs)、[agent.rs](../crates/nosh-core/src/agent.rs)、[command_assist.rs](../crates/nosh-core/src/command_assist.rs)、[suggestion.rs](../crates/nosh-shell/src/suggestion.rs)。

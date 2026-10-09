@@ -11,7 +11,10 @@ class SourceProvenanceTests(unittest.TestCase):
     def test_both_managed_dependencies_are_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "Cargo.toml").write_text('[workspace.dependencies]\nreedline={path=".nosh/reedline"}\n')
+            (root / "Cargo.toml").write_text(
+                '[workspace.dependencies]\nreedline={path=".nosh/reedline"}\n'
+                '[patch.crates-io]\nbrush-core={path=".nosh/brush/brush-core"}\n'
+                'brush-parser={path=".nosh/brush/brush-parser"}\n')
             tool = root / "tools" / "source" / "Cargo.toml"
             tool.parent.mkdir(parents=True)
             tool.write_text("[package]\n")
@@ -32,11 +35,15 @@ class SourceProvenanceTests(unittest.TestCase):
                 }
             with mock.patch.object(runtime.subprocess, "check_output", return_value=json.dumps(states)):
                 self.assertEqual(runtime.source_dependency_provenance(root)["managed_sources"], states)
-            with mock.patch.object(runtime.subprocess, "check_output",
-                                   return_value=json.dumps({"reedline": states["reedline"]})):
-                with self.assertRaisesRegex(ValueError, "incomplete"):
-                    runtime.source_dependency_provenance(root)
-            states["brush-core"]["patch_sha256"] = 42
-            with mock.patch.object(runtime.subprocess, "check_output", return_value=json.dumps(states)):
-                with self.assertRaisesRegex(ValueError, "invalid"):
-                    runtime.source_dependency_provenance(root)
+            for invalid in (states["reedline"], {"reedline": states["reedline"]},
+                            dict(states, unexpected=states["reedline"])):
+                with self.subTest(invalid=invalid), mock.patch.object(
+                        runtime.subprocess, "check_output", return_value=json.dumps(invalid)):
+                    with self.assertRaisesRegex(ValueError, "incomplete"):
+                        runtime.source_dependency_provenance(root)
+            for field, value in (("patch_sha256", 42), ("schema_version", True), ("schema_version", 2)):
+                invalid = dict(states, **{"brush-core": dict(states["brush-core"], **{field: value})})
+                with self.subTest(field=field, value=value), mock.patch.object(
+                        runtime.subprocess, "check_output", return_value=json.dumps(invalid)):
+                    with self.assertRaisesRegex(ValueError, "invalid"):
+                        runtime.source_dependency_provenance(root)

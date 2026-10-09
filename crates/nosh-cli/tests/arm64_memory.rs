@@ -25,7 +25,7 @@ fn prompt_tokens(tok: &mut Tok, prompt: &str) -> usize {
 fn long_prompt(tok: &mut Tok) -> (String, usize) {
     let source = format!(
         "Summarize this plan:\n\n{}",
-        include_str!("../../../docs/MVP-PLAN.md").repeat(4)
+        include_str!("../../../tests/fixtures/model_context.txt").repeat(4)
     );
     let ends: Vec<_> = source
         .char_indices()

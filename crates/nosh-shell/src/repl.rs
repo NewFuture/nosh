@@ -6,7 +6,7 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use nosh_hub::tr;
+use nosh_platform::tr;
 use nu_ansi_term::{Color, Style};
 use reedline::{
     ColumnarMenu, KeyCode, MenuBuilder, Prompt, PromptContext, PromptEditMode, PromptHistorySearch,

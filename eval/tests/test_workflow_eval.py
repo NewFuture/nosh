@@ -98,6 +98,17 @@ class BuildToolchainTests(unittest.TestCase):
             tool = root / "tools" / "source" / "Cargo.toml"
             tool.parent.mkdir(parents=True)
             tool.write_text("[package]\n")
+            with mock.patch.object(runtime.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "incomplete managed"):
+                    runtime.prepare_source_dependencies(root)
+                run.assert_not_called()
+            manifest.write_text(
+                '[workspace.dependencies]\nreedline={path=".nosh/reedline"}\n'
+                '[patch.crates-io]\nbrush-core={path=".nosh/brush/brush-core"}\n'
+                'brush-parser={path=".nosh/brush/brush-parser"}\n')
+            brush_pin = root / "patches" / "brush-core" / "source.toml"
+            brush_pin.parent.mkdir(parents=True)
+            brush_pin.write_text('repository="shell"\nrevision="' + "b" * 40 + '"\n')
             with mock.patch.object(runtime.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "prepare")) as run:
                 with self.assertRaises(subprocess.CalledProcessError):
                     runtime.prepare_source_dependencies(root)

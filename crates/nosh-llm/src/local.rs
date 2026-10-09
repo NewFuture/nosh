@@ -7,15 +7,11 @@
 //! that can be cancelled.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::conversation::Conversation;
-pub use crate::conversation::shorten_tool_result;
-use crate::engine::{
-    CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId, SessionSpec, StepOutcome,
-    StopReason, ToolChoice, Usage,
-};
 use crate::model::attn::KvDtype;
 use crate::model::llama::{Llama, LoadOptions, PrepackStats};
 use crate::sampling::Sampler;
@@ -23,10 +19,25 @@ use crate::template;
 use crate::tokenizer::Tok;
 use crate::toolcall::{FUNCTION_OPEN, Parsed, StreamParser};
 use crate::{DeviceSelection, InferenceDevice, LlmError};
+use nosh_engine::{
+    CancelHandle, ChatEngine, EngineError, Event, Message, SamplingParams, SessionId, SessionSpec,
+    StepOutcome, StopReason, ToolChoice, Usage,
+};
 
 pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
 pub const EOS: u32 = 1;
+
+/// Model files and metadata supplied by the host, independent of their store.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelSource<'a> {
+    pub id: &'a str,
+    pub arch: &'a str,
+    pub weights: &'a Path,
+    pub tokenizer: &'a Path,
+    pub eog_ids: &'a [u32],
+    pub sampling: SamplingParams,
+}
 
 fn mask_tool_choice(logits: &mut [f32], choice: &ToolChoice) {
     if *choice == ToolChoice::None {
@@ -63,10 +74,10 @@ impl Default for LocalEngineOptions {
 impl LocalEngineOptions {
     pub fn select_device(
         &self,
-        model: &nosh_hub::ResolvedModel,
+        weights: &Path,
     ) -> Result<(candle_core::Device, DeviceSelection), LlmError> {
         self.device.select(
-            &model.weights,
+            weights,
             self.context_length,
             self.prefill_chunk,
             self.kv_dtype,
@@ -117,10 +128,7 @@ fn load_error_context(selection: &DeviceSelection) -> String {
 }
 
 impl LocalChatEngine {
-    pub fn load(
-        model: &nosh_hub::ResolvedModel,
-        opts: LocalEngineOptions,
-    ) -> Result<Self, LlmError> {
+    pub fn load(model: ModelSource<'_>, opts: LocalEngineOptions) -> Result<Self, LlmError> {
         let t0 = Instant::now();
         // The environment is set up by the binary (`configure_thread_env`).
         let threads = barrier_threads();
@@ -128,17 +136,17 @@ impl LocalChatEngine {
             kv_dtype: opts.kv_dtype,
             prepack_weights: opts.prepack_weights,
         };
-        let (device, device_selection) = opts.select_device(model)?;
+        let (device, device_selection) = opts.select_device(model.weights)?;
         let device_init_secs = t0.elapsed().as_secs_f64();
         let model_start = Instant::now();
-        let mut tok = Tok::load(&model.tokenizer)?;
-        let llama = Llama::load(&model.weights, opts.context_length, load, &device)
+        let mut tok = Tok::load(model.tokenizer)?;
+        let llama = Llama::load(model.weights, opts.context_length, load, &device)
             .map_err(|error| error.context(load_error_context(&device_selection)))?;
         let cfg = llama.config().clone();
-        if cfg.arch != model.entry.arch {
+        if cfg.arch != model.arch {
             return Err(LlmError::Config(format!(
-                "GGUF architecture {} does not match registry ({})",
-                cfg.arch, model.entry.arch
+                "GGUF architecture {} does not match model metadata ({})",
+                cfg.arch, model.arch
             )));
         }
         if tok.vocab_size() != cfg.vocab {
@@ -149,18 +157,14 @@ impl LocalChatEngine {
             )));
         }
         let newline = tok.encode("\n", false)?;
-        let s = &model.entry.sampling;
         let default_sampling = SamplingParams {
-            temperature: s.temperature,
-            top_p: s.top_p,
-            min_p: s.min_p,
             seed: opts.seed,
-            ..SamplingParams::default()
+            ..model.sampling
         };
         let info = EngineInfo {
             device: device_selection.actual,
             device_selection,
-            model_id: model.entry.id.clone(),
+            model_id: model.id.to_owned(),
             arch: cfg.arch.clone(),
             layers: cfg.n_layer,
             vocab: cfg.vocab,
@@ -175,7 +179,7 @@ impl LocalChatEngine {
         Ok(Self {
             model: llama,
             tok,
-            eog: model.entry.eog_ids.clone(),
+            eog: model.eog_ids.to_vec(),
             newline,
             sessions: HashMap::new(),
             next_id: 1,
@@ -191,7 +195,7 @@ impl LocalChatEngine {
         &self.info
     }
 
-    /// Registry sampling defaults (temperature / top-p / min-p) with the seed.
+    /// Host-supplied sampling defaults with the seed from the engine options.
     pub fn default_sampling(&self) -> SamplingParams {
         self.default_sampling
     }
@@ -244,23 +248,19 @@ impl LocalChatEngine {
 }
 
 impl ChatEngine for LocalChatEngine {
-    fn set_tool_choice(
-        &mut self,
-        sid: SessionId,
-        choice: crate::ToolChoice,
-    ) -> Result<(), LlmError> {
+    fn set_tool_choice(&mut self, sid: SessionId, choice: ToolChoice) -> Result<(), EngineError> {
         let conversation = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         if matches!(choice, ToolChoice::Required | ToolChoice::Named(_))
             && (conversation.spec.tools.is_empty() || conversation.spec.thinking)
         {
-            return Err(LlmError::Config(
+            return Err(EngineError::Config(
                 "required tool choice needs tools and thinking disabled".into(),
             ));
         }
-        if let crate::ToolChoice::Named(name) = &choice
+        if let ToolChoice::Named(name) = &choice
             && (!conversation
                 .spec
                 .tools
@@ -270,13 +270,13 @@ impl ChatEngine for LocalChatEngine {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c)))
         {
-            return Err(LlmError::Config("named tool is not available".into()));
+            return Err(EngineError::Config("named tool is not available".into()));
         }
         conversation.tool_choice = choice;
         Ok(())
     }
 
-    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, LlmError> {
+    fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
         let conversation = Conversation::new(spec, &mut self.tok)?;
         let id = self.next_id;
         self.next_id += 1;
@@ -289,12 +289,12 @@ impl ChatEngine for LocalChatEngine {
         sid: SessionId,
         append: Vec<Message>,
         sink: &mut dyn FnMut(Event),
-    ) -> Result<StepOutcome, LlmError> {
+    ) -> Result<StepOutcome, EngineError> {
         let t_start = Instant::now();
         let conversation = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         conversation.append(append, &mut self.tok)?;
         let sampling = conversation.spec.sampling;
         let thinking = conversation.spec.thinking;
@@ -315,7 +315,7 @@ impl ChatEngine for LocalChatEngine {
             ..Usage::default()
         };
         if full.len() + 8 > max_ctx {
-            return Err(LlmError::ContextFull {
+            return Err(EngineError::ContextFull {
                 used: full.len(),
                 max: max_ctx,
             });
@@ -350,7 +350,7 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::Cancelled;
             }
             let ts = Instant::now();
-            let mut l: Vec<f32> = logits.to_vec1()?;
+            let mut l: Vec<f32> = logits.to_vec1().map_err(LlmError::from)?;
             mask_tool_choice(&mut l, &choice);
             let id = sampler.sample(&mut l, parser.in_call());
             sampler.observe(id);
@@ -372,7 +372,7 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::MaxTokens;
             }
             let tf = Instant::now();
-            logits = self.model.forward(&[id])?;
+            logits = self.model.forward(&[id]).map_err(LlmError::from)?;
             t_fwd += tf.elapsed().as_secs_f64();
             self.kv_tokens.push(id);
             if trace && generated.len().is_multiple_of(16) {
@@ -405,7 +405,7 @@ impl ChatEngine for LocalChatEngine {
         let conversation = self
             .sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?;
+            .ok_or(EngineError::UnknownSession(sid))?;
         conversation.push_assistant(raw);
         usage.context_used = conversation.token_count();
         outcome.stop = stop;
@@ -413,11 +413,12 @@ impl ChatEngine for LocalChatEngine {
         Ok(outcome)
     }
 
-    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), LlmError> {
+    fn rewind(&mut self, sid: SessionId, keep: usize) -> Result<(), EngineError> {
         self.sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?
+            .ok_or(EngineError::UnknownSession(sid))?
             .rewind(keep, &mut self.tok)
+            .map_err(Into::into)
     }
 
     fn message_count(&self, sid: SessionId) -> usize {
@@ -431,11 +432,12 @@ impl ChatEngine for LocalChatEngine {
         &mut self,
         sid: SessionId,
         keep_recent: usize,
-    ) -> Result<usize, LlmError> {
+    ) -> Result<usize, EngineError> {
         self.sessions
             .get_mut(&sid)
-            .ok_or(LlmError::UnknownSession(sid))?
+            .ok_or(EngineError::UnknownSession(sid))?
             .compact_tool_results(keep_recent, &mut self.tok)
+            .map_err(Into::into)
     }
 
     fn context_usage(&self, sid: SessionId) -> (usize, usize) {
@@ -543,21 +545,6 @@ pub(crate) fn dispatch(
             }
         }
     }
-}
-
-/// Resident set size of this process in MB (Linux), current and peak.
-pub fn rss_mb() -> Option<(f64, f64)> {
-    let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    let field = |name: &str| -> Option<f64> {
-        s.lines()
-            .find(|l| l.starts_with(name))?
-            .split_whitespace()
-            .nth(1)?
-            .parse::<f64>()
-            .ok()
-            .map(|kb| kb / 1024.0)
-    };
-    Some((field("VmRSS:")?, field("VmHWM:")?))
 }
 
 #[cfg(test)]
@@ -685,14 +672,16 @@ mod tests {
 
     #[test]
     fn unsupported_cuda_kv_fails_before_device_or_model_io() {
-        let model = nosh_hub::ResolvedModel {
-            entry: nosh_hub::Registry::builtin().default_model().clone(),
-            dir: "missing-model".into(),
-            weights: "missing-model/weights.gguf".into(),
-            tokenizer: "missing-model/tokenizer.json".into(),
+        let model = ModelSource {
+            id: "missing-model",
+            arch: "llama",
+            weights: Path::new("missing-model.gguf"),
+            tokenizer: Path::new("missing-tokenizer.json"),
+            eog_ids: &[EOS],
+            sampling: SamplingParams::default(),
         };
         let error = LocalChatEngine::load(
-            &model,
+            model,
             LocalEngineOptions {
                 device: InferenceDevice::Cuda(0),
                 kv_dtype: KvDtype::F32,
