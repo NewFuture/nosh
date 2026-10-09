@@ -81,6 +81,16 @@ pub fn run_agent(
         Ok(s) => s,
         Err(c) => return c,
     };
+    if stdin.is_none() {
+        shell.configure_project_env(cfg.project_env.clone());
+        if shell.refresh_project_env().is_err() {
+            return if shell.interrupts().count() > 0 {
+                130
+            } else {
+                2
+            };
+        }
+    }
     let loaded = match engine::load(setup, nosh_core::LoadMode::Foreground) {
         Ok(l) => l,
         Err(e) => {

@@ -283,7 +283,7 @@ Emacs / Vi、作用域改键、搜索、取消和建议采用见[输入编辑](I
 
 Linux 默认 `~/.config/nosh/config.toml`，macOS 默认 `~/Library/Application Support/nosh/config.toml`；`NOSH_HOME` 覆盖为其下的 `config.toml`。有对应覆盖项时，优先级为 CLI > 环境 > 用户配置 > 默认值；没有项目或管理员配置层。
 
-缺失配置使用默认值。配置不可读、TOML 错误或安全规则非法时报告原因并阻止 AI 工具执行，普通 shell 保持可用。非安全字段按告警与默认值规则处理；未知 section/key 明确告警，不为未实现能力预留静默接受的键。
+缺失配置使用默认值。配置不可读、TOML 错误或安全规则非法时报告原因并阻止 AI 工具执行，普通 shell 保持可用。非法项目环境配置也阻断 agent 执行，不默认为 off；终端集成配置错误则告警并关闭标记。其余非安全字段按告警与默认值规则处理；未知 section/key 明确告警，不为未实现能力预留静默接受的键。
 
 `shell.ai_prefix` 可为空字符串来关闭显式前缀入口；非空值不得以空白字符开头（包括 Unicode 空白）。非法值明确告警并使用默认 `#`，不静默禁用命令，也不自动去掉配置中的空白。
 
@@ -295,6 +295,8 @@ ai_prefix = "#"
 trigger_on_error = true
 on_failure = "hint"           # hint | auto | off
 capture_output = "last"       # last | off
+project_env = "off"           # off | direnv | mise；显式启用，互斥
+terminal_integration = "auto" # auto | off | on；通用 OSC 7/133
 input_assist = true
 completion = true
 completion_scripts = true
@@ -336,6 +338,8 @@ fallback_shell = "/bin/bash"
 键位列表是显式覆盖示例，不是所有原生别名。安全规则使用 TOML 条目，可改用 `[[safety.allow]]` 表数组，但同一个键只能定义一次；条件、路径 glob 与 workspace 作用域见[用户规则](APPROVAL-MODES.md#4-用户规则与会话授权)。
 
 `nosh model` 子命令使用自己的位置参数与选项，不继承交互模式的模型/下载配置。键、默认值与范围的实现来源为 [config.rs](../crates/nosh-cli/src/config.rs)。
+
+`project_env` 的工具版本、完整输入边界、`--safe`/`--norc` 区别及失败恢复，以及 `terminal_integration` 的自动发现和 OSC 7/133 范围，见[项目环境与终端集成](SHELL-INTEGRATION.md)。
 
 ### 11.2 环境变量
 

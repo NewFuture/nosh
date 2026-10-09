@@ -208,6 +208,7 @@ pub(super) fn terminal_probe() {
             );
         }
         mode if mode.starts_with("repl-editing") => super::editing::probe(mode),
+        mode if mode.starts_with("repl-integration") => super::integration::probe(mode),
         mode if mode.starts_with("repl-completion") => super::completion::probe(mode),
         "repl"
         | "repl-blocked"

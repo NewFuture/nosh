@@ -431,6 +431,21 @@ impl Agent {
             };
         }
         ui.state(self.cfg.mode, Activity::Thinking);
+        let environment_interrupts = shell.interrupts().count();
+        if self.tools == ToolSet::Full
+            && let Err(error) = shell.refresh_project_env()
+        {
+            ui.error(&error);
+            return TaskOutcome {
+                status: if shell.interrupts().count() != environment_interrupts {
+                    TaskStatus::Cancelled
+                } else {
+                    TaskStatus::Failed
+                },
+                error: Some(error),
+                ..TaskOutcome::default()
+            };
+        }
         let started = Instant::now();
         let ints = shell.interrupts();
         let cancel = self.engine.cancel_handle();
@@ -647,15 +662,14 @@ impl Agent {
         let cwd1 = shell.cwd();
         if cwd1 != cwd0 {
             if self.cfg.restore_cwd {
-                let cmd = format!(
-                    "cd -- '{}'",
-                    cwd0.display().to_string().replace('\'', "'\\''")
-                );
-                let _ = shell.run_agent_command(
-                    &cmd,
-                    &AgentExecOpts::default(),
-                    &mut nosh_shell::NullSink,
-                );
+                if let Err(error) = shell.restore_working_dir(&cwd0) {
+                    let error = format!("could not restore task directory: {error}");
+                    ui.error(&error);
+                    out.error = Some(error);
+                    if out.status != TaskStatus::Cancelled {
+                        out.status = TaskStatus::Failed;
+                    }
+                }
             } else {
                 ui.notice(&format!("cwd → {}", cwd1.display()));
             }
@@ -870,6 +884,9 @@ Approval request: {}; {}.{}",
         let mut command = original.to_string();
         let mut edited = false;
         for _ in 0..4 {
+            if let Err(result) = Self::refresh_environment(shell, ui) {
+                return result;
+            }
             if command.is_empty() || command.contains('\0') {
                 ui.error("invalid empty command or NUL byte");
                 return Exec::Result("error: invalid command".into());
@@ -889,6 +906,9 @@ Approval request: {}; {}.{}",
                     grant,
                 } => {
                     if manual {
+                        if let Err(result) = Self::refresh_environment(shell, ui) {
+                            return result;
+                        }
                         let mut fresh = self.cfg.permission_context(shell);
                         fresh.timeout = timeout;
                         if prepared_command(&command, &fresh, shell) != report {
@@ -1012,6 +1032,18 @@ Approval request: {}; {}.{}",
         Exec::CommandResult(text)
     }
 
+    fn refresh_environment(shell: &mut EmbeddedShell, ui: &mut dyn AgentUi) -> Result<(), Exec> {
+        let interrupts = shell.interrupts().count();
+        shell.refresh_project_env().map_err(|error| {
+            ui.error(&error);
+            if shell.interrupts().count() != interrupts {
+                Exec::Cancelled(error)
+            } else {
+                Exec::Failed(format!("[environment not ready] {error}"))
+            }
+        })
+    }
+
     fn read_tool(
         &mut self,
         shell: &mut EmbeddedShell,
@@ -1020,6 +1052,11 @@ Approval request: {}; {}.{}",
         ui: &mut dyn AgentUi,
         tool: BuiltinTool,
     ) -> Exec {
+        if self.tools == ToolSet::Full
+            && let Err(result) = Self::refresh_environment(shell, ui)
+        {
+            return result;
+        }
         let ctx = self.cfg.permission_context(shell);
         let prepared = match tools::prepare_read(call, &ctx) {
             Ok(call) => call,

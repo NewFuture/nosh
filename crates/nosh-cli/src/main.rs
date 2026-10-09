@@ -290,10 +290,16 @@ fn run_shell(
         Err(c) => return c,
     };
     shell.configure_output_capture(cfg.capture_output, control);
+    shell.configure_project_env(if cli.global.safe {
+        Ok(nosh_shell::project_env::Provider::Off)
+    } else {
+        cfg.project_env.clone()
+    });
     // Ctrl-C stops a model download (the partial file is kept).
     shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);
     let repl_cfg = nosh_shell::ReplConfig {
+        terminal_integration: cfg.terminal_integration,
         status_bar: nosh_shell::status::Config {
             enabled: cfg.status_bar,
             ..Default::default()

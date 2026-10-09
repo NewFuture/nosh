@@ -9,6 +9,8 @@ use nosh_shell::{CaptureOutput, OnFailure};
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub project_env: Result<nosh_shell::project_env::Provider, String>,
+    pub terminal_integration: nosh_shell::terminal_integration::Mode,
     pub ai_prefix: String,
     pub trigger_on_error: bool,
     pub on_failure: OnFailure,
@@ -44,6 +46,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            project_env: Ok(Default::default()),
+            terminal_integration: Default::default(),
             ai_prefix: "#".into(),
             trigger_on_error: true,
             on_failure: OnFailure::Hint,
@@ -83,6 +87,8 @@ const KNOWN: &[(&str, &[&str])] = &[
         "shell",
         &[
             "ai_prefix",
+            "project_env",
+            "terminal_integration",
             "trigger_on_error",
             "on_failure",
             "capture_output",
@@ -256,6 +262,29 @@ impl Config {
             } else {
                 c.ai_prefix = v;
             }
+        }
+        if let Some(value) = r.get("shell", "project_env") {
+            c.project_env = value
+                .as_str()
+                .and_then(nosh_shell::project_env::Provider::parse)
+                .ok_or_else(|| "shell.project_env: off | direnv | mise".to_string());
+            if let Err(error) = &c.project_env {
+                r.warnings.push(error.clone());
+            }
+        }
+        if let Some(value) = r.get("shell", "terminal_integration") {
+            c.terminal_integration = match value
+                .as_str()
+                .and_then(nosh_shell::terminal_integration::Mode::parse)
+            {
+                Some(mode) => mode,
+                None => {
+                    r.warnings.push(
+                        "shell.terminal_integration: auto | off | on; disabling integration".into(),
+                    );
+                    nosh_shell::terminal_integration::Mode::Off
+                }
+            };
         }
         if let Some(v) = r.bool("shell", "trigger_on_error") {
             c.trigger_on_error = v;
@@ -436,6 +465,31 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_environment_is_opt_in_and_invalid_configuration_is_not_off() {
+        use nosh_shell::project_env::Provider;
+        use nosh_shell::terminal_integration::Mode;
+        assert_eq!(Config::default().project_env, Ok(Provider::Off));
+        assert_eq!(Config::default().terminal_integration, Mode::Auto);
+        for (text, provider) in [
+            ("off", Provider::Off),
+            ("direnv", Provider::Direnv),
+            ("mise", Provider::Mise),
+        ] {
+            let config = Config::parse(&format!("[shell]\nproject_env='{text}'"));
+            assert_eq!(config.project_env, Ok(provider));
+            assert!(config.warnings.is_empty());
+        }
+        for text in ["'auto'", "true", "['direnv','mise']", "42"] {
+            let config = Config::parse(&format!("[shell]\nproject_env={text}"));
+            assert!(config.project_env.is_err());
+            assert!(!config.warnings.is_empty());
+        }
+        let config = Config::parse("[shell]\nterminal_integration='unknown'");
+        assert_eq!(config.terminal_integration, Mode::Off);
+        assert!(!config.warnings.is_empty());
+    }
 
     #[test]
     fn documented_configuration_uses_supported_settings() {

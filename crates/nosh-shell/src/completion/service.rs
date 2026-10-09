@@ -171,6 +171,11 @@ impl Service {
         self.shared.wake.notify_one();
     }
 
+    pub fn suspend(&self) {
+        self.shared.snapshot_session.store(0, Ordering::Release);
+        self.cancel();
+    }
+
     pub fn session(&self) -> u64 {
         self.shared.session.load(Ordering::Acquire)
     }

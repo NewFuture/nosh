@@ -23,6 +23,8 @@ pub enum ShellError {
     Brush(#[from] brush_core::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("project environment is not ready: {0}")]
+    ProjectEnvironment(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -325,6 +327,8 @@ pub struct EmbeddedShell {
     last_output: Option<UserOutput>,
     path_cache: Option<(String, Arc<Vec<String>>)>,
     path_scan: PathScan,
+    project_env: crate::project_env::Service,
+    environment_generation: u64,
 }
 
 impl EmbeddedShell {
@@ -382,6 +386,8 @@ impl EmbeddedShell {
             last_output: None,
             path_cache: None,
             path_scan: PathScan::default(),
+            project_env: Default::default(),
+            environment_generation: 0,
         };
         me.scrub_internal_env();
         if opts.load_rc {
@@ -417,6 +423,283 @@ impl EmbeddedShell {
 
     pub fn is_interactive(&self) -> bool {
         self.interactive
+    }
+
+    pub fn configure_project_env(
+        &mut self,
+        provider: Result<crate::project_env::Provider, String>,
+    ) {
+        self.poll_project_env();
+        if self.project_env.occupied() {
+            self.project_env.cancel();
+            self.project_env.error =
+                Some("cannot replace an environment task before it is reclaimed".into());
+            self.project_env.report();
+            return;
+        }
+        match provider {
+            Ok(provider) => self.project_env = crate::project_env::Service::new(provider),
+            Err(error) => {
+                self.project_env = Default::default();
+                self.project_env.error = Some(error);
+            }
+        }
+        self.project_env.report();
+    }
+
+    fn project_env_snapshot(&self) -> Result<crate::project_env::Snapshot, String> {
+        let sh = self
+            .shell
+            .try_lock()
+            .map_err(|_| "shell environment is busy")?;
+        self.project_env_snapshot_from(&sh, sh.env())
+    }
+
+    fn project_env_snapshot_from(
+        &self,
+        sh: &BrushShell,
+        environment: &brush_core::env::ShellEnvironment,
+    ) -> Result<crate::project_env::Snapshot, String> {
+        let mut exported = BTreeMap::new();
+        let mut size = 0usize;
+        for (name, variable) in environment.iter_exported() {
+            if variable.attribute_flags(sh).contains('n') {
+                return Err(format!(
+                    "exported nameref {name} is unsupported for project environments"
+                ));
+            }
+            let value = match variable.value() {
+                brush_core::ShellValue::String(value) => value,
+                brush_core::ShellValue::Unset(_) => continue,
+                _ => {
+                    return Err(format!(
+                        "exported non-scalar {name} is unsupported for project environments"
+                    ));
+                }
+            };
+            size = size
+                .checked_add(name.len() + value.len() + 32)
+                .ok_or("environment size overflow")?;
+            if size > crate::project_env::MAX_ENV {
+                return Err("project environment snapshot limit exceeded".into());
+            }
+            exported.insert(name.clone(), value.clone());
+        }
+        let snapshot = crate::project_env::Snapshot {
+            generation: self.environment_generation,
+            cwd: sh.working_dir().into(),
+            exported,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Starts at a real prompt boundary, never at a redraw or keypress.
+    pub fn begin_project_env(&mut self) {
+        self.poll_project_env();
+        if self.project_env.provider == crate::project_env::Provider::Off
+            || self.project_env.occupied()
+        {
+            return;
+        }
+        let conflict = {
+            let sh = self.lock();
+            let mise_disabled = sh.env_str("__MISE_HOOK_ENABLED").as_deref() == Some("0")
+                && !["PROMPT_COMMAND", "precmd_functions", "chpwd_functions"]
+                    .iter()
+                    .any(|name| {
+                        sh.env_var(name).is_some_and(|variable| {
+                            variable.value().element_values(&sh).iter().any(|command| {
+                                command
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                                    .any(|word| {
+                                        matches!(
+                                            word,
+                                            "_mise_hook"
+                                                | "__mise_hook"
+                                                | "_mise_hook_prompt_command"
+                                                | "_mise_hook_chpwd"
+                                        )
+                                    })
+                            })
+                        })
+                    });
+            ["_direnv_hook", "_mise_hook", "__mise_hook"]
+                .iter()
+                .any(|name| {
+                    sh.funcs().get(name).is_some() && (*name == "_direnv_hook" || !mise_disabled)
+                })
+        };
+        let result = if conflict {
+            Err(
+                "project environment hook already loaded; choose one owner or restart nosh --norc"
+                    .into(),
+            )
+        } else {
+            self.project_env_snapshot().and_then(|snapshot| {
+                self.project_env
+                    .start(snapshot, self.project_env.provider.name().into())
+            })
+        };
+        if let Err(error) = result {
+            self.project_env.error = Some(error);
+        }
+        self.project_env.report();
+    }
+
+    pub fn cancel_project_env(&mut self) {
+        self.project_env.cancel();
+    }
+
+    pub fn project_env_label(&self) -> Option<String> {
+        self.project_env.label()
+    }
+
+    pub(crate) fn project_env_loading(&self) -> bool {
+        self.project_env.occupied()
+    }
+
+    pub(crate) fn set_project_env_wakeup(&mut self, wakeup: Arc<dyn Fn() + Send + Sync>) {
+        self.project_env.wakeup = Some(wakeup);
+    }
+
+    pub(crate) fn update_project_env_for_editor(&mut self) -> bool {
+        if !self.project_env.completed() {
+            self.project_env.notify_if_published();
+            return false;
+        }
+        self.collect_project_env();
+        true
+    }
+
+    fn poll_project_env(&mut self) {
+        self.collect_project_env();
+        self.project_env.report();
+    }
+
+    fn collect_project_env(&mut self) {
+        if let Some(completed) = self.project_env.poll() {
+            let result = completed
+                .result
+                .and_then(|patch| self.apply_project_env(patch, &completed.snapshot))
+                .map(|snapshot| self.project_env.ready = Some(snapshot));
+            self.project_env.error = result.err();
+        }
+    }
+
+    fn apply_project_env(
+        &mut self,
+        mut patch: crate::project_env::Patch,
+        expected: &crate::project_env::Snapshot,
+    ) -> Result<crate::project_env::Snapshot, String> {
+        crate::project_env::validate_patch(&patch)?;
+        let mut sh = self.lock();
+        let current = self.project_env_snapshot_from(&sh, sh.env())?;
+        if &current != expected {
+            return Err("discarded stale project environment result".into());
+        }
+        let path_changed = patch.contains_key("PATH");
+        patch.retain(|name, value| match (sh.env_var(name), value) {
+            (None, None) => false,
+            (Some(variable), Some(value)) if variable.is_exported() => {
+                !matches!(variable.value(), brush_core::ShellValue::String(current) if current == value)
+            }
+            _ => true,
+        });
+        if patch.is_empty() {
+            if path_changed {
+                sh.program_location_cache_mut().reset();
+            }
+            return Ok(current);
+        }
+        for name in patch.keys() {
+            if sh.env_var(name).is_some_and(|variable| {
+                variable
+                    .attribute_flags(&sh)
+                    .contains(['r', 'n', 'i', 'l', 'u', 'c'])
+                    || variable.value().is_array()
+            }) {
+                return Err(format!(
+                    "project environment cannot replace readonly or non-scalar variable {name}"
+                ));
+            }
+        }
+        // Bound the existing state before cloning, then validate the complete
+        // candidate before committing any changes.
+        crate::input_assist::bounded_json(sh.env(), crate::project_env::MAX_ENV)
+            .map_err(|_| "project environment transaction size limit")?;
+        let mut next = sh.env().clone();
+        for (name, value) in patch {
+            match value {
+                Some(value) => {
+                    let mut variable = ShellVariable::new(value);
+                    variable.export();
+                    next.set_global(name, variable)
+                        .map_err(|error| error.to_string())?;
+                }
+                None => {
+                    next.unset(&name).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        crate::input_assist::bounded_json(&next, crate::project_env::MAX_ENV)
+            .map_err(|_| "project environment transaction size limit")?;
+        let snapshot = self.project_env_snapshot_from(&sh, &next)?;
+        *sh.env_mut() = next;
+        if path_changed {
+            sh.program_location_cache_mut().reset();
+        }
+        Ok(snapshot)
+    }
+
+    /// Finish a pending prompt refresh; errors do not prevent manual recovery.
+    pub fn finish_project_env(&mut self) -> Result<(), String> {
+        let interrupts = self.interrupts.count();
+        loop {
+            self.poll_project_env();
+            if self.interrupts.count() != interrupts {
+                self.project_env.cancel();
+            }
+            if let Some(error) = &self.project_env.error {
+                // An earlier failure is not final while a new retry can still
+                // succeed. A cancelled/expired task, however, must not hold up input.
+                if !self.project_env.occupied() || self.project_env.job_cancelled() {
+                    let error = error.clone();
+                    self.project_env.report();
+                    return Err(error);
+                }
+            }
+            if !self.project_env.occupied() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Must run before assessment/approval, not after an approved PATH is chosen.
+    pub fn refresh_project_env(&mut self) -> Result<(), String> {
+        self.begin_project_env();
+        self.finish_project_env()
+    }
+
+    fn require_project_env(&self) -> Result<(), ShellError> {
+        if let Some(error) = &self.project_env.error {
+            return Err(ShellError::ProjectEnvironment(error.clone()));
+        }
+        if self.project_env.provider != crate::project_env::Provider::Off
+            && (self.project_env.occupied()
+                || self.project_env.ready.as_ref()
+                    != Some(
+                        &self
+                            .project_env_snapshot()
+                            .map_err(ShellError::ProjectEnvironment)?,
+                    ))
+        {
+            return Err(ShellError::ProjectEnvironment(
+                "refresh is required before command assessment".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn interrupts(&self) -> Arc<Interrupts> {
@@ -511,6 +794,7 @@ impl EmbeddedShell {
 
     /// `nosh -c`: runs the command string with bash semantics and returns `$?`.
     pub fn run_dash_c(&mut self, command: &str) -> i32 {
+        self.environment_generation = self.environment_generation.wrapping_add(1);
         let rt = self.rt.clone();
         let mut sh = self.lock();
         match rt.block_on(sh.run_dash_c_command(command.to_string())) {
@@ -524,6 +808,7 @@ impl EmbeddedShell {
 
     /// `nosh script.sh args…`.
     pub fn run_script(&mut self, path: &Path, args: &[String]) -> i32 {
+        self.environment_generation = self.environment_generation.wrapping_add(1);
         if !path.exists() {
             eprintln!("nosh: {}: No such file or directory", path.display());
             return 127;
@@ -610,6 +895,7 @@ impl EmbeddedShell {
     }
 
     fn run_line(&mut self, line: &str, stdin: Option<OpenFile>) -> UserRun {
+        self.environment_generation = self.environment_generation.wrapping_add(1);
         let id = self.next_command_id;
         let Some(next) = id.checked_add(1) else {
             eprintln!("nosh: user command identifiers exhausted");
@@ -774,6 +1060,15 @@ impl EmbeddedShell {
         self.lock().working_dir().to_path_buf()
     }
 
+    /// Restore the task's initial directory without requiring an environment
+    /// that may have failed in the directory the task just left.
+    pub fn restore_working_dir(&mut self, path: &Path) -> Result<(), ShellError> {
+        self.lock().set_working_dir(path)?;
+        self.environment_generation = self.environment_generation.wrapping_add(1);
+        self.project_env.ready = None;
+        Ok(())
+    }
+
     pub fn home(&self) -> Option<PathBuf> {
         self.lock()
             .env_str("HOME")
@@ -795,6 +1090,10 @@ impl EmbeddedShell {
             .iter()
             .map(|(k, v)| (k.clone(), v.definition().body.to_string()))
             .collect()
+    }
+
+    pub fn has_function(&self, name: &str) -> bool {
+        self.lock().funcs().get(name).is_some()
     }
 
     /// Scalar variables (arrays, volatile ones like `RANDOM` and ones whose
@@ -1195,6 +1494,8 @@ impl EmbeddedShell {
         opts: &AgentExecOpts,
         out: &mut dyn OutputSink,
     ) -> Result<CommandResult, ShellError> {
+        self.require_project_env()?;
+        self.environment_generation = self.environment_generation.wrapping_add(1);
         let before = self.snapshot();
         let before_children = procs::child_pids();
         static RUNS: AtomicU64 = AtomicU64::new(0);

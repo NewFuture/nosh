@@ -21,6 +21,7 @@
 | [实时输入辅助](INPUT-ASSIST.md) | 高亮、语法与命令判定、快照、缓存和 worker |
 | [提示符状态行](STATUS-BAR.md) | 布局、主题、终端所有权、兼容性与已知限制 |
 | [项目上下文](PROJECT-CONTEXT.md) | 项目识别、AGENTS / README 加载与缓存边界 |
+| [项目环境与终端集成](SHELL-INTEGRATION.md) | direnv/mise、刷新与失败恢复、通用 OSC 7/133、自动发现和支持边界 |
 | [LLM 工具](LLM-TOOLS.md) | 工具集合、读取与搜索、提问、权限和结果 |
 | [CommandAssist](COMMAND-ASSIST.md) | Generate / Fix / Next、查询工具、直接终态与后台调度 |
 | [输出采集](OUTPUT-CAPTURE.md) | 最近命令输出、注入条件、PTY 协议、预算与隐私 |
