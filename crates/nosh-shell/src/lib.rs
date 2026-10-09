@@ -9,6 +9,7 @@ pub mod completion;
 pub mod editing;
 pub mod guard;
 pub mod history;
+pub mod inline_commands;
 pub mod input_assist;
 pub mod procs;
 pub mod pty;
@@ -28,6 +29,7 @@ pub use backend::{
     SessionState, ShellError, ShellOptions, StateDiff, UserCommand, UserRun, register_internal_env,
 };
 pub use command_snapshot::CommandSnapshot;
+pub use inline_commands::ManagementCommand;
 pub use repl::{AiHandler, AiOutcome, AiRequest, Badge, OnFailure, ReplConfig};
 pub use trigger::{Trigger, TriggerConfig};
 pub use user_output::{CaptureOutput, OutputState, OutputUnavailable, UserOutput};

@@ -300,7 +300,6 @@ fn run_shell(
         },
         trigger: nosh_shell::TriggerConfig {
             ai_prefix: cfg.ai_prefix.clone(),
-            builtin_name: cfg.builtin_name.clone(),
             trigger_on_error: cfg.trigger_on_error,
             nl_guard: cfg.nl_guard,
             ai_enabled: ai_on,
@@ -326,6 +325,7 @@ fn run_shell(
         completion: nosh_shell::completion::Config {
             enabled: cfg.completion,
             scripts: cfg.completion_scripts,
+            inline_prefix: None,
             abbreviations: Default::default(),
             selection_observer: None,
             worker: if cfg.completion {

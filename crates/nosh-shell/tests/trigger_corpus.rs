@@ -27,6 +27,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use brush_core::ShellVariable;
+use nosh_shell::inline_commands::Command as InlineCommand;
 use nosh_shell::trigger::{Action, Trigger, TriggerConfig, classify};
 use nosh_shell::{EmbeddedShell, Resolution, ShellOptions};
 use serde::Deserialize;
@@ -508,7 +509,7 @@ fn fixture_is_isolated_and_cleaned_up() {
 fn explicit_ai_and_incomplete_input_keep_their_contracts() {
     let mut fixture = Fixture::new();
     let cfg = TriggerConfig::default();
-    for input in ["", " \t ", "#", " #  "] {
+    for input in ["", " \t "] {
         assert_eq!(classify(input, &mut fixture.shell, &cfg), Action::Empty);
     }
     assert_eq!(
@@ -519,8 +520,8 @@ fn explicit_ai_and_incomplete_input_keep_their_contracts() {
         }
     );
     assert_eq!(
-        classify("ai \"find files\"", &mut fixture.shell, &cfg),
-        Action::AiBuiltin("\"find files\"".into())
+        classify("#", &mut fixture.shell, &cfg),
+        Action::Inline(InlineCommand::Help)
     );
     for input in [
         "echo 'unfinished",
@@ -581,7 +582,6 @@ fn configuration_and_session_commands_take_precedence() {
     ));
     let custom = TriggerConfig {
         ai_prefix: "?".into(),
-        builtin_name: "ask".into(),
         ..TriggerConfig::default()
     };
     assert_eq!(
@@ -592,8 +592,8 @@ fn configuration_and_session_commands_take_precedence() {
         }
     );
     assert_eq!(
-        classify("ask explain this", &mut fixture.shell, &custom),
-        Action::AiBuiltin("explain this".into())
+        classify("?help", &mut fixture.shell, &custom),
+        Action::Inline(InlineCommand::Help)
     );
     // Only fixture setup is executed, never an input from the corpus.
     assert_eq!(

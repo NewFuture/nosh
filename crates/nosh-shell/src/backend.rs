@@ -1142,13 +1142,6 @@ impl EmbeddedShell {
             sh: options.sh_mode,
             ai_enabled: trigger.ai_enabled,
             ai_prefix: copy(&trigger.ai_prefix, &mut remaining)?,
-            ai_builtin: copy(&trigger.builtin_name, &mut remaining)?,
-            ai_builtin_shadowed: sh.aliases().contains_key(&trigger.builtin_name)
-                || sh.funcs().get(&trigger.builtin_name).is_some()
-                || sh
-                    .builtins()
-                    .get(&trigger.builtin_name)
-                    .is_some_and(|b| !b.disabled),
             trigger_on_error: trigger.trigger_on_error,
         };
         drop(sh);

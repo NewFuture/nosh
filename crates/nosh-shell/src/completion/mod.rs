@@ -20,6 +20,7 @@ pub use editor::{AbbreviationSelection, Completion, SelectionObserver};
 pub struct Config {
     pub enabled: bool,
     pub scripts: bool,
+    pub inline_prefix: Option<String>,
     pub worker: Option<WorkerCommand>,
     pub abbreviations: crate::input_assist::Abbreviations,
     pub selection_observer: Option<SelectionObserver>,
@@ -31,6 +32,7 @@ impl std::fmt::Debug for Config {
             .debug_struct("Config")
             .field("enabled", &self.enabled)
             .field("scripts", &self.scripts)
+            .field("inline_prefix", &self.inline_prefix)
             .field("worker", &self.worker)
             .field("abbreviations", &self.abbreviations)
             .field("selection_observer", &self.selection_observer.is_some())
@@ -43,6 +45,7 @@ impl Default for Config {
         Self {
             enabled: true,
             scripts: true,
+            inline_prefix: None,
             worker: None,
             abbreviations: Default::default(),
             selection_observer: None,

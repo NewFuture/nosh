@@ -446,7 +446,6 @@ impl InputAssist {
             version,
             text: line.to_owned(),
             context,
-            command_input: false,
         });
         mailbox.latest = Some(input.clone());
         drop(mailbox);
@@ -592,14 +591,6 @@ impl Highlighter for InputHighlighter {
                                 state: State::Known,
                                 reason: Reason::Ai,
                             }];
-                        } else if analysis.ai_candidate
-                            && observations.iter().any(|o| o.role == Some(Role::External))
-                        {
-                            if let Some(error) = &publication.syntax_error {
-                                cache.findings.push(unavailable(error));
-                            } else {
-                                cache.findings.push(pending());
-                            }
                         } else {
                             for observation in observations.iter() {
                                 if let Some(role) = observation.role {
@@ -1231,21 +1222,6 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand, index: SharedIndex) {
                     }) =>
                 {
                     if shared.current(version) {
-                        if publication
-                            .analysis
-                            .as_ref()
-                            .is_some_and(|a| a.version == version && a.ai_candidate)
-                            && observations.iter().any(|o| o.role == Some(Role::External))
-                        {
-                            let mut resolved = (*input).clone();
-                            resolved.command_input = true;
-                            next_syntax = Some(Arc::new(resolved));
-                            publication.analysis = None;
-                            publication.lookup = None;
-                            publication.serial += 1;
-                            dirty = true;
-                            continue;
-                        }
                         let observations = Arc::new(observations);
                         resolved = Some(ResolvedLookup {
                             input,
@@ -1961,35 +1937,24 @@ mod tests {
     }
 
     #[test]
-    fn ai_header_full_parse_failure_does_not_leave_header_analysis_pending() {
+    fn inline_command_errors_do_not_wait_for_external_lookup() {
         let (_, assist, highlighter) = editor();
-        let text = "ai < missing";
+        let text = "#mode bad";
         highlighter.highlight(text, text.len());
         let input = highlighter.cache.borrow().input.clone().unwrap();
-        let header = analysis::analyze(&input);
-        assert!(header.ai_candidate);
-        let observations = vec![Observation {
-            range: 0..2,
-            role: Some(Role::External),
-            finding: None,
-        }];
+        let analysis = analysis::analyze(&input);
+        assert!(analysis.queries.is_empty());
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|finding| finding.state == State::Error)
+        );
         assist.shared.publish(|publication| {
-            publication.analysis = Some(Arc::new(header.clone()));
-            publication.lookup = Some((
-                input.version,
-                Arc::new(observations),
-                LookupStats {
-                    metadata_calls: 1,
-                    cache_entries: 0,
-                    cache_bytes: 0,
-                },
-            ));
+            publication.analysis = Some(Arc::new(analysis));
         });
-        assist
-            .shared
-            .publish(|publication| publication.syntax_error = Some("parse failed".into()));
         highlighter.highlight(text, text.len());
-        assert!(assist.status().contains("parse failed"));
+        assert!(assist.status().contains("mode"), "{}", assist.status());
     }
 
     #[test]

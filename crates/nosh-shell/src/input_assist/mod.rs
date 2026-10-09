@@ -110,8 +110,6 @@ pub(crate) struct Context {
     pub sh: bool,
     pub ai_enabled: bool,
     pub ai_prefix: String,
-    pub ai_builtin: String,
-    pub ai_builtin_shadowed: bool,
     pub trigger_on_error: bool,
 }
 
@@ -137,7 +135,6 @@ pub(crate) struct Input {
     pub version: Version,
     pub text: String,
     pub context: Arc<Context>,
-    pub command_input: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +248,6 @@ pub(crate) struct Analysis {
     pub spans: Vec<Span>,
     pub findings: Vec<Finding>,
     pub queries: Vec<Query>,
-    pub ai_candidate: bool,
 }
 
 impl Analysis {
@@ -261,7 +257,6 @@ impl Analysis {
             spans: Vec::new(),
             findings: Vec::new(),
             queries: Vec::new(),
-            ai_candidate: false,
         }
     }
 }

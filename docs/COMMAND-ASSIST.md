@@ -6,11 +6,11 @@
 
 | 意图 | 入口 | 输出 |
 |---|---|---|
-| Generate / CommandGen | `nosh -s "描述"`、非空输入 F2、适用的 Tab 兜底 | 根据 nosh 提交的需求生成或改写一个完整 shell program |
-| Fix / AutoFix | 用户命令失败后的自动辅助、裸 `ai fix`、失败后的裸 `#` | 根据上一条命令及其输出给出修复命令或无建议；不提问、不自动重跑或修改环境 |
+| Generate / CommandGen | `nosh -s "描述"`、非管理的非空输入 F2、适用的 Tab 兜底 | 根据 nosh 提交的需求生成或改写一个完整 shell program |
+| Fix / AutoFix | 用户命令失败后的自动辅助、显式 `#fix` | 根据上一条命令及其输出给出修复命令或无建议；不提问、不自动重跑或修改环境 |
 | Next / NextSuggest | 用户命令成功后的自动辅助 | 有依据的下一条命令；没有合理下一步就不建议 |
 
-`ai fix <question>` 保留 Agent 入口，携带匹配的失败证据，支持解释、日志分析和继续诊断。普通 `# <任务>`、自然语言任务与 `nosh -a` 仍走 Agent。
+`#fix <question>` 进入 Agent，携带匹配的失败证据，支持解释、日志分析和继续诊断。普通 `# <任务>`、自然语言任务与 `nosh -a` 走 Agent。单独 `#` 显示帮助，不请求修复；管理草稿的 F2 和 Tab 无结果不进入 Generate。
 
 只有交互层直接执行的用户命令产生自动辅助事件。Agent 内部的工具成功／失败继续由原 Agent 处理；不递归启动 Next/Fix。脚本、`-c`、补全、本地拼写纠错、AI 管理命令不产生新的用户执行事件。
 
@@ -96,7 +96,7 @@ Next 在捕获请求时，从 shell 现有的五条用户命令缓冲区取最�
 
 原命令、失败证据和 nosh 提供的需求属于任务输入，不随项目背景一起删除。Next 不自动获得 AGENTS 中的工作流目标，也没有单独输入目标的手动入口。当前评测使用真实失败操作及成功准备步骤提供后续依据。
 
-Next 只由用户命令成功后的完成事件触发，不提供 `ai next` 管理命令，也没有专用的任务文本解析或续行规则。普通 `ai "任务"` 仍是 Agent 入口；`next` 不是保留的管理子命令。关闭自动辅助后不再启动 Next。
+Next 只由用户命令成功后的完成事件触发，不提供 `#next` 管理命令，也没有专用的任务文本解析或续行规则。`#next` 明确报未知命令；普通 `# 任务` 是 Agent 入口。关闭自动辅助后不再启动 Next。
 
 Fix/Next 的 `Execution:` 模型视图始终包含 `exit_code`；仅当起始执行目录不同于当前 `Environment.cwd` 时增加 `execution_cwd`，不因命令内的 `cd` 丢失起始目录。command ID、派生的 status、完整命令未截断标记不重复展示。退出码只表示整条命令的退出结果，不代表整个工作流已完成；完整身份仍保留在宿主记录中。
 
@@ -160,7 +160,7 @@ Agent 的 `ask_user`、`Message::UserAnswer` 和终端交互不受此协议调�
 
 ## 调度与用户输入
 
-默认 `[shell] command_assist = true`。每条用户命令完成后，成功排入 Next，值得诊断的失败排入 Fix；`on_failure = "off"` 关闭自动失败辅助，`ai auto off` 暂停自动辅助。`command_assist = false` 保留显式 Generate/Fix，不再触发 Next；`--safe`／`NOSH_DISABLE_AI` 关闭 AI。
+默认 `[shell] command_assist = true`。每条用户命令完成后，成功排入 Next，值得诊断的失败排入 Fix；`on_failure = "off"` 关闭自动失败辅助，`#auto off` 暂停自动辅助。`command_assist = false` 保留显式 Generate/Fix，不再触发 Next；`--safe`／`NOSH_DISABLE_AI` 关闭 AI。
 
 一个后台 worker 临时持有既有 Agent 及其推理引擎，只有一个最新任务槽，不加载第二份模型。加载器、Agent 和模型描述作为同一个 EngineState 在前后台移动，不逐项交接独立状态。前台普通命令和编辑不等待推理；显式 AI 请求取消后台工作并取回同一引擎，因此可等待当前推理取消或模型加载完成。主 Agent 的对话日志不因辅助任务而清空，单份活动 KV 在切换对话后可能重新 prefill。
 
@@ -168,7 +168,7 @@ Agent 的 `ask_user`、`Message::UserAnswer` 和终端交互不受此协议调�
 
 正常 reedline 终端在提示符上方显示候选，F2 接受；接受时再次核对 command ID 和活 shell 的静态校验。基本终端只在输入仍为空时用新行显示结果并重画提示符，同样使用实际配置的建议键；用户开始输入后取消旧任务，不把后台正文插入已有输入。Tab 的补全成功/菜单操作也会使旧草稿候选失效，但明确无补全的兜底可以采用仍有效的现有候选。
 
-启用四区信息条时，后台候选/说明合并进状态区，实际可用的 F2（或改键）采用动作进入操作提示区，不叠加另一行。非空白草稿走 Generate；空白且没有可用候选只提示，不请求 Fix/Next 或 Agent。修复保留显式 `ai fix`。布局只读取既有 `AssistDisplay` 结果，不新增模型请求；关闭信息条保留原提示路径。焦点、改键、回填撤销和资源边界见[输入编辑](INPUT-EDITING.md)。
+启用四区信息条时，后台候选/说明合并进状态区，实际可用的 F2（或改键）采用动作进入操作提示区，不叠加另一行。非管理的非空白草稿走 Generate；空白且没有可用候选只提示，不请求 Fix/Next 或 Agent。管理输入不显示 AI 建议入口，也不采用后台候选；修复使用显式 `#fix`。布局只读取既有 `AssistDisplay` 结果，不新增模型请求；关闭信息条保留原提示路径。焦点、改键、回填撤销和资源边界见[输入编辑](INPUT-EDITING.md)。
 
 ## 评测
 

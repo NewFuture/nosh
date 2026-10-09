@@ -4,7 +4,7 @@
     "title": "Suggest a related diagnostic or archive continuation after the missing parent is created",
     "mode": "repl",
     "fixture": "partial-archive",
-    "inputs": ["ai auto off", "tar -czf backups/reports.tar.gz archive", "ai auto on", "mkdir -p backups"],
+    "inputs": ["#auto off", "tar -czf backups/reports.tar.gz archive", "#auto on", "mkdir -p backups"],
     "completions": [
       {"kind": "observe"},
       {"kind": "observe"},

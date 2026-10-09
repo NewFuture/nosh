@@ -121,7 +121,7 @@
     "fixture": "failure",
     "inputs": [
       "python3 broken.py",
-      "ai fix Explain why this failed and how to fix it without changing files."
+      "#fix Explain why this failed and how to fix it without changing files."
     ],
     "completions": [
       {
@@ -570,7 +570,7 @@
     "capture_output": "last",
     "inputs": [
       "python3 once.py",
-      "ai fix 根据刚才的实际输出解释失败原因并说明修复方法。不要重跑程序，也不要猜测输出未说明的应用用途。"
+      "#fix 根据刚才的实际输出解释失败原因并说明修复方法。不要重跑程序，也不要猜测输出未说明的应用用途。"
     ],
     "completions": [
       {
@@ -605,7 +605,7 @@
     "capture_output": "last",
     "inputs": [
       "python3 once.py",
-      "ai fix 根据刚才的实际输出解释失败原因，并原样引用 diagnostic_id 字段的完整值（不是 error_code，也不是进程退出码），再说明修复方法。不要重跑程序或猜测应用用途。"
+      "#fix 根据刚才的实际输出解释失败原因，并原样引用 diagnostic_id 字段的完整值（不是 error_code，也不是进程退出码），再说明修复方法。不要重跑程序或猜测应用用途。"
     ],
     "completions": [
       {
