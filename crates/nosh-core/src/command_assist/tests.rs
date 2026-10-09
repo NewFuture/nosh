@@ -82,7 +82,7 @@ fn generate_direct_final_is_strict_and_never_executes_the_program() {
         "echo ok\nif true; then",
         "echo ok; )",
         "echo ok\nThis prints ok.",
-        "Which directory?",
+        "Which directory? (choose one)",
     ] {
         let mut engine = MockChatEngine::new(vec![vec![text(reply)]]);
         assert!(matches!(
@@ -728,7 +728,7 @@ fn early_invalid_text_gets_one_bounded_final_turn_for_every_intent() {
         )
         .unwrap();
         for (draft, final_text) in [
-            ("Which directory?", "[None]"),
+            ("Which directory? (choose one)", "[None]"),
             ("`command_help`", "printf '%s\\n' ready"),
             ("```sh\nls .\n```", "ls ."),
             ("echo '", "for f in *.txt; do\n cat \"$f\"\ndone"),
@@ -783,7 +783,7 @@ fn invalid_terminal_text_is_not_retried_or_replaced_with_none() {
             ..AgentConfig::default()
         };
         let mut engine = MockChatEngine::new(vec![
-            vec![text("Which directory?")],
+            vec![text("Which directory? (choose one)")],
             vec![text("```sh\nls .\n```")],
             vec![text("[None]")],
         ]);
@@ -808,7 +808,7 @@ fn early_finalization_never_dispatches_tools_even_when_budget_remains() {
     let shell = shell(dir.path());
     for name in ["read_file", "exec", "ask_user"] {
         let mut engine = MockChatEngine::new(vec![
-            vec![text("Which directory?")],
+            vec![text("Which directory? (choose one)")],
             vec![call(name, json!({}))],
             vec![text("[None]")],
         ]);
@@ -984,7 +984,7 @@ fn early_finalization_preserves_parser_cancellation_and_timeout_failures() {
                     message, Message::User(text) if text.starts_with("Previous response rejected:")
                 )
             }) {
-                return vec![text("Which directory?")];
+                return vec![text("Which directory? (choose one)")];
             }
             match failure {
                 "parse" => vec![
@@ -1162,7 +1162,7 @@ fn direct_final_rejects_empty_prose_and_wrong_markers_without_clarifying() {
         "NONE",
         "[none]",
         "[None] explanation",
-        "Which directory?",
+        "Which directory? (choose one)",
         "Here is a command:\necho ready",
         "```bash\necho ready\n```",
         "echo \u{202e}hidden",

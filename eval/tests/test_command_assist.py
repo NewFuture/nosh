@@ -221,15 +221,11 @@ class ArchiveCommandTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.grade(command), [])
 
-    def test_cd_validation_preserves_real_shell_failure_for_empty_arguments(self):
-        for command, expected in (
-            ("tar -czf logs.tar.gz logs", True),
-            ("cd . && tar -czf logs.tar.gz logs", True),
-            ("cd logs && tar -czf ../logs.tar.gz .", True),
-            ("cd '' && tar -czf logs.tar.gz logs", False),
-            ('cd "" && tar -czf logs.tar.gz logs', False),
-            ("cd -- '' && tar -czf logs.tar.gz logs", False),
-            ("tar -czf logs.tar.gz logs && cd ''", False),
+    def test_supported_cd_commands_preserve_real_shell_results(self):
+        for command in (
+            "tar -czf logs.tar.gz logs",
+            "cd . && tar -czf logs.tar.gz logs",
+            "cd logs && tar -czf ../logs.tar.gz .",
         ):
             with self.subTest(command=command), tempfile.TemporaryDirectory(dir=self.base) as temporary:
                 actual = Path(temporary) / "files"
@@ -239,10 +235,19 @@ class ArchiveCommandTests(unittest.TestCase):
                     cwd=actual, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
                     capture_output=True, text=True, timeout=10,
                 )
-                self.assertEqual(result.returncode == 0, expected, result.stderr)
-                self.assertEqual(not self.grade(command), expected)
-                if command.startswith(("cd ''", 'cd ""', "cd -- ''")):
-                    self.assertFalse((actual / "logs.tar.gz").exists())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.grade(command), [])
+
+    def test_empty_cd_arguments_remain_outside_the_supported_subset(self):
+        for command in (
+            "cd '' && tar -czf logs.tar.gz logs",
+            'cd "" && tar -czf logs.tar.gz logs',
+            "cd -- '' && tar -czf logs.tar.gz logs",
+            "tar -czf logs.tar.gz logs && cd ''",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("unsupported cd arguments", " ".join(self.grade(command)))
+                self.assertFalse((self.root / "logs.tar.gz").exists())
 
     def test_help_generation_is_scored_by_the_command_without_a_native_query(self):
         scenario = next(s for s in suite.load_suite("command-assist")["scenarios"]

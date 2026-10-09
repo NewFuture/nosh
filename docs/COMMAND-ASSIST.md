@@ -128,7 +128,7 @@ Fix 只接受匹配 command ID、命令正文及截断标记、退出码与执�
 
 帮助结果以 `[command_help]` 和一行 JSON 元数据开头，记录请求名称、解析路径、实际 executable、subcommands 数组、实际帮助旗标 argument、真实 exit_code／signal、capture_complete、两路采集字节数、query、matched_blocks 和 excerpt_truncated；正文用 `[stdout]`／`[stderr]` 标明来源，不声称跨流时序。GNU、BSD、BusyBox 风格文本共用同一摘录逻辑，不根据程序名硬编码答案。非零退出的 usage（包括 Git 短帮助的 129）可作为证据，但不伪装成零退出；空输出明确报错。达到采集上限仍做相关性筛选，结束自有进程组，并将退出码记为未知；`capture_complete=false` 与摘录截断分开。未匹配只表示已采集文本中没有匹配，不证明参数不受支持。保留原 locale，不假设所有程序都支持同一种帮助形式。
 
-**帮助查询仍是真实执行，不是沙箱。** 不能仅凭 `--help` 字样把未知项目程序视为安全。文件系统查询也是协作式检查，不能保证强制中断一次阻塞 I/O；现阶段没有跨任务帮助缓存。
+**帮助查询仍是真实执行，不是沙箱。** 为了开发便利，默认沿用用户配置的 PATH，不额外限制安装目录，也不要求为常用工具逐个配置 allow 规则。调用仍须通过上述 Safe、保护路径、显式 deny、本地／不透明程序等检查，并受固定帮助参数、期限和输出上限约束。用户配置的 PATH 因此属于信任边界；其中的程序即使只收到 `--help` 也可能产生副作用，不能把该约定视为安全隔离。文件系统查询也是协作式检查，不能保证强制中断一次阻塞 I/O；现阶段没有跨任务帮助缓存。
 
 ## 结果与预算
 
@@ -174,7 +174,7 @@ Agent 的 `ask_user`、`Message::UserAnswer` 和终端交互不受此协议调�
 
 Agent 回归与命令辅助分别使用 `eval/suites/regression.json` 和 `eval/suites/command-assist.json`，从 `eval/scenarios/` 引用唯一场景定义。`smoke.json` 仅选择既有场景的 seed 0 小集合，不替代正式基线。Agent 回归显式关闭自动辅助以隔离任务统计；CommandAssist 专项覆盖归档与帮助命令生成、默认命名、含糊任务不猜测、失败修复，以及成功后的诊断/续行或无建议，自动场景保持真实完成事件。工具查询机制另有无模型与实际 CLI/PTY 回归，不通过普通 Generate 场景强制调用。Agent 的交互提问单独覆盖。
 
-真实 trace 区分模型工具调用和宿主接受结果。三种意图均记录 `observation.response_format = "command_or_none"`；接受结果只允许 command／none，必须匹配会话、command ID、执行状态和完整正常最终回复。新协议的执行身份来自结构化宿主 observation，旧输入格式继续按原结构解读，不凭 User 文本推断身份。历史归档和判分不改写。CLI 还要核对实际 stdout，不能拿 trace 中的正确命令替代错误或缺失的输出。帮助查询是否实际成功属于独立工具证据，不替代生成命令的正确性。记录 prompt、缓存和生成 token（含 schema／模板），以及步数、确认、延迟、结果类型、文件变化与重复结果一致性。协议稳定不等于任务正确，不宣称接口简化已提高准确率。
+真实 trace 区分模型工具调用和宿主接受结果。三种意图均记录 `observation.response_format = "command_or_none"`；接受结果只允许 command／none，必须匹配会话、command ID、执行状态和完整正常最终回复。执行身份只从当前 `command_assist_v1` 的结构化宿主 observation 读取，不凭 User 文本推断。历史归档和判分不改写。CLI 还要核对实际 stdout，不能拿 trace 中的正确命令替代错误或缺失的输出。帮助查询是否实际成功属于独立工具证据，不替代生成命令的正确性。记录 prompt、缓存和生成 token（含 schema／模板），以及步数、确认、延迟、结果类型、文件变化与重复结果一致性。协议稳定不等于任务正确，不宣称接口简化已提高准确率。
 
 后台结果先在显示状态的锁内核对版本并发布，再记录 completed；发布前已经过期的结果记录 cancelled，不带可评分的 kind/text。成功发布后用户继续输入可以正常清除候选；completed 只表示当时已发布，不代表用户接受或执行。
 

@@ -636,7 +636,7 @@ fn external_query_uses_snapshot_identity_environment_cwd_and_only_the_help_flag(
     let installed = tempfile::tempdir().unwrap();
     let executable = installed.path().join("implementation");
     let program = installed.path().join("nosh-help-fixture");
-    std::fs::write(&executable, "#!/bin/sh\nprintf 'Usage: fixture version list resolve gzip\\nargs=%s:%s pager=%s env=%s cwd=%s\\n' \"$#\" \"$1\" \"$PAGER\" \"$SNAPSHOT_VALUE\" \"$PWD\"\nif read line; then printf 'unexpected stdin'; exit 1; fi\n").unwrap();
+    std::fs::write(&executable, "#!/bin/sh\nprintf 'Usage: fixture version list resolve gzip\\nargs=%s:%s pager=%s env=%s cwd=%s\\n' \"$#\" \"$1\" \"$PAGER\" \"$SNAPSHOT_VALUE\" \"$(pwd -P)\"\nif read line; then printf 'unexpected stdin'; exit 1; fi\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(&executable, &program).unwrap();
     let mut shell = EmbeddedShell::new(ShellOptions {
@@ -682,7 +682,10 @@ fn external_query_uses_snapshot_identity_environment_cwd_and_only_the_help_flag(
         assert_eq!(meta["query"], json!(filter));
         assert!(meta.get("topic").is_none());
         assert!(body.contains("args=1:--help pager=cat env=before"));
-        assert!(body.contains(&format!("cwd={}", dir.path().display())));
+        assert!(body.contains(&format!(
+            "cwd={}",
+            dir.path().canonicalize().unwrap().display()
+        )));
         assert!(!body.contains("unexpected stdin"));
     }
 }
