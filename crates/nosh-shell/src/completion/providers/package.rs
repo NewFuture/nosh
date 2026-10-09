@@ -119,6 +119,7 @@ pub(super) fn generate(
             source,
         ));
     }
+    let explicit_prefix = npm && index > 1;
     let explicit_run = context
         .words
         .get(index)
@@ -134,7 +135,7 @@ pub(super) fn generate(
     }
     let manifest = cwd
         .ancestors()
-        .take(32)
+        .take(if explicit_prefix { 1 } else { 32 })
         .find_map(|directory| {
             let path = directory.join("package.json");
             match fs::metadata(&path) {
@@ -144,7 +145,13 @@ pub(super) fn generate(
                 Err(error) => Some(Err(format!("{}: {error}", path.display()))),
             }
         })
-        .ok_or("no package.json found within 32 ancestor directories")??;
+        .ok_or_else(|| {
+            if explicit_prefix {
+                format!("no package.json found in {}", cwd.display())
+            } else {
+                "no package.json found within 32 ancestor directories".into()
+            }
+        })??;
     let shortcut = !npm && !explicit_run;
     let key = format!("package-scripts\0{}\0{shortcut}", manifest.display());
     let set = cache.load(key, Duration::from_secs(1), || read(&manifest, shortcut))?;

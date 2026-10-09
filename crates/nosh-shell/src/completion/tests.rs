@@ -975,10 +975,20 @@ fn package_directory_options_nearest_manifest_and_mid_line_spans_are_respected()
         assert_eq!(&result.query.text[result.candidates[0].span.clone()], "ch");
         assert!(result.query.text.ends_with(" tail"));
     }
+    for text in [
+        "npm --prefix 'child project/src' run ch",
+        "npm --prefix='child project/src' run ch",
+    ] {
+        let result = answer(&mut Server::default(), query(text), snapshot.clone());
+        assert!(matches!(result.state, State::Failed(_)), "{text}");
+        assert!(result.candidates.is_empty());
+    }
     let mut nested = snapshot;
     Arc::make_mut(&mut nested.native).context.cwd = project.join("src");
-    let result = answer(&mut Server::default(), query("yarn ch"), nested);
-    assert_eq!(result.candidates[0].value, "child");
+    for text in ["npm run ch", "yarn ch"] {
+        let result = answer(&mut Server::default(), query(text), nested.clone());
+        assert_eq!(result.candidates[0].value, "child");
+    }
 }
 
 #[test]

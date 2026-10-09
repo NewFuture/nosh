@@ -71,10 +71,10 @@ fn run() -> Result<()> {
     if matches!(action, Action::Upgrade) && revision.is_none() {
         return Err("upgrade requires --rev".into());
     }
-    let root = match root {
+    let root = dunce::canonicalize(match root {
         Some(root) => root,
         None => env::current_dir()?,
-    };
+    })?;
     let dependencies = if let Some(dependency) = dependency {
         vec![dependency]
     } else if matches!(action, Action::Upgrade) {
@@ -82,9 +82,10 @@ fn run() -> Result<()> {
     } else {
         Dependency::ALL.into_iter().collect()
     };
+    let _lock = source::lock_root(&root, &dependencies)?;
     let mut states = std::collections::BTreeMap::new();
     for dependency in dependencies {
-        let manager = Manager::new(root.clone(), cache.clone(), offline, dependency)?;
+        let manager = Manager::new(root.clone(), cache.clone(), offline, dependency);
         match action {
             Action::Prepare => manager.prepare()?,
             Action::Export => manager.export()?,

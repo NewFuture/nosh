@@ -147,13 +147,33 @@ struct Replay {
     patch: Vec<u8>,
 }
 
+pub(crate) fn lock_root(root: &Path, dependencies: &[Dependency]) -> Result<File> {
+    for dependency in dependencies {
+        if !root.join(dependency.pin).is_file() || !root.join(dependency.patch).is_file() {
+            return Err(format!(
+                "{} is not a managed nosh source root; run from the repository/archive root or pass --root <path>",
+                root.display()
+            ).into());
+        }
+    }
+    fs::create_dir_all(root.join(".nosh"))?;
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".nosh/source.lock"))?;
+    lock.try_lock()
+        .map_err(|e| format!("another source command is running, or locking failed: {e}"))?;
+    Ok(lock)
+}
+
 pub(crate) struct Manager {
     dependency: Dependency,
     root: PathBuf,
     cache: PathBuf,
     cache_read_only: bool,
     offline: bool,
-    _lock: File,
 }
 
 impl Manager {
@@ -162,32 +182,15 @@ impl Manager {
         cache: Option<PathBuf>,
         offline: bool,
         dependency: Dependency,
-    ) -> Result<Self> {
-        let root = dunce::canonicalize(root)?;
-        if !root.join(dependency.pin).is_file() || !root.join(dependency.patch).is_file() {
-            return Err(format!(
-                "{} is not a managed nosh source root; run from the repository/archive root or pass --root <path>",
-                root.display()
-            ).into());
-        }
-        fs::create_dir_all(root.join(".nosh"))?;
-        let lock = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.join(".nosh/source.lock"))?;
-        lock.try_lock()
-            .map_err(|e| format!("another source command is running, or locking failed: {e}"))?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             dependency,
             cache_read_only: cache.is_some(),
             cache: cache
                 .unwrap_or_else(|| root.join(format!(".nosh/cache/{}.git", dependency.key))),
             root,
             offline,
-            _lock: lock,
-        })
+        }
     }
 
     fn upstream(&self) -> Result<Option<PathBuf>> {
@@ -556,5 +559,28 @@ impl Manager {
             candidate.display()
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_lock_outlives_dependency_managers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for dependency in Dependency::ALL {
+            fs::create_dir_all(root.join(dependency.pin).parent().unwrap()).unwrap();
+            fs::write(root.join(dependency.pin), "").unwrap();
+            fs::write(root.join(dependency.patch), "").unwrap();
+        }
+        let lock = lock_root(root, &Dependency::ALL).unwrap();
+        for dependency in Dependency::ALL {
+            drop(Manager::new(root.into(), None, true, dependency));
+            assert!(lock_root(root, &[dependency]).is_err());
+        }
+        drop(lock);
+        assert!(lock_root(root, &Dependency::ALL).is_ok());
     }
 }

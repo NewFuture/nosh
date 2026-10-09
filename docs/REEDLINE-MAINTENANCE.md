@@ -172,8 +172,9 @@ new upstream behavior. Export is recomputed from the new base, so absorbed
 changes disappear naturally, including an entirely empty patch. No heuristic
 silently skips a failed hunk. Candidates remain available for inspection.
 
-Source commands take a per-checkout exclusive lock. Do not edit the source while
-preparing/upgrading it. Interrupted installs retain `.nosh/previous-reedline` and
+Source commands hold one per-checkout exclusive lock across all selected
+dependencies. Do not edit the source while preparing/upgrading it.
+Interrupted installs retain `.nosh/previous-reedline` and
 refuse another replacement until it has been inspected; never delete it without
 preserving any wanted work. Invalid/incomplete state is an error, not permission
 to overwrite an existing source directory.
