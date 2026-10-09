@@ -312,6 +312,10 @@ impl Completion {
 
     pub(crate) fn prepare(&self, shell: &crate::EmbeddedShell) {
         if self.config.enabled {
+            if shell.project_env_loading() {
+                self.service.suspend();
+                return;
+            }
             self.service.prepare(snapshot::capture(
                 shell,
                 self.config.scripts,

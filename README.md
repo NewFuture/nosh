@@ -76,6 +76,12 @@ agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交
 
 ## 终端与字符兼容
 
+### 项目环境与命令区域
+
+可显式设置 `[shell] project_env = "direnv"` 或 `"mise"` 接入已授权的项目环境，默认关闭、两者互斥。人工提示符与 agent 工具调用之间刷新；单条 `cd … && …` 内不自动刷新。加载失败时明确警告，人工仍可修复，agent 停止执行。mise 首版仅支持已安装工具的 PATH/业务变量，不接管完整激活功能。
+
+`[shell] terminal_integration = "auto"` 默认根据终端提示简单识别，使用通用 OSC 7/133 报告目录和真实命令区域；可设为 `off` 或 `on`。工具版本、恢复规则、终端范围与资源预算见[项目环境与终端集成](docs/SHELL-INTEGRATION.md)。
+
 ### 最近命令输出
 
 交互 shell 默认采集最近一条命令的终端输出，可在配置文件中关闭：

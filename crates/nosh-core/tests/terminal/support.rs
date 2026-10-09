@@ -380,6 +380,7 @@ impl Probe<'_> {
         let mut theme_revision = 0;
         let mut resize_requested = None;
         let needs_cursor_reply = self.mode.starts_with("repl")
+            && self.stdout_tty
             && self
                 .terminal
                 .is_some_and(|t| !matches!(t, "" | "dumb" | "unknown"));

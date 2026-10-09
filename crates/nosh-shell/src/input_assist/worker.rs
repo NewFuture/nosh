@@ -411,6 +411,17 @@ pub(crate) struct OwnedChild {
 }
 
 impl OwnedChild {
+    pub(crate) fn new(child: Child, marker: Option<String>) -> Self {
+        Self {
+            child,
+            reaped: false,
+            marker,
+            helpers: Vec::new(),
+            uncontrolled: None,
+            reported_cleanup_error: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn id(&self) -> u32 {
         self.child.id()
@@ -478,9 +489,7 @@ impl OwnedChild {
                 continue;
             }
             let opened = if self.helpers.len() >= MAX_DETACHED_HELPERS {
-                Err(io::Error::other(
-                    "completion detached-helper limit exceeded",
-                ))
+                Err(io::Error::other("owned detached-helper limit exceeded"))
             } else {
                 crate::procs::TaggedProcess::open_in_session(process, &marker, controlled_group)
             };
@@ -511,6 +520,10 @@ impl OwnedChild {
         if self.reaped {
             return Ok(true);
         }
+        Ok(self.exit_code()?.is_some())
+    }
+
+    pub(crate) fn exit_code(&self) -> io::Result<Option<i32>> {
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: this is our retained child. WNOWAIT preserves its identity and
         // the dedicated group id until descendant cleanup has been verified.
@@ -529,7 +542,18 @@ impl OwnedChild {
         let pid = unsafe { status.si_pid() };
         #[cfg(not(target_os = "linux"))]
         let pid = status.si_pid;
-        Ok(pid != 0)
+        if pid == 0 {
+            return Ok(None);
+        }
+        #[cfg(target_os = "linux")]
+        let code = unsafe { status.si_status() };
+        #[cfg(not(target_os = "linux"))]
+        let code = status.si_status;
+        Ok(Some(if status.si_code == libc::CLD_EXITED {
+            code
+        } else {
+            128 + code
+        }))
     }
 
     fn stop(&mut self) -> io::Result<()> {
@@ -551,7 +575,7 @@ impl OwnedChild {
         killed
     }
 
-    fn retire(&mut self) -> io::Result<bool> {
+    pub(crate) fn retire(&mut self) -> io::Result<bool> {
         if self.reaped {
             return Ok(true);
         }
@@ -707,14 +731,7 @@ impl Worker {
         let process = command.spawn()?;
         drop(child);
         Ok(Self {
-            child: Arc::new(Mutex::new(OwnedChild {
-                child: process,
-                reaped: false,
-                marker,
-                helpers: Vec::new(),
-                uncontrolled: None,
-                reported_cleanup_error: None,
-            })),
+            child: Arc::new(Mutex::new(OwnedChild::new(process, marker))),
             stream: parent,
             outgoing: Vec::new(),
             written: 0,

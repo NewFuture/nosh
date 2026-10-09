@@ -121,6 +121,7 @@ impl OnFailure {
 
 #[derive(Debug, Clone)]
 pub struct ReplConfig {
+    pub terminal_integration: crate::terminal_integration::Mode,
     pub status_bar: crate::status::Config,
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
@@ -134,6 +135,7 @@ pub struct ReplConfig {
 impl Default for ReplConfig {
     fn default() -> Self {
         Self {
+            terminal_integration: Default::default(),
             status_bar: Default::default(),
             trigger: Default::default(),
             on_failure: Default::default(),
@@ -202,6 +204,7 @@ pub enum LineOutcome {
 /// Decides what to do with each input line and runs it.
 pub struct Pipeline {
     pub cfg: ReplConfig,
+    terminal: crate::terminal_integration::Session,
     auto_paused: bool,
     last_failure: Option<UserCommand>,
 }
@@ -210,6 +213,7 @@ impl Pipeline {
     pub fn new(cfg: ReplConfig) -> Self {
         Self {
             cfg,
+            terminal: Default::default(),
             auto_paused: false,
             last_failure: None,
         }
@@ -234,6 +238,18 @@ impl Pipeline {
         ui: &mut dyn ReplUi,
         line: &str,
     ) -> LineOutcome {
+        let outcome = self.process_line(shell, ai, ui, line);
+        self.terminal.finish_input();
+        outcome
+    }
+
+    fn process_line(
+        &mut self,
+        shell: &mut EmbeddedShell,
+        ai: &mut dyn AiHandler,
+        ui: &mut dyn ReplUi,
+        line: &str,
+    ) -> LineOutcome {
         if let Some(display) = ai.assistance() {
             display.invalidate();
         }
@@ -241,7 +257,7 @@ impl Pipeline {
         match trigger::classify(line, shell, &tc) {
             Action::Empty => LineOutcome::Continue(None),
             Action::Execute => self.execute(shell, ai, ui, line),
-            Action::Ai { trigger, text } => ask(shell, ai, trigger, text, None),
+            Action::Ai { trigger, text } => ask(&self.terminal, shell, ai, trigger, text, None),
             Action::Correct {
                 corrected,
                 from,
@@ -255,7 +271,14 @@ impl Pipeline {
                 LineOutcome::Continue(Some(corrected))
             }
             Action::Guard => match ui.guard(line) {
-                GuardChoice::Ai => ask(shell, ai, Trigger::Hash, line.trim().to_string(), None),
+                GuardChoice::Ai => ask(
+                    &self.terminal,
+                    shell,
+                    ai,
+                    Trigger::Hash,
+                    line.trim().to_string(),
+                    None,
+                ),
                 GuardChoice::Run => self.execute(shell, ai, ui, line),
                 GuardChoice::Cancel => LineOutcome::Continue(Some(line.trim().to_string())),
             },
@@ -276,6 +299,7 @@ impl Pipeline {
     ) -> LineOutcome {
         match self.last_failure.clone() {
             Some(cmd) => ask(
+                &self.terminal,
                 shell,
                 ai,
                 Trigger::Failed { exit: cmd.exit },
@@ -320,6 +344,7 @@ impl Pipeline {
                 LineOutcome::Continue(None)
             }
             Command::Manage(command) => {
+                let _region = self.terminal.begin();
                 let out = isolate(|| ai.command(shell, command)).unwrap_or_default();
                 LineOutcome::Continue(out.prefill)
             }
@@ -334,7 +359,9 @@ impl Pipeline {
         line: &str,
     ) -> LineOutcome {
         self.last_failure = None;
+        let region = self.terminal.begin();
         let run = shell.run_user_line(line);
+        region.finish(run.exit_code);
         if run.exit_shell {
             return LineOutcome::Exit(run.exit_code);
         }
@@ -390,6 +417,7 @@ impl Pipeline {
         match self.cfg.on_failure {
             OnFailure::Off => LineOutcome::Continue(None),
             _ if auto => ask(
+                &self.terminal,
                 shell,
                 ai,
                 Trigger::Failed {
@@ -407,12 +435,14 @@ impl Pipeline {
 }
 
 fn ask(
+    terminal: &crate::terminal_integration::Session,
     shell: &mut EmbeddedShell,
     ai: &mut dyn AiHandler,
     trigger: Trigger,
     text: String,
     failed: Option<UserCommand>,
 ) -> LineOutcome {
+    let _region = terminal.begin();
     let user_output = if matches!(&trigger, Trigger::Failed { .. }) {
         shell
             .last_user_output()
@@ -458,6 +488,7 @@ pub fn isolate<T>(f: impl FnOnce() -> T) -> Option<T> {
 }
 
 pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
+const PROJECT_ENV_READY: &str = "__nosh_project_env_ready__";
 
 #[derive(Clone, Default)]
 struct EditorState {
@@ -498,7 +529,27 @@ struct ReplPrompt {
 }
 
 impl ReplPrompt {
+    fn refresh_environment(&mut self, shell: &EmbeddedShell, badge: &Badge) {
+        *self = Self {
+            status_enabled: self.status_enabled,
+            status_feedback: self.status_feedback,
+            theme: self.theme.clone(),
+            editor: self.editor.clone(),
+            failed_exit: self.failed_exit,
+            input_assist: self.input_assist.clone(),
+            command_assist: self.command_assist.clone(),
+            ..Self::build(shell, badge)
+        };
+    }
+
     fn build(shell: &EmbeddedShell, badge: &Badge) -> Self {
+        let mut badge = badge.clone();
+        if let Some(environment) = shell.project_env_label() {
+            badge.note = Some(match badge.note {
+                Some(note) => format!("{note} · {environment}"),
+                None => environment,
+            });
+        }
         let (left, custom) = shell.prompt();
         let ok = shell.last_exit_status() == 0;
         let environment = (!custom).then(|| (left.clone(), git_branch(&shell.cwd())));
@@ -876,6 +927,7 @@ fn build_editor(
     shell: &EmbeddedShell,
     cfg: &ReplConfig,
     command_assist: Option<crate::AssistDisplay>,
+    semantic_markers: bool,
 ) -> (Reedline, Option<input_assist::InputAssist>, EditorState) {
     let (_, sh) = shell.shared();
     let enhanced = if cfg.editing.needs_enhanced_keyboard()
@@ -925,6 +977,7 @@ fn build_editor(
         hinter = hinter.with_style(Style::new().italic().fg(Color::DarkGray));
     }
     let mut editor = Reedline::create()
+        .with_semantic_markers(semantic_markers.then(reedline::Osc133Markers::boxed))
         .with_ansi_colors(colors)
         .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_quick_completions(true)
@@ -1052,10 +1105,12 @@ fn read_plain_prompt(
 pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -> i32 {
     let _terminal = brush_core::terminal::TerminalControl::acquire().ok();
     shell.start_interactive();
+    let terminal = crate::terminal_integration::Session::detect(shell, cfg.terminal_integration);
     let (mut editor, input_assist, editor_state) = if style::stdout().ansi
         && std::io::stdin().is_terminal()
     {
-        let (editor, assist, state) = build_editor(shell, &cfg, ai.assistance());
+        let (editor, assist, state) =
+            build_editor(shell, &cfg, ai.assistance(), terminal.enabled());
         (Some(editor), assist, state)
     } else {
         let (compiled, notices) = cfg.editing.compile(
@@ -1081,6 +1136,12 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             },
         )
     };
+    if let Some(ed) = editor.as_mut() {
+        let signal = ed.repaint_signal();
+        shell.set_project_env_wakeup(Arc::new(move || {
+            signal.request_host_command(PROJECT_ENV_READY.into());
+        }));
+    }
     if input_assist.is_none() || (cfg.input_assist.enabled && cfg.input_assist.worker.is_none()) {
         shell.warm_command_names();
     }
@@ -1090,11 +1151,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         ai_enabled: cfg.trigger.ai_enabled,
     };
     let mut pipeline = Pipeline::new(cfg);
+    pipeline.terminal = terminal;
     let status_supported = pipeline.cfg.status_bar.enabled && crate::status::supported();
     let mut ui = TermUi;
     let mut prefill: Option<String> = None;
     let code = loop {
         shell.pre_prompt();
+        shell.begin_project_env();
+        pipeline.terminal.cwd(&shell.cwd());
         let mut prompt = ReplPrompt::build(shell, &ai.badge());
         prompt.status_enabled = status_supported && !shell.has_running_jobs();
         prompt.status_feedback = pipeline.cfg.status_bar.enabled;
@@ -1120,9 +1184,13 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         }
         prompt.command_assist = ai.assistance();
         if let Some(assist) = &input_assist {
-            assist.prepare(
-                shell.input_context(&pipeline.trigger_cfg(), &pipeline.cfg.input_abbreviations),
-            );
+            if shell.project_env_loading() {
+                assist.suspend();
+            } else {
+                assist.prepare(
+                    shell.input_context(&pipeline.trigger_cfg(), &pipeline.cfg.input_abbreviations),
+                );
+            }
             prompt.input_assist = Some(assist.clone());
         }
         let mut plain_draft = prefill.take().unwrap_or_default();
@@ -1131,7 +1199,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         {
             set_buffer(ed, &plain_draft);
         }
+        let mut input_interrupts;
         let signal = loop {
+            input_interrupts = shell.interrupts().count();
             let signal = if let Some(ed) = editor.as_mut() {
                 ed.read_line(&prompt)
             } else {
@@ -1148,6 +1218,28 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             let Ok(Signal::HostCommand(command)) = &signal else {
                 break signal;
             };
+            if command == PROJECT_ENV_READY {
+                if shell.update_project_env_for_editor() {
+                    prompt.refresh_environment(shell, &ai.badge());
+                    if !pipeline.cfg.trigger.ai_enabled {
+                        prompt.approval.clear();
+                        prompt.right = prompt.note.clone().unwrap_or_default();
+                    }
+                    if let Some(completion) = &editor_state.completion_controller {
+                        completion.prepare(shell);
+                    }
+                    if let Ok(mut state) = editor_state.completion.try_lock() {
+                        *state = None;
+                    }
+                    if let Some(assist) = &input_assist {
+                        assist.prepare(shell.input_context(
+                            &pipeline.trigger_cfg(),
+                            &pipeline.cfg.input_abbreviations,
+                        ));
+                    }
+                }
+                continue;
+            }
             if editor.is_some() {
                 eprintln!();
             }
@@ -1220,7 +1312,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                             *completion = None;
                         }
                     }
-                    if needs_model && let Some(assist) = &input_assist {
+                    if needs_model && let Some(assist) = &input_assist
+                        && !shell.project_env_loading()
+                    {
                         assist.prepare(shell.input_context(
                             &pipeline.trigger_cfg(),
                             &pipeline.cfg.input_abbreviations,
@@ -1235,6 +1329,16 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         }
         match signal {
             Ok(Signal::Success(line)) => {
+                // A failed refresh is reported by the backend, but must not
+                // prevent a human from fixing or leaving the project.
+                let waiting_for_environment = shell.project_env_loading();
+                let _environment = shell.finish_project_env();
+                if waiting_for_environment && shell.interrupts().count() != input_interrupts {
+                    pipeline.terminal.cancel_input();
+                    shell.set_last_exit_status(130);
+                    prefill = Some(line);
+                    continue;
+                }
                 if !line.trim().is_empty() {
                     shell.add_history(&line);
                 }
@@ -1243,8 +1347,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                     LineOutcome::Exit(c) => break c,
                 }
             }
-            Ok(Signal::CtrlC) => shell.set_last_exit_status(130),
+            Ok(Signal::CtrlC) => {
+                shell.cancel_project_env();
+                pipeline.terminal.cancel_input();
+                shell.set_last_exit_status(130);
+            }
             Ok(Signal::CtrlD) => {
+                shell.cancel_project_env();
+                pipeline.terminal.cancel_input();
                 eprintln!("exit");
                 break shell.last_exit_status();
             }
@@ -1255,6 +1365,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             }
         }
     };
+    shell.cancel_project_env();
     shell.end_interactive();
     code
 }
@@ -1539,7 +1650,7 @@ mod tests {
             ..Default::default()
         };
         let themes = config.status_bar.theme.clone();
-        let (mut editor, _, state) = build_editor(&shell, &config, None);
+        let (mut editor, _, state) = build_editor(&shell, &config, None, false);
         assert!(
             state._theme_subscription.is_some(),
             "theme was not wired to the editor repaint signal"

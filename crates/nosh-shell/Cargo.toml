@@ -13,6 +13,7 @@ brush-builtins.workspace = true
 brush-core = { workspace = true, features = ["serde"] }
 brush-parser.workspace = true
 crossterm.workspace = true
+csv.workspace = true
 filedescriptor.workspace = true
 libc.workspace = true
 nosh-platform.workspace = true

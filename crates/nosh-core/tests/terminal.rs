@@ -34,6 +34,9 @@ mod completion;
 #[path = "terminal/status.rs"]
 mod status;
 
+#[path = "terminal/integration.rs"]
+mod integration;
+
 #[path = "terminal/probes.rs"]
 mod probes;
 

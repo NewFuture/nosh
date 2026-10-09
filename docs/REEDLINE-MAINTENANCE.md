@@ -4,6 +4,10 @@ Reedline and brush each use an **official upstream submodule, a maintained patch
 and an ignored editable build copy**. Source preparation requires Rust, Git
 (with `git archive --mtime` support), and the platform linker.
 
+The patched `RepaintSignal` also supports one coalescing background host
+notification. Project environment updates use it to refresh editor context
+without submitting or clearing an unfinished draft.
+
 ## Layout and source of truth
 
 | Path | Purpose |
