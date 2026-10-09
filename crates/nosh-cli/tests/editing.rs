@@ -205,6 +205,47 @@ fn inline_prefix_configuration_reaches_interactive_commands_without_a_model() {
 }
 
 #[test]
+fn invalid_whitespace_prefix_warns_and_keeps_default_commands_available() {
+    for prefix in [" ?", "\u{3000}?"] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[shell]\nai_prefix = {}\ncapture_output = 'off'\ninput_assist = false\n\
+                 status_bar = false\ncommand_assist = false\ncompletion = false\n",
+                serde_json::to_string(prefix).unwrap(),
+            ),
+        )
+        .unwrap();
+        let mut launch = command(home.path());
+        launch
+            .env("PS1", "prefix-validation> ")
+            .env_remove("NOSH_DISABLE_AI")
+            .args(["--offline", "--no-download", "--norc", "-i"]);
+        let output = interactive(
+            launch,
+            &[
+                ("prefix-validation> ", b"#help\r"),
+                ("mode [confirm|auto|yolo]", b"#mode confirm\r"),
+                ("Confirm", b"exit 0\r"),
+            ],
+        );
+        assert!(
+            output.contains("shell.ai_prefix: must not start with whitespace"),
+            "{output}"
+        );
+        assert!(
+            output.contains("#help") && output.contains("#fix"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("not installed") && !output.contains("Downloading"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
 fn invalid_editing_configuration_does_not_change_noninteractive_execution() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(

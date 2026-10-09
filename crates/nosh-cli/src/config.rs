@@ -248,7 +248,14 @@ impl Config {
             }
         }
         if let Some(v) = r.str("shell", "ai_prefix") {
-            c.ai_prefix = v;
+            if v.starts_with(char::is_whitespace) {
+                r.warnings.push(
+                    "shell.ai_prefix: must not start with whitespace; using the default prefix"
+                        .into(),
+                );
+            } else {
+                c.ai_prefix = v;
+            }
         }
         if let Some(v) = r.bool("shell", "trigger_on_error") {
             c.trigger_on_error = v;
@@ -598,6 +605,43 @@ on = true
         assert_eq!(config.warnings, ["unknown key shell.builtin_name"]);
         let empty = Config::parse("[shell]\nai_prefix = ''");
         assert!(empty.ai_prefix.is_empty() && empty.warnings.is_empty());
+    }
+
+    #[test]
+    fn inline_prefix_rejects_leading_whitespace_without_disabling_commands() {
+        for prefix in [" ", "\t", "\n#", " ?", "\u{3000}?", "\u{00a0}#"] {
+            let config = Config::parse(&format!(
+                "[shell]\nai_prefix = {}",
+                serde_json::to_string(prefix).unwrap()
+            ));
+            assert_eq!(config.ai_prefix, "#", "{prefix:?}");
+            assert_eq!(config.warnings.len(), 1, "{prefix:?}");
+            assert!(config.warnings[0].contains("shell.ai_prefix"), "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn inline_prefix_accepts_empty_and_recognizable_custom_values() {
+        for prefix in ["", "#", "?", "##", "问", "# "] {
+            let config = Config::parse(&format!(
+                "[shell]\nai_prefix = {}",
+                serde_json::to_string(prefix).unwrap()
+            ));
+            assert_eq!(config.ai_prefix, prefix);
+            assert!(config.warnings.is_empty(), "{prefix:?}");
+            if !prefix.is_empty() {
+                assert!(matches!(
+                    nosh_shell::inline_commands::parse(
+                        &format!("{prefix}help"),
+                        &config.ai_prefix,
+                        true,
+                    ),
+                    nosh_shell::inline_commands::Input::Command(
+                        nosh_shell::inline_commands::Command::Help,
+                    ),
+                ));
+            }
+        }
     }
 
     #[test]

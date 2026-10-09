@@ -285,6 +285,8 @@ Linux 默认 `~/.config/nosh/config.toml`，macOS 默认 `~/Library/Application 
 
 缺失配置使用默认值。配置不可读、TOML 错误或安全规则非法时报告原因并阻止 AI 工具执行，普通 shell 保持可用。非安全字段按告警与默认值规则处理；未知 section/key 明确告警，不为未实现能力预留静默接受的键。
 
+`shell.ai_prefix` 可为空字符串来关闭显式前缀入口；非空值不得以空白字符开头（包括 Unicode 空白）。非法值明确告警并使用默认 `#`，不静默禁用命令，也不自动去掉配置中的空白。
+
 ### 11.1 当前配置示例
 
 ```toml
