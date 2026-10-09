@@ -7,6 +7,22 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{NativeSnapshot, Query};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Redirect {
+    Path,
+    Other,
+}
+
+impl Redirect {
+    fn operator(value: &str) -> Option<Self> {
+        match value {
+            "<" | ">" | ">>" | "<>" | ">|" | "&>" | "&>>" => Some(Self::Path),
+            "<&" | ">&" | "<<" | "<<-" | "<<<" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Context {
     pub words: Arc<[String]>,
@@ -16,7 +32,7 @@ pub(crate) struct Context {
     pub command_start: usize,
     pub command_end: usize,
     pub quote: Option<char>,
-    pub redirect: bool,
+    pub redirect: Option<Redirect>,
     pub path: Option<String>,
     pub requires_execution: bool,
 }
@@ -35,6 +51,14 @@ impl Words {
             &query.text[start..end],
             delimiters,
         );
+        Self::from_tokens(query, start, &raw)
+    }
+
+    fn from_tokens(
+        query: &Query,
+        start: usize,
+        raw: &[CompletionToken<'_>],
+    ) -> Result<Self, String> {
         let cursor = query.cursor - start;
         let current = raw
             .iter()
@@ -93,23 +117,28 @@ impl Context {
             return Err("completion input or cursor limit".into());
         }
         let options = snapshot.context.options();
-        let all =
-            brush_core::completion::simple_tokenize_by_delimiters(&query.text, &[' ', '\t', '\n']);
-        let word_start = all
+        let all = brush_core::completion::simple_tokenize_by_delimiters(
+            &query.text,
+            &[' ', '\t', '\n', '<', '>', '&', '|', ';', '(', ')'],
+        );
+        let current = all
             .iter()
-            .find(|word| word.start <= query.cursor && query.cursor <= word.end())
-            .map_or(query.cursor, |word| word.start);
-        let tokens = brush_parser::uncached_tokenize_str(&query.text, &options.tokenizer_options())
-            .or_else(|_| {
-                brush_parser::uncached_tokenize_str(
-                    &query.text[..word_start],
-                    &options.tokenizer_options(),
-                )
-            })
-            .map_err(|error| format!("completion context: {error}"))?;
+            .find(|word| word.start <= query.cursor && query.cursor <= word.end());
+        let word_start = current.map_or(query.cursor, |word| word.start);
+        let (tokens, incomplete) =
+            match brush_parser::uncached_tokenize_str(&query.text, &options.tokenizer_options()) {
+                Ok(tokens) => (tokens, None),
+                Err(_) => (
+                    brush_parser::uncached_tokenize_str(
+                        &query.text[..word_start],
+                        &options.tokenizer_options(),
+                    )
+                    .map_err(|error| format!("completion context: {error}"))?,
+                    current.copied(),
+                ),
+            };
         let mut command_start = 0;
         let mut command_end = query.text.len();
-        let mut redirect = false;
         let offsets: Vec<_> = query
             .text
             .char_indices()
@@ -128,30 +157,65 @@ impl Context {
                     let end = byte(location.end.index);
                     if end <= query.cursor {
                         command_start = end;
-                        redirect = false;
                     } else if start >= query.cursor {
                         command_end = start;
                         break;
                     }
                 }
-                Token::Operator(operator, location)
-                    if byte(location.start.index) < query.cursor
-                        && matches!(operator.as_str(), "<" | ">" | ">>" | "<>" | ">|" | "<<<") =>
-                {
-                    redirect = true
-                }
-                Token::Word(_, location) if byte(location.end.index) < word_start => {
-                    redirect = false
-                }
                 _ => {}
             }
         }
-        let line = query
+        query
             .text
             .get(command_start..command_end)
             .ok_or("invalid command boundary")?;
         let cursor = query.cursor - command_start;
-        let raw = brush_core::completion::simple_tokenize_by_delimiters(line, &[' ', '\t', '\n']);
+        let mut lexical = tokens
+            .iter()
+            .map(|token| {
+                let start = byte(token.location().start.index);
+                let end = byte(token.location().end.index);
+                (
+                    &query.text[start..end],
+                    start,
+                    matches!(token, Token::Operator(..)),
+                )
+            })
+            .chain(incomplete.map(|word| (word.text, word.start, false)))
+            .filter(|(_, start, _)| command_start <= *start && *start < command_end)
+            .peekable();
+        let mut raw = Vec::new();
+        let mut operand = None;
+        let mut redirect = None;
+        while let Some((text, start, operator)) = lexical.next() {
+            let end = start + text.len();
+            if operator {
+                operand = Redirect::operator(text).map(|kind| (kind, end));
+                continue;
+            }
+            if text.bytes().all(|byte| byte.is_ascii_digit())
+                && lexical.peek().is_some_and(|(next, next_start, operator)| {
+                    *operator && end == *next_start && next.starts_with(['<', '>'])
+                })
+            {
+                continue;
+            }
+            if let Some((kind, after_operator)) = operand.take() {
+                if query.cursor < after_operator || query.cursor > end {
+                    continue;
+                }
+                redirect = Some(kind);
+            }
+            raw.push(CompletionToken {
+                text,
+                start: start - command_start,
+            });
+        }
+        if let Some((kind, end)) = operand
+            && end <= query.cursor
+        {
+            redirect = Some(kind);
+        }
         let mut path = snapshot.context.path.clone();
         let mut skipped = raw
             .iter()
@@ -178,10 +242,10 @@ impl Context {
             }
             skipped += 1;
         }
-        if skipped > 0 {
-            command_start += raw.get(skipped).map_or(cursor, |token| token.start);
-        }
-        let words = Words::parse(query, command_start, command_end, &[' ', '\t', '\n'])?;
+        let words = Words::from_tokens(query, command_start, &raw[skipped..])?;
+        command_start += raw
+            .get(skipped)
+            .map_or(cursor, |token| token.start.min(cursor));
         let fragment = &query.text[words.span.start..query.cursor];
         let quote = fragment
             .chars()
@@ -200,7 +264,8 @@ impl Context {
             requires_execution: false,
         };
         context.requires_execution = context.needs_script(snapshot)
-            || (context.quote != Some('\'')
+            || (context.redirect != Some(Redirect::Other)
+                && context.quote != Some('\'')
                 && context.word.contains(['$', '`'])
                 && context.word.contains('/'));
         Ok(context)
@@ -218,7 +283,7 @@ impl Context {
     }
 
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {
-        if self.redirect || !snapshot.scripts {
+        if self.redirect.is_some() || !snapshot.scripts {
             return false;
         }
         let registry = &snapshot.registry;

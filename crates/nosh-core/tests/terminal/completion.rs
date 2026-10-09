@@ -320,7 +320,8 @@ fn completion_command_and_path_acceptance() {
             ("completion> nosh_Completion_Alpha", b"\x1a"),
             ("completion> nca", b"\x15cd mp\t"),
             ("main-playground/", b"\r"),
-            ("completion> cd my-project/", b"\x15exit 0\r"),
+            ("completion> cd my-project/", b"\x15cat 2>native_\t"),
+            ("completion> cat 2>native_candidate", b"\x15exit 0\r"),
         ],
     );
     unexecuted(&result);

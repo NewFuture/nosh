@@ -552,7 +552,7 @@ impl Manager {
         self.record(&replay.dir, &next, replay.tree)?;
         self.install(&replay.dir)?;
         println!(
-            "Upgraded source and staged gitlink. Candidate retained at {}. Review the pin/patch/gitlink; align the root exact Reedline version and Cargo.lock, then run regressions. Any initialized upstream checkout now matches the new clean pin.",
+            "Upgraded source and staged gitlink. Candidate retained at {}. Review the pin/patch/gitlink; align the root dependency versions and Cargo.lock, then run regressions. Any initialized upstream checkout now matches the new clean pin.",
             candidate.display()
         );
         Ok(())

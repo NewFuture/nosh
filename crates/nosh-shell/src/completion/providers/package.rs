@@ -7,6 +7,7 @@ use super::*;
 const MAX_MANIFEST: usize = 2 * 1024 * 1024;
 const YARN_COMMANDS: &[&str] = &[
     "add",
+    "audit",
     "bin",
     "cache",
     "config",

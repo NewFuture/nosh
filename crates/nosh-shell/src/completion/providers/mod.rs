@@ -177,7 +177,7 @@ fn value_context(context: &Context, query: &Query) -> Context {
     Context {
         word,
         span,
-        redirect: false,
+        redirect: None,
         ..context.clone()
     }
 }

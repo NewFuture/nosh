@@ -129,13 +129,16 @@ pub(super) fn generate(
         return Err("dynamic Make paths need a loaded completion definition".into());
     }
     let mut flags_error = None;
-    if let Some(flags) = snapshot.environment.get("MAKEFLAGS") {
-        match include_flags(flags) {
-            Ok(mut paths) => {
-                paths.extend(includes);
-                includes = paths;
+    // Prepending yields GNUMAKEFLAGS, MAKEFLAGS, then command-line include paths.
+    for name in ["MAKEFLAGS", "GNUMAKEFLAGS"] {
+        if let Some(flags) = snapshot.environment.get(name) {
+            match include_flags(flags) {
+                Ok(mut paths) => {
+                    paths.extend(includes);
+                    includes = paths;
+                }
+                Err(error) => flags_error = Some(error),
             }
-            Err(error) => flags_error = Some(error),
         }
     }
     if files.is_empty() {

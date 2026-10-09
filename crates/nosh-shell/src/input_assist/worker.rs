@@ -1045,7 +1045,7 @@ mod tests {
                 command_start: 0,
                 command_end: 7,
                 quote: None,
-                redirect: false,
+                redirect: None,
                 path: None,
                 requires_execution: false,
             }),

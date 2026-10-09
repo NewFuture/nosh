@@ -35,6 +35,7 @@ pub(crate) fn capture(
                     | "GIT_COMMON_DIR"
                     | "GIT_NAMESPACE"
                     | "XDG_CONFIG_HOME"
+                    | "GNUMAKEFLAGS"
                     | "MAKEFLAGS"
                     | "MAKEFILES"
                     | "LANG"

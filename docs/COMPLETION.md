@@ -20,7 +20,7 @@ Tab 打开候选菜单，菜单内 Enter 采用候选，再次提交才执行命
 
 已加载定义优先于内置提供器，其顺序、`nosort/noquote/nospace` 和回退规则保持有效。查询失败、无匹配和部分结果分别报告。当前参数无需补全时保留 worker，执行故障才进入回收和暂停流程。`complete_or_ai` 仅在完整无匹配时按现有输入编辑规则进入 AI 建议。
 
-Make 静态读取规则、转义、续行和 include，CLI 路径参数使用分离值或长选项 `=值` 形式，支持 `MAKEFLAGS` 中的 `-I`／`--include-dir` 路径；动态目标、条件、模式规则和未支持的 include 选项形式标为不完整。npm／Yarn 查找最近的 `package.json`，支持子命令前的 `--prefix`／`--cwd` 及 `=值` 形式。Yarn 快捷调用排除已知内置命令同名脚本，显式 `yarn run` 可补这些名称。脚本参数、workspace 和插件命令由已加载定义提供。
+Make 静态读取规则、转义、续行和 include，CLI 路径参数使用分离值或长选项 `=值` 形式，按顺序读取已导出的 `GNUMAKEFLAGS`／`MAKEFLAGS` 中的 `-I`／`--include-dir` 路径；动态目标、条件、模式规则和未支持的 include 选项形式标为不完整。npm／Yarn 查找最近的 `package.json`，支持子命令前的 `--prefix`／`--cwd` 及 `=值` 形式。Yarn 快捷调用排除已知内置命令同名脚本，显式 `yarn run` 可补这些名称。脚本参数、workspace 和插件命令由已加载定义提供。
 
 ## 配置
 

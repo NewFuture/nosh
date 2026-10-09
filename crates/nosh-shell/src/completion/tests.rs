@@ -90,6 +90,68 @@ fn completion_context_uses_active_command_and_byte_ranges() {
 }
 
 #[test]
+fn redirection_operands_and_leading_prefixes_keep_native_word_ranges() {
+    let (directory, _, mut snapshot) = fixture();
+    fs::write(directory.path().join("output"), "").unwrap();
+    Arc::make_mut(&mut snapshot.native)
+        .context
+        .functions
+        .insert("nosh_redirect_fixture".into());
+    let mut server = Server::default();
+    for (text, replaced) in [
+        ("cat >ou", "ou"),
+        ("cat>ou", "ou"),
+        ("cat 2>ou", "ou"),
+        ("cat 2>>ou", "ou"),
+        ("cat >|ou", "ou"),
+        ("cat <>ou", "ou"),
+        ("cat <ou", "ou"),
+        ("cat &>ou", "ou"),
+        ("cat &>>ou", "ou"),
+        ("cat >'ou'", "'ou'"),
+        ("cat >'ou", "'ou"),
+        ("cat 2>", ""),
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(result.state, State::Complete, "{text}");
+        assert_eq!(candidate_values(&result), ["output"], "{text}");
+        assert_eq!(
+            &result.query.text[result.candidates[0].span.clone()],
+            replaced,
+            "{text}"
+        );
+    }
+    let mut middle = query("echo 中; cat 2>ou tail");
+    middle.cursor = "echo 中; cat 2>ou".len();
+    let result = answer(&mut server, middle, snapshot.clone());
+    let span = result.candidates[0].span.clone();
+    assert_eq!(&result.query.text[..span.start], "echo 中; cat 2>");
+    assert_eq!(&result.query.text[span.end..], " tail");
+    for text in [
+        ">log nosh_red",
+        "2>log nosh_red",
+        ">log PATH=/usr/bin nosh_red",
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(
+            candidate_values(&result),
+            ["nosh_redirect_fixture"],
+            "{text}"
+        );
+        assert_eq!(result.candidates[0].source, Source::Command);
+    }
+    for text in [">log git sw", "git >log sw", "2>&1 git sw"] {
+        let context = Context::parse(&query(text), &snapshot.native).unwrap();
+        assert_eq!(context.words.as_ref(), ["git", "sw"], "{text}");
+        assert_eq!(context.index, 1);
+    }
+    let literal = Context::parse(&query("echo \\>ou"), &snapshot.native).unwrap();
+    assert_eq!(literal.words.as_ref(), ["echo", ">ou"]);
+    let duplicate = answer(&mut server, query("cat 2>&1"), snapshot);
+    assert!(matches!(duplicate.state, State::Unavailable(_)));
+}
+
+#[test]
 fn compound_command_prefixes_preserve_command_and_argument_positions() {
     let (_, _, snapshot) = fixture();
     for prefix in [
@@ -129,6 +191,11 @@ fn compound_command_prefixes_preserve_command_and_argument_positions() {
 #[test]
 fn mid_line_token_ranges() {
     let (_, _, snapshot) = fixture();
+    let mut leading = query("  git");
+    leading.cursor = 1;
+    let context = Context::parse(&leading, &snapshot.native).unwrap();
+    assert!(context.valid_for(&leading));
+    assert_eq!(context.span, 1..1);
     let mut request = query("sample first   tail");
     request.cursor = "sample first ".len();
     let context = Context::parse(&request, &snapshot.native).unwrap();
@@ -415,7 +482,7 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     assert_eq!(
         shell.run_user_line(
             "unset GIT_DIR MAKEFILES GIT_CONFIG_VALUE_1; GIT_DIR=local-only; MAKEFILES=local.mk; \
-             export HOME=provider-home GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
+             export HOME=provider-home GNUMAKEFLAGS='-I first' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=9 GIT_CONFIG_VALUE_1"
         ).exit_code,
         0
     );
@@ -426,6 +493,7 @@ fn provider_environment_uses_exported_values_with_bounded_capture() {
     assert!(snapshot.native.variables.contains("GIT_DIR"));
     for (name, value) in [
         ("HOME", "provider-home"),
+        ("GNUMAKEFLAGS", "-I first"),
         ("GIT_CONFIG_COUNT", "1"),
         ("GIT_CONFIG_KEY_0", "core.abbrev"),
         ("GIT_CONFIG_VALUE_0", "9"),
@@ -531,6 +599,45 @@ fn autoloaded_unavailable_definitions_survive_worker_replacement() {
 }
 
 #[test]
+fn registry_changes_checkpoint_matching_execution_state_only_on_success() {
+    for fail in [false, true] {
+        let (_directory, mut shell, _) = fixture();
+        let ending = if fail {
+            "complete -F missing setup; return 124"
+        } else {
+            "COMPREPLY=(ready)"
+        };
+        assert_eq!(shell.run_user_line(&format!(
+            "actual() {{ COMPREPLY=(restored); }}; change() {{ complete -r old; \
+             complete -F actual added; {ending}; }}; complete -F actual old; complete -F change setup"
+        )).exit_code, 0);
+        let snapshot = snapshot::capture(&shell, true, &Default::default()).unwrap();
+        let request = query("setup ");
+        let context = Context::parse(&request, &snapshot.native).unwrap();
+        let Outcome::Ready {
+            answer: result,
+            snapshot: checkpoint,
+        } = Server::default()
+            .run(request, &context, Some(snapshot), &mut |_| Ok(()))
+            .unwrap()
+        else {
+            panic!("expected final checkpoint result")
+        };
+        if fail {
+            assert!(matches!(result.state, State::Failed(_)));
+            assert!(checkpoint.is_none());
+        } else {
+            assert_eq!(result.state, State::Complete);
+            let checkpoint = checkpoint.unwrap();
+            assert!(!checkpoint.native.registry.names.contains("old"));
+            let restored = answer(&mut Server::default(), query("added "), checkpoint);
+            assert_eq!(restored.state, State::Complete);
+            assert_eq!(candidate_values(&restored), ["restored"]);
+        }
+    }
+}
+
+#[test]
 fn static_make_targets_skip_dynamic_and_recipe_content_without_execution() {
     let (directory, _, _) = fixture();
     fs::write(
@@ -619,6 +726,27 @@ fn makeflags_include_directories_are_used_for_static_targets() {
         assert!(matches!(result.state, State::Partial(_)), "{flags}");
         assert_eq!(result.candidates[0].value, "local");
     }
+    Arc::make_mut(&mut snapshot.native)
+        .environment
+        .remove("MAKEFLAGS");
+    for flags in ["-I first", "--include-dir=first"] {
+        Arc::make_mut(&mut snapshot.native)
+            .environment
+            .insert("GNUMAKEFLAGS".into(), flags.into());
+        Arc::make_mut(&mut snapshot.native)
+            .environment
+            .insert("MAKEFLAGS".into(), "-Isecond\\ path".into());
+        let result = answer(
+            &mut server,
+            query("make -I 'second path' "),
+            snapshot.clone(),
+        );
+        assert_eq!(result.state, State::Complete);
+        assert_eq!(candidate_values(&result), ["first_target", "local"]);
+    }
+    Arc::make_mut(&mut snapshot.native)
+        .environment
+        .remove("GNUMAKEFLAGS");
     Arc::make_mut(&mut snapshot.native)
         .environment
         .remove("MAKEFLAGS");
@@ -847,6 +975,7 @@ fn package_command_boundaries() {
     let (directory, snapshot) = package_fixture();
     let reserved = [
         "install",
+        "audit",
         "constraints",
         "dedupe",
         "explain",

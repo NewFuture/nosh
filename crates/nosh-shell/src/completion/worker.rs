@@ -8,7 +8,7 @@ use brush_core::completion::CompleteAction;
 use brush_core::{CommandArg, ExecutionContext, ExecutionResult};
 
 use super::cache::{Cache, Entry, Set};
-use super::context::Context;
+use super::context::{Context, Redirect};
 use super::types::*;
 use super::{native, providers, snapshot};
 use crate::backend::BrushShell;
@@ -160,15 +160,10 @@ impl Server {
             answer
         };
         let registry = Registry::capture(shell);
-        let save = loaded && matches!(answer.state, State::Complete | State::Unavailable(_));
-        if registry != native.registry || save {
+        if (loaded || registry != native.registry) && !matches!(answer.state, State::Failed(_)) {
             let mut updated = snapshot.clone();
-            if registry != native.registry {
-                Arc::make_mut(&mut updated.native).registry = registry;
-            }
-            if save {
-                updated.script = Some(Ok(snapshot::execution_state(shell)?));
-            }
+            Arc::make_mut(&mut updated.native).registry = registry;
+            updated.script = Some(Ok(snapshot::execution_state(shell)?));
             self.snapshot = Some(updated.clone());
             return Ok(Outcome::Ready {
                 answer,
@@ -223,15 +218,18 @@ impl Server {
             }
             return Ok(answer);
         }
-        if context.index == 0
-            && !context.redirect
-            && !context.word.contains('/')
-            && !context.word.starts_with('~')
-        {
+        if let Some(redirect) = context.redirect {
+            return Ok(match redirect {
+                Redirect::Path => native::paths(query, context, snapshot, &mut self.cache, false),
+                Redirect::Other => {
+                    Answer::unavailable(query, "this redirection does not take a pathname")
+                }
+            });
+        }
+        if context.index == 0 && !context.word.contains('/') && !context.word.starts_with('~') {
             native::commands(query, context, snapshot, &mut self.cache, progress)
-        } else if !context.redirect
-            && let Some(answer) =
-                providers::generate(query.clone(), context, snapshot, &mut self.cache)
+        } else if let Some(answer) =
+            providers::generate(query.clone(), context, snapshot, &mut self.cache)
         {
             Ok(answer)
         } else {
@@ -240,7 +238,7 @@ impl Server {
                 context,
                 snapshot,
                 &mut self.cache,
-                context.command() == Some("cd") && !context.redirect,
+                context.command() == Some("cd"),
             ))
         }
     }
