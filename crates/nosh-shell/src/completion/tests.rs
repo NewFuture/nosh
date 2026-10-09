@@ -623,6 +623,21 @@ fn makeflags_include_directories_are_used_for_static_targets() {
         .environment
         .remove("MAKEFLAGS");
     for text in [
+        "make -C first -f targets.mk first",
+        "make --directory=first --file=targets.mk first",
+        "make -I first first",
+        "make --include-dir=first first",
+    ] {
+        let result = answer(&mut server, query(text), snapshot.clone());
+        assert_eq!(result.state, State::Complete, "{text}");
+        assert_eq!(candidate_values(&result), ["first_target"]);
+    }
+    let options = answer(&mut server, query("make -C '$DIR' --dry"), snapshot.clone());
+    assert_eq!(options.state, State::Complete);
+    assert_eq!(candidate_values(&options), ["--dry-run"]);
+    let dynamic = answer(&mut server, query("make -C '$DIR' first"), snapshot.clone());
+    assert!(matches!(dynamic.state, State::Failed(_)));
+    for text in [
         "make -Cfirst ",
         "make -ftargets.mk ",
         "make -Ifirst ",

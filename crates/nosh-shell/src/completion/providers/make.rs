@@ -53,49 +53,64 @@ pub(super) fn generate(
     if !version.starts_with("GNU Make ") {
         return Err("built-in target completion supports GNU Make; load a definition for this implementation".into());
     }
-    let mut arguments = context.words[1..context.index]
+    let mut cwd = snapshot.context.cwd.clone();
+    let mut files = Vec::new();
+    let mut includes = Vec::new();
+    let mut dynamic_path = false;
+    let prior = &context.words[1..context.index];
+    let mut arguments = prior
         .iter()
-        .chain(std::iter::once(&context.word));
-    while let Some(word) = arguments.next() {
-        match word.as_str() {
-            "--" => break,
-            word if path_option(word).is_some() => {
-                arguments.next();
-            }
-            _ if word.len() > 2 && word.get(..2).and_then(path_option).is_some() => {
-                return Ok(Answer::unavailable(
-                    query,
-                    "attached Make path options require a loaded completion definition",
-                ));
-            }
-            _ => {}
+        .map(String::as_str)
+        .chain(std::iter::once(context.word.as_str()))
+        .enumerate();
+    while let Some((index, word)) = arguments.next() {
+        if word == "--" {
+            break;
+        }
+        let (index, option, value) = if let Some(option) = path_option(word) {
+            let Some((index, value)) = arguments.next() else {
+                break;
+            };
+            (index, Some(option), value)
+        } else if word.len() > 2 && word.get(..2).and_then(path_option).is_some() {
+            return Ok(Answer::unavailable(
+                query,
+                "attached Make path options require a loaded completion definition",
+            ));
+        } else if let Some((option, value)) = word.split_once('=') {
+            (index, path_option(option), value)
+        } else {
+            continue;
+        };
+        if index == prior.len()
+            && let Some(option) = option
+        {
+            return Ok(paths(
+                query,
+                context,
+                snapshot,
+                cache,
+                !matches!(option, PathOption::Makefile),
+            ));
+        }
+        if value.contains(['$', '`']) {
+            dynamic_path = true;
+            continue;
+        }
+        match option {
+            Some(PathOption::Directory) => cwd = cwd.join(value),
+            Some(PathOption::Makefile) => files.push(PathBuf::from(value)),
+            Some(PathOption::Include) => includes.push(PathBuf::from(value)),
+            None => {}
         }
     }
-    let previous = context
-        .index
-        .checked_sub(1)
-        .and_then(|index| context.words.get(index))
-        .map(String::as_str);
-    let path_options = [
-        previous.and_then(path_option),
-        context
-            .word
-            .split_once('=')
-            .and_then(|(name, _)| path_option(name)),
-    ];
-    if path_options.iter().any(Option::is_some) {
-        let directories = path_options
-            .iter()
-            .any(|option| matches!(option, Some(PathOption::Directory | PathOption::Include)));
-        return Ok(paths(query, context, snapshot, cache, directories));
-    }
+    let previous = prior.last().map(String::as_str);
     if matches!(previous, Some("-j" | "--jobs")) || context.word.starts_with("--jobs=") {
         return Ok(Answer::unavailable(
             query,
             "jobs accepts an integer; no enumerated values",
         ));
     }
-    let prior = &context.words[1..context.index];
     if context.word.starts_with('-') && !prior.iter().any(|word| word == "--") {
         return Ok(select(
             query,
@@ -110,40 +125,17 @@ pub(super) fn generate(
             "Make variable values are not inferred",
         ));
     }
-    let mut cwd = snapshot.context.cwd.clone();
-    let mut files = Vec::new();
-    let mut includes = Vec::new();
+    if dynamic_path {
+        return Err("dynamic Make paths need a loaded completion definition".into());
+    }
     let mut flags_error = None;
     if let Some(flags) = snapshot.environment.get("MAKEFLAGS") {
         match include_flags(flags) {
-            Ok(paths) => includes = paths,
+            Ok(mut paths) => {
+                paths.extend(includes);
+                includes = paths;
+            }
             Err(error) => flags_error = Some(error),
-        }
-    }
-    let mut arguments = prior.iter();
-    while let Some(word) = arguments.next() {
-        if word == "--" {
-            break;
-        }
-        let (option, value) = if let Some((option, value)) = word.split_once('=') {
-            (path_option(option), Some(value))
-        } else {
-            let option = path_option(word);
-            (
-                option,
-                option.and_then(|_| arguments.next().map(String::as_str)),
-            )
-        };
-        if let Some(value) = value {
-            if value.contains(['$', '`']) {
-                return Err("dynamic Make paths need a loaded completion definition".into());
-            }
-            match option {
-                Some(PathOption::Directory) => cwd = cwd.join(value),
-                Some(PathOption::Makefile) => files.push(PathBuf::from(value)),
-                Some(PathOption::Include) => includes.push(PathBuf::from(value)),
-                None => {}
-            }
         }
     }
     if files.is_empty() {
