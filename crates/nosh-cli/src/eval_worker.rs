@@ -727,6 +727,41 @@ mod tests {
     }
 
     #[test]
+    fn none_tool_choice_round_trips_to_the_resident_engine() {
+        let mut engine = MockChatEngine::new(vec![vec![mock::text("printf ready")]]);
+        let choices = engine.tool_choices();
+        let (client, server) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                serve(
+                    &mut engine,
+                    server,
+                    &json!({}),
+                    &json!({}),
+                    "mock",
+                    &mut Totals::default(),
+                )
+            });
+            let mut client = Proxy::new(client).unwrap();
+            hello(&mut client, json!({})).unwrap();
+            let sid = client.open(spec(0)).unwrap();
+            client.set_tool_choice(sid, ToolChoice::None).unwrap();
+            assert_eq!(
+                client.step(sid, vec![], &mut |_| {}).unwrap().text,
+                "printf ready"
+            );
+            let other = client.open(spec(1)).unwrap();
+            client.set_tool_choice(other, ToolChoice::Auto).unwrap();
+            assert_eq!(
+                choices.lock().unwrap().as_slice(),
+                [(1, ToolChoice::None), (2, ToolChoice::Auto)]
+            );
+            drop(client);
+            assert!(!worker.join().unwrap().unwrap());
+        });
+    }
+
+    #[test]
     fn isolated_connections_keep_specs_events_ids_and_cleanup() {
         let mut engine = MockChatEngine::with_responder(|history| {
             assert_eq!(history.len(), 2, "no previous case conversation");

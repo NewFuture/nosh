@@ -18,23 +18,28 @@ class DriverTests(unittest.TestCase):
     def test_assistance_trace_parses_appended_records_only_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "trace.jsonl"
-            reader = driver.AssistanceTrace(str(path))
-            self.assertEqual(reader.read(), [])
-            observation = {"workflow": "command_assist", "kind": "clarify", "text": "哪个目录？"}
-            first = json.dumps({"ev": "step_start", "messages": []}).encode() + b"\n"
-            second = json.dumps({"ev": "observation", "value": observation}, ensure_ascii=False).encode() + b"\n"
-            split = second.index("哪".encode()) + 1
+            reader = driver.InteractionTrace(str(path))
+            reader.refresh()
+            self.assertEqual(reader.assistance, [])
+            observation = {"workflow": "command_assist", "kind": "command", "text": "echo 中文"}
+            first = json.dumps({"ev": "step_start", "engine": 1, "sid": 1, "messages": []}).encode() + b"\n"
+            second = json.dumps({"ev": "observation", "engine": 1, "sid": 1, "value": observation}, ensure_ascii=False).encode() + b"\n"
+            split = second.index("中".encode()) + 1
             path.write_bytes(first + second[:split])
             with patch("eval.driver.json.loads", wraps=json.loads) as decode:
-                self.assertEqual(reader.read(), [])
+                reader.refresh()
+                self.assertEqual(reader.assistance, [])
                 for _ in range(10):
-                    self.assertEqual(reader.read(), [])
+                    reader.refresh()
+                    self.assertEqual(reader.assistance, [])
                 self.assertEqual(decode.call_count, 1)
                 with path.open("ab") as stream:
                     stream.write(second[split:])
-                self.assertEqual(reader.read(), [observation])
+                reader.refresh()
+                self.assertEqual(reader.assistance, [observation])
                 for _ in range(10):
-                    self.assertEqual(reader.read(), [observation])
+                    reader.refresh()
+                    self.assertEqual(reader.assistance, [observation])
                 self.assertEqual(decode.call_count, 2)
 
     def test_assistance_trace_reports_corruption_instead_of_hiding_it(self):
@@ -43,16 +48,16 @@ class DriverTests(unittest.TestCase):
             for payload in (b"broken\n", b"[]\n", b'{"ev":"observation","value":null}\n'):
                 path.write_bytes(payload)
                 with self.assertRaises(driver.DriverError):
-                    driver.AssistanceTrace(str(path)).read()
-            path.write_bytes(b'{"ev":"step_start"}\n')
-            reader = driver.AssistanceTrace(str(path))
-            reader.read()
+                    driver.InteractionTrace(str(path)).refresh()
+            path.write_bytes(b'{"ev":"step_start","engine":1,"sid":1}\n')
+            reader = driver.InteractionTrace(str(path))
+            reader.refresh()
             path.write_bytes(b"")
             with self.assertRaisesRegex(driver.DriverError, "truncated"):
-                reader.read()
+                reader.refresh()
             path.unlink()
             with self.assertRaisesRegex(driver.DriverError, "disappeared"):
-                reader.read()
+                reader.refresh()
 
     def test_partial_pty_setup_failure_reaps_the_started_child(self):
         import pty
@@ -80,6 +85,25 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(screen.feed("\x1b[6n"), b"\x1b[1;4R")
         screen.feed("\r\x1b[K" + driver.PROMPT + "git status")
         self.assertEqual(screen.line(), driver.PROMPT + "git status")
+
+    def test_logical_prompt_survives_wrapping_scrolling_and_continuation_lines(self):
+        for width in (24, 40, 160):
+            for content in ("a" * 1000, "中文" * 500):
+                with self.subTest(width=width, content=content[:2]):
+                    screen = driver.Screen(height=3, width=width)
+                    screen.feed(driver.PROMPT + content)
+                    self.assertTrue(screen.at_prompt())
+                    self.assertFalse(screen.line().startswith(driver.PROMPT.rstrip()))
+                    screen.feed("\r\n" + driver.CONTINUATION + "second line " * 40)
+                    self.assertTrue(screen.at_prompt())
+                    screen.feed("\r\nordinary output")
+                    self.assertFalse(screen.at_prompt())
+                    screen.feed("\r\n" + driver.CONTINUATION + "not an input")
+                    self.assertFalse(screen.at_prompt())
+                    screen.feed("\x1b[2J\x1b[1;1H" + driver.PROMPT + content)
+                    self.assertTrue(screen.at_prompt())
+                    screen.feed("\r\x1b[2Knot a prompt")
+                    self.assertFalse(screen.at_prompt())
 
     def test_prompt_recognition_accepts_only_the_configured_approval_badge(self):
         self.assertTrue(driver.prompt_matches(driver.PROMPT.rstrip()))
@@ -148,7 +172,7 @@ def line():
     return data
 out("__NOSH_EVAL_PROMPT__ ")
 line()
-out("\r\n┃ inspecting\r\n┃ ╭─ run_command · MUTATING\r\n┃ │ $ touch fixture\r\n┃ ╰─ [y] run")
+out("\r\n┃ inspecting\r\n┃ ╭─ exec · MUTATING\r\n┃ │ $ touch fixture\r\n┃ ╰─ [y] run")
 time.sleep(.01)
 out("  [n] deny  [e] edit › ")
 assert os.read(0, 1) == b"y"
@@ -221,22 +245,31 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
 
     def test_trial_pipeline_records_grades_raw_state_and_cleanup(self):
         scenario = SCENARIOS["zh-clarify-task"]
-        answer = "你希望我完成什么具体任务？"
-        meta = {"run_id": "unit-test", "observation": "native-v1", "dataset_revision": 12,
+        question = {"name":"ask_user", "args":{"question":"你希望我完成什么具体任务？"}}
+        answer = "好的，已停止处理。"
+        reply = scenario["completions"][0]["answers"][0]
+        meta = {"run_id": "unit-test", "observation": "native-v1", "dataset_revision": 16,
                 "build": {"binary_sha256": "a" * 64},
                 "settings": {"timeout_s": 5}, "scenarios": [scenario], "seeds": [0], "repeat": 1}
         args = SimpleNamespace(threads=1)
 
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
-                {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "tools":[{"name":"ask_user"}]},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
-                {"ev": "step_end", "sid": 1, "tool_calls": [], "text": answer, "usage": {"ttft_s": 0.01}},
+                {"ev": "step_end", "sid": 1, "tool_calls": [question], "text": "", "usage": {"ttft_s": 0.01},
+                 "stop":"end_of_turn", "errors":[]},
+                {"ev": "step_start", "sid": 1, "messages":[{"role":"tool", "source":"user",
+                    "text":json.dumps({"question":question["args"]["question"], "choices":[], "answer":reply})}]},
+                {"ev": "step_end", "sid": 1, "tool_calls": [], "text": answer, "usage": {"ttft_s": 0.01},
+                 "stop":"end_of_turn", "errors":[]},
             ]
             Path(env["NOSH_EVAL_TRACE"]).write_text("\n".join(
                 json.dumps(dict(e, schema_version=1, engine=1)) for e in events), encoding="utf-8")
-            return driver.Result(exit_code=0, transcript=f"| {answer}\n| + 1 steps | 0.1 s\n| stats: ttft 0.01s\n")
+            return driver.Result(exit_code=0, transcript=f"| {answer}\n| + 2 steps | 0.1 s\n| stats: ttft 0.01s\n",
+                                 questions=[{"engine":1, "sid":1, "step":1, "input_index":0, "call":question,
+                                             "answer":reply, "state":"answered"}])
 
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -247,8 +280,10 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
                 self.assertEqual(row["status"], "pass", row["reasons"])
                 self.assertTrue(row["grading"]["facts"]["passed"])
                 self.assertTrue(row["grading"]["experience"]["final_question"]["passed"])
+                self.assertEqual(row["questions"][0]["answer"], reply)
+                self.assertEqual(row["metrics"]["confirmations"], 0)
                 self.assertIn("maths.py", row["file_snapshot"])
-                self.assertFalse((workspace.root / scenario["id"]).exists())
+                self.assertFalse(workspace.case_path(scenario["id"]).exists())
                 self.assertTrue((output / row["logs"] / "engine.jsonl").is_file())
                 report.save({"schema_version": 2, "metadata": meta, "trials": [row]}, output)
 
@@ -266,7 +301,7 @@ def line():
 out("__NOSH_EVAL_PROMPT__ ")
 line()
 for _ in range(2):
-    out("\\r\\n| +- run_command - MUTATING\\r\\n| | $ cargo build\\r\\n| +- [y] run [n] deny > ")
+    out("\\r\\n| +- exec - MUTATING\\r\\n| | $ cargo build\\r\\n| +- [y] run [n] deny > ")
     assert os.read(0, 1) == b"n"
     out("\\r\\n| reason (optional, Enter to skip): ")
     assert line() == b"\\r"
@@ -281,7 +316,7 @@ assert b"exit 0" in line()
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "trace.jsonl"
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
             ]
             for index in range(3):
@@ -291,7 +326,7 @@ assert b"exit 0" in line()
                          "text": "编译" if index == 0 else "[denied] command was not run"}]},
                     {"ev": "step_end", "sid": 1, "text": "未执行命令。" if index == 2 else "",
                      "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.01},
-                     "tool_calls": [{"name": "run_command", "args": {"command": "cargo build"}}] if index < 2 else []},
+                     "tool_calls": [{"name": "exec", "args": {"command": "cargo build"}}] if index < 2 else []},
                 ])
             trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             observed = observations.observe(result, scenario, trace, seed=0)
@@ -304,7 +339,7 @@ assert b"exit 0" in line()
         meta = {"settings": {"timeout_s": 5}}
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
             ]
@@ -323,7 +358,7 @@ assert b"exit 0" in line()
                 self.assertIsNone(row["metrics"]["ttft_s"])
                 self.assertIsNone(row["grading"]["experience"])
                 self.assertEqual(row["answer"], "")
-                self.assertFalse((workspace.root / scenario["id"]).exists())
+                self.assertFalse(workspace.case_path(scenario["id"]).exists())
 
     def test_trial_records_post_generation_deadline_as_failure(self):
         scenario = SCENARIOS["zh-node-test"]
@@ -332,7 +367,7 @@ assert b"exit 0" in line()
 
         def child(argv, cwd, env, timeout, case, approve):
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
                 {"ev": "step_end", "sid": 1, "text": "tests passed", "tool_calls": [],

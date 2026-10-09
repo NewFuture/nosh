@@ -348,7 +348,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
             "python3": "Python 3.14.4",
         }
         self.evidence = {"executions": [{
-            "call": {"name": "run_command", "args": {
+            "call": {"name": "exec", "args": {
                 "command": "cargo --version; node --version; python3 --version",
             }},
             "state": "executed", "exit_code": 0,
@@ -445,6 +445,22 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
         self.evidence["final_state"] = {"git": dict(self.facts["git_before"])}
         answer = "仓库最近2个提交：\n1. docs: document offline usage\n2. core: truncate long tool output"
         self.assertTrue(self.grade(answer).passed)
+        entries = answer.split("\n", 1)[1]
+        for heading in (
+            "最近的提交（最近2次）如下：",
+            "最新提交（最新2条）：",
+            "最近提交（共2个）：",
+            "Recent commits (last 2):",
+            "Recent commits (latest 2):",
+            "Recent commits (most recent 2):",
+        ):
+            with self.subTest(heading=heading):
+                self.assertTrue(self.grade(heading + "\n" + entries).passed)
+                for count in (3, 4):
+                    self.assertFalse(self.grade(heading.replace("2", str(count)) + "\n" + entries).passed)
+                skipped = entries.replace("core: truncate long tool output", "shell: support shell pipelines")
+                self.assertFalse(self.grade(heading + "\n" + skipped).passed)
+        self.assertTrue(self.grade("最近提交（版本 10）如下：\n" + entries).passed)
         self.assertFalse(self.grade(answer.replace("最近2个", "最近4个")).passed)
         self.assertFalse(self.grade(answer + "\n3. fixture (current HEAD)").passed)
         self.assertFalse(self.grade(answer + "\n3. core: truncate long tool output").passed)

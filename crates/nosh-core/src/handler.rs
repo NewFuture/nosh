@@ -79,12 +79,15 @@ impl ShellAi {
             match (state.loader)(LoadMode::Foreground) {
                 Ok(l) => {
                     state.description = Some(l.description);
-                    state.agent = Some(Agent::new(
-                        l.engine,
-                        self.cfg.clone(),
-                        Environment::detect(shell),
-                        ToolSet::Full,
-                    ));
+                    state.agent = Some(
+                        Agent::new(
+                            l.engine,
+                            self.cfg.clone(),
+                            Environment::detect(shell),
+                            ToolSet::Full,
+                        )
+                        .with_user_input(Box::new(crate::user_input::TerminalUserInput)),
+                    );
                 }
                 Err(e) => {
                     eprintln!("{}", style::red(&format!("nosh: {e}")));
@@ -158,10 +161,6 @@ impl ShellAi {
                 let mut ui = TermUi::new(false);
                 let prefill = match outcome.result {
                     AssistResult::Command(program) => Some(program),
-                    AssistResult::Clarify(question) => {
-                        ui.text(&question);
-                        None
-                    }
                     AssistResult::NoSuggestion => None,
                 };
                 let u = outcome.usage;
@@ -280,20 +279,6 @@ impl AiHandler for ShellAi {
         }
         let sub = args.first().map(String::as_str).unwrap_or("");
         let arg = args.get(1).map(String::as_str);
-        if sub == "next" {
-            let command = shell
-                .recent_commands()
-                .last()
-                .filter(|command| command.exit == 0)
-                .cloned();
-            return self.assist(
-                shell,
-                crate::command_assist::Intent::Next,
-                arg.unwrap_or("").into(),
-                command,
-                None,
-            );
-        }
         let state = self.foreground.as_ref();
         let agent = state.and_then(|state| state.agent.as_ref());
         match sub {

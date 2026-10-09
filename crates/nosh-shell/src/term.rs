@@ -119,7 +119,32 @@ pub fn read_key() -> Option<KeyEvent> {
 /// Reads a short line on stderr, starting from `initial`.
 /// `None` on Esc, Ctrl-C or Ctrl-D.
 pub fn read_text(prompt: &str, initial: &str) -> Option<String> {
-    text_result(read_short_line(prompt, initial, false, None, None).map(|(signal, _)| signal))
+    text_result(read_short_line(prompt, initial, false, None, None, None).map(|(signal, _)| signal))
+}
+
+/// Reads from the controlling terminal, never stdin. Up/Down selects a choice;
+/// typing always permits a custom answer, including numeric text.
+pub fn read_answer(
+    prompt: &str,
+    choices: &[String],
+    max_bytes: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<String>> {
+    let options = AnswerInput {
+        choices,
+        max_bytes,
+        cancelled,
+    };
+    match read_short_line(prompt, "", false, None, None, Some(&options))? {
+        (Signal::Success(text), _) => Ok(Some(text)),
+        _ => Ok(None),
+    }
+}
+
+struct AnswerInput<'a> {
+    choices: &'a [String],
+    max_bytes: usize,
+    cancelled: &'a dyn Fn() -> bool,
 }
 
 fn text_result(result: io::Result<Signal>) -> Option<String> {
@@ -139,7 +164,7 @@ pub(crate) fn read_plain_line(
     assistance: Option<&crate::AssistDisplay>,
     editing: &crate::editing::Compiled,
 ) -> io::Result<Signal> {
-    let (signal, buffer) = read_short_line(prompt, draft, true, assistance, Some(editing))?;
+    let (signal, buffer) = read_short_line(prompt, draft, true, assistance, Some(editing), None)?;
     *draft = buffer;
     Ok(signal)
 }
@@ -150,6 +175,7 @@ fn read_short_line(
     command: bool,
     assistance: Option<&crate::AssistDisplay>,
     editing: Option<&crate::editing::Compiled>,
+    answer: Option<&AnswerInput<'_>>,
 ) -> io::Result<(Signal, String)> {
     if !available() {
         return Err(io::Error::new(
@@ -175,28 +201,36 @@ fn read_short_line(
     line.start(&mut err)?;
     line.draw(&mut err, &buf)?;
     let mut shown = String::new();
+    let mut selected: Option<usize> = None;
     let result = loop {
-        if let Some(display) = assistance {
-            if buf.is_empty() {
-                let status =
-                    display.status(editing.and_then(|maps| maps.ai_key(&maps.initial_mode())));
-                if !status.is_empty() && status != shown {
-                    write!(err, "\r\n{status}\r\n")?;
-                    shown = status;
-                    line.previous_width = 0;
-                    line.draw(&mut err, &buf)?;
-                }
+        if answer.is_some_and(|input| (input.cancelled)()) {
+            break Signal::CtrlC;
+        }
+        if let Some(display) = assistance
+            && buf.is_empty()
+        {
+            let status = display.status(editing.and_then(|maps| maps.ai_key(&maps.initial_mode())));
+            if !status.is_empty() && status != shown {
+                write!(err, "\r\n{status}\r\n")?;
+                shown = status;
+                line.previous_width = 0;
+                line.draw(&mut err, &buf)?;
             }
-            if !event::poll(std::time::Duration::from_millis(100))? {
-                continue;
-            }
+        }
+        if (assistance.is_some() || answer.is_some())
+            && !event::poll(std::time::Duration::from_millis(100))?
+        {
+            continue;
         }
         match event::read()? {
             Event::Paste(s) => {
+                selected = None;
                 if let Some(display) = assistance {
                     display.invalidate();
                 }
-                if command && editing.is_some() {
+                if answer.is_some() {
+                    buf.push_str(&s);
+                } else if command && editing.is_some() {
                     buf.push_str(&s.replace("\r\n", "\n").replace('\r', "\n"));
                 } else {
                     buf.extend(s.chars().filter(|c| !c.is_control()));
@@ -245,7 +279,23 @@ fn read_short_line(
                     }
                     KeyCode::Char('u') if ctrl && editing.is_none() => buf.clear(),
                     KeyCode::Backspace => pop_grapheme(&mut buf),
+                    KeyCode::Up | KeyCode::Down
+                        if answer.is_some_and(|input| !input.choices.is_empty()) =>
+                    {
+                        let choices = answer.unwrap().choices;
+                        let index = match (selected, k.code) {
+                            (None, KeyCode::Up) => choices.len() - 1,
+                            (None, _) => 0,
+                            (Some(index), KeyCode::Up) => {
+                                (index + choices.len() - 1) % choices.len()
+                            }
+                            (Some(index), _) => (index + 1) % choices.len(),
+                        };
+                        selected = Some(index);
+                        buf.clone_from(&choices[index]);
+                    }
                     KeyCode::Char(c) if !ctrl => {
+                        selected = None;
                         buf.push(c);
                     }
                     _ => {}
@@ -260,6 +310,12 @@ fn read_short_line(
                 line.start(&mut err)?;
             }
             _ => {}
+        }
+        if answer.is_some_and(|input| buf.len() > input.max_bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "answer exceeds input limit",
+            ));
         }
         line.draw(&mut err, &buf)?;
     };
@@ -370,7 +426,9 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
         ed.run_edit_commands(&[reedline::EditCommand::InsertString(initial.to_string())]);
         text_result(ed.read_line(&PlainPrompt(prompt.to_string())))
     } else {
-        text_result(read_short_line(prompt, initial, true, None, None).map(|(signal, _)| signal))
+        text_result(
+            read_short_line(prompt, initial, true, None, None, None).map(|(signal, _)| signal),
+        )
     }
 }
 

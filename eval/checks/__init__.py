@@ -3,7 +3,7 @@
 from __future__ import annotations
 from pathlib import Path
 from ..contracts import STATEFUL_CHECKS, check_spec
-from . import agent, capture, command_assist, experience, project
+from . import agent, assist_context, capture, command_assist, experience, project
 from .common import Verdict
 
 
@@ -14,13 +14,16 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     family = spec.family
     reasons = []
     capture_verdicts = None
-    expected_exit = 1 if scenario.get("assistance", {}).get("result") in ("clarify", "none") and scenario["mode"] == "suggest" else 0
+    expected_exit = 1 if scenario.get("assistance", {}).get("result") == "none" and scenario["mode"] == "suggest" else 0
     if result.exit_code != expected_exit:
         reasons.append(f"nosh exit code: {result.exit_code}")
     if metrics.get("task_status") not in ("completed", "local"):
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
     if family == "assist":
-        reasons.extend(command_assist.assistance_judgment(scenario, answer, facts, root, after, evidence))
+        context_errors = assist_context.context_reasons(scenario, root, result, evidence)
+        reasons.extend(context_errors)
+        if not context_errors:
+            reasons.extend(command_assist.assistance_judgment(scenario, answer, facts, root, after, evidence))
     elif family == "capture":
         capture_verdicts = capture.captured_components(scenario, answer, facts, root, after, result, evidence)
         reasons.extend(f"{name}: {reason}" for name, item in capture_verdicts.items()

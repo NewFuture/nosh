@@ -58,8 +58,8 @@ def validate(report: dict) -> None:
         engines = trial.get("engines")
         if engines is not None and (not isinstance(engines, list) or any(
                 not isinstance(engine, dict)
-                or ("device" in engine and (not isinstance(engine["device"], str)
-                    or not re.fullmatch(r"cpu|cuda:(?:0|[1-9][0-9]*)", engine["device"])))
+                or not isinstance(engine.get("device"), str)
+                or not re.fullmatch(r"cpu|cuda:(?:0|[1-9][0-9]*)", engine["device"])
                 for engine in engines)):
             raise ValueError(f"invalid observed devices: {key}")
         metrics = trial.get("metrics")
@@ -72,6 +72,11 @@ def validate(report: dict) -> None:
         state = trial["final_state"]
         if (state is not None and not isinstance(state, dict)) or (trial["status"] == "pass" and state is None):
             raise ValueError(f"invalid or missing final-state evidence: {key}")
+        if scenarios[key[0]].get("assistance") and trial["status"] == "pass":
+            directories = state.get("directories")
+            if (not isinstance(directories, list) or not all(isinstance(name, str) for name in directories)
+                    or directories != sorted(set(directories))):
+                raise ValueError(f"missing or invalid assistance directory state: {key}")
         for name in METRICS:
             value = metrics.get(name)
             if value is not None and (not finite_number(value) or value < 0):
@@ -191,17 +196,14 @@ def compare(current: dict, previous: dict) -> dict:
         })
     if any(change["sampling_changed"] for change in changes):
         warnings.append("observed sampling parameters differ")
-    def observed_devices(trial, metadata):
+    def observed_devices(trial):
         engines = trial.get("engines")
         if engines is not None:
-            return sorted({engine.get("device", "cpu") for engine in engines})
+            return sorted({engine["device"] for engine in engines})
         if trial["metrics"].get("task_status") == "local":
             return []
-        # Native-v1 reports without device settings/observations were CPU-only.
-        if metadata.get("settings", {}).get("device", "cpu") == "cpu":
-            return ["cpu"]
         return None
-    if any(observed_devices(trial, a) != observed_devices(old[trial_key(trial)], b)
+    if any(observed_devices(trial) != observed_devices(old[trial_key(trial)])
            for trial in current["trials"] if trial_key(trial) in old):
         warnings.append("observed devices differ; auto-selected backends may not be a controlled regression")
     return {
@@ -364,15 +366,16 @@ def _markdown(report: dict, tables: dict) -> str:
            else "Each model trial loads its own engine with an empty prefix cache. ")
         + "The typo scenario does not use a model.",
         "",
-        "| Scenario | Passed/planned | Failed / error / missing | Steps (mean) | Confirmations (mean) | TTFT (median s) | Process time (median s) | Peak RSS (max MiB) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Task/facts passed / planned | All requirements passed / planned | Failed / error / missing | Steps (mean) | Confirmations (mean) | TTFT (median s) | Process time (median s) | Peak RSS (max MiB) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     overview = ["## Overall and groups", "",
-                "| Group | Passed/planned | Pass rate | Failed / error / missing | Steps mean (samples) | Confirmations mean (samples) |",
-                "|---|---:|---:|---:|---:|---:|"]
+                "| Group | Task/facts passed / planned | All requirements passed / planned | All requirements rate | Failed / error / missing | Steps mean (samples) | Confirmations mean (samples) |",
+                "|---|---:|---:|---:|---:|---:|---:|"]
     for row in tables["groups"]:
         overview.append(
-            f"| {row['group']} | {row['pass']}/{row['planned']} | {100 * row['pass'] / row['planned']:.1f}% | "
+            f"| {row['group']} | {row['facts_pass']}/{row['planned']} | {row['pass']}/{row['planned']} | "
+            f"{100 * row['pass'] / row['planned']:.1f}% | "
             f"{row['fail']} / {row['error']} / {row['missing']} | "
             f"{fmt(row['steps'])} ({row['steps_samples']}) | {fmt(row['confirmations'])} ({row['confirmations_samples']}) |"
         )
@@ -380,7 +383,8 @@ def _markdown(report: dict, tables: dict) -> str:
     for row in tables["summary"]:
         pct = 100 * row["pass"] / row["planned"]
         rows.append(
-            f"| {row['scenario_id']} | {row['pass']}/{row['planned']} ({pct:.0f}%) | "
+            f"| {row['scenario_id']} | {row['facts_pass']}/{row['planned']} | "
+            f"{row['pass']}/{row['planned']} ({pct:.0f}%) | "
             f"{row['fail']} / {row['error']} / {row['missing']} | "
             + " | ".join(fmt(row[name]) for name in METRICS) + " |"
         )
@@ -427,7 +431,8 @@ def _markdown(report: dict, tables: dict) -> str:
             f"{limits.get('response_language', 'N/A')} | {limits.get('final_question', 'N/A')} | "
             f"{row['facts_pass']}/{row['facts_samples']} | {row['experience_pass']}/{row['experience_samples']} |"
         )
-    rows.extend(["", "A trial passes only when its facts/state and every applicable experience check pass. "
+    rows.extend(["", "Task/facts correctness is separate from language, question, step and approval experience requirements. "
+                 "All requirements passes only when facts/state and every applicable experience check pass. "
                  "Missing observations are not zero or a pass. Group means use individual measured trials, including failures; "
                  "the local spelling-correction cases are separate from model tasks. "
                  "Language and closing-question checks are deterministic heuristics, not a model judge."])

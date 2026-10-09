@@ -45,6 +45,115 @@ fn which(name: &str) -> bool {
 }
 
 #[test]
+fn suggestion_programs_validate_every_top_level_list_in_execution_order() {
+    use nosh_shell::{CommandSnapshot, trigger::is_suggestion_program};
+
+    let _g = serial();
+    let sh = shell();
+    let snapshot = CommandSnapshot::capture(&sh).unwrap();
+    for (program, expected) in [
+        ("printf first\nprintf second", true),
+        ("printf first; printf second", true),
+        ("false\nprintf after-failure; true", true),
+        ("true\nnosh_h0_missing", false),
+        ("false; nosh_h0_missing", false),
+        ("nosh_h0_missing\ntrue", false),
+        ("true\nprintf '%s' \"$(nosh_h0_missing)\"", false),
+        ("true\n: > \"$(nosh_h0_missing)\"", false),
+        ("nosh_h0_f() { :; }\nnosh_h0_f", true),
+        (
+            "nosh_h0_f() { nosh_h0_g; }\nnosh_h0_g() { :; }\nnosh_h0_f",
+            true,
+        ),
+        (
+            "nosh_h0_f() { nosh_h0_g; }\nnosh_h0_f\nnosh_h0_g() { :; }",
+            false,
+        ),
+        ("nosh_h0_f\nnosh_h0_f() { :; }", false),
+        ("nosh_h0_f() { nosh_h0_missing; }\ntrue", false),
+        (
+            "nosh_h0_f() { nosh_h0_missing; }\nnosh_h0_f() { :; }\nnosh_h0_f",
+            true,
+        ),
+        ("(nosh_h0_f() { :; })\nnosh_h0_f", false),
+        ("{ nosh_h0_f() { :; }; } &\nnosh_h0_f", false),
+        ("if true; then nosh_h0_f() { :; }; fi\nnosh_h0_f", true),
+        ("true && nosh_h0_f() { :; }\nnosh_h0_f", true),
+        ("true\n(nosh_h0_missing)", false),
+        ("true\nnosh_h0_missing &", false),
+        ("true\nif false; then nosh_h0_missing; fi", false),
+        ("eval ':'\nnosh_h0_runtime", true),
+        ("$nosh_h0_command\nnosh_h0_runtime", true),
+        ("(eval ':')\nnosh_h0_missing", false),
+        ("eval ':' &\nnosh_h0_missing", false),
+        ("nosh_h0_f() { nosh_h0_f; }\nnosh_h0_f", true),
+    ] {
+        let grouped = format!("{{\n{program}\n}}");
+        for candidate in [program, grouped.as_str()] {
+            assert_eq!(
+                snapshot.validate(candidate),
+                expected,
+                "snapshot: {candidate}"
+            );
+            assert_eq!(
+                is_suggestion_program(candidate, &sh),
+                expected,
+                "live shell: {candidate}"
+            );
+        }
+    }
+    for program in [
+        "",
+        " \n\t",
+        "# comment only\n# another comment",
+        "Here is a command:\nprintf ok",
+        "printf ok\nThis prints ok.",
+        "printf ok\nif true; then",
+        "printf ok; )",
+        "printf ok\nprintf 'unterminated",
+    ] {
+        assert!(!snapshot.validate(program), "snapshot: {program:?}");
+        assert!(
+            !is_suggestion_program(program, &sh),
+            "live shell: {program:?}"
+        );
+    }
+}
+
+#[test]
+fn suggestion_program_validation_never_executes_or_mutates_the_shell() {
+    use nosh_shell::{CommandSnapshot, Resolution, trigger::is_suggestion_program};
+
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let sh = EmbeddedShell::new(ShellOptions {
+        working_dir: Some(dir.path().into()),
+        ..Default::default()
+    })
+    .unwrap();
+    std::fs::write(dir.path().join("existing"), "unchanged").unwrap();
+    let snapshot = CommandSnapshot::capture(&sh).unwrap();
+    let program = "nosh_h0_state=changed\n\
+        nosh_h0_f() { printf function > function-marker; }\n\
+        nosh_h0_f\n\
+        printf command > existing\n\
+        : \"$(printf substitution > substitution-marker)\"\n\
+        : `printf backquoted > backquoted-marker`\n\
+        : <(printf process > process-marker)\n\
+        printf async > async-marker &";
+    assert!(snapshot.validate(program));
+    assert!(is_suggestion_program(program, &sh));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("existing")).unwrap(),
+        "unchanged"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    assert_eq!(sh.var("nosh_h0_state"), None);
+    assert_eq!(sh.resolve("nosh_h0_f"), Resolution::NotFound);
+    assert!(sh.recent_commands().is_empty());
+}
+
+#[test]
 fn suggestion_tilde_paths_are_checked_without_execution() {
     use nosh_shell::trigger::is_suggestion_program;
     use std::os::unix::fs::PermissionsExt;
@@ -286,6 +395,8 @@ fn capture_is_bounded() {
 #[derive(Default)]
 struct RecordingAi {
     requests: Vec<AiRequest>,
+    builtins: Vec<Vec<String>>,
+    completed: Vec<nosh_shell::UserCommand>,
     reply_prefill: Option<String>,
 }
 
@@ -298,6 +409,7 @@ impl AiHandler for RecordingAi {
         }
     }
     fn builtin(&mut self, _: &mut EmbeddedShell, args: &[String]) -> AiOutcome {
+        self.builtins.push(args.to_vec());
         self.requests.push(AiRequest {
             trigger: Trigger::Builtin,
             text: format!("builtin:{}", args.join(" ")),
@@ -311,6 +423,14 @@ impl AiHandler for RecordingAi {
     }
     fn badge(&self) -> Badge {
         Badge::default()
+    }
+    fn after_command(
+        &mut self,
+        _: &EmbeddedShell,
+        command: nosh_shell::UserCommand,
+        _: Option<nosh_shell::UserOutput>,
+    ) {
+        self.completed.push(command);
     }
 }
 
@@ -409,6 +529,95 @@ fn pipeline_routes_lines() {
         p.process(&mut sh, &mut ai, &mut ui, "exit 7"),
         LineOutcome::Exit(7)
     );
+}
+
+#[test]
+fn pipeline_next_requires_enabled_automatic_assistance_and_success() {
+    let _g = serial();
+    for (enabled, paused, line, expected) in [
+        (true, false, "true", 1),
+        (false, false, "true", 0),
+        (true, true, "true", 0),
+        (true, false, "false", 0),
+    ] {
+        let mut sh = shell();
+        let mut ai = RecordingAi::default();
+        let mut ui = ScriptUi {
+            guard: GuardChoice::Cancel,
+            notices: Vec::new(),
+        };
+        let mut pipeline = Pipeline::new(ReplConfig {
+            command_assist: enabled,
+            on_failure: nosh_shell::OnFailure::Off,
+            ..Default::default()
+        });
+        if paused {
+            pipeline.process(&mut sh, &mut ai, &mut ui, "ai auto off");
+        }
+        pipeline.process(&mut sh, &mut ai, &mut ui, line);
+        assert_eq!(ai.completed.len(), expected);
+        if let Some(command) = ai.completed.first() {
+            assert_eq!(command.line, line);
+            assert_eq!(command.exit, 0);
+        }
+    }
+}
+
+#[test]
+fn pipeline_next_is_not_a_management_subcommand() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Cancel,
+        notices: Vec::new(),
+    };
+    let mut p = Pipeline::new(ReplConfig::default());
+    for (line, task) in [
+        ("ai next", "next"),
+        ("ai next sort the records", "next sort the records"),
+        ("ai 'next sort the records'", "next sort the records"),
+        ("ai next; describe the result", "next; describe the result"),
+        ("ai next>report.txt", "next>report.txt"),
+    ] {
+        let mut ai = RecordingAi::default();
+        assert_eq!(
+            p.process(&mut sh, &mut ai, &mut ui, line),
+            LineOutcome::Continue(None)
+        );
+        assert!(ai.builtins.is_empty(), "{line}");
+        assert_eq!(ai.requests.len(), 1, "{line}");
+        assert_eq!(ai.requests[0].trigger, Trigger::Builtin, "{line}");
+        assert_eq!(ai.requests[0].text, task, "{line}");
+        assert!(sh.recent_commands().is_empty(), "{line}");
+    }
+}
+
+#[test]
+fn pipeline_ai_tasks_and_management_commands_keep_their_routes() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Cancel,
+        notices: Vec::new(),
+    };
+    let mut p = Pipeline::new(ReplConfig::default());
+    for (line, request) in [
+        ("ai 'next sort the records'", "next sort the records"),
+        ("ai nextish sort the records", "nextish sort the records"),
+        ("ai explain the records", "explain the records"),
+    ] {
+        let mut ai = RecordingAi::default();
+        p.process(&mut sh, &mut ai, &mut ui, line);
+        assert!(ai.builtins.is_empty(), "{line}");
+        assert_eq!(ai.requests.len(), 1, "{line}");
+        assert_eq!(ai.requests[0].text, request, "{line}");
+        assert!(sh.recent_commands().is_empty(), "{line}");
+    }
+    for line in ["ai mode auto", "ai think off", "ai status"] {
+        let mut ai = RecordingAi::default();
+        p.process(&mut sh, &mut ai, &mut ui, line);
+        assert_eq!(ai.requests[0].text, format!("builtin:{}", &line[3..]));
+    }
 }
 
 #[test]

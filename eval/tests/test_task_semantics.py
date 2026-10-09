@@ -23,7 +23,7 @@ def execution(command: str, result: driver.Result | None = None) -> dict:
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     return {
-        "call": {"name": "run_command", "args": {"command": command}},
+        "call": {"name": "exec", "args": {"command": command}},
         "state": "executed",
         "exit_code": result.exit_code,
         "timed_out": False,
@@ -273,7 +273,7 @@ class DatasetRevisionTests(ProjectWorkCase):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 12)
+        self.assertEqual(data["dataset_revision"], 26)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])

@@ -112,7 +112,8 @@ pub fn run_agent(
         attachment: stdin.map(|b| Attachment::from_bytes("stdin", &b)),
     };
     let env = Environment::detect(&shell);
-    let mut agent = Agent::new(loaded.engine, agent_config(cfg, mode, seed), env, tools);
+    let mut agent = Agent::new(loaded.engine, agent_config(cfg, mode, seed), env, tools)
+        .with_user_input(Box::new(nosh_core::user_input::TerminalUserInput));
     let mut approval = TerminalApproval::detect();
     let mut term_ui;
     let mut json_ui;
@@ -170,15 +171,11 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
     if shell.interrupts().count() > 0 {
         return 130;
     }
-    use nosh_core::command_assist::AssistResult;
+    use nosh_core::command_assist::{AssistError, AssistResult};
     match r.map(|outcome| outcome.result) {
         Ok(AssistResult::Command(command)) => {
             println!("{command}");
             0
-        }
-        Ok(AssistResult::Clarify(question)) => {
-            eprintln!("{question}");
-            1
         }
         Ok(AssistResult::NoSuggestion) => {
             eprintln!("{}", tr!("nosh: 没有建议", "nosh: no suggestion"));
@@ -186,7 +183,11 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
         }
         Err(e) => {
             eprintln!("nosh: {e}");
-            2
+            if matches!(e, AssistError::Cancelled) {
+                130
+            } else {
+                2
+            }
         }
     }
 }

@@ -370,7 +370,7 @@ impl AgentUi for TermUi {
     fn tool_start(&mut self, tool: &str, detail: &str, risk: Option<Risk>, label: &str) {
         self.clear_status();
         self.end_text_line();
-        if tool == "run_command" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        if tool == "exec" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             eprintln!(
                 "{} {}",
                 self.bar,
@@ -404,8 +404,8 @@ impl AgentUi for TermUi {
         );
         for (i, l) in detail.split('\n').enumerate() {
             let p = match (i, tool) {
-                (0, "run_command") => "$ ",
-                (_, "run_command") => "  ",
+                (0, "exec") => "$ ",
+                (_, "exec") => "  ",
                 _ => "",
             };
             eprintln!("{}   {p}{}", self.bar, style::visible(l));

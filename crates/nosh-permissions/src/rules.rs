@@ -1664,6 +1664,9 @@ fn awk_redirects(prog: &str) -> bool {
 }
 
 fn git(args: &[Arg]) -> Verdict {
+    if git_short_help(args) {
+        return Verdict::safe("prints git subcommand usage");
+    }
     let sub_idx = args.iter().position(|a| !is_opt(a) || a.value == "--");
     // Skip global options with values: -C dir, -c k=v, --git-dir x, --work-tree x.
     let mut i = 0;
@@ -1824,6 +1827,79 @@ fn git(args: &[Arg]) -> Verdict {
             _ => Verdict::mutating("git bisect"),
         },
         _ => Verdict::mutating(format!("git {sub} changes the repository")),
+    }
+}
+
+fn git_short_help(args: &[Arg]) -> bool {
+    let Some((flag, command)) = args.split_last() else {
+        return false;
+    };
+    if flag.value != "-h" || args.iter().any(|arg| arg.dynamic || arg.glob) {
+        return false;
+    }
+    match command {
+        [sub] => matches!(
+            sub.value.as_str(),
+            "add"
+                | "am"
+                | "apply"
+                | "branch"
+                | "checkout"
+                | "cherry-pick"
+                | "clean"
+                | "clone"
+                | "commit"
+                | "config"
+                | "fetch"
+                | "gc"
+                | "init"
+                | "merge"
+                | "mv"
+                | "prune"
+                | "pull"
+                | "push"
+                | "rebase"
+                | "remote"
+                | "reset"
+                | "restore"
+                | "revert"
+                | "rm"
+                | "sparse-checkout"
+                | "stash"
+                | "switch"
+                | "tag"
+                | "worktree"
+        ),
+        [sub, action] => match sub.value.as_str() {
+            "remote" => matches!(
+                action.value.as_str(),
+                "add"
+                    | "remove"
+                    | "rename"
+                    | "get-url"
+                    | "set-url"
+                    | "show"
+                    | "prune"
+                    | "update"
+                    | "set-head"
+                    | "set-branches"
+            ),
+            "worktree" => matches!(
+                action.value.as_str(),
+                "add" | "list" | "lock" | "move" | "prune" | "remove" | "repair" | "unlock"
+            ),
+            // `stash create -h` writes objects, using "-h" as its message.
+            "stash" => matches!(
+                action.value.as_str(),
+                "push" | "pop" | "apply" | "drop" | "clear" | "list" | "show" | "branch" | "store"
+            ),
+            "sparse-checkout" => matches!(
+                action.value.as_str(),
+                "init" | "list" | "set" | "add" | "reapply" | "disable" | "check-rules"
+            ),
+            _ => false,
+        },
+        _ => false,
     }
 }
 

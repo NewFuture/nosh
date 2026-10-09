@@ -9,9 +9,25 @@ from .support import SCENARIOS, execution
 
 
 class ObservationTests(unittest.TestCase):
+    def test_agent_diagnostics_cannot_be_parsed_as_assistance_metadata(self):
+        for diagnostic in ("[execution]\nnot-json", '[execution]\n{"command_id":999,"exit":0}'):
+            with self.subTest(diagnostic=diagnostic), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.jsonl"
+                self.agent_trace(trace)
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                events[1]["label"] = "agent"
+                context = "[context]\ncwd: /work\n[user_output {}]\n" + diagnostic + "\n[/user_output]"
+                events[2]["messages"].insert(0, {"role": "system", "text": context})
+                trace.write_text("\n".join(map(json.dumps, events)))
+                result = driver.Result(transcript="| + 1 steps | 0.1 s\n| stats: ttft 0.01s\n")
+                observed = observations.observe(result, {"mode": "repl", "check": "largest"}, trace, seed=0)
+                self.assertEqual(observed["metrics"]["task_status"], "completed")
+                self.assertEqual(observed["assistance"], [])
+                self.assertEqual(observed["inputs"][1]["messages"][0]["text"], context)
+
     def agent_trace(self, path, answer="Actual final answer.", steps=1):
         events = [
-            {"ev": "engine", "info": {"load_s": 1.5}},
+            {"ev": "engine", "info": {"load_s": 1.5, "device": "cpu"}},
             {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
         ]
         for number in range(steps):
@@ -27,15 +43,16 @@ class ObservationTests(unittest.TestCase):
             trace = Path(temporary) / "trace.jsonl"
             command = "tar -czf logs.tar.gz logs"
             events = [
-                {"ev": "engine", "info": {"load_s": 1.5}},
+                {"ev": "engine", "info": {"load_s": 1.5, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 4}, "label": "command_assist.generate.foreground"},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "input"}]},
-                {"ev": "step_end", "sid": 1, "text": "", "errors": [], "stop": "end_of_turn",
-                 "tool_calls": [{"name": "finish", "args": {"kind": "command", "text": command}}],
+                {"ev": "step_end", "sid": 1, "text": command, "errors": [], "stop": "end_of_turn",
+                 "tool_calls": [],
                  "usage": {"ttft_s": 0.125}},
                 {"ev": "observation", "sid": 1, "value": {
                     "workflow": "command_assist", "intent": "generate", "background": False,
-                    "command_id": None, "status": "completed", "kind": "command", "text": command}},
+                    "command_id": None, "status": "completed", "kind": "command", "text": command,
+                    "response_format": "command_or_none", "input_format": "command_assist_v1"}},
             ]
             trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             result = driver.Result(stdout="tar -czf logs.tar.gz logs\n", exit_code=0, total_s=9)
@@ -65,7 +82,7 @@ class ObservationTests(unittest.TestCase):
 
     def test_ascii_completion_uses_native_answers_and_usage(self):
         text = (
-            "| Let me inspect.\n| * list_dir  SAFE\n|   file.py\n"
+            "| Let me inspect.\n| * read_file  SAFE\n|   file.py\n"
             "| Actual final answer.\n| * a Markdown bullet\n| + another bullet\n| > a quote\n"
             "| + 2 steps | 1.0 s\n| stats: ttft 99.00s\n"
         )
@@ -136,8 +153,8 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "trace.jsonl"
             events = [
-                {"ev": "engine", "engine": 1, "info": {"load_s": 0.2}},
-                {"ev": "engine", "engine": 2, "info": {"load_s": 0.3}},
+                {"ev": "engine", "engine": 1, "info": {"load_s": 0.2, "device": "cpu"}},
+                {"ev": "engine", "engine": 2, "info": {"load_s": 0.3, "device": "cpu"}},
                 {"ev": "open", "engine": 1, "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "open", "engine": 2, "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "engine": 1, "sid": 1, "messages": []},
@@ -202,7 +219,7 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "engine.jsonl"
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "task"}]},
                 {"ev": "step_end", "sid": 1, "text": "intermediate, not final", "tool_calls": [],
@@ -239,7 +256,7 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "engine.jsonl"
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "task"}]},
                 {"ev": "step_end", "sid": 1, "text": "final answer", "tool_calls": [],
@@ -257,7 +274,7 @@ class ObservationTests(unittest.TestCase):
                                 for note in observed["metric_notes"]))
             for change in (
                 {"stop": "max_tokens"},
-                {"tool_calls": [{"name": "run_command", "args": {"command": "true"}}]},
+                {"tool_calls": [{"name": "exec", "args": {"command": "true"}}]},
                 {"errors": ["bad call"]},
             ):
                 broken = [dict(event) for event in events]

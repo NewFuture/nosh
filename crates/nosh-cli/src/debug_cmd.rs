@@ -30,7 +30,7 @@ pub enum DebugCmd {
         max_tokens: usize,
         #[arg(long, default_value = "You are a helpful assistant.")]
         system: String,
-        /// Offer a run_command tool.
+        /// Offer the exec tool.
         #[arg(long)]
         tools: bool,
         /// Enable thinking.
@@ -139,7 +139,7 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
             }
             let tool_specs = if tools {
                 vec![ToolSpec {
-                    name: "run_command".into(),
+                    name: "exec".into(),
                     description: "Run a bash command in the user's shell session.".into(),
                     parameters: serde_json::json!({
                         "type": "object",

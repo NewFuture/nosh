@@ -219,9 +219,9 @@ metadata. Regular CI initializes submodules; the evaluation job instead archives
 its selected commit, then executes the **selected archive's** source tool.
 It records `source-dependencies.json` and includes it in `build-info.json`, beside
 the root archive hash and exact binary hash. A second strict provenance read
-after compilation must match the pre-build one. Older selected commits with an
-unmanaged layout are explicitly labeled `legacy`; an incomplete managed layout
-fails instead of falling back. Every tracked archive file is checked again after
+after compilation must match the pre-build one. Selected sources must use the
+current complete managed layout; missing preparation tools or pins fail instead
+of falling back. Every tracked archive file is checked again after
 the build, including lockfiles that cache-action metadata could otherwise rewrite.
 
 Windows source-tool/editor tests complement Linux/macOS CI. For this app's

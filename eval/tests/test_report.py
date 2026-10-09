@@ -47,26 +47,28 @@ class ReportTests(unittest.TestCase):
         cpu["trials"][0]["engines"] = [{"device": "cpu"}]
         gpu["trials"][0]["engines"] = [{"device": "cuda:0"}]
         self.assertTrue(any("observed devices differ" in warning for warning in report.compare(gpu, cpu)["warnings"]))
-        for engines in ("cuda", [None], [{"device": "auto"}], [{"device": 0}]):
+        for engines in ("cuda", [None], [{}], [{"device": None}], [{"device": "auto"}], [{"device": 0}]):
             invalid = copy.deepcopy(cpu)
             invalid["trials"][0]["engines"] = engines
             with self.assertRaisesRegex(ValueError, "invalid observed devices"):
                 report.validate(invalid)
 
-    def test_legacy_cpu_device_observations_do_not_produce_false_warnings(self):
-        legacy = self.sample()
-        current = copy.deepcopy(legacy)
+    def test_missing_device_observations_are_unknown_not_implicit_cpu(self):
+        missing = self.sample()
+        current = copy.deepcopy(missing)
         for engines in ([{"device": "cpu"}], [{"device": "cpu"}, {"device": "cpu"}]):
             current["trials"][0]["engines"] = engines
-            self.assertEqual(report.compare(current, legacy)["warnings"], [])
-            self.assertEqual(report.compare(legacy, current)["warnings"], [])
+            self.assertTrue(any("observed devices differ" in warning
+                                for warning in report.compare(current, missing)["warnings"]))
+            self.assertTrue(any("observed devices differ" in warning
+                                for warning in report.compare(missing, current)["warnings"]))
         current["trials"][0]["engines"] = [{"device": "cuda:0"}]
         self.assertTrue(any("observed devices differ" in warning
-                            for warning in report.compare(current, legacy)["warnings"]))
-        legacy["trials"][0]["metrics"]["task_status"] = "local"
-        current = copy.deepcopy(legacy)
+                            for warning in report.compare(current, missing)["warnings"]))
+        missing["trials"][0]["metrics"]["task_status"] = "local"
+        current = copy.deepcopy(missing)
         current["trials"][0]["engines"] = []
-        self.assertEqual(report.compare(current, legacy)["warnings"], [])
+        self.assertEqual(report.compare(current, missing)["warnings"], [])
 
     def test_missing_auto_observations_are_not_assumed_to_be_cpu(self):
         missing = self.sample()
@@ -92,6 +94,23 @@ class ReportTests(unittest.TestCase):
         after = copy.deepcopy(before)
         after["metadata"]["harness_sha256"] = "raw-lf"
         self.assertEqual(report.compare(after, before)["warnings"], [])
+
+    def test_report_separates_task_correctness_from_experience_failure(self):
+        data = self.sample()
+        scenario = data["metadata"]["scenarios"][0]
+        scenario.update(check="largest", expect={
+            "max_steps": 1, "max_confirmations": 0, "response_language": "any", "final_question": "forbid",
+        })
+        trial = data["trials"][0]
+        trial.update(status="fail", answer="Done.")
+        trial["metrics"]["steps"] = 2
+        trial["grading"]["experience"] = experience_checks.experience(scenario, trial["answer"], trial["metrics"])
+        row = report.groups(data)[0]
+        self.assertEqual((row["facts_pass"], row["pass"], row["planned"]), (1, 0, 2))
+        text = report.markdown(data)
+        self.assertIn("Task/facts passed / planned", text)
+        self.assertIn("All requirements passed / planned", text)
+        self.assertIn("| all | 1/2 | 0/2 |", text)
 
     def test_repeatability_does_not_require_identical_answers_or_timings(self):
         first = self.sample()["trials"][0]
@@ -119,6 +138,21 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(pair["consistent"])
         self.assertFalse(pair["inputs_changed"])
         self.assertIsNone(pair["tools_changed"])
+
+    def test_assist_passes_always_require_directory_state(self):
+        data = self.sample()
+        data["metadata"]["scenarios"][0]["assistance"] = {"intent": "generate", "result": "command", "automatic": False}
+        for revision in (1, SUITE["dataset_revision"]):
+            data["metadata"]["dataset_revision"] = revision
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "directory state"):
+                report.validate(data)
+        for value in (None, {}, ["z", "a"], ["a", "a"], [1]):
+            data["trials"][0]["final_state"]["directories"] = value
+            with self.subTest(directories=value), self.assertRaisesRegex(ValueError, "directory state"):
+                report.validate(data)
+        for value in ([], ["logs", "logs/old"]):
+            data["trials"][0]["final_state"]["directories"] = value
+            report.validate(data)
 
     def test_plan_membership_and_contradictory_success_are_rejected(self):
         for changed in ({"scenario_id": "unknown"}, {"seed": 2}, {"repeat": 1}):

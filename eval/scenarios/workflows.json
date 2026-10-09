@@ -1,20 +1,25 @@
 [
   {
-    "id": "next-review-after-tests",
-    "title": "Suggest reviewing changes after successful tests and explicit project guidance",
+    "id": "next-retry-after-prerequisite",
+    "title": "Suggest a related diagnostic or archive continuation after the missing parent is created",
     "mode": "repl",
-    "fixture": "review-workflow",
-    "inputs": ["python3 -m unittest discover -s tests -v"],
-    "completions": [{"kind": "assist"}],
+    "fixture": "partial-archive",
+    "inputs": ["ai auto off", "tar -czf backups/reports.tar.gz archive", "ai auto on", "mkdir -p backups"],
+    "completions": [
+      {"kind": "observe"},
+      {"kind": "observe"},
+      {"kind": "observe"},
+      {"kind": "assist"}
+    ],
     "assistance": {"intent": "next", "result": "command", "automatic": true},
     "group": "command-assist",
     "approval": "deny",
-    "check": "assist-next-review",
+    "check": "assist-retry-archive",
     "expect": {"max_steps": 2, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
   },
   {
     "id": "fix-partially-completed-archive",
-    "title": "Resume archiving after a move succeeded but the output directory was missing",
+    "title": "Fix the missing output directory after a move succeeded",
     "mode": "repl",
     "fixture": "partial-archive",
     "inputs": ["mv incoming/report.csv archive/report.csv && tar -czf backups/reports.tar.gz archive"],
@@ -76,14 +81,14 @@
   },
   {
     "id": "generate-natural-clarification",
-    "title": "Notice unspecified archive operands without being told to ask a question",
+    "title": "Noninteractive generation declines unspecified archive operands",
     "mode": "suggest",
     "fixture": "logs",
     "input": "Archive that directory and overwrite the previous backup.",
-    "assistance": {"intent": "generate", "result": "clarify", "automatic": false},
+    "assistance": {"intent": "generate", "result": "none", "automatic": false},
     "group": "command-assist",
     "approval": "deny",
-    "check": "assist-clarify",
+    "check": "assist-none",
     "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
   }
 ]

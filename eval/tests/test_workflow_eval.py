@@ -82,13 +82,13 @@ class BuildToolchainTests(unittest.TestCase):
         self.assertIn('"source_dependencies": dependencies', workflow)
         self.assertIn("verify_source_archive(Path", workflow)
 
-    def test_selected_archive_controls_materialization_and_legacy_is_explicit(self):
+    def test_selected_archive_requires_current_managed_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = root / "Cargo.toml"
             manifest.write_text('[workspace.dependencies]\nreedline = "0.51.0"\n')
-            self.assertEqual(runtime.prepare_source_dependencies(root),
-                             {"schema_version": 1, "layout": "legacy", "managed_sources": {}})
+            with self.assertRaisesRegex(ValueError, "incomplete managed"):
+                runtime.prepare_source_dependencies(root)
             manifest.write_text('[workspace.dependencies]\nreedline = {path=".nosh/reedline"}\n')
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 runtime.prepare_source_dependencies(root)

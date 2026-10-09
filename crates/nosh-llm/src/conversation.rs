@@ -83,6 +83,9 @@ impl Conversation {
                 Message::User(content) => {
                     Entry::Message(tok.encode_segments(&template::render_user(&content))?)
                 }
+                Message::UserAnswer(content) => Entry::Message(
+                    tok.encode_segments(&template::render_tool_results(&[&content]))?,
+                ),
                 Message::Assistant {
                     content,
                     tool_calls,
@@ -273,6 +276,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_definitions_stay_in_the_prefix_across_history_changes() {
+        let mut tok = tokenizer();
+        let mut spec = conversation(&mut tok).spec;
+        spec.tools.push(crate::ToolSpec {
+            name: "read_file".into(),
+            description: "Read a text file.".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+        });
+        let prefix = tok
+            .encode_segments(&template::render_system(Some(&spec.system), &spec.tools))
+            .unwrap();
+        let mut session = Conversation::new(spec, &mut tok).unwrap();
+        assert_eq!(session.tokens(&[]), prefix);
+        session.append(messages(), &mut tok).unwrap();
+        assert!(session.tokens(&[]).starts_with(&prefix));
+        session.rewind(0, &mut tok).unwrap();
+        assert_eq!(session.tokens(&[]), prefix);
+    }
+
+    #[test]
     fn dynamic_system_context_is_plain_text_and_rewindable() {
         let mut tok = tokenizer();
         let mut session = conversation(&mut tok);
@@ -365,6 +388,32 @@ mod tests {
         assert_eq!(session.entries.len(), 2);
         session.rewind(1, &mut tok).unwrap();
         assert_eq!(session.message_count(), 1);
+    }
+
+    #[test]
+    fn user_answers_render_as_tool_replies_but_survive_tool_compaction() {
+        let mut tok = tokenizer();
+        let answer = format!("{}gamma", "alpha ".repeat(100));
+        let mut session = conversation(&mut tok);
+        let prefix = session.tokens(&[]);
+        session
+            .append(vec![Message::UserAnswer(answer.clone())], &mut tok)
+            .unwrap();
+        let original = session.tokens(&[]);
+        let rendered = tok
+            .encode_segments(&template::render_tool_results(&[&answer]))
+            .unwrap();
+        assert_eq!(original, [prefix, rendered].concat());
+        assert_eq!(session.message_count(), 1);
+        assert_eq!(session.compact_tool_results(0, &mut tok).unwrap(), 0);
+        assert_eq!(session.tokens(&[]), original);
+        session
+            .append(vec![Message::Tool(answer)], &mut tok)
+            .unwrap();
+        assert_eq!(session.compact_tool_results(0, &mut tok).unwrap(), 1);
+        assert!(session.tokens(&[]).starts_with(&original));
+        session.rewind(1, &mut tok).unwrap();
+        assert_eq!(session.tokens(&[]), original);
     }
 
     #[test]

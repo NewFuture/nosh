@@ -5,6 +5,7 @@
     "mode": "suggest",
     "fixture": "logs",
     "input": "compress the logs directory into logs.tar.gz",
+    "assistance": {"intent": "generate", "result": "command", "automatic": false},
     "group": "mvp",
     "expect": {
       "max_steps": 4,
@@ -13,7 +14,7 @@
       "final_question": "not_applicable"
     },
     "approval": "deny",
-    "check": "archive"
+    "check": "assist-archive"
   },
   {
     "id": "generate-archive",
@@ -37,20 +38,19 @@
     }
   },
   {
-    "id": "generate-query-help",
-    "title": "Query installed tar help before generating an archive command",
+    "id": "generate-help",
+    "title": "Translate a request to view tar help into a command",
     "mode": "suggest",
     "fixture": "logs",
-    "input": "Check the installed tar's help, then generate a command to compress logs into logs.tar.gz. Do not create the archive.",
+    "input": "show the help for tar",
     "assistance": {
       "intent": "generate",
       "result": "command",
-      "automatic": false,
-      "require_query": true
+      "automatic": false
     },
     "group": "command-assist",
     "approval": "deny",
-    "check": "assist-archive",
+    "check": "assist-help",
     "expect": {
       "max_steps": 4,
       "max_confirmations": 0,
@@ -59,25 +59,16 @@
     }
   },
   {
-    "id": "generate-clarify",
-    "title": "Ask for the essential source and destination",
+    "id": "generate-archive-default-name",
+    "title": "Suggest a gzip archive with a reasonable default output filename",
     "mode": "suggest",
     "fixture": "logs",
-    "input": "Generate an archive command. Ask me which source directory and destination filename to use before generating it; do not choose them for me.",
-    "assistance": {
-      "intent": "generate",
-      "result": "clarify",
-      "automatic": false
-    },
+    "input": "compress the logs directory into a tar.gz archive",
+    "assistance": {"intent": "generate", "result": "command", "automatic": false},
     "group": "command-assist",
     "approval": "deny",
-    "check": "assist-clarify",
-    "expect": {
-      "max_steps": 4,
-      "max_confirmations": 0,
-      "response_language": "not_applicable",
-      "final_question": "not_applicable"
-    }
+    "check": "assist-archive-default-name",
+    "expect": {"max_steps": 4, "max_confirmations": 0, "response_language": "not_applicable", "final_question": "not_applicable"}
   },
   {
     "id": "auto-fix-archive",
@@ -85,7 +76,7 @@
     "mode": "repl",
     "fixture": "logs",
     "inputs": [
-      "tar --nosh-invalid-option -czf logs.tar.gz logs"
+      "tar --gizp -cf logs.tar.gz logs"
     ],
     "completions": [
       {
@@ -110,11 +101,11 @@
   },
   {
     "id": "next-no-goal",
-    "title": "Successful true does not invent another task",
+    "title": "Showing the working directory does not invent another task",
     "mode": "repl",
     "fixture": "logs",
     "inputs": [
-      "true"
+      "pwd"
     ],
     "completions": [
       {

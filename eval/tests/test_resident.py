@@ -17,7 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from eval import campaign, driver, fixtures, observations, report, resident, runtime, trial
+from eval import campaign, checks, driver, fixtures, observations, report, resident, runtime, suite, trial
 from .support import SCENARIOS
 from . import test_observations
 
@@ -83,7 +83,7 @@ class AccountingTests(unittest.TestCase):
         comparison = report.compare(data, old)
         self.assertTrue(any("lifecycles differ" in note for note in comparison["warnings"]))
         self.assertIn("**resident**", report.markdown(data))
-        data["trials"][0]["engines"] = [{"load_s": 1}]
+        data["trials"][0]["engines"] = [{"load_s": 1, "device": "cpu"}]
         with self.assertRaisesRegex(ValueError, "mixed cold/resident"):
             report.validate(data)
 
@@ -403,12 +403,13 @@ class ProductionProxyTests(unittest.TestCase):
         (self.base / "tokenizer.json").write_text("{}")
         self.socket = self.base / "worker.sock"
 
-    def case(self, number, seed):
+    def case(self, number, seed, capture_output=None, command_assist=False):
         root, home = self.base / f"case{number}", self.base / f"home{number}"
         root.mkdir()
         home.mkdir()
         trace = home / "engine.jsonl"
-        env = runtime.environment(home, 1, trace)
+        env = runtime.environment(home, 1, trace, capture_output=capture_output,
+                                  command_assist=command_assist)
         env["NOSH_EVAL_WORKER"] = str(self.socket)
         argv = [str(Path(BINARY).resolve()), "--offline", "--no-download", "--norc",
                 "--model-path", str(self.weights), "--seed", str(seed)]
@@ -421,7 +422,7 @@ class ProductionProxyTests(unittest.TestCase):
             "touch denied.txt",
         ]
         turns = [turn for command in commands for turn in (
-            {"calls": [{"name": "run_command", "args": {"command": command}}]}, {"text": "Complete."})]
+            {"calls": [{"name": "exec", "args": {"command": command}}]}, {"text": "Complete."})]
         with ScriptedWorker(self.socket, turns) as server:
             for number in range(3):
                 root, home, trace, env, argv = self.case(number, number)
@@ -449,10 +450,10 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertEqual(len(starts), 3)
             self.assertTrue(all(r["sid"] == 1 for r in starts))
 
-    def test_native_query_and_finish_command_assist_are_preserved(self):
+    def test_native_query_and_direct_final_command_assist_are_preserved(self):
         command = "tar -czf logs.tar.gz logs"
-        turns = [{"calls": [{"name": "command_info", "args": {"name": "tar", "query": "help"}}]},
-                 {"calls": [{"name": "finish", "args": {"kind": "command", "text": command}}]}]
+        turns = [{"calls": [{"name": "command_help", "args": {"name": "tar", "query": "gz"}}]},
+                 {"text": command}]
         with ScriptedWorker(self.socket, turns) as server:
             root, _, trace, env, argv = self.case(0, 0)
             (root / "logs").mkdir()
@@ -463,13 +464,307 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertFalse((root / "logs.tar.gz").exists())
             specs = [r["spec"] for r in server.requests if r["op"] == "open"]
             self.assertEqual(specs[-1]["label"], "command_assist.generate.foreground")
-            self.assertEqual([t["name"] for t in specs[-1]["tools"]], ["command_info", "read_file", "grep", "finish"])
+            self.assertEqual([t["name"] for t in specs[-1]["tools"]], ["command_help", "read_file", "grep"])
             self.assertEqual([r["choice"] for r in server.requests if r["op"] == "choice"],
-                             [{"type": "required"}, {"type": "required"}])
+                             [{"type": "auto"}, {"type": "auto"}])
             tool_results = [message["Tool"] for r in server.requests if r["op"] == "step"
                             for message in r["append"] if "Tool" in message]
             self.assertEqual(len(tool_results), 1)
-            self.assertRegex(tool_results[0], r"^\[query program=.+/tar exit=0 truncated=")
+            header, metadata, body = tool_results[0].split("\n", 2)
+            self.assertEqual(header, "[command_help]")
+            self.assertEqual(json.loads(metadata)["exit_code"], 0)
+            self.assertEqual(json.loads(metadata)["query"], "gz")
+            self.assertIn("gzip", body)
+
+    def test_generate_default_filename_uses_the_real_user_task_and_full_archive_judge(self):
+        scenario = next(s for s in suite.load_suite("command-assist")["scenarios"]
+                        if s["id"] == "generate-archive-default-name")
+        for number, command in enumerate(("tar -czf logs.tar.gz logs", "tar -czf log-backup.tgz logs")):
+            with self.subTest(command=command), ScriptedWorker(self.socket, [{"text": command}]) as server:
+                base, _, trace, env, argv = self.case(number, 0)
+                root = base / "files"
+                facts = fixtures.create(root, scenario["fixture"])
+                result = driver.run_cli(argv + ["-s", scenario["input"]], root, env, 15)
+                self.assertIsNone(result.error, result.stderr)
+                self.assertEqual(result.exit_code, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), command)
+                self.assertEqual(fixtures.snapshot(root), facts["before"])
+                requests = [r["append"] for r in server.requests if r["op"] == "step"]
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0], [{"User": (
+                    f"Give a shell command for:\n```text\n{scenario['input']}\n```\n\n"
+                    f"Environment:\ncwd: {json.dumps(str(root))}\n\n"
+                    "Return the shell input itself, without wrapping the response in inline backticks or Markdown fences."
+                )}])
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                info = next(e["info"] for e in events if e["ev"] == "engine")
+                observed = observations.observe(
+                    result, scenario, trace, seed=0,
+                    expected_worker={"pid": info["worker_pid"], "config": info["worker_config"]},
+                )
+                verdict = checks.judge(scenario, observed["answer"], facts, root, fixtures.snapshot(root),
+                                       result, observed["metrics"], observed)
+                self.assertTrue(verdict.passed, verdict.reasons)
+                self.assertEqual(fixtures.snapshot(root), facts["before"])
+            self.socket.unlink()
+
+    def test_all_assist_scenarios_match_real_context_and_reference_outcomes(self):
+        scenarios = {}
+        for name in suite.BUILTIN_SUITES:
+            for scenario in suite.load_suite(name)["scenarios"]:
+                if scenario.get("assistance"):
+                    if scenario["id"] in scenarios:
+                        self.assertEqual(scenarios[scenario["id"]], scenario)
+                    scenarios[scenario["id"]] = scenario
+        references = {
+            "suggest-archive": "tar -czf logs.tar.gz logs",
+            "generate-archive": "tar -czf logs.tar.gz logs",
+            "generate-help": "tar --help",
+            "generate-archive-default-name": "tar -czf log-backup.tgz logs",
+            "generate-natural-clarification": "[None]",
+            "auto-fix-archive": "tar -czf logs.tar.gz logs",
+            "fix-partially-completed-archive": "mkdir -p backups",
+            "next-no-goal": "[None]",
+            "next-retry-after-prerequisite": "ls -ld archive backups",
+        }
+        self.assertEqual(scenarios.keys(), references.keys())
+        systems = set()
+        for number, (sid, scenario) in enumerate(scenarios.items()):
+            contract = scenario["assistance"]
+            for variant, expected_pass in enumerate((True, False)):
+                answer = references[sid] if expected_pass else "echo unrelated"
+                turns = [{"text": answer}]
+                with self.subTest(scenario=sid, expected_pass=expected_pass), ScriptedWorker(self.socket, turns) as server:
+                    base, _, trace, env, argv = self.case(
+                        number * 2 + variant, 0, scenario.get("capture_output"), contract["automatic"],
+                    )
+                    root = base / "files"
+                    facts = fixtures.create(root, scenario["fixture"])
+                    if scenario["mode"] == "suggest":
+                        result = driver.run_cli(argv + ["-s", scenario["input"]], root, env, 20)
+                    else:
+                        result = driver.run_repl(argv, root, env, 20, scenario, lambda *_: False)
+                    self.assertIsNone(result.error, result.transcript or result.stderr)
+                    self.assertIsNone(result.failure, result.transcript or result.stderr)
+                    self.assertEqual(result.approvals, [])
+                    events = [json.loads(line) for line in trace.read_text().splitlines()]
+                    opens = [event for event in events if event["ev"] == "open"]
+                    self.assertEqual(len(opens), 1)
+                    spec = opens[0]
+                    systems.add(spec["system"])
+                    suffix = "background" if contract["automatic"] else "foreground"
+                    self.assertEqual(spec["label"], f"command_assist.{contract['intent']}.{suffix}")
+                    self.assertEqual([tool["name"] for tool in spec["tools"]], ["command_help", "read_file", "grep"])
+                    self.assertFalse(spec["thinking"])
+                    self.assertEqual(spec["max_new_tokens"], 512)
+                    starts = [event for event in events if event["ev"] == "step_start"]
+                    messages = starts[0]["messages"]
+                    self.assertEqual(len(messages), 1)
+                    self.assertEqual(messages[0]["role"], "user")
+                    body = messages[0]["text"]
+                    self.assertIn("Environment:\ncwd: " + json.dumps(str(root)), body)
+                    self.assertEqual(
+                        "Return the shell input itself, without wrapping the response in inline backticks or Markdown fences." in body,
+                        contract["intent"] == "generate",
+                    )
+                    self.assertNotIn(sid, body)
+                    self.assertNotIn("require_query", body)
+                    info = next(event["info"] for event in events if event["ev"] == "engine")
+                    observed = observations.observe(
+                        result, scenario, trace, seed=0,
+                        expected_worker={"pid": info["worker_pid"], "config": info["worker_config"]},
+                    )
+                    self.assertEqual(len(observed["assistance"]), 1)
+                    accepted = observed["assistance"][0]
+                    self.assertEqual(accepted["kind"], "none" if answer == "[None]" else "command")
+                    if contract["intent"] == "generate":
+                        self.assertEqual(body, (
+                            f"Give a shell command for:\n```text\n{scenario['input']}\n```\n\n"
+                            f"Environment:\ncwd: {json.dumps(str(root))}\n\n"
+                            "Return the shell input itself, without wrapping the response in inline backticks or Markdown fences."
+                        ))
+                        self.assertIsNone(accepted["execution"])
+                    else:
+                        execution = accepted["execution"]
+                        command = scenario["inputs"][-1]
+                        self.assertEqual(execution["command"], command)
+                        self.assertEqual(execution["execution_cwd"], str(root))
+                        self.assertEqual(execution["exit"] == 0, contract["intent"] == "next")
+                        self.assertIn(f"```bash\n{command}\n```", body)
+                        self.assertIn(f"Execution:\nexit_code: {execution['exit']}", body)
+                        if contract["intent"] == "fix":
+                            self.assertIn("Terminal output (stdout/stderr not separated):", body)
+                            self.assertNotIn("Recent user commands", body)
+                            capture = accepted["captured_output"]
+                            self.assertEqual(capture["command"], command)
+                            self.assertEqual(capture["exit"], execution["exit"])
+                            self.assertEqual(capture["state"], "captured")
+                            if sid == "auto-fix-archive":
+                                self.assertIn("unrecognized option", body)
+                                self.assertIn("--gizp", body)
+                            else:
+                                self.assertIn("Cannot open: No such file or directory", body)
+                                self.assertFalse((root / "incoming" / "report.csv").exists())
+                                self.assertEqual(
+                                    fixtures.snapshot(root)["archive/report.csv"],
+                                    facts["before"]["incoming/report.csv"],
+                                )
+                        else:
+                            self.assertNotIn("Terminal output", body)
+                            history = accepted.get("recent_executions", [])
+                            if sid == "next-no-goal":
+                                self.assertEqual(history, [])
+                                self.assertNotIn("Recent user commands", body)
+                            else:
+                                self.assertEqual(len(history), 1)
+                                self.assertEqual(history[0]["command"], scenario["inputs"][1])
+                                self.assertNotEqual(history[0]["exit"], 0)
+                                self.assertLess(history[0]["command_id"], execution["command_id"])
+                                self.assertLess(body.index(scenario["inputs"][1]), body.index("Latest completed command:"))
+                                self.assertTrue((root / "backups").is_dir())
+                    after = fixtures.snapshot(root)
+                    verdict = checks.judge(scenario, observed["answer"], facts, root, after,
+                                           result, observed["metrics"], observed)
+                    self.assertEqual(verdict.passed, expected_pass, verdict.reasons)
+                    self.assertEqual(fixtures.snapshot(root), after)
+                    self.assertFalse((root / "logs.tar.gz").exists())
+                    self.assertFalse((root / "log-backup.tgz").exists())
+                    self.assertFalse((root / "backups" / "reports.tar.gz").exists())
+                    self.assertEqual(len([r for r in server.requests if r["op"] == "open"]), 1)
+                self.socket.unlink()
+        self.assertEqual(len(systems), 1)
+
+    def test_fix_packet_keeps_error_in_user_and_binding_in_host_observation(self):
+        original = "sh -c 'printf \"actual-error\\n\" >&2; exit 7'"
+        turns = [{"text": "Here is the repaired command:\n```bash\ntouch not-created\n```"},
+                 {"text": "touch not-created"}]
+        with ScriptedWorker(self.socket, turns) as server:
+            root, _, trace, env, argv = self.case(0, 0, capture_output="last")
+            scenario = {"inputs": [original, "ai fix"],
+                        "completions": [{"kind": "shell", "exit_code": 7, "contains": ["actual-error"]},
+                                        {"kind": "assist"}],
+                        "check": "fix-packet"}
+            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+            self.assertIsNone(result.error, result.transcript)
+            self.assertIsNone(result.failure, result.transcript)
+            specs = [r["spec"] for r in server.requests if r["op"] == "open"]
+            self.assertEqual([s["label"] for s in specs], ["command_assist.fix.foreground"])
+            steps = [r["append"] for r in server.requests if r["op"] == "step"]
+            self.assertEqual(len(steps), 2)
+            self.assertEqual([r["choice"] for r in server.requests if r["op"] == "choice"],
+                             [{"type": "auto"}, {"type": "none"}])
+            first = steps[0]
+            self.assertEqual(len(first), 1)
+            self.assertEqual(list(first[0]), ["User"])
+            packet = first[0]["User"]
+            for rule in ("Preserve existing data.",
+                         "create placeholder input files to bypass an error."):
+                self.assertIn(rule, packet)
+                self.assertNotIn(rule, specs[0]["system"])
+            self.assertEqual(len(steps[-1]), 1)
+            self.assertEqual(
+                steps[-1][0]["User"],
+                "Previous response rejected: command assistance: reply contains Markdown fences\n"
+                "Return only shell code for the original repair task. No explanation or Markdown fences. "
+                "Return exactly [None] if no repair is supported. Do not call tools.",
+            )
+            self.assertNotIn(original, steps[-1][0]["User"])
+            self.assertTrue(packet.startswith(
+                "Previous command (already executed):\n```bash\n" + original + "\n```"
+            ))
+            self.assertLess(
+                packet.index("Terminal output (stdout/stderr not separated):"),
+                packet.index("Give a shell command to fix the failure shown above."),
+            )
+            self.assertEqual(packet.count("Give a shell command to fix the failure shown above."), 1)
+            self.assertIn(
+                "Fixing the error's cause is sufficient. Preserve the intended result and output format.",
+                packet,
+            )
+            self.assertNotIn(
+                "Return the shell input itself, without wrapping the response in inline backticks or Markdown fences.",
+                packet,
+            )
+            self.assertIn("Execution:\nexit_code: 7", packet)
+            self.assertIn("Terminal output (stdout/stderr not separated):", packet)
+            self.assertNotIn("command_id:", packet)
+            self.assertNotIn("duration_ms:", packet)
+            self.assertNotIn('state: "captured"', packet)
+            self.assertIn("actual-error", packet)
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            observed = observations.assistance_observations(events)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0]["input_format"], "command_assist_v1")
+            self.assertEqual(observed[0]["execution"]["command"], original)
+            self.assertEqual(observed[0]["execution"]["execution_cwd"], str(root))
+            capture = observed[0]["captured_output"]
+            self.assertEqual(capture["command_id"], observed[0]["command_id"])
+            self.assertEqual(capture["state"], "captured")
+            self.assertEqual(capture["source"], "terminal")
+            self.assertGreater(capture["observed_bytes"], 0)
+            self.assertGreater(capture["retained_bytes"], 0)
+            self.assertIn("duration_ms", capture)
+            self.assertFalse(capture["truncated"])
+            self.assertFalse((root / "not-created").exists())
+
+    def test_suggest_accepts_complete_programs_without_executing_or_rewriting_them(self):
+        cases = [
+            ("printf first\nprintf second", 0),
+            ("false; printf continued > existing", 0),
+            ("false\nprintf continued > existing", 0),
+            ("false && printf continued > existing", 0),
+            ("git diff --cached\ngit diff", 0),
+            ("find . -type f\nwc -l existing", 0),
+            ("nosh_h0_f() { printf function > existing; }\nnosh_h0_f", 0),
+            ("printf command > existing\n: \"$(printf substitution > marker)\"", 0),
+            ("printf '%s\\n' 'a quoted argument' \"a path with spaces\"", 0),
+            ("printf '%s' \"`printf substitution > marker`\"", 0),
+            ("printf '%s' '`literal backticks`'", 0),
+            ("printf single", 0),
+            ("[None]", 1),
+            ("", 2),
+            (" \n\t", 2),
+            ("# comment only\n# still no command", 2),
+            ("```sh\nprintf ok\n```", 2),
+            ("Here is a command:\nprintf ok", 2),
+            ("printf ok\nThis prints ok.", 2),
+            ("printf ok; nosh_h0_missing", 2),
+            ("printf ok\nif true; then", 2),
+            ("printf ok; )", 2),
+            ("nosh_h0_f\nnosh_h0_f() { :; }", 2),
+            ("printf ok\n: \"$(nosh_h0_missing)\"", 2),
+        ]
+        turns = [{"text": program} for program, code in cases
+                 for _ in range(2 if code == 2 else 1)]
+        with ScriptedWorker(self.socket, turns) as server:
+            for number, (program, code) in enumerate(cases):
+                with self.subTest(program=program):
+                    root, _, trace, env, argv = self.case(number, 0)
+                    (root / "existing").write_text("unchanged")
+                    before = len(server.requests)
+                    result = driver.run_cli(argv + ["-s"], root, env, 15,
+                                            stdin=b"Suggest a complete shell program, without running it.\n")
+                    self.assertIsNone(result.error, result.stderr)
+                    self.assertEqual(result.exit_code, code, result.stderr)
+                    self.assertEqual(result.stdout, program + "\n" if code == 0 else "")
+                    self.assertEqual((root / "existing").read_text(), "unchanged")
+                    self.assertEqual(sorted(path.name for path in root.iterdir()), ["existing"])
+                    requests = list(server.requests)[before:]
+                    specs = [request["spec"] for request in requests if request["op"] == "open"]
+                    self.assertEqual(len(specs), 1)
+                    self.assertEqual(specs[0]["label"], "command_assist.generate.foreground")
+                    self.assertEqual([tool["name"] for tool in specs[0]["tools"]],
+                                     ["command_help", "read_file", "grep"])
+                    self.assertEqual(sum(request["op"] == "step" for request in requests),
+                                     2 if code == 2 else 1)
+                    self.assertTrue(trace.is_file())
+                    if code == 0 and program.startswith("false"):
+                        executed = driver.run_cli(argv + ["-c", result.stdout], root, env, 15)
+                        conditional = "&&" in program
+                        self.assertIsNone(executed.error, executed.stderr)
+                        self.assertEqual(executed.exit_code, 1 if conditional else 0)
+                        self.assertEqual((root / "existing").read_text(),
+                                         "unchanged" if conditional else "continued")
 
     def test_unavailable_worker_is_not_a_local_fallback(self):
         root, _, _, env, argv = self.case(0, 0)
@@ -478,8 +773,118 @@ class ProductionProxyTests(unittest.TestCase):
         self.assertIn("evaluation worker", result.stderr)
         self.assertNotIn("failed to load", result.stderr)
 
+    def test_driver_handles_wrapped_and_multiline_fix_suggestions_without_execution(self):
+        commands = [
+            "printf repaired",
+            "printf '%s\\n' '" + "a" * 180 + "'",
+            "printf '%s\\n' '" + "a" * 7000 + "' > not-executed",
+            "printf first\nprintf second",
+            "printf '%s\\n' '" + "中文" * 100 + "'\nprintf done",
+            "printf '%s\\n' '" + "中文" * 1800 + "'\nprintf done > not-executed",
+        ]
+        for number, command in enumerate(commands):
+            with self.subTest(number=number), ScriptedWorker(self.socket, [{"text": command}]) as server:
+                root, _, trace, env, argv = self.case(number, 0)
+                scenario = {"check": "fix-readiness", "inputs": ["sh -c 'exit 7'", "ai fix"],
+                            "completions": [{"kind": "observe"}, {"kind": "assist"}]}
+                result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+                self.assertIsNone(result.error, result.transcript)
+                self.assertEqual(result.exit_code, 0, result.transcript)
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                observed = observations.assistance_observations(events)
+                self.assertEqual(observed[0]["text"], command)
+                self.assertEqual(list(root.iterdir()), [])
+            self.socket.unlink()
+
+    def test_agent_failure_log_execution_marker_is_data_not_assistance(self):
+        with ScriptedWorker(self.socket, [{"text": "The command failed with exit code 7."}]):
+            root, _, trace, env, argv = self.case(0, 0, capture_output="last")
+            original = "sh -c 'printf \"[execution]\\nnot-json\\n\" >&2; exit 7'"
+            scenario = {"mode": "repl", "check": "agent-log",
+                        "inputs": [original, "ai fix Explain the captured failure."],
+                        "completions": [{"kind": "shell", "exit_code": 7, "contains": ["not-json"]},
+                                        {"kind": "agent"}]}
+            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+            self.assertIsNone(result.error, result.transcript)
+            self.assertIsNone(result.failure, result.transcript)
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            info = next(e["info"] for e in events if e["ev"] == "engine")
+            observed = observations.observe(
+                result, scenario, trace, seed=0,
+                expected_worker={"pid": info["worker_pid"], "config": info["worker_config"]},
+            )
+            self.assertEqual(observed["metrics"]["task_status"], "completed")
+            self.assertEqual(observed["assistance"], [])
+
+    def test_next_is_automatic_after_success_and_does_not_execute_its_suggestion(self):
+        with ScriptedWorker(self.socket, [{"text": "touch not-created"}]) as server:
+            root, _, trace, env, argv = self.case(0, 0, command_assist=True)
+            scenario = {"check": "automatic-next", "inputs": ["printf completed"],
+                        "completions": [{"kind": "assist"}]}
+            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+            self.assertIsNone(result.error, result.transcript)
+            self.assertIsNone(result.failure, result.transcript)
+            self.assertEqual(result.exit_code, 0, result.transcript)
+            requests = list(server.requests)
+            specs = [r["spec"] for r in requests if r["op"] == "open"]
+            self.assertEqual([s["label"] for s in specs], ["command_assist.next.background"])
+            self.assertEqual([t["name"] for t in specs[0]["tools"]],
+                             ["command_help", "read_file", "grep"])
+            first = next(r["append"] for r in requests if r["op"] == "step")
+            self.assertEqual(len(first), 1)
+            self.assertTrue(first[0]["User"].startswith("Suggest a continuation of the same task"))
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            observed = observations.assistance_observations(events)
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0]["background"])
+            self.assertEqual(observed[0]["input_format"], "command_assist_v1")
+            self.assertEqual(observed[0]["execution"]["command"], "printf completed")
+            self.assertEqual(observed[0]["execution"]["exit"], 0)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_next_text_is_an_ordinary_agent_request_not_a_management_command(self):
+        with ScriptedWorker(self.socket, [{"text": "Task received."}]) as server:
+            root, _, trace, env, argv = self.case(0, 0)
+            scenario = {"check": "ordinary-task", "inputs": ["ai next"],
+                        "completions": [{"kind": "agent"}]}
+            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+            self.assertIsNone(result.error, result.transcript)
+            self.assertIsNone(result.failure, result.transcript)
+            specs = [r["spec"] for r in server.requests if r["op"] == "open"]
+            self.assertEqual([s["label"] for s in specs], ["agent"])
+            users = [m["User"] for r in server.requests if r["op"] == "step"
+                     for m in r["append"] if "User" in m]
+            self.assertEqual(users, ["next"])
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            self.assertEqual(observations.assistance_observations(events), [])
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_command_assist_cannot_prompt_even_with_a_terminal(self):
+        question = {"calls": [{"name": "ask_user", "args": {"question": "Which destination?"}}]}
+        with ScriptedWorker(self.socket, [question, {"text": "[None]"}]) as server:
+            root, _, trace, env, argv = self.case(0, 0)
+            child = driver.Child(argv + ["-s", "Ask me for a destination before suggesting."],
+                                 root, env, True)
+            try:
+                child.until(lambda: child.result.exit_code is not None, child.start + 15, "exit")
+                self.assertEqual(child.result.exit_code, 2, child.result.transcript)
+                self.assertNotIn("answer>", child.result.transcript)
+            finally:
+                child.close()
+            requests = list(server.requests)
+            specs = [r["spec"] for r in requests if r["op"] == "open"]
+            self.assertTrue(all(t["name"] != "ask_user" for s in specs for t in s["tools"]))
+            self.assertFalse(any("UserAnswer" in m for r in requests if r["op"] == "step"
+                                 for m in r["append"]))
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            outcomes = [e["value"] for e in events if e["ev"] == "observation"]
+            self.assertEqual([o["status"] for o in outcomes], ["failed"])
+            self.assertTrue(all("kind" not in o for o in outcomes))
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_trial_pipeline_preserves_native_clarification_grading(self):
-        turns = [{"text": "你希望我具体处理什么任务？"}]
+        turns = [{"calls": [{"name": "ask_user", "args": {"question": "你希望我具体处理什么任务？"}}]},
+                 {"text": "已停止本次任务，未执行任何操作。"}]
         config = {"model": "minicpm5-2b:q4_k_m", "weights": str(self.weights),
                   "tokenizer": str(self.base / "tokenizer.json"), "device": "cpu",
                   "context_length": 8192, "kv_dtype": "F16", "prefill_chunk": 512, "prepack_weights": True,
@@ -491,8 +896,54 @@ class ProductionProxyTests(unittest.TestCase):
             row = trial.run_trial(SimpleNamespace(threads=1, device="cpu"), {"settings": {"timeout_s": 15}},
                                   scenario, 0, 0, workspace, self.base / "report",
                                   Path(BINARY).resolve(), self.weights, worker=worker)
+            answers = [message["UserAnswer"] for request in server.requests if request["op"] == "step"
+                       for message in request["append"] if "UserAnswer" in message]
+            self.assertEqual([json.loads(answer) for answer in answers], [{
+                "question": turns[0]["calls"][0]["args"]["question"],
+                "choices": [],
+                "answer": scenario["completions"][0]["answers"][0],
+            }])
         self.assertEqual(row["status"], "pass", row["reasons"])
         self.assertEqual(row["metrics"]["load_s"], 0)
         self.assertEqual(row["engines"][0]["worker_config"], config)
-        self.assertEqual(row["metrics"]["steps"], 1)
-        self.assertFalse((self.base / "work" / scenario["id"]).exists())
+        self.assertEqual(row["metrics"]["steps"], 2)
+        self.assertFalse(workspace.case_path(scenario["id"]).exists())
+
+    def test_automatic_next_receives_history_after_a_prerequisite_is_fixed(self):
+        from eval.suite import load_suite
+        scenario = next(s for s in load_suite("command-assist")["scenarios"]
+                        if s["id"] == "next-retry-after-prerequisite")
+        config = {"model": "minicpm5-2b:q4_k_m", "weights": str(self.weights),
+                  "tokenizer": str(self.base / "tokenizer.json"), "device": "cpu",
+                  "context_length": 8192, "kv_dtype": "F16", "prefill_chunk": 512, "prepack_weights": True,
+                  "threads": "1", "rayon_threads": "1", "cuda_visible_devices": None, "cuda_device_order": None}
+        worker = SimpleNamespace(path=self.socket, record={"config": config})
+        with ScriptedWorker(self.socket, [{"text": "tar -czf backups/reports.tar.gz archive"}]) as server, \
+                fixtures.Workspace(self.base / "work") as workspace:
+            worker.record["pid"] = server.process.pid
+            row = trial.run_trial(SimpleNamespace(threads=1, device="cpu"), {"settings": {"timeout_s": 15}},
+                                  scenario, 0, 0, workspace, self.base / "report",
+                                  Path(BINARY).resolve(), self.weights, worker=worker)
+            self.assertEqual(row["status"], "pass", row["reasons"])
+            self.assertEqual(len(row["assistance"]), 1)
+            observation = row["assistance"][0]
+            self.assertEqual(observation["execution"]["command"], "mkdir -p backups")
+            self.assertEqual([item["command"] for item in observation["recent_executions"]],
+                             [scenario["inputs"][1]])
+            self.assertNotEqual(observation["recent_executions"][0]["exit"], 0)
+            task = next(r["append"][0]["User"] for r in server.requests if r["op"] == "step")
+            self.assertIn("Recent user commands", task)
+            self.assertLess(task.index("Recent user commands"), task.index("Latest completed command:"))
+            self.assertLess(task.index(scenario["inputs"][1]), task.index("Latest completed command:"))
+            self.assertEqual(task.count(scenario["inputs"][1]), 1)
+            self.assertNotIn(scenario["id"], task)
+        self.assertFalse(workspace.case_path(scenario["id"]).exists())
+
+    def test_observe_rejects_an_unexpected_model_task_during_setup(self):
+        with ScriptedWorker(self.socket, [{"text": "Ready."}]):
+            root, _, _, env, argv = self.case(0, 0)
+            scenario = {"check": "setup-contract", "inputs": ["ai Say ready."],
+                        "completions": [{"kind": "observe"}]}
+            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+            self.assertIsNone(result.error, result.transcript)
+            self.assertIn("setup unexpectedly started a model task", result.failure)

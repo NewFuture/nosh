@@ -22,6 +22,7 @@ use crate::approval::{ApprovalChannel, ApprovalRequest, ApprovalResponse};
 use crate::prompt::{self, Environment, TaskInput};
 use crate::tools::{self, BuiltinTool, NoRedact, Redactor, ToolSet};
 use crate::ui::{Activity, AgentUi, TaskSummary, UiSink};
+use crate::user_input::{self, InputError, NoUserInput, UserInput};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -154,11 +155,13 @@ pub struct OutputRecord {
 
 enum Exec {
     Result(String),
+    UserAnswer(String),
     CommandResult(String),
     Denied(String),
     Handoff(String, String),
     Aborted(String),
     Cancelled(String),
+    Failed(String),
 }
 
 enum Authorization {
@@ -197,6 +200,8 @@ pub struct Agent {
     /// Filters what the agent writes to disk (see [`tools::Redactor`]).
     redactor: Arc<dyn Redactor>,
     command_runner: CommandRunner,
+    user_input: Box<dyn UserInput>,
+    can_ask: bool,
 }
 
 const SUMMARIZE: &str = "Step limit reached for the preceding user request only. Finish it without tools, with supported results and the next step in its language. Later user requests may use tools normally.";
@@ -225,6 +230,8 @@ impl Agent {
             hooked: false,
             redactor: Arc::new(NoRedact),
             command_runner: EmbeddedShell::run_agent_command,
+            user_input: Box::new(NoUserInput),
+            can_ask: false,
         }
     }
 
@@ -232,6 +239,13 @@ impl Agent {
     /// is trusted and keeps [`NoRedact`].
     pub fn with_redactor(mut self, redactor: Arc<dyn Redactor>) -> Self {
         self.redactor = redactor;
+        self
+    }
+
+    pub fn with_user_input(mut self, input: Box<dyn UserInput>) -> Self {
+        self.reset_conversation();
+        self.user_input = input;
+        self.can_ask = false;
         self
     }
 
@@ -262,11 +276,15 @@ impl Agent {
     }
 
     fn spec(&self) -> SessionSpec {
-        let system = prompt::system_prompt(&self.env);
+        let system = prompt::system_prompt(&self.env, self.tools);
+        let mut tools = tools::specs(self.tools);
+        if self.can_ask {
+            tools.push(user_input::spec());
+        }
         SessionSpec {
             label: "agent".into(),
             system,
-            tools: tools::specs(self.tools),
+            tools,
             thinking: self.cfg.thinking,
             sampling: self.cfg.sampling,
             max_new_tokens: self.cfg.max_new_tokens,
@@ -349,7 +367,7 @@ impl Agent {
         self.carry.extend(
             messages
                 .iter()
-                .filter(|message| matches!(message, Message::Tool(_)))
+                .filter(|message| matches!(message, Message::Tool(_) | Message::UserAnswer(_)))
                 .cloned(),
         );
     }
@@ -416,9 +434,15 @@ impl Agent {
             ints.on_interrupt(move || c.cancel());
             self.hooked = true;
         }
+        cancel.reset();
         let mut out = TaskOutcome::default();
         // Keep executed results outside the history that automatic resets discard.
         let mut pending = std::mem::take(&mut self.carry);
+        let can_ask = self.user_input.available();
+        if self.can_ask != can_ask {
+            self.reset_conversation();
+            self.can_ask = can_ask;
+        }
         let sid = match self.ensure_session() {
             Ok(s) => s,
             Err(e) => {
@@ -449,12 +473,16 @@ impl Agent {
         let mut errors: HashMap<String, usize> = HashMap::new();
         let mut summarizing = false;
         loop {
+            if cancel.is_cancelled() {
+                out.status = TaskStatus::Cancelled;
+                self.carry = pending;
+                break;
+            }
             ui.state(self.cfg.mode, Activity::Thinking);
             if out.steps >= self.cfg.max_steps && !summarizing {
                 summarizing = true;
                 pending.push(Message::System(SUMMARIZE.into()));
             }
-            cancel.reset();
             out.steps += 1;
             let step = match self.step(sid, std::mem::take(&mut pending), ui) {
                 Ok(s) => {
@@ -506,9 +534,23 @@ impl Agent {
             let mut denied = false;
             let mut aborted = false;
             let mut handed_off = false;
+            let mut fatal = None;
+            let has_question = step.tool_calls.iter().any(|call| call.name == "ask_user")
+                || step
+                    .errors
+                    .iter()
+                    .any(|error| error.tool.as_deref() == Some("ask_user"));
+            let mixed_question = has_question && step.tool_calls.len() + step.errors.len() > 1;
+            if mixed_question {
+                ui.error("ask_user must be the only tool call in its turn; no tools were executed");
+            }
             let calls_cwd = shell.cwd();
             for call in &step.tool_calls {
-                if denied || aborted || handed_off {
+                if mixed_question {
+                    pending.push(Message::Tool("error: ask_user must be the only tool call in its turn; no tools were executed".into()));
+                    continue;
+                }
+                if denied || aborted || handed_off || fatal.is_some() {
                     pending.push(Message::Tool(
                         "[skipped] an earlier call was denied, cancelled or handed to the user"
                             .into(),
@@ -518,6 +560,9 @@ impl Agent {
                 match self.exec_call(shell, call, approval, ui) {
                     Exec::Result(t) => {
                         pending.push(Message::Tool(t));
+                    }
+                    Exec::UserAnswer(answer) => {
+                        pending.push(Message::UserAnswer(answer));
                     }
                     Exec::CommandResult(t) => {
                         out.commands_run += 1;
@@ -543,9 +588,12 @@ impl Agent {
                         aborted = true;
                         pending.push(Message::Tool(t));
                     }
+                    Exec::Failed(t) => {
+                        fatal = Some(t.clone());
+                        pending.push(Message::Tool(t));
+                    }
                 }
             }
-            let mut fatal = None;
             for e in &step.errors {
                 let key = format!("{:?}:{}", e.kind, e.tool.as_deref().unwrap_or(""));
                 let n = errors.entry(key).or_insert(0);
@@ -649,8 +697,51 @@ impl Agent {
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> Exec {
+        if call.name == "ask_user" && self.can_ask {
+            ui.pause();
+            ui.tool_start(
+                "ask_user",
+                call.str_arg("question").unwrap_or(""),
+                None,
+                "user input",
+            );
+            ui.state(self.cfg.mode, Activity::NeedsUser);
+            ui.pause();
+            return match user_input::ask(
+                self.user_input.as_mut(),
+                call,
+                &self.engine.cancel_handle(),
+            ) {
+                Ok(answer) => {
+                    ui.tool_end("answered");
+                    Exec::UserAnswer(
+                        serde_json::json!({
+                            "question": answer.question.question,
+                            "choices": answer.question.choices,
+                            "answer": answer.answer,
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(InputError::Cancelled) => {
+                    ui.tool_end("cancelled");
+                    Exec::Cancelled("[user input cancelled]".into())
+                }
+                Err(error @ InputError::Unavailable(_)) => {
+                    ui.tool_end("unavailable");
+                    Exec::Failed(error.to_string())
+                }
+                Err(error) => {
+                    ui.error(&error.to_string());
+                    Exec::Result(format!("error: {error}"))
+                }
+            };
+        }
         let Some(tool) = self.tools.resolve(&call.name) else {
-            let allowed: Vec<_> = self.tools.tools().iter().map(|t| t.name()).collect();
+            let mut allowed: Vec<_> = self.tools.tools().iter().map(|t| t.name()).collect();
+            if self.can_ask {
+                allowed.push("ask_user");
+            }
             let error = format!(
                 "error: unknown tool '{}'; available tools: {}",
                 call.name,
@@ -660,7 +751,7 @@ impl Agent {
             return Exec::Result(error);
         };
         match tool {
-            BuiltinTool::RunCommand => self.run_command(shell, call, approval, ui),
+            BuiltinTool::Exec => self.exec(shell, call, approval, ui),
             BuiltinTool::ReadFile | BuiltinTool::Grep => {
                 self.read_tool(shell, call, approval, ui, tool)
             }
@@ -695,8 +786,7 @@ impl Agent {
             },
             Decision::Ask { strong } => {
                 ui.state(self.cfg.mode, Activity::Waiting);
-                let can_grant =
-                    !strong && tool == "run_command" && SessionAllowList::can_grant(report);
+                let can_grant = !strong && tool == "exec" && SessionAllowList::can_grant(report);
                 let mut reasons = vec![source];
                 reasons.extend(report.top_reasons().into_iter().map(str::to_string));
                 let req = ApprovalRequest {
@@ -711,7 +801,7 @@ impl Agent {
                     reasons,
                     strong,
                     can_grant,
-                    can_edit: tool == "run_command",
+                    can_edit: tool == "exec",
                     mode: self.cfg.mode,
                 };
                 ui.pause();
@@ -726,14 +816,19 @@ impl Agent {
                         manual: true,
                         grant: true,
                     },
-                    ApprovalResponse::Edit(command) if tool == "run_command" => {
+                    ApprovalResponse::Edit(command) if tool == "exec" => {
                         Authorization::Edit(command)
                     }
                     ApprovalResponse::Deny { reason } => denied(
                         ui,
                         format!(
-                            "[denied by user] Pending call was not approved; no command was run. {}",
-                            reason.unwrap_or_default()
+                            "[denied by user] Pending call was not approved; no command was run.\n\
+Approval request: {}; {}.{}",
+                            req.risk,
+                            req.reasons.join("; "),
+                            reason
+                                .map(|reason| format!("\nUser reason: {reason}."))
+                                .unwrap_or_default()
                         ),
                     ),
                     ApprovalResponse::Unavailable { reason } => {
@@ -748,7 +843,7 @@ impl Agent {
         }
     }
 
-    fn run_command(
+    fn exec(
         &mut self,
         shell: &mut EmbeddedShell,
         call: &ToolCall,
@@ -782,8 +877,7 @@ impl Agent {
                 return Exec::Result(format!("error: invalid command syntax: {error}"));
             }
             let shown = report.rewritten.as_deref().unwrap_or(&command);
-            let label = match self.authorize("run_command", shown, &ctx.cwd, &report, approval, ui)
-            {
+            let label = match self.authorize("exec", shown, &ctx.cwd, &report, approval, ui) {
                 Authorization::Allowed {
                     label,
                     manual,
@@ -834,7 +928,7 @@ impl Agent {
             .clone()
             .unwrap_or_else(|| command.to_string());
         ui.state(self.cfg.mode, Activity::Running);
-        ui.tool_start("run_command", &to_run, Some(report.risk()), label);
+        ui.tool_start("exec", &to_run, Some(report.risk()), label);
         let opts = AgentExecOpts {
             timeout,
             ..AgentExecOpts::default()
@@ -984,7 +1078,7 @@ impl Agent {
                     Ok(())
                 },
             ),
-            BuiltinTool::RunCommand => unreachable!("commands are dispatched separately"),
+            BuiltinTool::Exec => unreachable!("commands are dispatched separately"),
         };
         if tool == BuiltinTool::Grep && cancel.is_cancelled() {
             ui.tool_end("cancelled");
@@ -1239,7 +1333,7 @@ mod tests {
     fn compaction_failure_carries_results_without_replaying_user_messages() {
         let (mut agent, calls) = recovery_agent(Some("compact"));
         let first = Message::Tool("first executed result".into());
-        let second = Message::Tool("second executed result".into());
+        let second = Message::UserAnswer("keep the backup files".into());
         let error = agent
             .step(
                 1,
@@ -1392,7 +1486,7 @@ mod permission_tests {
 
     fn call(command: &str) -> ToolCall {
         ToolCall {
-            name: "run_command".into(),
+            name: "exec".into(),
             args: serde_json::json!({ "command": command })
                 .as_object()
                 .unwrap()

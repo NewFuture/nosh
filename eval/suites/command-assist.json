@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "dataset_revision": 12,
+  "dataset_revision": 26,
   "seeds": [
     0,
     1,
@@ -11,12 +11,16 @@
   "timeout_s": 120,
   "scenarios": [
     "generate-archive",
-    "generate-query-help",
-    "generate-clarify",
+    "generate-help",
+    "generate-archive-default-name",
     "auto-fix-archive",
-    "next-no-goal"
+    "next-no-goal",
+    "generate-natural-clarification",
+    "fix-partially-completed-archive",
+    "next-retry-after-prerequisite"
   ],
   "catalogs": [
-    "../scenarios/command_assist.json"
+    "../scenarios/command_assist.json",
+    "../scenarios/workflows.json"
   ]
 }

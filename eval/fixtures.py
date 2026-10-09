@@ -22,7 +22,6 @@ EPOCH = 1_700_000_000
 OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
     "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
-    "review-workflow",
 }
 FIXTURES = {
     "big", "port", "project", "rename", "typo", "failure", "diagnostic-failure", "history", "logs",
@@ -187,8 +186,9 @@ def digest(value: object) -> str:
 def snapshot(root: Path) -> dict:
     result = {}
     for base, dirs, files in os.walk(root, followlinks=False):
+        links = [name for name in dirs if (Path(base) / name).is_symlink()]
         dirs[:] = sorted(d for d in dirs if d != ".git")
-        for name in sorted(files + [d for d in dirs if (Path(base) / d).is_symlink()]):
+        for name in sorted(files + links):
             path = Path(base) / name
             key = path.relative_to(root).as_posix()
             if path.is_symlink():
@@ -196,6 +196,18 @@ def snapshot(root: Path) -> dict:
             elif path.is_file():
                 result[key] = {"bytes": path.stat().st_size, "sha256": file_hash(path)}
     return result
+
+
+def directory_snapshot(root: Path) -> list[str]:
+    def failed(error):
+        raise error
+
+    result = []
+    for base, dirs, _ in os.walk(root, followlinks=False, onerror=failed):
+        ordinary = [name for name in dirs if not (Path(base) / name).is_symlink()]
+        result.extend((Path(base) / name).relative_to(root).as_posix() for name in ordinary)
+        dirs[:] = [name for name in ordinary if name != ".git"]
+    return sorted(result)
 
 
 def write(root: Path, name: str, text: str) -> None:
@@ -336,11 +348,6 @@ def create(root: Path, kind: str, env: dict | None = None,
         project = RUST_PROJECT if kind.startswith("rust") else NODE_PROJECT if kind == "node" else PYTHON_PROJECT
         for name, text in project.items():
             write(root, name, text)
-        if kind == "review-workflow":
-            write(root, "AGENTS.md",
-                  "# Review workflow\n\n"
-                  "After a successful unittest run, review both staged and unstaged changes with git diff "
-                  "before preparing a commit. Do not stage or commit as part of this review.\n")
         facts["project"] = kind
         facts["test_count"] = 2
         if kind == "rust-broken":
@@ -350,7 +357,7 @@ def create(root: Path, kind: str, env: dict | None = None,
             write(root, "src/main.rs", text)
         elif kind == "python-broken":
             write(root, "maths.py", "def add(a, b):\n    return a - b\n")
-        elif kind in {"dirty-git", "staged-git", "review-workflow"}:
+        elif kind in {"dirty-git", "staged-git"}:
             git(root, "init", "--quiet", "--initial-branch=fixture", "--template=")
             git(root, "config", "user.name", "Eval Fixture")
             git(root, "config", "user.email", "fixture@example.invalid")
@@ -378,6 +385,7 @@ def create(root: Path, kind: str, env: dict | None = None,
             os.utime(path, (EPOCH, EPOCH))
     os.utime(root, (EPOCH, EPOCH))
     facts["before"] = snapshot(root)
+    facts["before_directories"] = directory_snapshot(root)
     return facts
 
 
@@ -386,6 +394,11 @@ class Workspace:
         self.root = root.absolute()
         self.lock = None
         self.tools = tools
+
+    def case_path(self, scenario_id: str) -> Path:
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", scenario_id):
+            raise ValueError(f"invalid scenario id: {scenario_id}")
+        return self.root / ("case-" + hashlib.sha256(scenario_id.encode()).hexdigest()[:32])
 
     def __enter__(self):
         import fcntl
@@ -419,14 +432,12 @@ class Workspace:
     def clean(self, scenario_id: str) -> None:
         if self.lock is None or self.lock.closed:
             raise ValueError("workspace cleanup requires its exclusive lock")
-        if not re.fullmatch(r"[a-z][a-z0-9-]*", scenario_id):
-            raise ValueError(f"invalid scenario id: {scenario_id}")
+        path = self.case_path(scenario_id)
         if self.root.is_symlink() or self.root.resolve() != self.root:
             raise ValueError("workspace moved or replaced")
         marker = self.root / ".owner"
         if marker.is_symlink() or marker.read_text(encoding="ascii") != OWNER:
             raise ValueError("workspace ownership marker changed")
-        path = self.root / scenario_id
         if path.is_symlink():
             path.unlink()
         elif path.exists():
@@ -435,7 +446,7 @@ class Workspace:
     def prepare(self, scenario: dict, seed: int | None = None,
                 repeat: int | None = None) -> tuple[Path, Path, dict]:
         self.clean(scenario["id"])
-        base = self.root / scenario["id"]
+        base = self.case_path(scenario["id"])
         base.mkdir(mode=0o700)
         home = base / "home"
         home.mkdir(mode=0o700)
@@ -484,6 +495,8 @@ def listener(root: Path, port: int = 8080):
 def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) -> dict:
     kind = scenario["check"]
     state = {"files": after, "cwd": result.pwd}
+    if scenario.get("assistance"):
+        state["directories"] = directory_snapshot(root)
     if kind in STATEFUL_CHECKS:
         state["files"] = protected_files(after, kind)
         state["artifacts"] = sorted({
@@ -495,6 +508,6 @@ def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) 
             # The original snapshot remains in file_snapshot; the trial-specific
             # diagnostic ID must not make an unchanged script look nondeterministic.
             state["files"] = dict(state["files"], **{"once.py": {"unchanged_from_fixture": True}})
-    if kind in ("git-diff", "git-commit", "recent-history", "assist-next-review"):
+    if kind in ("git-diff", "git-commit", "recent-history"):
         state["git"] = git_state(root)
     return state

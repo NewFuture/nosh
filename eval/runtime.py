@@ -54,14 +54,12 @@ def resolve_source_revision(source_ref: str = "main", revision: str = "", cwd: P
     return source
 
 
-def source_tool_command(source: Path) -> list[str] | None:
+def source_tool_command(source: Path) -> list[str]:
     """Use the selected archive's tool and pin, not the harness checkout's submodule."""
     manifest = tomllib.loads(source.joinpath("Cargo.toml").read_text(encoding="utf-8"))
     dependency = manifest["workspace"]["dependencies"]["reedline"]
     pin = source / "patches" / "reedline" / "source.toml"
     managed = isinstance(dependency, dict) and dependency.get("path") == ".nosh/reedline"
-    if not managed and not pin.exists():
-        return None  # Older source revisions keep their original dependency layout.
     tool = source / "tools" / "source" / "Cargo.toml"
     if not managed or not pin.is_file() or not tool.is_file():
         raise ValueError("selected source has an incomplete managed Reedline layout")
@@ -70,8 +68,6 @@ def source_tool_command(source: Path) -> list[str] | None:
 
 def source_dependency_provenance(source: Path) -> dict:
     command = source_tool_command(source)
-    if command is None:
-        return {"schema_version": 1, "layout": "legacy", "managed_sources": {}}
     data = json.loads(subprocess.check_output(
         [*command, "provenance", "--root", str(source)], cwd=source, text=True))
     pin = tomllib.loads(source.joinpath("patches", "reedline", "source.toml").read_text(encoding="utf-8"))
@@ -87,8 +83,7 @@ def source_dependency_provenance(source: Path) -> dict:
 
 def prepare_source_dependencies(source: Path) -> dict:
     command = source_tool_command(source)
-    if command is not None:
-        subprocess.run([*command, "prepare", "--root", str(source)], cwd=source, check=True)
+    subprocess.run([*command, "prepare", "--root", str(source)], cwd=source, check=True)
     return source_dependency_provenance(source)
 
 

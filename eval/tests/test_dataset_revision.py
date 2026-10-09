@@ -177,7 +177,7 @@ class TaskCompletionIntegrationTests(unittest.TestCase):
 
             def grade(command, output):
                 evidence = {"executions": [{
-                    "call": {"name": "run_command", "args": {"command": command}},
+                    "call": {"name": "exec", "args": {"command": command}},
                     "state": "executed", "exit_code": 0, "timed_out": False, "interrupted": False,
                     "result": "[exit_code=0 duration=0.01s truncated=no]\n--- stdout ---\n" + output,
                 }]}

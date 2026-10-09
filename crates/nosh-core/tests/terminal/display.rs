@@ -132,7 +132,7 @@ fn tool_labels_follow_the_destination_without_rewriting_command_text() {
                 assert_eq!(
                     lines[header],
                     format!(
-                        "{bar} {marker} run_command  {}",
+                        "{bar} {marker} exec  {}",
                         label.replace(" \u{b7} ", separator)
                     ),
                     "{terminal} {locale:?} tty={stderr_tty} NO_COLOR={no_color:?}"

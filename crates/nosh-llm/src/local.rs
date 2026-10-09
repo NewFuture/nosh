@@ -14,19 +14,26 @@ use crate::conversation::Conversation;
 pub use crate::conversation::shorten_tool_result;
 use crate::engine::{
     CancelHandle, ChatEngine, Event, Message, SamplingParams, SessionId, SessionSpec, StepOutcome,
-    StopReason, Usage,
+    StopReason, ToolChoice, Usage,
 };
 use crate::model::attn::KvDtype;
 use crate::model::llama::{Llama, LoadOptions, PrepackStats};
 use crate::sampling::Sampler;
 use crate::template;
 use crate::tokenizer::Tok;
-use crate::toolcall::{Parsed, StreamParser};
+use crate::toolcall::{FUNCTION_OPEN, Parsed, StreamParser};
 use crate::{DeviceSelection, InferenceDevice, LlmError};
 
 pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
 pub const EOS: u32 = 1;
+
+fn mask_tool_choice(logits: &mut [f32], choice: &ToolChoice) {
+    if *choice == ToolChoice::None {
+        // The parser can enter a call only through this special token.
+        logits[FUNCTION_OPEN as usize] = f32::NEG_INFINITY;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalEngineOptions {
@@ -246,7 +253,7 @@ impl ChatEngine for LocalChatEngine {
             .sessions
             .get_mut(&sid)
             .ok_or(LlmError::UnknownSession(sid))?;
-        if choice != crate::ToolChoice::Auto
+        if matches!(choice, ToolChoice::Required | ToolChoice::Named(_))
             && (conversation.spec.tools.is_empty() || conversation.spec.thinking)
         {
             return Err(LlmError::Config(
@@ -344,6 +351,7 @@ impl ChatEngine for LocalChatEngine {
             }
             let ts = Instant::now();
             let mut l: Vec<f32> = logits.to_vec1()?;
+            mask_tool_choice(&mut l, &choice);
             let id = sampler.sample(&mut l, parser.in_call());
             sampler.observe(id);
             t_samp += ts.elapsed().as_secs_f64();
@@ -355,7 +363,7 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::EndOfTurn;
             }
             dispatch(parser.push(id, &self.tok), &mut outcome, sink);
-            if choice != crate::ToolChoice::Auto
+            if matches!(choice, ToolChoice::Required | ToolChoice::Named(_))
                 && (!outcome.tool_calls.is_empty() || !outcome.errors.is_empty())
             {
                 break StopReason::EndOfTurn;
@@ -555,6 +563,93 @@ pub fn rss_mb() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn none_tool_choice_masks_calls_throughout_greedy_and_sampled_text() {
+        let text_id = 24;
+        for temperature in [0.0, 1.0] {
+            for seed in 0..16 {
+                for program in [
+                    "printf '%s\\n' ready",
+                    "for f in *.txt; do\n cat \"$f\"\ndone",
+                    "if test -d src; then\n ls src\nfi",
+                    "[None]",
+                ] {
+                    let mut sampler = Sampler::new(SamplingParams {
+                        temperature,
+                        top_p: 1.0,
+                        seed: Some(seed),
+                        ..SamplingParams::default()
+                    });
+                    let mut parser = StreamParser::new(vec![], false);
+                    let mut parsed = Vec::new();
+                    for byte in program.bytes() {
+                        let mut logits = vec![f32::NEG_INFINITY; 32];
+                        logits[FUNCTION_OPEN as usize] = 100.0;
+                        logits[text_id as usize] = 0.0;
+                        mask_tool_choice(&mut logits, &ToolChoice::None);
+                        let id = sampler.sample(&mut logits, parser.in_call());
+                        sampler.observe(id);
+                        assert_eq!(id, text_id);
+                        parsed.extend(parser.push_bytes(id, &[byte]));
+                    }
+                    parsed.extend(parser.finish());
+                    assert!(parsed.iter().all(|part| matches!(part, Parsed::Text(_))));
+                    let actual: String = parsed
+                        .iter()
+                        .map(|part| match part {
+                            Parsed::Text(text) => text.as_str(),
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    assert_eq!(actual, program);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn none_tool_choice_changes_only_the_call_opening_logit() {
+        let logits: Vec<f32> = (0..32).map(|id| id as f32).collect();
+        for choice in [
+            ToolChoice::Auto,
+            ToolChoice::Required,
+            ToolChoice::Named("read_file".into()),
+            ToolChoice::None,
+        ] {
+            let mut masked = logits.clone();
+            mask_tool_choice(&mut masked, &choice);
+            for (id, (&before, &after)) in logits.iter().zip(&masked).enumerate() {
+                assert_eq!(
+                    after,
+                    if choice == ToolChoice::None && id == FUNCTION_OPEN as usize {
+                        f32::NEG_INFINITY
+                    } else {
+                        before
+                    }
+                );
+            }
+        }
+        assert!(template::tool_choice_prefix(&ToolChoice::None).is_empty());
+        assert_eq!(ToolChoice::default(), ToolChoice::Auto);
+        assert_eq!(
+            serde_json::to_value(ToolChoice::None).unwrap(),
+            serde_json::json!({"type":"none"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolChoice>(serde_json::json!({"type":"none"})).unwrap(),
+            ToolChoice::None
+        );
+    }
+
+    #[test]
+    fn literal_tool_markup_is_still_text_not_a_decoded_call() {
+        let text = "<function name=\"read_file\"><param name=\"path\">note.txt</param></function>";
+        let mut parser = StreamParser::new(vec![], false);
+        let mut parsed = parser.push_bytes(24, text.as_bytes());
+        parsed.extend(parser.finish());
+        assert_eq!(parsed, [Parsed::Text(text.into())]);
+    }
 
     #[test]
     fn load_failure_context_only_describes_cuda_memory_for_cuda() {

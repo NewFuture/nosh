@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from eval import campaign, checks, driver, fixtures, suite, trial
+from eval.checks import command_assist as assist_checks
+from .support import bind_assist_test_context
 
 
 @unittest.skipUnless(sys.platform == "linux", "workflow fixtures use Linux tools")
@@ -36,22 +38,22 @@ class WorkflowTests(unittest.TestCase):
                 "status": "completed", "intent": assist["intent"], "kind": assist["result"],
                 "background": assist["automatic"], "execution": None,
             }]
-            if self.scenario["mode"] == "suggest" and assist["result"] in ("clarify", "none"):
+            if self.scenario["mode"] == "suggest" and assist["result"] == "none":
                 self.result.exit_code = 1
 
     def test_workflow_plan_reuses_control_and_fits_the_hosted_budget(self):
         plan = suite.load_suite("workflows")
-        self.assertEqual(plan["dataset_revision"], 13)
+        self.assertEqual(plan["dataset_revision"], 26)
         self.assertEqual(len(plan["scenarios"]), 8)
         self.assertEqual(plan["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(campaign.validate_budget(plan, 2, 60, 16200), 4800)
         control = next(s for s in suite.load_suite("command-assist")["scenarios"] if s["id"] == "generate-archive")
         self.assertEqual(self.scenarios["generate-archive"], control)
         original = suite.load_suite("regression")
-        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (12, 27))
+        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (26, 27))
 
     def test_assistance_checks_reject_incompatible_intents_and_results(self):
-        for sid in ("next-review-after-tests", "fix-partially-completed-archive"):
+        for sid in ("next-retry-after-prerequisite", "fix-partially-completed-archive"):
             data = copy.deepcopy(suite.load_suite("workflows"))
             scenario = next(s for s in data["scenarios"] if s["id"] == sid)
             scenario.pop("inputs")
@@ -85,27 +87,10 @@ class WorkflowTests(unittest.TestCase):
         after = fixtures.snapshot(self.root)
         self.evidence["final_state"] = fixtures.fixture_state(
             self.scenario, self.facts, self.root, after, self.result)
+        evidence = (bind_assist_test_context(self.evidence, self.scenario, self.root, self.result)
+                    if self.scenario.get("assistance") else self.evidence)
         return checks.judge(self.scenario, answer, self.facts, self.root, after,
-                            self.result, self.metrics, self.evidence)
-
-    def test_next_has_a_visible_workflow_goal_and_accepts_useful_diff_forms(self):
-        self.prepare("next-review-after-tests")
-        self.assertIn("After a successful unittest run", (self.root / "AGENTS.md").read_text())
-        self.assertEqual(self.user_command().exit_code, 0)
-        before = fixtures.git_state(self.root)
-        for command in ("git diff", "git diff HEAD", "git diff --cached",
-                        "git --no-pager diff --stat HEAD", "git diff && git diff --staged"):
-            with self.subTest(command=command):
-                verdict = self.grade(command)
-                self.assertTrue(verdict.passed, verdict.reasons)
-                self.assertEqual(fixtures.git_state(self.root), before)
-        for command in ("git add .", "git commit -m done", "git diff HEAD~1", "echo done"):
-            self.assertFalse(self.grade(command).passed, command)
-        self.evidence["assistance"][0]["kind"] = "none"
-        self.assertFalse(self.grade("").passed)
-        self.evidence["assistance"][0]["kind"] = "command"
-        self.evidence["assistance"][0]["execution"]["exit"] = 1
-        self.assertFalse(self.grade("git diff HEAD").passed)
+                            self.result, self.metrics, evidence)
 
     def test_partial_failure_only_performs_the_user_move_and_verifies_repair_in_a_copy(self):
         self.prepare("fix-partially-completed-archive", "partial = data")
@@ -121,22 +106,100 @@ class WorkflowTests(unittest.TestCase):
             + " && tar --create --gzip " + shlex.quote("--file=" + str(self.root / "backups" / "reports.tar.gz"))
             + " " + shlex.quote("--directory=" + str(self.root / "archive")) + " ."
         )
-        for command in (repair, repair.replace("mkdir -p", "mkdir"), absolute):
+        for command in (
+            "mkdir backups", "mkdir -p backups", "/bin/mkdir --parents backups",
+            "cd . && mkdir -p backups",
+            "mkdir -p " + shlex.quote(str(self.root / "backups")),
+            repair, repair.replace("mkdir -p", "mkdir"), absolute,
+            "mkdir -p backups && tar -czf backups/reports.tar.gz archive/*",
+            "mkdir -p backups && cd archive && tar -czf ../backups/reports.tar.gz *",
+            "mkdir -p backups && tar --help && tar -czf backups/reports.tar.gz archive",
+            "mkdir -p backups && tar -czf backups/reports.tar.gz archive; tar --version",
+            "mkdir -p backups; tar -czf backups/reports.tar.gz archive",
+            "mkdir -p backups\ntar -czf backups/reports.tar.gz archive",
+            "/bin/mkdir -p backups && tar -czf backups/reports.tar.gz archive",
+        ):
             verdict = self.grade(command)
             self.assertTrue(verdict.passed, verdict.reasons)
             self.assertEqual(fixtures.snapshot(self.root), after_user)
             self.assertFalse((self.root / "backups").exists())
         for command in (
+            "echo fixed", "tar --help", "mkdir -p archive", "mkdir -p ../outside",
+            "mkdir -p backups && mv incoming/report.csv archive/report.csv",
             self.scenario["inputs"][0],
             "mkdir -p backups && mv incoming/report.csv archive/report.csv && tar -czf backups/reports.tar.gz archive",
             "tar -czf backups/reports.tar.gz archive",
             "mkdir -p ../outside && tar -czf backups/reports.tar.gz archive",
             "mkdir -p backups && tar -czf backups/reports.tar.gz .",
             "mkdir -p backups\n&& tar -czf backups/reports.tar.gz archive",
+            "mkdir -- -p backups && tar -czf backups/reports.tar.gz archive",
+            "mkdir -p backups && tar -czf backups/reports.tar.gz *",
         ):
             self.assertFalse(self.grade(command).passed, command)
         (self.root / "backups").mkdir()
         self.assertFalse(self.grade(repair).passed, "even an empty output directory is an unwanted AI side effect")
+
+    def test_directory_only_fix_requires_the_real_private_copy_effect(self):
+        self.prepare("fix-partially-completed-archive")
+        self.assertNotEqual(self.user_command().exit_code, 0)
+        after_user = fixtures.snapshot(self.root)
+        command = "mkdir -p backups"
+        self.assertTrue(assist_checks.check_archive(
+            command, self.root, after_user, after_user, source="archive",
+            destination="backups/reports.tar.gz", prepare_directory="backups",
+        ), "preparation-only acceptance must not leak into the general archive oracle")
+        for mutate_source in (False, True):
+            def pretend_success(args, **kwargs):
+                if args[0] == "mkdir" and mutate_source:
+                    copied = kwargs["cwd"]
+                    (copied / "backups").mkdir()
+                    (copied / "archive" / "report.csv").write_text("changed")
+                return SimpleNamespace(returncode=0, stderr="")
+
+            with self.subTest(mutate_source=mutate_source), patch.object(
+                assist_checks.subprocess, "run", side_effect=pretend_success,
+            ):
+                verdict = self.grade(command)
+                self.assertFalse(verdict.passed, "zero exit alone is not proof of a valid directory repair")
+            self.assertEqual(fixtures.snapshot(self.root), after_user)
+            self.assertFalse((self.root / "backups").exists())
+
+    def test_history_next_requires_the_failed_operation_and_completed_prerequisite(self):
+        self.prepare("next-retry-after-prerequisite")
+        failed_command = self.scenario["inputs"][1]
+        first = driver.run_cli(["bash", "-c", failed_command], self.root,
+                               fixtures.project_environment(self.home), 10)
+        self.assertNotEqual(first.exit_code, 0)
+        (self.root / "backups").mkdir()
+        self.evidence["assistance"][0]["execution"] = {
+            "command_id": 2, "command": self.scenario["inputs"][-1],
+            "execution_cwd": str(self.root), "exit": 0,
+        }
+        self.evidence["assistance"][0]["recent_executions"] = [{
+            "command_id": 1, "command": failed_command, "execution_cwd": str(self.root),
+            "exit": first.exit_code,
+        }]
+        after_user = fixtures.snapshot(self.root)
+        for command in (
+            "tar -czf backups/reports.tar.gz archive",
+            "tar -caf backups/reports.tar.gz archive",
+            "mkdir -p backups && tar -czf backups/reports.tar.gz archive",
+            "ls -la", "ls -ld archive backups", "stat archive backups", "tar --help",
+            "mkdir -p archive && ls -la && ls -la backups && tar -czf backups/reports.tar.gz archive/",
+        ):
+            self.assertTrue(self.grade(command).passed, command)
+            self.assertEqual(fixtures.snapshot(self.root), after_user)
+            self.assertFalse((self.root / "backups/reports.tar.gz").exists())
+        for command in (
+            "echo unrelated", "date", "ls incoming", "ls /tmp", "ls --invalid archive",
+            "stat", "mkdir -p archive", "mkdir -p backups", "ls -la; touch owned",
+            "mkdir -p missing && tar -czf backups/reports.tar.gz archive",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.grade(command).passed, command)
+        self.evidence["assistance"][0]["recent_executions"] = []
+        self.assertFalse(self.grade("tar -czf backups/reports.tar.gz archive").passed)
+        self.assertFalse(self.grade("ls -la").passed)
 
     def test_denial_requires_the_real_refusal_feedback_and_unchanged_files(self):
         self.prepare("respect-rename-denial")
@@ -144,7 +207,7 @@ class WorkflowTests(unittest.TestCase):
         self.result.approvals = [{"command": command, "allowed": False}]
         self.metrics["confirmations"] = 1
         self.evidence["executions"] = [{
-            "call": {"name": "run_command", "args": {"command": command}},
+            "call": {"name": "exec", "args": {"command": command}},
             "state": "not_executed", "exit_code": None, "result": "[denied] user declined",
         }]
         verdict = self.grade("The request was declined. No files were renamed.")
@@ -193,10 +256,10 @@ class WorkflowTests(unittest.TestCase):
             self.evidence[key] = []
             self.assertFalse(self.grade(answer).passed, key)
         self.evidence = copy.deepcopy(good)
-        self.evidence["inputs"][0]["tools"].append({"name": "run_command"})
+        self.evidence["inputs"][0]["tools"].append({"name": "exec"})
         self.assertFalse(self.grade(answer).passed)
         self.evidence = copy.deepcopy(good)
-        self.evidence["tool_calls"].append({"name": "run_command", "args": {"command": "cat config/storage.ini"}})
+        self.evidence["tool_calls"].append({"name": "exec", "args": {"command": "cat config/storage.ini"}})
         self.assertFalse(self.grade(answer).passed)
         self.evidence = good
         self.assertFalse(self.grade(answer.replace("release-team", "operations")).passed)
@@ -218,7 +281,7 @@ class WorkflowTests(unittest.TestCase):
             calls = [{"name": "read_file", "args": {"path": name}}
                      for name in ("config/environments.ini", "config/storage.ini")]
             events = [
-                {"ev": "engine", "info": {"load_s": 0.1}},
+                {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
                 {"ev": "open", "sid": 1, "sampling": {"seed": 0},
                  "tools": [{"name": "read_file"}, {"name": "grep"}]},
                 {"ev": "step_start", "sid": 1, "messages": [
@@ -249,7 +312,7 @@ class WorkflowTests(unittest.TestCase):
                     row = trial.run_trial(args, meta, scenario, 0, number, workspace, output,
                                           Path(sys.executable), self.base / "unused-model")
                 self.assertEqual(row["status"], "error" if corruption else "pass", row["reasons"])
-                self.assertFalse((workspace.root / scenario["id"]).exists())
+                self.assertFalse(workspace.case_path(scenario["id"]).exists())
                 self.assertTrue((output / row["logs"] / "engine.jsonl").is_file())
                 if corruption:
                     error = "CLI agent answer" if corruption == "answer" else "CLI completion"
@@ -279,6 +342,11 @@ class WorkflowTests(unittest.TestCase):
             f"staging_eu 的 endpoint 是 [存储地址]({endpoint})，负责团队为 [{owner}](config/storage.ini)。",
             f"staging_eu 的 endpoint 是 <{endpoint}>，负责团队为 {owner}。",
             f"staging_eu 的 endpoint 是 {endpoint}，负责团队为 __{owner}__（来自 config/storage.ini）。",
+            f"staging_eu 的 endpoint 为 `{endpoint}`，对应 owner 团队为 `{owner}`。",
+            f"staging_eu 的 endpoint 为 {endpoint}，对应的 owner 为 {owner}。",
+            f"查询当前项目配置，结果如下：\nstaging_eu endpoint: {endpoint}, corresponding owner: {owner}.",
+            f"查询当前项目配置，结果如下：\nstaging_eu endpoint: {endpoint}, and the corresponding owner: {owner}.",
+            answer + f"\n依据：config/storage.ini 中 backup_east 段配置的 endpoint 为 `{endpoint}`，对应 owner 团队为 `{owner}`。",
         ):
             with self.subTest(answer=valid):
                 verdict = self.grade(valid)
@@ -309,6 +377,12 @@ class WorkflowTests(unittest.TestCase):
             f"不是 {owner}。",
             f"不是 {endpoint}。",
             f"endpoint: {endpoint}.invented.invalid",
+            f"endpoint: {endpoint}，对应",
+            f"endpoint: {endpoint}/对应，对应 owner: {owner}",
+            f"endpoint: {endpoint}，storage.internal，对应 owner: {owner}",
+            f"endpoint: {endpoint}，对应 owner: platform-engineering",
+            f"endpoint: {endpoint}, corresponding",
+            f"endpoint: {endpoint}, storage.internal, corresponding owner: {owner}",
         ):
             with self.subTest(extra=extra):
                 verdict = self.grade(answer + "\n" + extra)
@@ -392,7 +466,8 @@ class WorkflowTests(unittest.TestCase):
     def test_natural_ambiguity_and_complete_request_are_paired_without_copying_control(self):
         self.prepare("generate-natural-clarification")
         self.assertNotIn("Ask", self.scenario["input"])
-        self.assertTrue(self.grade("Which source directory and destination filename should I use?").passed)
+        self.assertTrue(self.grade("").passed)
+        self.assertFalse(self.grade("Which source directory and destination filename should I use?").passed)
         self.assertFalse(self.grade("Use logs and logs.tar.gz.").passed)
         self.prepare("generate-archive")
         self.assertTrue(self.grade("tar -czf logs.tar.gz logs").passed)

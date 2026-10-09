@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nosh_llm::{ToolCall, ToolSpec};
-use nosh_shell::{CommandResult, EmbeddedShell, OutputState, UserOutput};
+use nosh_shell::{CommandResult, OutputState, UserOutput};
 use serde_json::json;
 
 /// Characters of tool output fed back per call (~1.5K tokens).
@@ -20,7 +20,7 @@ const GREP_READ_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
-    /// run_command, read_file, grep.
+    /// exec, read_file, grep.
     Full,
     /// Piped attachments: read_file and grep only.
     ReadOnly,
@@ -28,7 +28,7 @@ pub enum ToolSet {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinTool {
-    RunCommand,
+    Exec,
     ReadFile,
     Grep,
 }
@@ -36,7 +36,7 @@ pub(crate) enum BuiltinTool {
 impl BuiltinTool {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::RunCommand => "run_command",
+            Self::Exec => "exec",
             Self::ReadFile => "read_file",
             Self::Grep => "grep",
         }
@@ -44,7 +44,7 @@ impl BuiltinTool {
 
     fn spec(self) -> ToolSpec {
         match self {
-            Self::RunCommand => run_command_spec(),
+            Self::Exec => exec_spec(),
             Self::ReadFile => read_file_spec(),
             Self::Grep => grep_spec(),
         }
@@ -54,11 +54,7 @@ impl BuiltinTool {
 impl ToolSet {
     pub(crate) fn tools(self) -> &'static [BuiltinTool] {
         match self {
-            Self::Full => &[
-                BuiltinTool::RunCommand,
-                BuiltinTool::ReadFile,
-                BuiltinTool::Grep,
-            ],
+            Self::Full => &[BuiltinTool::Exec, BuiltinTool::ReadFile, BuiltinTool::Grep],
             Self::ReadOnly => &[BuiltinTool::ReadFile, BuiltinTool::Grep],
         }
     }
@@ -68,17 +64,16 @@ impl ToolSet {
     }
 }
 
-pub fn run_command_spec() -> ToolSpec {
+pub fn exec_spec() -> ToolSpec {
     ToolSpec {
-        name: BuiltinTool::RunCommand.name().into(),
-        description:
-            "Run a bash command in the current directory; shell state persists. Returns its output."
-                .into(),
+        name: BuiltinTool::Exec.name().into(),
+        description: "Run a command in the current shell session. Returns output and exit code."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "The bash command line"},
-                "timeout_sec": {"type": "integer", "description": "Timeout in seconds (default 60, max 600)"}
+                "command": {"type": "string", "description": "Shell code to execute."},
+                "timeout_sec": {"type": "integer", "description": "Timeout in seconds (1-600; default: configured timeout)."}
             },
             "required": ["command"]
         }),
@@ -88,14 +83,13 @@ pub fn run_command_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::ReadFile.name().into(),
-        description: "Read a text file (not a directory) with line numbers, at most 400 lines."
-            .into(),
+        description: "Read a text file with line numbers.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "start_line": {"type": "integer"},
-                "end_line": {"type": "integer"}
+                "path": {"type": "string", "description": "File path."},
+                "start_line": {"type": "integer", "description": "First line (1-based; default: 1)."},
+                "end_line": {"type": "integer", "description": "Last line, inclusive. Omit for up to 400 lines from start_line."}
             },
             "required": ["path"]
         }),
@@ -105,13 +99,15 @@ pub fn read_file_spec() -> ToolSpec {
 pub fn grep_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::Grep.name().into(),
-        description: "Search file contents recursively using ripgrep regex. Does not search file names. Returns relative paths, line numbers and matching lines. Respects .gitignore; skips hidden/binary files and descendant symlinks. At most 200 matching lines; bounded scans report truncation.".into(),
+        description:
+            "Search file contents recursively. Directory searches skip ignored and hidden files."
+                .into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Regular expression"},
-                "path": {"type": "string", "description": "File or directory (default: cwd)"},
-                "glob": {"type": "string", "description": "File glob filter, e.g. *.rs"}
+                "pattern": {"type": "string", "description": "Regular expression."},
+                "path": {"type": "string", "description": "File or directory (default: current directory)."},
+                "glob": {"type": "string", "description": "File filter, e.g. *.rs."}
             },
             "required": ["pattern"]
         }),
@@ -123,12 +119,73 @@ pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
 }
 
 pub(crate) fn format_user_output(output: &UserOutput) -> String {
+    format!(
+        "[user_output {}]\n{}\n[/user_output]",
+        output_metadata(output),
+        output_body(output)
+    )
+}
+
+pub(crate) fn format_assist_output(output: &UserOutput) -> String {
+    let mut metadata = match output.state {
+        OutputState::NotCaptured => json!({"state": "not_captured", "reason": "capture_disabled"}),
+        OutputState::Unavailable(reason) => {
+            json!({"state": "unavailable", "reason": reason.reason()})
+        }
+        OutputState::Captured => json!({}),
+    };
+    for (key, active) in [
+        ("truncated", output.truncated),
+        ("incomplete", output.incomplete),
+        ("concurrent_output", output.mixed),
+    ] {
+        if active {
+            metadata[key] = json!(true);
+        }
+    }
+    let fields = format_key_values(&metadata);
+    let quality = if fields.is_empty() {
+        String::new()
+    } else {
+        format!("{fields}\n\n")
+    };
+    format!(
+        "Terminal output (stdout/stderr not separated):\n{quality}{}",
+        text_block(output_body(output))
+    )
+}
+
+pub(crate) fn format_key_values(metadata: &serde_json::Value) -> String {
+    metadata
+        .as_object()
+        .expect("metadata is an object")
+        .iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn text_block(text: &str) -> String {
+    fenced_block(text, "text")
+}
+
+pub(crate) fn shell_block(text: &str) -> String {
+    fenced_block(text, "bash")
+}
+
+fn fenced_block(text: &str, language: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}{language}\n{text}\n{fence}")
+}
+
+pub(crate) fn output_metadata(output: &UserOutput) -> serde_json::Value {
     let (state, reason) = match output.state {
         OutputState::NotCaptured => ("not_captured", Some("capture_disabled")),
         OutputState::Unavailable(reason) => ("unavailable", Some(reason.reason())),
         OutputState::Captured => ("captured", None),
     };
-    let metadata = json!({
+    json!({
         "command_id": output.command_id,
         "command": output.command,
         "execution_cwd": output.cwd,
@@ -144,48 +201,24 @@ pub(crate) fn format_user_output(output: &UserOutput) -> String {
         "mixed": output.mixed,
         "command_truncated": output.command_truncated,
         "cwd_truncated": output.cwd_truncated,
-    });
-    let mut result = format!("[user_output {metadata}]\n");
+    })
+}
+
+fn output_body(output: &UserOutput) -> &str {
     if output.has_body() {
         if output.text.is_empty() {
-            result.push_str(if output.observed_bytes == Some(0) {
+            if output.observed_bytes == Some(0) {
                 "(Capture succeeded: no terminal output.)"
             } else {
                 "(Terminal bytes were captured, but no text remained after display cleanup.)"
-            });
+            }
         } else {
-            result.push_str(&output.text);
+            &output.text
         }
     } else if output.mixed {
-        result.push_str(
-            "(Known concurrent output: content omitted; do not attribute it to this command.)",
-        );
+        "(Known concurrent output: content omitted; do not attribute it to this command.)"
     } else {
-        result.push_str("(No captured output is available. Do not invent error text.)");
-    }
-    result.push_str("\n[/user_output]");
-    result
-}
-
-/// Internal implementation for the planned `get_last_output` model tool.
-///
-/// This function is intentionally absent from [`BuiltinTool`] and every
-/// [`ToolSet`], so the model cannot call it until its policy is finalized.
-#[allow(dead_code)]
-pub(crate) fn get_last_output(shell: &EmbeddedShell) -> String {
-    match shell.last_user_output() {
-        Some(output) => format_user_output(output),
-        None => {
-            let metadata = json!({
-                "state": "unavailable",
-                "reason": "no_completed_user_command",
-            });
-            format!(
-                "[user_output {metadata}]\n\
-                 (No completed user command is available.)\n\
-                 [/user_output]"
-            )
-        }
+        "(No captured output is available. Do not invent error text.)"
     }
 }
 
@@ -220,7 +253,7 @@ fn secs(d: std::time::Duration) -> String {
     format!("{:.2}s", d.as_secs_f64())
 }
 
-/// Tool result text for `run_command` (plain header + raw output).
+/// Tool result text for `exec` (plain header + raw output).
 pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> String {
     let body_budget = OUTPUT_CHARS;
     let out_len = r.stdout.chars().count();
@@ -736,7 +769,7 @@ fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<Stri
     let meta = std::fs::metadata(&path).map_err(err)?;
     if meta.is_dir() {
         return Err(format!(
-            "{} is a directory; read_file requires a text file. Use ls via run_command if command execution is available.",
+            "{} is a directory; read_file requires a text file. Use grep to search file contents under a directory.",
             path.display()
         ));
     }
@@ -887,11 +920,11 @@ mod tests {
 
     #[test]
     fn tool_catalog_matches_the_advertised_schema_and_order() {
-        let command = run_command_spec();
-        assert!(command.description.contains("current directory"));
-        assert!(command.description.contains("shell state persists"));
+        let command = exec_spec();
+        assert!(command.description.contains("current shell session"));
+        assert!(!command.description.contains("Bash"));
         for (set, names) in [
-            (ToolSet::Full, vec!["run_command", "read_file", "grep"]),
+            (ToolSet::Full, vec!["exec", "read_file", "grep"]),
             (ToolSet::ReadOnly, vec!["read_file", "grep"]),
         ] {
             let advertised = specs(set);
@@ -908,6 +941,7 @@ mod tests {
             }
 
             for name in [
+                "exec",
                 "run_command",
                 "read_file",
                 "grep",
@@ -922,6 +956,104 @@ mod tests {
                 assert_eq!(set.resolve(name).is_some(), names.contains(&name));
             }
         }
+    }
+
+    #[test]
+    fn model_visible_tools_have_described_parameters_and_unambiguous_examples() {
+        let mut specs = specs(ToolSet::Full);
+        specs.push(crate::command_help::spec());
+        specs.push(crate::user_input::spec());
+        let rendered = nosh_llm::template::tool_definitions(&specs);
+        for spec in &specs {
+            assert!(!spec.description.trim().is_empty(), "{}", spec.name);
+            for (name, parameter) in spec.parameters["properties"].as_object().unwrap() {
+                assert!(
+                    parameter["description"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty()),
+                    "{}.{name} has no explanation",
+                    spec.name
+                );
+            }
+            assert!(rendered.contains(&spec.name));
+            assert!(rendered.contains(&spec.description));
+        }
+        assert!(!rendered.contains("command_info"));
+        assert!(!rendered.contains("\"topic\""));
+        assert!(!rendered.contains("default 60"));
+        let help = crate::command_help::spec();
+        assert_eq!(help.parameters["required"], json!(["name"]));
+        assert!(help.parameters["properties"]["query"].get("enum").is_none());
+        for (raw, name, args) in [
+            (
+                "<function name=\"command_help\"><param name=\"name\">tar</param><param name=\"query\">gzip</param></function>",
+                "command_help",
+                json!({"name":"tar","query":"gzip"}),
+            ),
+            (
+                "<function name=\"command_help\"><param name=\"name\">tar</param></function>",
+                "command_help",
+                json!({"name":"tar"}),
+            ),
+            (
+                "<function name=\"command_help\"><param name=\"name\">git commit</param><param name=\"query\">--amend</param></function>",
+                "command_help",
+                json!({"name":"git commit","query":"--amend"}),
+            ),
+            (
+                "<function name=\"read_file\"><param name=\"path\">src/main.rs</param><param name=\"start_line\">10</param><param name=\"end_line\">20</param></function>",
+                "read_file",
+                json!({"path":"src/main.rs","start_line":10,"end_line":20}),
+            ),
+            (
+                "<function name=\"grep\"><param name=\"pattern\">(?i)todo</param><param name=\"glob\">*.rs</param></function>",
+                "grep",
+                json!({"pattern":"(?i)todo","glob":"*.rs"}),
+            ),
+            (
+                "<function name=\"ask_user\"><param name=\"question\">Format?</param><param name=\"choices\">[\"tar.gz\",\"zip\"]</param></function>",
+                "ask_user",
+                json!({"question":"Format?","choices":["tar.gz","zip"]}),
+            ),
+            (
+                "<function name=\"exec\"><param name=\"command\">pwd</param><param name=\"timeout_sec\">5</param></function>",
+                "exec",
+                json!({"command":"pwd","timeout_sec":5}),
+            ),
+        ] {
+            assert_eq!(
+                nosh_llm::toolcall::parse_call(raw, &specs).unwrap(),
+                call(name, args)
+            );
+        }
+    }
+
+    #[test]
+    fn grep_case_flags_and_explicit_file_scope_match_the_descriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".hidden"), "TODO\n").unwrap();
+        std::fs::write(dir.path().join("notes"), "TODO\ntodo\n").unwrap();
+        let exact = grep(&call("grep", json!({"pattern":"todo"})), dir.path(), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(exact.contains("[1 matching lines;"));
+        assert!(exact.contains("notes:2:todo"));
+        let insensitive = grep(
+            &call("grep", json!({"pattern":"(?i)todo"})),
+            dir.path(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(insensitive.contains("[2 matching lines;"));
+        assert!(!insensitive.contains(".hidden"));
+        let explicit = grep(
+            &call("grep", json!({"pattern":"TODO","path":".hidden"})),
+            dir.path(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(explicit.contains(".hidden:1:TODO"));
     }
 
     #[test]
@@ -944,28 +1076,21 @@ mod tests {
     }
 
     #[test]
-    fn last_output_accessor_is_implemented_but_not_registered() {
-        let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
-        let empty = get_last_output(&shell);
-        assert!(empty.contains("\"reason\":\"no_completed_user_command\""));
-        assert!(
-            !ToolSet::Full
-                .tools()
-                .iter()
-                .any(|tool| tool.name() == "get_last_output")
-        );
-        assert!(ToolSet::Full.resolve("get_last_output").is_none());
-        assert!(
-            specs(ToolSet::Full)
-                .iter()
-                .all(|spec| spec.name != "get_last_output")
-        );
+    fn directory_read_error_only_suggests_a_shared_read_only_tool() {
+        let directory = tempfile::tempdir().unwrap();
+        let call = ToolCall {
+            name: "read_file".into(),
+            args: json!({"path": "."}).as_object().unwrap().clone(),
+        };
+        let error = read_file(&call, directory.path()).unwrap_err();
+        assert!(error.contains("is a directory; read_file requires a text file"));
+        assert!(error.contains("Use grep to search file contents"));
+        assert!(!error.contains("exec"));
+        assert!(!error.contains("Use ls"));
+    }
 
-        assert_eq!(shell.run_user_line("true").exit_code, 0);
-        let disabled = get_last_output(&shell);
-        assert!(disabled.contains("\"state\":\"not_captured\""));
-        assert!(disabled.contains("\"command\":\"true\""));
-
+    #[test]
+    fn user_output_format_preserves_metadata_and_capture_quality() {
         let mut output = UserOutput {
             command_id: 7,
             command: "cargo build".into(),
@@ -987,6 +1112,132 @@ mod tests {
         assert!(captured.contains("actual error"));
         output.mixed = true;
         assert!(!format_user_output(&output).contains("actual error"));
+    }
+
+    #[test]
+    fn compact_assist_output_preserves_capture_quality_without_repeating_execution() {
+        let mut output = UserOutput {
+            command_id: 7,
+            command: "cargo build".into(),
+            cwd: "/work/app".into(),
+            command_truncated: false,
+            cwd_truncated: false,
+            exit: 101,
+            duration: Duration::from_millis(25),
+            state: OutputState::Captured,
+            terminal_source: true,
+            text: "actual error\n".into(),
+            observed_bytes: Some(13),
+            truncated: false,
+            incomplete: false,
+            mixed: false,
+        };
+        for state in [
+            OutputState::Captured,
+            OutputState::NotCaptured,
+            OutputState::Unavailable(nosh_shell::OutputUnavailable::FullScreen),
+        ] {
+            for mixed in [false, true] {
+                output.state = state;
+                output.mixed = mixed;
+                output.truncated = true;
+                output.incomplete = true;
+                output.command_truncated = true;
+                output.cwd_truncated = true;
+                let original = output.clone();
+                let full = format_user_output(&output);
+                let compact = format_assist_output(&output);
+                let (full_header, full_body) = full.split_once('\n').unwrap();
+                let (header, body) = compact
+                    .strip_prefix("Terminal output (stdout/stderr not separated):\n")
+                    .unwrap()
+                    .split_once("\n\n")
+                    .unwrap();
+                assert_eq!(
+                    body,
+                    text_block(full_body.strip_suffix("\n[/user_output]").unwrap())
+                );
+                let parse = |header: &str| {
+                    serde_json::from_str::<serde_json::Value>(
+                        header
+                            .strip_prefix("[user_output ")
+                            .unwrap()
+                            .strip_suffix(']')
+                            .unwrap(),
+                    )
+                    .unwrap()
+                };
+                let full_fields = parse(full_header);
+                assert_eq!(full_fields["command_id"], 7);
+                assert_eq!(full_fields["command"], "cargo build");
+                assert_eq!(full_fields["execution_cwd"], "/work/app");
+                assert_eq!(full_fields["exit"], 101);
+                assert_eq!(full_fields["duration_ms"], 25);
+                assert_eq!(full_fields["observed_bytes"], 13);
+                assert_eq!(full_fields["retained_bytes"], output.text.len());
+                assert_eq!(full_fields["command_truncated"], true);
+                assert_eq!(full_fields["cwd_truncated"], true);
+                let mut expected = json!({"truncated": true, "incomplete": true});
+                if state != OutputState::Captured {
+                    expected["state"] = full_fields["state"].clone();
+                    expected["reason"] = full_fields["reason"].clone();
+                }
+                if mixed {
+                    expected["concurrent_output"] = json!(true);
+                }
+                let fields: serde_json::Map<String, serde_json::Value> = header
+                    .lines()
+                    .map(|line| {
+                        let (key, value) = line.split_once(": ").unwrap();
+                        (key.to_owned(), serde_json::from_str(value).unwrap())
+                    })
+                    .collect();
+                assert_eq!(serde_json::Value::Object(fields), expected);
+                assert!(header.contains("truncated: true"));
+                assert!(header.contains("incomplete: true"));
+                for absent in [
+                    "command_id:",
+                    "duration_ms:",
+                    "retained_bytes:",
+                    "observed_bytes:",
+                    "command_truncated:",
+                    "cwd_truncated:",
+                    "execution_cwd:",
+                    "exit:",
+                ] {
+                    assert!(!header.contains(absent), "{absent}");
+                }
+                assert_eq!(compact.contains("actual error"), output.has_body());
+                assert_eq!(output, original);
+            }
+        }
+        output.state = OutputState::Captured;
+        output.mixed = false;
+        output.truncated = false;
+        output.incomplete = false;
+        assert_eq!(
+            format_assist_output(&output),
+            format!(
+                "Terminal output (stdout/stderr not separated):\n{}",
+                text_block("actual error\n")
+            )
+        );
+        output.text.clear();
+        output.observed_bytes = Some(0);
+        assert!(format_assist_output(&output).contains("Capture succeeded: no terminal output"));
+        output.observed_bytes = Some(13);
+        assert!(format_assist_output(&output).contains("no text remained after display cleanup"));
+    }
+
+    #[test]
+    fn text_blocks_and_metadata_cannot_be_closed_by_payload_delimiters() {
+        let raw = "first\n```\nlast\n`````";
+        assert_eq!(text_block(raw), format!("``````text\n{raw}\n``````"));
+        assert_eq!(shell_block(raw), format!("``````bash\n{raw}\n``````"));
+        assert_eq!(
+            format_key_values(&json!({"cwd": "a\"\n[execution]", "exit": 7})),
+            "cwd: \"a\\\"\\n[execution]\"\nexit: 7"
+        );
     }
 
     #[test]

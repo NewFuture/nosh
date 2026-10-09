@@ -47,6 +47,7 @@ pub struct MockChatEngine {
     received: Arc<Mutex<Vec<Vec<Message>>>>,
     specs: Arc<Mutex<Vec<SessionSpec>>>,
     observations: Arc<Mutex<Vec<(SessionId, Value)>>>,
+    tool_choices: Arc<Mutex<Vec<(SessionId, crate::ToolChoice)>>>,
     sessions: HashMap<SessionId, Vec<Message>>,
     next_id: SessionId,
     cancel: CancelHandle,
@@ -62,6 +63,7 @@ impl MockChatEngine {
             received: Arc::default(),
             specs: Arc::default(),
             observations: Arc::default(),
+            tool_choices: Arc::default(),
             sessions: HashMap::new(),
             next_id: 1,
             cancel: CancelHandle::default(),
@@ -89,6 +91,10 @@ impl MockChatEngine {
         self.observations.clone()
     }
 
+    pub fn tool_choices(&self) -> Arc<Mutex<Vec<(SessionId, crate::ToolChoice)>>> {
+        self.tool_choices.clone()
+    }
+
     pub fn set_context_max(&mut self, n: usize) {
         self.context_max = n;
     }
@@ -97,7 +103,9 @@ impl MockChatEngine {
 fn approx_tokens(msgs: &[Message]) -> usize {
     msgs.iter()
         .map(|m| match m {
-            Message::System(s) | Message::User(s) | Message::Tool(s) => s.len() / 4 + 4,
+            Message::System(s) | Message::User(s) | Message::Tool(s) | Message::UserAnswer(s) => {
+                s.len() / 4 + 4
+            }
             Message::Assistant { content, .. } => content.len() / 4 + 8,
         })
         .sum()
@@ -115,11 +123,12 @@ impl ChatEngine for MockChatEngine {
     fn set_tool_choice(
         &mut self,
         sid: SessionId,
-        _choice: crate::ToolChoice,
+        choice: crate::ToolChoice,
     ) -> Result<(), LlmError> {
         if !self.sessions.contains_key(&sid) {
             return Err(LlmError::UnknownSession(sid));
         }
+        self.tool_choices.lock().unwrap().push((sid, choice));
         Ok(())
     }
 
@@ -267,10 +276,7 @@ mod tests {
     #[test]
     fn replays_script_and_records_messages() {
         let mut m = MockChatEngine::new(vec![
-            vec![
-                text("checking"),
-                call("run_command", json!({"command": "ls"})),
-            ],
+            vec![text("checking"), call("exec", json!({"command": "ls"}))],
             vec![text("all good")],
         ]);
         let sid = m.open(spec()).unwrap();
@@ -290,6 +296,26 @@ mod tests {
         assert_eq!(m.message_count(sid), 4);
         m.rewind(sid, 1).unwrap();
         assert_eq!(m.message_count(sid), 1);
+    }
+
+    #[test]
+    fn user_answers_are_not_shortened_with_tool_output() {
+        let answer = format!("{}keep backups", "details ".repeat(60));
+        let expected = answer.clone();
+        let mut engine = MockChatEngine::with_responder(move |history| {
+            assert!(history.contains(&Message::UserAnswer(expected.clone())));
+            vec![text("done")]
+        });
+        let sid = engine.open(spec()).unwrap();
+        engine
+            .step(
+                sid,
+                vec![Message::UserAnswer(answer.clone()), Message::Tool(answer)],
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(engine.compact_tool_results(sid, 0).unwrap(), 1);
+        engine.step(sid, vec![], &mut |_| {}).unwrap();
     }
 
     #[test]

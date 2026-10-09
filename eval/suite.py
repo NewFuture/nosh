@@ -102,12 +102,11 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
         assistance = scenario.get("assistance")
         if assistance is not None:
             if (not isinstance(assistance, dict)
-                    or set(assistance) - {"intent", "result", "automatic", "require_query"}
+                    or set(assistance) - {"intent", "result", "automatic"}
                     or not {"intent", "result", "automatic"} <= set(assistance)
                     or assistance["intent"] not in ("generate", "fix", "next")
-                    or assistance["result"] not in ("command", "clarify", "none")
-                    or type(assistance["automatic"]) is not bool
-                    or ("require_query" in assistance and type(assistance["require_query"]) is not bool)):
+                    or assistance["result"] not in ("command", "none")
+                    or type(assistance["automatic"]) is not bool):
                 raise ValueError("invalid command assistance contract")
             if assistance["automatic"] != (scenario.get("mode") == "repl"):
                 raise ValueError("automatic assistance requires a REPL completion")
@@ -182,7 +181,7 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
                 if not isinstance(completion, dict):
                     raise ValueError(f"invalid completion contract: {sid}")
                 kind = completion.get("kind")
-                if kind not in ("agent", "shell", "correction", "assist"):
+                if kind not in ("agent", "shell", "correction", "assist", "observe"):
                     raise ValueError(f"unknown input completion: {sid}")
                 if kind == "shell":
                     code = completion.get("exit_code")
@@ -192,6 +191,17 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
                             or not isinstance(contains, list) or not contains
                             or not all(isinstance(s, str) and s and "\n" not in s for s in contains)):
                         raise ValueError(f"invalid failed-command completion: {sid}")
+                elif kind == "agent":
+                    if set(completion) - {"kind", "answers"}:
+                        raise ValueError(f"unknown completion fields: {sid}")
+                    if "answers" in completion:
+                        answers = completion["answers"]
+                        if (not isinstance(answers, list) or not answers
+                                or not all(isinstance(answer, str) and answer.strip()
+                                           and len(answer.encode("utf-8")) <= 4096
+                                           and all(c.isprintable() for c in answer)
+                                           for answer in answers)):
+                            raise ValueError(f"answers must be nonempty single-line user replies: {sid}")
                 elif set(completion) != {"kind"}:
                     raise ValueError(f"unknown completion fields: {sid}")
                 if kind == "assist" and (assistance is None or not assistance["automatic"]):
@@ -224,7 +234,8 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
         if (expect["response_language"] not in ("zh", "any", "not_applicable")
                 or (expect["response_language"] == "not_applicable") != nonprose):
             raise ValueError(f"invalid response language expectation: {sid}")
-        question = "not_applicable" if nonprose else "require" if scenario["check"] == "clarification" else "forbid"
+        has_answers = any(completion.get("answers") for completion in scenario.get("completions", []))
+        question = "not_applicable" if nonprose else "require" if scenario["check"] == "clarification" and not has_answers else "forbid"
         if expect["final_question"] != question:
             raise ValueError(f"invalid final-question expectation: {sid}")
         if (expect["max_steps"] == 0) != (scenario["check"] == "typos"):

@@ -6,7 +6,17 @@ use std::process::{Command, Stdio};
 fn nosh() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_nosh"));
     c.env("NOSH_HOME", std::env::temp_dir().join("nosh-cli-test-home"));
+    c.env_remove("NOSH_MODEL_PATH");
     c
+}
+
+#[test]
+fn fixtures_do_not_inherit_a_real_model_path() {
+    assert!(
+        nosh()
+            .get_envs()
+            .any(|(name, value)| name == "NOSH_MODEL_PATH" && value.is_none())
+    );
 }
 
 #[test]
@@ -170,9 +180,7 @@ fn cpu_build_reports_device_and_rejects_cuda_without_fallback() {
     let home = empty_home("device");
     let doctor = || {
         let mut command = nosh();
-        command
-            .env("NOSH_HOME", &home)
-            .env_remove("NOSH_MODEL_PATH");
+        command.env("NOSH_HOME", &home);
         command.args(["--offline", "doctor"]);
         command
     };

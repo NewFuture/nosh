@@ -27,7 +27,7 @@ fn resolved() -> nosh_hub::ResolvedModel {
 
 fn run_tool() -> ToolSpec {
     ToolSpec {
-        name: "run_command".into(),
+        name: "exec".into(),
         description: "Run a bash command in the user's shell session and return its output.".into(),
         parameters: json!({
             "type": "object",
@@ -93,6 +93,22 @@ fn segment_encoding_matches_full_string_encoding() {
         let by_segments = tok.encode_segments(&segs).unwrap();
         let whole = tok.encode(expected, true).unwrap();
         assert_eq!(by_segments, whole, "case {}", c["name"]);
+        if !tools.is_empty() {
+            let official = tok
+                .encode(c["official_expected"].as_str().unwrap(), true)
+                .unwrap();
+            assert!(
+                whole.len() < official.len(),
+                "tool guidance grew in {}",
+                c["name"]
+            );
+            eprintln!(
+                "{}: official={} compact={} tokens",
+                c["name"],
+                official.len(),
+                whole.len()
+            );
+        }
     }
     // Untrusted text cannot produce special tokens.
     let ids = tok
@@ -118,7 +134,7 @@ fn named_tool_choice_returns_one_call_without_prose() {
             .is_err()
     );
     engine
-        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("run_command".into()))
+        .set_tool_choice(sid, nosh_llm::ToolChoice::Named("exec".into()))
         .unwrap();
     let output = engine
         .step(
@@ -131,7 +147,7 @@ fn named_tool_choice_returns_one_call_without_prose() {
     assert!(output.text.is_empty());
     assert!(output.errors.is_empty(), "{:?}", output.errors);
     assert_eq!(output.tool_calls.len(), 1);
-    assert_eq!(output.tool_calls[0].name, "run_command");
+    assert_eq!(output.tool_calls[0].name, "exec");
     engine.close(sid);
 }
 
@@ -224,7 +240,7 @@ fn produces_parseable_tool_call() {
     );
     assert!(o.errors.is_empty(), "{:?}", o.errors);
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].name, "run_command");
+    assert_eq!(calls[0].name, "exec");
     assert!(calls[0].str_arg("command").unwrap().contains("ls"));
 }
 

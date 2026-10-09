@@ -68,7 +68,7 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
     let engine = MockChatEngine::with_responder(move |history| match history.last() {
         Some(Message::User(text)) if text == "change project" => {
             vec![call(
-                "run_command",
+                "exec",
                 json!({"command": format!("cd {}", destination.display())}),
             )]
         }
@@ -159,7 +159,7 @@ fn project_context_refreshes_between_tasks_and_after_agent_cd() {
 }
 
 #[test]
-fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions() {
+fn agent_protects_project_metadata_and_suggestions_do_not_load_it() {
     use nosh_shell::AiHandler;
     let _g = setup();
     let root = tmpdir("protected-project-context");
@@ -180,32 +180,33 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
         &mut Scripted::new([]),
         &mut RecordUi::default(),
     );
-    let check = |messages: &[Vec<Message>]| {
-        let Message::System(message) = &messages[0][0] else {
-            panic!("expected task")
+    let check = |messages: &[Vec<Message>], project_context: bool| {
+        let message = match (&messages[0][0], project_context) {
+            (Message::System(message), true) | (Message::User(message), false) => message,
+            _ => panic!("expected the matching task role"),
         };
-        assert!(
-            context_field(message, "project")
-                .unwrap()
-                .contains("metadata=unavailable")
-        );
+        if project_context {
+            assert!(
+                context_field(message, "project")
+                    .unwrap()
+                    .contains("metadata=unavailable")
+            );
+        } else {
+            assert!(message.contains("\n\nEnvironment:\n"));
+            assert!(!message.contains("project:"));
+            assert!(!message.contains("metadata=unavailable"));
+        }
         assert!(!message.contains("never-expose-this-package-name"));
     };
-    check(&received.lock().unwrap());
+    check(&received.lock().unwrap(), true);
 
-    let mut engine = MockChatEngine::new(vec![vec![call(
-        "finish",
-        json!({"kind": "command", "text": "echo ok"}),
-    )]]);
+    let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let received = engine.received();
     let suggestion = generate(&mut engine, &sh, "suggest", &cfg).unwrap();
     assert_eq!(suggestion.result, AssistResult::Command("echo ok".into()));
-    check(&received.lock().unwrap());
+    check(&received.lock().unwrap(), false);
 
-    let engine = MockChatEngine::new(vec![vec![call(
-        "finish",
-        json!({"kind": "command", "text": "echo ok"}),
-    )]]);
+    let engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let received = engine.received();
     let mut engine = Some(engine);
     let mut ai = ShellAi::new(
@@ -219,7 +220,7 @@ fn automatic_project_context_honors_custom_protection_in_agent_and_suggestions()
         Box::new(Scripted::new([])),
     );
     assert_eq!(ai.suggest(&mut sh, "suggest").as_deref(), Some("echo ok"));
-    check(&received.lock().unwrap());
+    check(&received.lock().unwrap(), false);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -372,7 +373,7 @@ fn cancelled_generation_resends_guidance_on_the_next_task() {
 }
 
 #[test]
-fn suggestions_do_not_guess_when_agents_guidance_cannot_be_loaded() {
+fn suggestions_do_not_load_even_blocked_project_guidance() {
     let _g = setup();
     let root = tmpdir("blocked-agents");
     std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -385,22 +386,21 @@ fn suggestions_do_not_guess_when_agents_guidance_cannot_be_loaded() {
     };
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", root.display()));
-    let mut engine = MockChatEngine::new(vec![vec![text("echo should-not-be-generated")]]);
+    let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
     let specs = engine.specs();
-    let result = generate(&mut engine, &sh, "suggest", &cfg);
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("AGENTS.md guidance is incomplete"));
-    assert!(!error.contains("protected instruction content"));
-    assert!(!error.contains("must-not-fall-back"));
-    assert!(
-        specs.lock().unwrap().is_empty(),
-        "no model session opens with incomplete guidance"
-    );
+    let received = engine.received();
+    let result = generate(&mut engine, &sh, "suggest", &cfg).unwrap();
+    assert_eq!(result.result, AssistResult::Command("echo ok".into()));
+    let inputs = format!("{:?}", received.lock().unwrap());
+    assert!(!inputs.contains("AGENTS.md"));
+    assert!(!inputs.contains("protected instruction content"));
+    assert!(!inputs.contains("must-not-fall-back"));
+    assert_eq!(specs.lock().unwrap().len(), 1);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn readme_references_refresh_and_remain_optional_for_suggestions() {
+fn readme_references_refresh_for_agent_but_are_not_injected_into_suggestions() {
     let _g = setup();
     let root = tmpdir("readme-reference");
     std::fs::create_dir(root.join(".git")).unwrap();
@@ -447,24 +447,21 @@ fn readme_references_refresh_and_remain_optional_for_suggestions() {
     drop(received);
 
     for protected in [vec![], vec![readme.clone()]] {
-        let blocked = !protected.is_empty();
         let cfg = AgentConfig {
             protected,
             ..AgentConfig::default()
         };
-        let mut engine = MockChatEngine::new(vec![vec![call(
-            "finish",
-            json!({"kind": "command", "text": "echo ok"}),
-        )]]);
+        let mut engine = MockChatEngine::new(vec![vec![text("echo ok")]]);
         let received = engine.received();
         let result = generate(&mut engine, &sh, "suggest", &cfg).unwrap();
         assert_eq!(result.result, AssistResult::Command("echo ok".into()));
         let received = received.lock().unwrap();
-        let Message::System(message) = &received[0][0] else {
-            panic!("expected reference context in the task");
+        let Message::User(message) = &received[0][0] else {
+            panic!("expected environment in the task");
         };
-        assert_eq!(message.contains("reference unavailable"), blocked);
-        assert_eq!(message.contains("Updated reference."), !blocked);
+        assert!(message.contains("\n\nEnvironment:\n"));
+        assert!(!message.contains("reference unavailable"));
+        assert!(!message.contains("Updated reference."));
     }
     std::fs::remove_dir_all(root).unwrap();
 }
