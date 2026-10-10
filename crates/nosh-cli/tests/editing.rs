@@ -186,7 +186,7 @@ fn inline_prefix_configuration_reaches_interactive_commands_without_a_model() {
             ("Confirm", b"?think on\r"),
             ("think: on", b"?status\r"),
             ("not loaded (loads on first use)", b"?out invalid\r"),
-            ("invalid arguments; usage: ?out", b"?unknown\r"),
+            ("unknown command ?out", b"?unknown\r"),
             (
                 "unknown command ?unknown",
                 b"ai() { printf 'ORDINARY_AI:%s\\n' \"$*\"; }; ai mode auto\r",

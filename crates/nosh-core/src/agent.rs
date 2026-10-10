@@ -26,7 +26,6 @@ use crate::user_input::{self, InputError, NoUserInput, UserInput};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    pub command_prefix: String,
     pub mode: ApprovalMode,
     pub rules: UserRules,
     pub rules_error: Option<String>,
@@ -45,7 +44,6 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            command_prefix: "#".into(),
             mode: ApprovalMode::default(),
             rules: UserRules::default(),
             rules_error: None,
@@ -147,17 +145,6 @@ pub struct TaskOutcome {
     pub error: Option<String>,
 }
 
-/// Full output of an agent command, for `#out <id>`.
-#[derive(Debug, Clone)]
-pub struct OutputRecord {
-    pub id: usize,
-    pub command: String,
-    pub text: String,
-    pub permission: String,
-    pub previous_cwd: PathBuf,
-    pub previous_variables: Vec<(String, Option<String>, bool)>,
-}
-
 enum Exec {
     Result(String),
     UserAnswer(String),
@@ -196,7 +183,6 @@ pub struct Agent {
     allow: SessionAllowList,
     /// Tool results owed to the conversation from an interrupted turn.
     carry: Vec<Message>,
-    outputs: Vec<OutputRecord>,
     next_output: usize,
     user_outputs_seen: HashSet<u64>,
     guidance: crate::guidance::GuidanceCache,
@@ -227,7 +213,6 @@ impl Agent {
             last_task: None,
             allow: SessionAllowList::default(),
             carry: Vec::new(),
-            outputs: Vec::new(),
             next_output: 1,
             user_outputs_seen: HashSet::new(),
             guidance: crate::guidance::GuidanceCache::default(),
@@ -270,14 +255,6 @@ impl Agent {
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
         self.sid.map(|s| self.engine.context_usage(s))
-    }
-
-    pub fn output(&self, id: usize) -> Option<&OutputRecord> {
-        self.outputs.iter().find(|o| o.id == id)
-    }
-
-    pub fn last_output_id(&self) -> Option<usize> {
-        self.outputs.last().map(|o| o.id)
     }
 
     fn spec(&self) -> SessionSpec {
@@ -976,41 +953,12 @@ Approval request: {}; {}.{}",
         } else {
             None
         };
-        self.outputs.push(OutputRecord {
-            id,
-            command: to_run.clone(),
-            text: format!("{}{}", r.stdout, r.stderr),
-            permission: label.to_string(),
-            previous_cwd: report.context.cwd.clone(),
-            previous_variables: report
-                .operations
-                .iter()
-                .flat_map(|op| &op.variables)
-                .filter(|(name, _)| !report.context.unknown_variables.contains(name))
-                .map(|(name, _)| {
-                    (
-                        name.clone(),
-                        report.context.variables.get(name).cloned(),
-                        report.context.exported.contains(name),
-                    )
-                })
-                .collect(),
-        });
-        if self.outputs.len() > 20 {
-            self.outputs.remove(0);
-        }
         let mut summary = format!("exit {} · {:.2}s", r.exit_code, r.duration.as_secs_f64());
         if r.timed_out {
             summary.push_str(" · timed out");
         }
         if r.interrupted {
             summary.push_str(" · command interrupted; prior effects are not undone");
-        }
-        if (!r.stdout.is_empty() || !r.stderr.is_empty()) && !self.cfg.command_prefix.is_empty() {
-            summary.push_str(&format!(
-                " · {}out {id}",
-                nosh_shell::style::visible_text(&self.cfg.command_prefix)
-            ));
         }
         ui.tool_end(&summary);
         let mut text = tools::format_command_result(&r, log.as_deref());

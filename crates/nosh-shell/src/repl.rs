@@ -963,14 +963,16 @@ fn build_editor(
         _theme_subscription: None,
         completion_controller: None,
     };
-    let menu = ColumnarMenu::default()
-        .with_name("completion_menu")
-        .with_preserve_case(true)
-        .with_input_mode(reedline::InputMode::FullBuffer)
-        .with_marker("")
-        .with_columns(10)
-        .with_selected_text_style(Color::Blue.bold().reverse())
-        .with_selected_match_text_style(Color::Blue.bold().reverse());
+    let menu = |name: &str| {
+        ColumnarMenu::default()
+            .with_name(name)
+            .with_preserve_case(true)
+            .with_input_mode(reedline::InputMode::FullBuffer)
+            .with_marker("")
+            .with_columns(10)
+            .with_selected_text_style(Color::Blue.bold().reverse())
+            .with_selected_match_text_style(Color::Blue.bold().reverse())
+    };
     let colors = style::stdout().color;
     let mut hinter = reedline::DefaultHinter::default();
     if colors {
@@ -985,7 +987,12 @@ fn build_editor(
         .with_contextual_input(true)
         .use_kitty_keyboard_enhancement(enhanced)
         .with_menu_submit_protection(true)
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu(
+            "completion_menu",
+        ))))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu(
+            crate::completion::INLINE_MENU,
+        ))))
         .with_validator(Box::new(LineValidator {
             shell: sh.clone(),
             prefix: cfg.trigger.ai_prefix.clone(),
@@ -1546,6 +1553,8 @@ mod tests {
             "#fix",
             "#mode auto",
             "#mode bad",
+            "#out",
+            "#out 1",
             "#unknown",
             "#找文件",
         ] {
@@ -1872,7 +1881,7 @@ mod tests {
     fn help_uses_only_latest_input_syntax() {
         let help = inline_commands::help("?");
         assert!(help.contains("?help") && help.contains("?fix"));
-        assert!(help.contains("? <task>"));
+        assert!(help.starts_with("  ? <task>"));
         assert!(!help.contains("ai ") && !help.contains("?next"));
     }
 

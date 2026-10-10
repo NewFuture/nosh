@@ -415,6 +415,119 @@ class ProductionProxyTests(unittest.TestCase):
                 "--model-path", str(self.weights), "--seed", str(seed)]
         return root, home, trace, env, argv
 
+    def test_typing_prefix_opens_local_completion_before_submission(self):
+        names = {"auto", "clear", "ctx", "fix", "help", "mode", "status", "think"}
+        for number, mode in enumerate(("emacs", "vi")):
+            with self.subTest(mode=mode), ScriptedWorker(
+                    self.socket, [{"text": "PREFIX_TASK_DONE"}]) as server:
+                root, home, _, env, argv = self.case(number, 0)
+                config = home / "nosh" / "config.toml"
+                config.write_text(config.read_text().replace(
+                    "[shell]\n", f'[shell]\nedit_mode = "{mode}"\n'), encoding="utf-8")
+                child = driver.Child(
+                    argv, root, dict(env, PS1=driver.PROMPT, PS2=driver.CONTINUATION), True)
+                deadline = child.start + 20
+
+                def screen_text():
+                    return "\n".join("".join(row) for row in child.screen.lines)
+
+                def selected(command):
+                    return any(row.strip().startswith(f">{command} ")
+                               for row in screen_text().splitlines())
+
+                def wait_draft(expected):
+                    child.until(
+                        lambda: driver.prompt_matches(child.screen.line(), expected)
+                        or mode == "vi" and driver.prompt_matches(
+                            child.screen.line(), f"[I] {expected}".rstrip()),
+                        deadline, f"draft {expected!r}")
+
+                def menu_visible():
+                    return names.issubset(
+                        words[0] for row in screen_text().splitlines()
+                        if (words := row.strip().lstrip(">").split()))
+
+                try:
+                    child.until(child.screen.at_prompt, deadline, "initial prompt")
+                    for partial, command in (("s", "status"), ("f", "fix")):
+                        child.send(b"#")
+                        child.until(menu_visible, deadline, "automatic command menu")
+                        self.assertTrue(selected("# <task>"), screen_text())
+                        self.assertEqual(len(server.requests), 0, child.result.transcript)
+                        self.assertNotIn("#out", driver.plain(child.result.transcript))
+
+                        for text, expected in (
+                                (partial.encode(), f"#{partial}"),
+                                (b"\x7f", "#"),
+                                (partial.encode(), f"#{partial}"),
+                                (b"q", f"#{partial}q"),
+                                (b"\x7f", f"#{partial}"),
+                                (b"q", f"#{partial}q"),
+                                (b"\x1b[D\x1b[3~", f"#{partial}"),
+                                (command[1:].encode(), f"#{command}"),
+                                (b"\x7f", f"#{command[:-1]}"),
+                                (b"\x7f" * len(command), "")):
+                            child.send(text)
+                            wait_draft(expected)
+                            if expected == "#":
+                                child.until(menu_visible, deadline, "menu retained after backspace")
+                            elif expected in (f"#{partial}", f"#{command[:-1]}"):
+                                child.until(
+                                    lambda: selected(command),
+                                    deadline, "menu restored for the edited command prefix")
+                            if not expected.endswith("q"):
+                                self.assertNotIn("unknown command", screen_text())
+                        child.send(b"#")
+                        child.until(menu_visible, deadline, "menu reopened after deleting the draft")
+                        child.send(partial.encode())
+                        wait_draft(f"#{partial}")
+                        child.until(lambda: selected(command), deadline, "filtered selection")
+                        self.assertNotIn("Selection unavailable", screen_text())
+                        child.send(b"\r")
+                        wait_draft(f"#{command}")
+                        self.assertFalse(menu_visible(), screen_text())
+                        self.assertEqual(len(server.requests), 0, child.result.transcript)
+                        child.send(b"\r")
+                        wait_draft("")
+                        self.assertEqual(len(server.requests), 0, child.result.transcript)
+
+                    start = len(child.result.transcript)
+                    child.send(b"#help\r")
+                    child.until(
+                        lambda: "# <task>" in driver.plain(child.result.transcript[start:])
+                        and child.screen.at_prompt() and "#help" not in child.screen.line(),
+                        deadline, "fully typed help submitted directly")
+                    self.assertEqual(len(server.requests), 0, child.result.transcript)
+
+                    child.send(b"#")
+                    child.until(menu_visible, deadline, "second automatic command menu")
+                    self.assertTrue(selected("# <task>"), screen_text())
+                    child.send(b"\r")
+                    child.until(lambda: not menu_visible(), deadline, "task entry accepted")
+                    wait_draft("#")
+                    self.assertEqual(len(server.requests), 0, child.result.transcript)
+                    child.send(b"explain this\r")
+                    child.until(
+                        lambda: "PREFIX_TASK_DONE" in child.result.transcript
+                        and driver.prompt_matches(
+                            child.screen.line(), "[I]" if mode == "vi" else ""),
+                        deadline, "task submitted after the prefix menu")
+                    specs = [request["spec"] for request in server.requests
+                             if request["op"] == "open"]
+                    self.assertEqual([spec["label"] for spec in specs], ["agent"])
+                    self.assertTrue(any(
+                        message.get("User") == "explain this"
+                        for request in server.requests if request["op"] == "step"
+                        for message in request["append"]))
+                    child.send(b"exit\r")
+                    child.until(lambda: child.result.exit_code is not None, deadline, "shell exit")
+                    self.assertEqual(child.result.exit_code, 0, child.result.transcript)
+                except (driver.DriverError, TimeoutError) as error:
+                    self.fail(f"{error}\n{driver.plain(child.result.transcript)}")
+                finally:
+                    child.close()
+            self.socket.unlink()
+
     def test_fresh_shell_home_cwd_environment_approvals_and_seed(self):
         commands = [
             "export RESIDENT_TEST=leak; cd data; printf '%s' \"$HOME\" > home.txt",
@@ -634,21 +747,20 @@ class ProductionProxyTests(unittest.TestCase):
                 self.socket.unlink()
         self.assertEqual(len(systems), 1)
 
-    def test_fix_packet_keeps_error_in_user_and_binding_in_host_observation(self):
+    def test_automatic_fix_packet_keeps_error_in_user_and_binding_in_host_observation(self):
         original = "sh -c 'printf \"actual-error\\n\" >&2; exit 7'"
         turns = [{"text": "Here is the repaired command:\n```bash\ntouch not-created\n```"},
                  {"text": "touch not-created"}]
         with ScriptedWorker(self.socket, turns) as server:
-            root, _, trace, env, argv = self.case(0, 0, capture_output="last")
-            scenario = {"inputs": [original, "#fix"],
-                        "completions": [{"kind": "shell", "exit_code": 7, "contains": ["actual-error"]},
-                                        {"kind": "assist"}],
+            root, _, trace, env, argv = self.case(0, 0, capture_output="last", command_assist=True)
+            scenario = {"inputs": [original],
+                        "completions": [{"kind": "assist"}],
                         "check": "fix-packet"}
             result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
             self.assertIsNone(result.error, result.transcript)
             self.assertIsNone(result.failure, result.transcript)
             specs = [r["spec"] for r in server.requests if r["op"] == "open"]
-            self.assertEqual([s["label"] for s in specs], ["command_assist.fix.foreground"])
+            self.assertEqual([s["label"] for s in specs], ["command_assist.fix.background"])
             steps = [r["append"] for r in server.requests if r["op"] == "step"]
             self.assertEqual(len(steps), 2)
             self.assertEqual([r["choice"] for r in server.requests if r["op"] == "choice"],
@@ -694,6 +806,7 @@ class ProductionProxyTests(unittest.TestCase):
             events = [json.loads(line) for line in trace.read_text().splitlines()]
             observed = observations.assistance_observations(events)
             self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0]["background"])
             self.assertEqual(observed[0]["input_format"], "command_assist_v1")
             self.assertEqual(observed[0]["execution"]["command"], original)
             self.assertEqual(observed[0]["execution"]["execution_cwd"], str(root))
@@ -773,7 +886,7 @@ class ProductionProxyTests(unittest.TestCase):
         self.assertIn("evaluation worker", result.stderr)
         self.assertNotIn("failed to load", result.stderr)
 
-    def test_driver_handles_wrapped_and_multiline_fix_suggestions_without_execution(self):
+    def test_driver_handles_wrapped_and_multiline_automatic_fix_suggestions_without_execution(self):
         commands = [
             "printf repaired",
             "printf '%s\\n' '" + "a" * 180 + "'",
@@ -784,37 +897,58 @@ class ProductionProxyTests(unittest.TestCase):
         ]
         for number, command in enumerate(commands):
             with self.subTest(number=number), ScriptedWorker(self.socket, [{"text": command}]) as server:
-                root, _, trace, env, argv = self.case(number, 0)
-                scenario = {"check": "fix-readiness", "inputs": ["sh -c 'exit 7'", "#fix"],
-                            "completions": [{"kind": "observe"}, {"kind": "assist"}]}
+                root, _, trace, env, argv = self.case(number, 0, command_assist=True)
+                scenario = {"check": "fix-readiness", "inputs": ["sh -c 'exit 7'"],
+                            "completions": [{"kind": "assist"}]}
                 result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
                 self.assertIsNone(result.error, result.transcript)
                 self.assertEqual(result.exit_code, 0, result.transcript)
                 events = [json.loads(line) for line in trace.read_text().splitlines()]
                 observed = observations.assistance_observations(events)
                 self.assertEqual(observed[0]["text"], command)
+                self.assertTrue(observed[0]["background"])
+                self.assertEqual(observed[0]["intent"], "fix")
                 self.assertEqual(list(root.iterdir()), [])
             self.socket.unlink()
 
-    def test_agent_failure_log_execution_marker_is_data_not_assistance(self):
-        with ScriptedWorker(self.socket, [{"text": "The command failed with exit code 7."}]):
-            root, _, trace, env, argv = self.case(0, 0, capture_output="last")
-            original = "sh -c 'printf \"[execution]\\nnot-json\\n\" >&2; exit 7'"
-            scenario = {"mode": "repl", "check": "agent-log",
-                        "inputs": [original, "#fix Explain the captured failure."],
-                        "completions": [{"kind": "shell", "exit_code": 7, "contains": ["not-json"]},
-                                        {"kind": "agent"}]}
-            result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
-            self.assertIsNone(result.error, result.transcript)
-            self.assertIsNone(result.failure, result.transcript)
-            events = [json.loads(line) for line in trace.read_text().splitlines()]
-            info = next(e["info"] for e in events if e["ev"] == "engine")
-            observed = observations.observe(
-                result, scenario, trace, seed=0,
-                expected_worker={"pid": info["worker_pid"], "config": info["worker_config"]},
-            )
-            self.assertEqual(observed["metrics"]["task_status"], "completed")
-            self.assertEqual(observed["assistance"], [])
+    def test_manual_fix_with_optional_context_uses_agent_and_captured_failure(self):
+        for number, additional in enumerate(("", "The deployment target is eu-west-1; do not change files.")):
+            with self.subTest(additional=additional), ScriptedWorker(
+                self.socket, [{"text": "The command failed with exit code 7."}]
+            ) as server:
+                root, _, trace, env, argv = self.case(number, 0, capture_output="last")
+                original = "sh -c 'printf \"[execution]\\nnot-json\\n\" >&2; exit 7'"
+                scenario = {"mode": "repl", "check": "agent-log",
+                            "inputs": [original, "#fix" + (" " + additional if additional else "")],
+                            "completions": [{"kind": "shell", "exit_code": 7, "contains": ["not-json"]},
+                                            {"kind": "agent"}]}
+                result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+                self.assertIsNone(result.error, result.transcript)
+                self.assertIsNone(result.failure, result.transcript)
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                info = next(e["info"] for e in events if e["ev"] == "engine")
+                observed = observations.observe(
+                    result, scenario, trace, seed=0,
+                    expected_worker={"pid": info["worker_pid"], "config": info["worker_config"]},
+                )
+                self.assertEqual(observed["metrics"]["task_status"], "completed")
+                self.assertEqual(observed["assistance"], [])
+                requests = list(server.requests)
+                specs = [request["spec"] for request in requests if request["op"] == "open"]
+                self.assertEqual([spec["label"] for spec in specs], ["agent"])
+                self.assertEqual([tool["name"] for tool in specs[0]["tools"]],
+                                 ["exec", "read_file", "grep", "ask_user"])
+                first = next(request["append"] for request in requests if request["op"] == "step")
+                expected = "Explain why the command failed and how to fix it."
+                if additional:
+                    expected += "\n\nAdditional context from the user:\n" + additional
+                self.assertEqual([message["User"] for message in first if "User" in message], [expected])
+                context = next(message["System"] for message in first if "System" in message)
+                self.assertIn("\nexit: 7", context)
+                self.assertIn("\nfailed_command:", context)
+                self.assertIn("\n[user_output ", context)
+                self.assertIn("not-json", context)
+            self.socket.unlink()
 
     def test_next_is_automatic_after_success_and_does_not_execute_its_suggestion(self):
         with ScriptedWorker(self.socket, [{"text": "touch not-created"}]) as server:

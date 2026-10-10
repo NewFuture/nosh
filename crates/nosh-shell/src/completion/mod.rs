@@ -16,6 +16,8 @@ pub(crate) mod worker;
 pub use crate::input_assist::WorkerCommand;
 pub use editor::{AbbreviationSelection, Completion, SelectionObserver};
 
+pub(crate) const INLINE_MENU: &str = "inline_command_menu";
+
 #[derive(Clone)]
 pub struct Config {
     pub enabled: bool,
