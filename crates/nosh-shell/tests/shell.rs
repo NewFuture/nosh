@@ -566,7 +566,7 @@ fn pipeline_next_requires_enabled_automatic_assistance_and_success() {
 }
 
 #[test]
-fn pipeline_next_is_not_a_management_subcommand() {
+fn pipeline_removed_management_subcommands_do_not_dispatch() {
     let _g = serial();
     let mut sh = shell();
     let mut ui = ScriptUi {
@@ -575,6 +575,10 @@ fn pipeline_next_is_not_a_management_subcommand() {
     };
     let mut p = Pipeline::new(ReplConfig::default());
     for line in [
+        "#s",
+        "#s argument",
+        "#out",
+        "#out 1",
         "#next",
         "#next sort the records",
         "#history",

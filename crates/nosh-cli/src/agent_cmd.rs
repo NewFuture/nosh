@@ -16,7 +16,6 @@ use crate::engine::{self, EngineSetup};
 
 pub fn agent_config(cfg: &Config, mode: ApprovalMode, seed: Option<u64>) -> AgentConfig {
     let mut ac = AgentConfig {
-        command_prefix: cfg.ai_prefix.clone(),
         mode,
         rules: UserRules {
             allow: cfg.allow.clone(),

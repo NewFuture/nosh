@@ -22,7 +22,6 @@ const SWITCHES: &[(&str, bool)] = &[("on", true), ("off", false)];
 pub enum ManagementCommand {
     Mode(Option<ApprovalMode>),
     Think(Option<bool>),
-    Out(Option<usize>),
     Clear,
     Ctx,
     Status,
@@ -57,6 +56,12 @@ enum ErrorKind {
 }
 
 impl Error {
+    pub(crate) fn is_incomplete_name(&self, input: &str) -> bool {
+        self.span.end == input.len()
+            && matches!(&self.kind, ErrorKind::Unknown(name)
+                if names().any(|candidate| candidate.starts_with(name)))
+    }
+
     pub fn message(&self, prefix: &str) -> String {
         let prefix = crate::style::visible_text(prefix);
         match &self.kind {
@@ -86,7 +91,6 @@ enum Kind {
     Think,
     Auto,
     Fix,
-    Out,
     Clear,
     Ctx,
     Status,
@@ -131,17 +135,10 @@ const COMMANDS: &[Definition] = &[
     },
     Definition {
         name: "fix",
-        syntax: "fix [question]",
-        zh: "生成修复命令；附问题时交给 Agent 诊断",
-        en: "suggest a fix; add a question for Agent diagnosis",
+        syntax: "fix [context]",
+        zh: "由 Agent 诊断上次失败，可附补充说明",
+        en: "ask Agent to diagnose the last failure, with optional context",
         kind: Kind::Fix,
-    },
-    Definition {
-        name: "out",
-        syntax: "out [id]",
-        zh: "查看 agent 命令输出，默认最近一条",
-        en: "show agent command output, most recent by default",
-        kind: Kind::Out,
     },
     Definition {
         name: "clear",
@@ -205,16 +202,6 @@ impl Definition {
             }
             Kind::Think => Some(Command::Manage(ManagementCommand::Think(switch()?))),
             Kind::Auto => Some(Command::Auto(switch()?)),
-            Kind::Out => {
-                let id = match arg {
-                    Some(arg) if arg.bytes().all(|byte| byte.is_ascii_digit()) => {
-                        Some(arg.parse().ok()?)
-                    }
-                    Some(_) => return None,
-                    None => None,
-                };
-                Some(Command::Manage(ManagementCommand::Out(id)))
-            }
             _ if arg.is_some() => None,
             Kind::Help => Some(Command::Help),
             Kind::Clear => Some(Command::Manage(ManagementCommand::Clear)),
@@ -240,6 +227,15 @@ fn task(body: &str) -> bool {
 
 pub fn is_command(line: &str, prefix: &str, enabled: bool) -> bool {
     body(line, prefix, enabled).is_some_and(|(body, _)| !task(body))
+}
+
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|definition| definition.name)
+}
+
+pub(crate) fn name_fragment<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let (name, _) = body(line, prefix, true)?;
+    (!name.contains(char::is_whitespace)).then_some(name)
 }
 
 pub fn parse<'a>(line: &'a str, prefix: &str, enabled: bool) -> Input<'a> {
@@ -276,24 +272,21 @@ pub fn parse<'a>(line: &'a str, prefix: &str, enabled: bool) -> Input<'a> {
 
 pub fn help(prefix: &str) -> String {
     let prefix = crate::style::visible_text(prefix);
-    let mut lines = COMMANDS
-        .iter()
-        .map(|definition| {
-            format!(
-                "  {prefix}{:<26} {}",
-                definition.syntax,
-                definition.description()
-            )
-        })
-        .collect::<Vec<_>>();
-    lines.push(format!(
+    let mut lines = vec![format!(
         "  {prefix} {:<25} {}",
         "<task>",
         tr!(
             "执行任务（前缀后加空白）",
             "run a task (whitespace after the prefix)"
         )
-    ));
+    )];
+    lines.extend(COMMANDS.iter().map(|definition| {
+        format!(
+            "  {prefix}{:<26} {}",
+            definition.syntax,
+            definition.description()
+        )
+    }));
     lines.join("\n")
 }
 
@@ -397,7 +390,7 @@ mod tests {
 
     #[test]
     fn catalog_and_fixed_parameters_share_the_contract() {
-        assert_eq!(COMMANDS.len(), 9);
+        assert_eq!(COMMANDS.len(), 8);
         for definition in COMMANDS {
             assert!(matches!(
                 parse(&format!("#{}", definition.name), "#", true),
@@ -415,12 +408,8 @@ mod tests {
             Input::Command(Command::Auto(Some(false)))
         );
         assert_eq!(
-            parse("#out 12", "#", true),
-            Input::Command(Command::Manage(ManagementCommand::Out(Some(12))))
-        );
-        assert_eq!(
-            parse("#fix 说明原因\n不要修改文件", "#", true),
-            Input::Command(Command::Fix("说明原因\n不要修改文件".into()))
+            parse("#fix 部署环境是 Ubuntu 24.04\n不要修改文件", "#", true),
+            Input::Command(Command::Fix("部署环境是 Ubuntu 24.04\n不要修改文件".into()))
         );
     }
 
@@ -441,16 +430,29 @@ mod tests {
             "#clear extra",
             "#ctx extra",
             "#status extra",
-            "#out nope",
-            "#out -1",
-            "#out #1",
-            "#out 999999999999999999999999999999999",
         ] {
             let Input::Error(error) = parse(line, "#", true) else {
                 panic!("accepted invalid command: {line}");
             };
             assert!(line.get(error.span.clone()).is_some());
             assert!(!error.message("#").is_empty());
+        }
+    }
+
+    #[test]
+    fn removed_output_command_is_not_exposed() {
+        for prefix in ["#", "##", "问"] {
+            for suffix in ["", " 12", " invalid"] {
+                let line = format!("{prefix}out{suffix}");
+                let Input::Error(error) = parse(&line, prefix, true) else {
+                    panic!("accepted removed command: {line}");
+                };
+                assert_eq!(error.kind, ErrorKind::Unknown("out".into()));
+                assert_eq!(&line[error.span], "out");
+            }
+            assert!(!help(prefix).contains(&format!("{prefix}out")));
+            let scope = completion_scope(prefix, prefix.len(), prefix).unwrap();
+            assert!(scope.values.iter().all(|(name, _)| *name != "out"));
         }
     }
 
@@ -462,7 +464,7 @@ mod tests {
             let mut result = line.to_owned();
             result.replace_range(scope.span, "help");
             assert_eq!(result, if prefix == "#" { "#help" } else { "  问help" });
-            assert_eq!(scope.values.len(), 9);
+            assert_eq!(scope.values.len(), 8);
         }
         let line = "#mode au";
         let scope = completion_scope(line, line.len(), "#").unwrap();

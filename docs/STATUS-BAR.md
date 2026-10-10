@@ -159,7 +159,7 @@
 | **M03 `input_assist = false`** | 不显示该分析器的诊断/查询状态，也不标“检查通过”；环境、菜单、历史和操作提示独立保留 |
 | **M04 状态行关闭/不可用/故障停用** | 四区不生成，走原提示符、badge 和 InputAssist 契约；非交互、基础终端及重定向不强开装饰 |
 | **M05 自定义 PS1/PS2** | 环境区不自动注入；其它适用区在完整 PS1 之前，用户提示符及控制序列不被拆改 |
-| **M06 `command_assist = false`** | 关闭自动 Next/Fix，不影响显式 Generate/Fix/Next 或 InputAssist；信息条不为补齐状态主动发起模型请求 |
+| **M06 `command_assist = false`** | 关闭自动 Next/Fix，不影响显式 Generate、Agent（包括 `#fix`）或 InputAssist；信息条不为补齐状态主动发起模型请求 |
 
 ### 2.5 操作提示必须匹配实际键义
 

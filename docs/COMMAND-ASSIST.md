@@ -7,10 +7,10 @@
 | 意图 | 入口 | 输出 |
 |---|---|---|
 | Generate / CommandGen | `nosh -s "描述"`、非管理的非空输入 F2、适用的 Tab 兜底 | 根据 nosh 提交的需求生成或改写一个完整 shell program |
-| Fix / AutoFix | 用户命令失败后的自动辅助、显式 `#fix` | 根据上一条命令及其输出给出修复命令或无建议；不提问、不自动重跑或修改环境 |
+| Fix / AutoFix | 用户命令失败后的自动辅助 | 根据上一条命令及其输出给出修复命令或无建议；不提问、不自动重跑或修改环境 |
 | Next / NextSuggest | 用户命令成功后的自动辅助 | 有依据的下一条命令；没有合理下一步就不建议 |
 
-`#fix <question>` 进入 Agent，携带匹配的失败证据，支持解释、日志分析和继续诊断。普通 `# <任务>`、自然语言任务与 `nosh -a` 走 Agent。单独 `#` 显示帮助，不请求修复；管理草稿的 F2 和 Tab 无结果不进入 Generate。
+手动 `#fix [补充说明]` 始终进入 Agent，自动附带上次失败命令、退出码及匹配输出；正文只是可选补充，不要求写成问题或重复报错。工具调用按 Agent 审批规则处理，不走 CommandAssist Fix。普通 `# <任务>`、自然语言任务与 `nosh -a` 也走 Agent。单独键入 `#` 弹出本地命令补全，`#help` 显示帮助；管理草稿的 F2 和 Tab 无结果不进入 Generate。
 
 只有交互层直接执行的用户命令产生自动辅助事件。Agent 内部的工具成功／失败继续由原 Agent 处理；不递归启动 Next/Fix。脚本、`-c`、补全、本地拼写纠错、AI 管理命令不产生新的用户执行事件。
 
@@ -160,7 +160,7 @@ Agent 的 `ask_user`、`Message::UserAnswer` 和终端交互不受此协议调�
 
 ## 调度与用户输入
 
-默认 `[shell] command_assist = true`。每条用户命令完成后，成功排入 Next，值得诊断的失败排入 Fix；`on_failure = "off"` 关闭自动失败辅助，`#auto off` 暂停自动辅助。`command_assist = false` 保留显式 Generate/Fix，不再触发 Next；`--safe`／`NOSH_DISABLE_AI` 关闭 AI。
+默认 `[shell] command_assist = true`。每条用户命令完成后，成功排入 Next，值得诊断的失败排入 Fix；`on_failure = "off"` 关闭自动失败辅助，`#auto off` 暂停自动辅助。`command_assist = false` 关闭自动 Fix/Next，保留显式 Generate 和 Agent 入口（包括 `#fix`）；`--safe`／`NOSH_DISABLE_AI` 关闭 AI。
 
 一个后台 worker 临时持有既有 Agent 及其推理引擎，只有一个最新任务槽，不加载第二份模型。加载器、Agent 和模型描述作为同一个 EngineState 在前后台移动，不逐项交接独立状态。前台普通命令和编辑不等待推理；显式 AI 请求取消后台工作并取回同一引擎，因此可等待当前推理取消或模型加载完成。主 Agent 的对话日志不因辅助任务而清空，单份活动 KV 在切换对话后可能重新 prefill。
 

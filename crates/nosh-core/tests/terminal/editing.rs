@@ -195,7 +195,7 @@ fn inline_prefix_help_completion_and_editor_actions_do_not_request_ai() {
         "repl-editing-prefix",
         "xterm-256color",
         &[
-            ("editing> ", b"#\r"),
+            ("editing> ", b"#help\r"),
             ("mode [confirm|auto|yolo]", b"#mo\t"),
             ("#mode ", b"au\t"),
             ("#mode auto", b"\r"),

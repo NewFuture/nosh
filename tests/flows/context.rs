@@ -15,7 +15,8 @@ fn user_output_is_attached_once_per_conversation() {
     let engine = MockChatEngine::with_responder(|_| vec![text("done")]);
     let received = engine.received();
     let mut agent = agent(engine, AgentConfig::default());
-    let mut input = TaskInput::new(Trigger::Failed { exit: 17 }, "");
+    let additional = "REGION should be eu-west-1; do not change files.";
+    let mut input = TaskInput::new(Trigger::Failed { exit: 17 }, additional);
     input.failed = Some(command);
     input.user_output = Some(output);
     let mut ui = RecordUi::default();
@@ -36,11 +37,23 @@ fn user_output_is_attached_once_per_conversation() {
     assert!(task(0).contains("[user_output "));
     assert!(!task(1).contains("[user_output "));
     assert!(task(2).contains("[user_output "));
+    assert!(task(0).contains("REGION is unset"));
+    assert!(task(2).contains("REGION is unset"));
     for messages in received.iter() {
-        let [Message::System(_), Message::User(request)] = messages.as_slice() else {
+        let [Message::System(context), Message::User(request)] = messages.as_slice() else {
             panic!("captured output must remain separate from the real request");
         };
-        assert_eq!(request, "Explain why the command failed and how to fix it.");
+        assert_eq!(context_field(context, "exit"), Some("17"));
+        assert_eq!(
+            context_field(context, "failed_command"),
+            Some("\"sh -c 'exit 17'\"")
+        );
+        assert_eq!(
+            request,
+            &format!(
+                "Explain why the command failed and how to fix it.\n\nAdditional context from the user:\n{additional}"
+            )
+        );
     }
 }
 
