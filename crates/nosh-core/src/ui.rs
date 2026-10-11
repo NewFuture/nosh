@@ -1,15 +1,18 @@
-//! Rendering of agent activity: the `┃` block in the terminal, JSON Lines for
+//! Rendering of agent activity: the `│` block in the terminal, JSON Lines for
 //! `nosh -a --json`, and a recorder for tests.
 
 use std::io::Write;
 
 use nosh_permissions::{ApprovalMode, Risk};
 use nosh_platform::tr;
+use nosh_shell::theme::{Role, Styles, Theme, ThemeHandle};
 use nosh_shell::{OutputSink, style};
 use serde_json::{Value, json};
 
 pub fn bar() -> String {
-    style::cyan(style::glyph("┃", "|"))
+    Theme::default()
+        .styles(style::stderr())
+        .cyan(style::glyph("│", "|"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -171,7 +174,7 @@ impl TextState {
 
 /// Terminal renderer (stderr; the answer can go to stdout for `nosh -a`).
 pub struct TermUi {
-    bar: String,
+    theme: ThemeHandle,
     answer_to_stdout: bool,
     stdout: style::Terminal,
     stderr: style::Terminal,
@@ -188,8 +191,12 @@ pub struct TermUi {
 
 impl TermUi {
     pub fn new(answer_to_stdout: bool) -> Self {
+        Self::with_theme(answer_to_stdout, ThemeHandle::default())
+    }
+
+    pub fn with_theme(answer_to_stdout: bool, theme: ThemeHandle) -> Self {
         Self {
-            bar: bar(),
+            theme,
             answer_to_stdout,
             stdout: style::stdout(),
             stderr: style::stderr(),
@@ -203,6 +210,13 @@ impl TermUi {
             show_think: false,
             state: None,
         }
+    }
+
+    fn styles(&self) -> Styles {
+        self.theme.snapshot().styles(self.stderr)
+    }
+    fn bar(&self) -> String {
+        self.styles().cyan(self.stderr.glyph("│", "|"))
     }
 
     fn clear_status(&mut self) {
@@ -223,9 +237,15 @@ impl TermUi {
             if !self.stdout.tty {
                 return String::new();
             }
-            format!("{} ", self.stdout.paint("36", self.stdout.glyph("┃", "|")))
+            format!(
+                "{} ",
+                self.theme
+                    .snapshot()
+                    .styles(self.stdout)
+                    .cyan(self.stdout.glyph("│", "|"))
+            )
         } else {
-            format!("{} ", self.bar)
+            format!("{} ", self.bar())
         }
     }
 
@@ -238,7 +258,7 @@ impl TermUi {
             let _ = std::io::stdout().flush();
         } else {
             let out = if self.text_is_think {
-                style::dim(out)
+                self.styles().dim(out)
             } else {
                 out.to_string()
             };
@@ -267,7 +287,7 @@ impl TermUi {
     fn output_line(&self, line: &str, is_err: bool, columns: Option<usize>) -> String {
         // Leave the last column unused to avoid terminal auto-wrap.
         let max = columns.map_or(usize::MAX, |w| w.saturating_sub(1));
-        let prefix = style::clip_line(&format!("{}   ", self.stderr.glyph("┃", "|")), max, 0, "");
+        let prefix = style::clip_line(&format!("{}   ", self.stderr.glyph("│", "|")), max, 0, "");
         let offset = style::width(&prefix);
         let text = style::clip_line(
             line,
@@ -277,8 +297,9 @@ impl TermUi {
         );
         format!(
             "{}{}",
-            self.stderr.paint("36", &prefix),
-            self.stderr.paint(if is_err { "31" } else { "2" }, &text,)
+            self.styles().cyan(&prefix),
+            self.styles()
+                .paint(if is_err { Role::Error } else { Role::Muted }, &text)
         )
     }
 
@@ -314,15 +335,16 @@ impl AgentUi for TermUi {
             self.end_text_line();
             eprintln!(
                 "{} {} | {}",
-                self.bar,
+                self.bar(),
                 approval_label(mode),
                 activity.label()
             );
             if activity == Activity::Thinking {
                 eprintln!(
                     "{} {}",
-                    self.bar,
-                    style::dim(tr!("Ctrl+C 结束任务", "Ctrl+C cancel task"))
+                    self.bar(),
+                    self.styles()
+                        .dim(tr!("Ctrl+C 结束任务", "Ctrl+C cancel task"))
                 );
             }
         }
@@ -341,7 +363,7 @@ impl AgentUi for TermUi {
         let pct = done * 100 / total.max(1);
         let status = format!(
             "{} {} {pct}%",
-            self.stderr.glyph("┃", "|"),
+            self.stderr.glyph("│", "|"),
             self.stderr.glyph("…", "...")
         );
         let status = style::clip_line(
@@ -350,7 +372,7 @@ impl AgentUi for TermUi {
             0,
             "",
         );
-        eprint!("\r\x1b[K{}", style::dim(&status));
+        eprint!("\r\x1b[K{}", self.styles().dim(&status));
         let _ = std::io::stderr().flush();
         self.status_shown = true;
     }
@@ -373,8 +395,8 @@ impl AgentUi for TermUi {
         if tool == "exec" && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             eprintln!(
                 "{} {}",
-                self.bar,
-                style::dim(tr!(
+                self.bar(),
+                self.styles().dim(tr!(
                     "Ctrl+C 中断命令；再次结束任务",
                     "Ctrl+C interrupt command; again abort task"
                 ))
@@ -391,16 +413,16 @@ impl AgentUi for TermUi {
             "...",
         );
         let risk_s = match risk {
-            Some(Risk::Safe) => style::green(&label),
-            Some(Risk::Mutating) => style::yellow(&label),
-            Some(_) => style::red(&label),
-            None => style::dim(&label),
+            Some(Risk::Safe) => self.styles().green(&label),
+            Some(Risk::Mutating) => self.styles().yellow(&label),
+            Some(_) => self.styles().red(&label),
+            None => self.styles().dim(&label),
         };
         eprintln!(
             "{} {} {}  {risk_s}",
-            self.bar,
-            style::cyan(style::glyph("⚙", "*")),
-            style::bold(tool)
+            self.bar(),
+            self.styles().cyan(style::glyph("⚙", "*")),
+            self.styles().bold(tool)
         );
         for (i, l) in detail.split('\n').enumerate() {
             let p = match (i, tool) {
@@ -408,7 +430,7 @@ impl AgentUi for TermUi {
                 (_, "exec") => "  ",
                 _ => "",
             };
-            eprintln!("{}   {p}{}", self.bar, style::visible(l));
+            eprintln!("{}   {p}{}", self.bar(), style::visible(l));
         }
         self.shown = 0;
         self.hidden = 0;
@@ -433,8 +455,9 @@ impl AgentUi for TermUi {
             if more > 0 {
                 eprintln!(
                     "{}   {}",
-                    self.bar,
-                    style::dim(&format!("{} {more} more lines", style::glyph("…", "...")))
+                    self.bar(),
+                    self.styles()
+                        .dim(&format!("{} {more} more lines", style::glyph("…", "...")))
                 );
             }
             for (line, is_err) in std::mem::take(&mut self.tail) {
@@ -444,8 +467,8 @@ impl AgentUi for TermUi {
         if !summary.is_empty() {
             eprintln!(
                 "{}   {}",
-                self.bar,
-                style::dim(&style::visible_text(summary))
+                self.bar(),
+                self.styles().dim(&style::visible_text(summary))
             );
         }
         self.text = TextState::default();
@@ -454,13 +477,21 @@ impl AgentUi for TermUi {
     fn notice(&mut self, msg: &str) {
         self.clear_status();
         self.end_text_line();
-        eprintln!("{} {}", self.bar, style::dim(&style::visible_text(msg)));
+        eprintln!(
+            "{} {}",
+            self.bar(),
+            self.styles().dim(&style::visible_text(msg))
+        );
     }
 
     fn error(&mut self, msg: &str) {
         self.clear_status();
         self.end_text_line();
-        eprintln!("{} {}", self.bar, style::red(&style::visible_text(msg)));
+        eprintln!(
+            "{} {}",
+            self.bar(),
+            self.styles().red(&style::visible_text(msg))
+        );
     }
 
     fn proposed(&mut self, cmd: &str, explanation: Option<&str>) {
@@ -468,13 +499,17 @@ impl AgentUi for TermUi {
         self.end_text_line();
         eprintln!(
             "{} {} {}",
-            self.bar,
-            style::cyan(style::glyph("↳", "->")),
-            style::bold(&style::visible(cmd))
+            self.bar(),
+            self.styles().cyan(style::glyph("↳", "->")),
+            self.styles().bold(&style::visible(cmd))
         );
         if let Some(e) = explanation.filter(|e| !e.trim().is_empty()) {
             for line in e.trim().lines() {
-                eprintln!("{}   {}", self.bar, style::dim(&style::visible_text(line)));
+                eprintln!(
+                    "{}   {}",
+                    self.bar(),
+                    self.styles().dim(&style::visible_text(line))
+                );
             }
         }
     }
@@ -483,9 +518,9 @@ impl AgentUi for TermUi {
         self.clear_status();
         self.end_text_line();
         let mark = match s.status.as_str() {
-            "completed" => style::green(style::glyph("✔", "+")),
-            "cancelled" => style::yellow(style::glyph("✗", "x")),
-            _ => style::yellow(style::glyph("⚠", "!")),
+            "completed" => self.styles().green(style::glyph("✔", "+")),
+            "cancelled" => self.styles().yellow(style::glyph("✗", "x")),
+            _ => self.styles().yellow(style::glyph("⚠", "!")),
         };
         let sep = style::glyph(" · ", " | ");
         let mut line = format!("{} steps{sep}{:.1} s", s.steps, s.secs);
@@ -497,11 +532,11 @@ impl AgentUi for TermUi {
         }
         eprintln!(
             "{} {mark} {}",
-            self.bar,
-            style::dim(&style::visible_text(&line))
+            self.bar(),
+            self.styles().dim(&style::visible_text(&line))
         );
         if stats_enabled() {
-            eprintln!("{} {}", self.bar, style::dim(&s.stats_line()));
+            eprintln!("{} {}", self.bar(), self.styles().dim(&s.stats_line()));
         }
         self.text = TextState::default();
     }

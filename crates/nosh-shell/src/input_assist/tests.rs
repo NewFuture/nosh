@@ -664,7 +664,7 @@ fn an_external_ai_command_gets_full_shell_diagnostics_after_header_resolution() 
         let styled = highlighter.highlight("ai < missing", 12);
         assert_eq!(styled.raw_string(), "ai < missing");
         if styled.buffer.iter().any(|(style, text)| {
-            text == "missing" && style.foreground == Some(nu_ansi_term::Color::Red)
+            text == "missing" && style.foreground == Some(nu_ansi_term::Color::Rgb(243, 139, 168))
         }) {
             break;
         }

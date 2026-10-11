@@ -1,4 +1,4 @@
-//! One self-contained status-row palette, with an explicit extended-color fallback.
+//! Explicit RGB and extended-color pairs shared by shell themes.
 
 use super::Tone;
 use std::sync::OnceLock;
@@ -48,6 +48,7 @@ pub struct ColorPair {
     background: [u8; 3],
     foreground_index: u8,
     background_index: u8,
+    attributes: nu_ansi_term::Style,
 }
 
 /// ANSI entries 0–15 are theme-overridable and cannot be an explicit fallback.
@@ -83,6 +84,7 @@ impl ColorPair {
             background,
             foreground_index,
             background_index,
+            attributes: nu_ansi_term::Style::new(),
         })
     }
 
@@ -99,24 +101,85 @@ impl ColorPair {
         self.background_index
     }
 
-    fn normal(background: [u8; 3], background_index: u8) -> Self {
-        Self {
-            foreground: [238, 243, 248],
-            foreground_index: 231,
-            background,
-            background_index,
+    pub fn attributes(self) -> nu_ansi_term::Style {
+        self.attributes
+    }
+
+    pub fn from_style(style: nu_ansi_term::Style, fallback: Self) -> Result<Self, String> {
+        if style.is_dimmed || style.is_hidden || style.is_blink {
+            return Err("dim, hidden and blink are not supported for meaningful shell text".into());
         }
+        let mut fg = style
+            .foreground
+            .map(crate::theme::color_rgb)
+            .transpose()?
+            .flatten()
+            .unwrap_or(fallback.foreground);
+        let mut bg = style
+            .background
+            .map(crate::theme::color_rgb)
+            .transpose()?
+            .flatten()
+            .unwrap_or(fallback.background);
+        if style.is_reverse {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        let mut pair = Self::from_rgb(fg, bg)?;
+        pair.attributes = nu_ansi_term::Style {
+            foreground: None,
+            background: None,
+            is_reverse: false,
+            ..style
+        };
+        Ok(pair)
+    }
+
+    pub fn from_rgb(foreground: [u8; 3], background: [u8; 3]) -> Result<Self, String> {
+        if crate::theme::contrast(foreground, background) < 4.5 {
+            return Err("RGB text contrast must be at least 4.5:1".into());
+        }
+        let background_index = crate::theme::nearest_index(background);
+        let fallback_bg = crate::theme::indexed_rgb(background_index).expect("extended index");
+        let foreground_index = (16..=255)
+            .filter(|&index| {
+                crate::theme::contrast(
+                    crate::theme::indexed_rgb(index).expect("extended index"),
+                    fallback_bg,
+                ) >= 4.5
+            })
+            .min_by_key(|&index| {
+                crate::theme::indexed_rgb(index)
+                    .expect("extended index")
+                    .into_iter()
+                    .zip(foreground)
+                    .map(|(a, b)| (i32::from(a) - i32::from(b)).pow(2))
+                    .sum::<i32>()
+            })
+            .expect("black or white always satisfies the contrast bound");
+        Self::new(foreground, background, foreground_index, background_index)
+            .map_err(|e| e.to_string())
     }
 
     pub(crate) fn sgr(self, depth: ColorDepth) -> String {
+        let mut attributes = String::new();
+        for (enabled, code) in [
+            (self.attributes.is_bold, 1),
+            (self.attributes.is_italic, 3),
+            (self.attributes.is_underline, 4),
+            (self.attributes.is_strikethrough, 9),
+        ] {
+            if enabled {
+                attributes.push_str(&format!(";{code}"));
+            }
+        }
         match depth {
             ColorDepth::Rgb => {
                 let [r, g, b] = self.foreground;
                 let [br, bg, bb] = self.background;
-                format!("\x1b[0;38;2;{r};{g};{b};48;2;{br};{bg};{bb}m")
+                format!("\x1b[0{attributes};38;2;{r};{g};{b};48;2;{br};{bg};{bb}m")
             }
             ColorDepth::Indexed => format!(
-                "\x1b[0;38;5;{};48;5;{}m",
+                "\x1b[0{attributes};38;5;{};48;5;{}m",
                 self.foreground_index, self.background_index
             ),
             ColorDepth::Plain => String::new(),
@@ -156,30 +219,18 @@ pub struct StatusPalette {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub environment: ColorPair,
+    pub git_branch: ColorPair,
     pub status: StatusPalette,
     pub operation: ColorPair,
     pub mode: ColorPair,
+    pub selection: ColorPair,
+    pub text: crate::theme::TextPalette,
+    pub powerline: bool,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            environment: ColorPair::normal([20, 60, 64], 23),
-            status: StatusPalette {
-                neutral: ColorPair::normal([37, 47, 63], 236),
-                advice: ColorPair::normal([35, 60, 91], 18),
-                pending: ColorPair::normal([45, 53, 66], 235),
-                notice: ColorPair::normal([89, 72, 38], 58),
-                error: ColorPair::normal([100, 54, 59], 88),
-            },
-            operation: ColorPair::normal([36, 69, 97], 24),
-            mode: ColorPair {
-                foreground: [199, 212, 224],
-                foreground_index: 252,
-                background: [27, 37, 51],
-                background_index: 234,
-            },
-        }
+        crate::theme::Builtin::default().palette()
     }
 }
 
@@ -243,55 +294,55 @@ mod tests {
     }
 
     #[test]
-    fn default_colors_preserve_the_accepted_rgb_and_indexed_bytes() {
+    fn soft_dark_default_has_explicit_rgb_and_indexed_golden_bytes() {
         for (region, state, rgb, indexed) in [
             (
                 Region::Environment,
                 StatusTone::Neutral,
-                "\x1b[0;38;2;238;243;248;48;2;20;60;64m",
-                "\x1b[0;38;5;231;48;5;23m",
+                "\x1b[0;38;2;17;17;27;48;2;250;179;135m",
+                "\x1b[0;38;5;233;48;5;216m",
             ),
             (
                 Region::Status,
                 StatusTone::Neutral,
-                "\x1b[0;38;2;238;243;248;48;2;37;47;63m",
-                "\x1b[0;38;5;231;48;5;236m",
+                "\x1b[0;38;2;205;214;244;48;2;36;36;51m",
+                "\x1b[0;38;5;189;48;5;235m",
             ),
             (
                 Region::Operation,
                 StatusTone::Neutral,
-                "\x1b[0;38;2;238;243;248;48;2;36;69;97m",
-                "\x1b[0;38;5;231;48;5;24m",
+                "\x1b[0;38;2;205;214;244;48;2;30;30;46m",
+                "\x1b[0;38;5;189;48;5;235m",
             ),
             (
                 Region::Mode,
                 StatusTone::Neutral,
-                "\x1b[0;38;2;199;212;224;48;2;27;37;51m",
-                "\x1b[0;38;5;252;48;5;234m",
+                "\x1b[0;38;2;166;173;200;48;2;30;30;46m",
+                "\x1b[0;38;5;146;48;5;235m",
             ),
             (
                 Region::Status,
                 StatusTone::Advice,
-                "\x1b[0;38;2;238;243;248;48;2;35;60;91m",
-                "\x1b[0;38;5;231;48;5;18m",
+                "\x1b[0;38;2;17;17;27;48;2;180;190;254m",
+                "\x1b[0;38;5;233;48;5;147m",
             ),
             (
                 Region::Status,
                 StatusTone::Pending,
-                "\x1b[0;38;2;238;243;248;48;2;45;53;66m",
-                "\x1b[0;38;5;231;48;5;235m",
+                "\x1b[0;38;2;186;194;222;48;2;39;41;56m",
+                "\x1b[0;38;5;146;48;5;236m",
             ),
             (
                 Region::Status,
                 StatusTone::Notice,
-                "\x1b[0;38;2;238;243;248;48;2;89;72;38m",
-                "\x1b[0;38;5;231;48;5;58m",
+                "\x1b[0;38;2;17;17;27;48;2;249;226;175m",
+                "\x1b[0;38;5;233;48;5;223m",
             ),
             (
                 Region::Status,
                 StatusTone::Error,
-                "\x1b[0;38;2;238;243;248;48;2;100;54;59m",
-                "\x1b[0;38;5;231;48;5;88m",
+                "\x1b[0;38;2;17;17;27;48;2;243;139;168m",
+                "\x1b[0;38;5;233;48;5;211m",
             ),
         ] {
             let pair = Theme::default().colors(region, state);
@@ -381,12 +432,8 @@ mod tests {
                 indexed_rgb(pair.foreground_index),
                 indexed_rgb(pair.background_index),
             );
-            assert!(rgb >= 7.0, "{name}: RGB text contrast {rgb}");
+            assert!(rgb >= 4.5, "{name}: RGB text contrast {rgb}");
             assert!(indexed >= 4.5, "{name}: 256-color text contrast {indexed}");
-            assert!(
-                indexed >= 7.0 || name == "notice",
-                "{name}: fallback should prefer 7:1"
-            );
             for outside in [[11, 13, 16], [247, 248, 250]] {
                 assert!(
                     contrast(pair.foreground, outside).max(contrast(pair.background, outside))
@@ -430,16 +477,14 @@ mod tests {
     }
 
     #[test]
-    fn regional_bases_and_state_semantics_have_distinct_backgrounds() {
-        let regions = (0..4)
-            .map(|zone| pair(zone, Tone::Secondary))
-            .collect::<Vec<_>>();
-        for (index, region) in regions.iter().enumerate() {
-            for other in &regions[index + 1..] {
-                assert_ne!(region.background, other.background);
-                assert_ne!(region.background_index, other.background_index);
-            }
-        }
+    fn environment_segments_and_state_semantics_have_distinct_backgrounds() {
+        let theme = Theme::default();
+        assert_ne!(theme.environment.background, theme.git_branch.background);
+        assert_eq!(
+            theme.operation.background,
+            theme.text_color(crate::theme::Role::Text).background
+        );
+        assert_eq!(theme.mode.background, theme.operation.background);
         let states = [
             Tone::Secondary,
             Tone::Advice,
@@ -451,7 +496,10 @@ mod tests {
         for (index, state) in states.iter().enumerate() {
             for other in &states[index + 1..] {
                 assert_ne!(state.background, other.background);
-                assert_ne!(state.background_index, other.background_index);
+                assert_ne!(
+                    (state.foreground_index, state.background_index),
+                    (other.foreground_index, other.background_index)
+                );
             }
         }
     }

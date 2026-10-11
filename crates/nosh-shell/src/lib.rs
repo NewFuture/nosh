@@ -21,6 +21,7 @@ pub mod style;
 mod suggestion;
 pub mod term;
 pub mod terminal_integration;
+pub mod theme;
 pub mod trigger;
 pub mod user_output;
 mod yielding;

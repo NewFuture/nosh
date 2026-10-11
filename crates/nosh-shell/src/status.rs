@@ -246,11 +246,14 @@ pub(crate) struct Completion {
 pub(crate) struct Context<'a> {
     pub editor: &'a PromptContext<'a>,
     pub environment: Option<(&'a str, Option<&'a str>)>,
+    pub external_environment: Option<&'a crate::theme::Fragment>,
     pub feedback: Option<&'a input_assist::Feedback>,
     pub completion: Option<&'a Completion>,
     pub assistance: Option<&'a Assistance>,
     pub latest_command: Option<u64>,
     pub failed_exit: Option<i32>,
+    pub last_result: Option<(i32, std::time::Duration)>,
+    pub context_usage: Option<crate::repl::ContextUsage>,
     pub approval: &'a str,
     pub note: Option<&'a str>,
     pub bindings: &'a Bindings,
@@ -379,28 +382,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
     if editor.rows < 3 {
         return Layout::default();
     }
-    let columns = usize::from(editor.columns.saturating_sub(1));
-    let slots = Slots::new(columns);
     let mut fields = Vec::new();
-    if let Some((cwd, branch)) = context.environment {
-        let budget = slots.widths[0].saturating_sub(3);
-        let mut environment = path_summary(cwd, budget.min(40));
-        if let Some(branch) = branch.filter(|branch| !branch.is_empty()) {
-            let branch = format!("({})", plain(branch));
-            if style::width(&environment) + 1 + style::width(&branch) <= budget {
-                environment.push(' ');
-                environment.push_str(&branch);
-            }
-        }
-        fields.push(Field::new(
-            0,
-            &environment,
-            &environment,
-            &environment,
-            80,
-            false,
-        ));
-    }
     let add_action = |fields: &mut Vec<Field>, action, label: &str, priority, required| {
         if let Some(field) =
             context
@@ -624,8 +606,21 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 state(
                     &mut fields,
                     &format!("{intent}: {program}"),
-                    tr!("命令建议可用", "Suggestion ready"),
+                    tr!("有建议", "Advice"),
                     Tone::Advice,
+                );
+            } else if let Some(Assistance::Pending { command_id, intent }) =
+                context.assistance.filter(|_| blank)
+                && context.latest_command == Some(*command_id)
+            {
+                state(
+                    &mut fields,
+                    &format!(
+                        "AI {intent}: {}",
+                        tr!("生成建议中", "generating suggestion")
+                    ),
+                    &format!("AI {intent}"),
+                    Tone::Pending,
                 );
             } else if let Some(Assistance::Message(message)) = context.assistance.filter(|_| blank)
             {
@@ -635,7 +630,11 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                     &style::clip_line(&plain(message), 28, 0, "..."),
                     Tone::Secondary,
                 );
-            } else if blank && let Some(exit) = context.failed_exit {
+            } else if blank
+                && context.last_result.is_none()
+                && context.external_environment.is_none()
+                && let Some(exit) = context.failed_exit
+            {
                 let text = format!("{}: {exit}", tr!("上次失败", "Last failure"));
                 state(&mut fields, &text, &text, Tone::Notice);
             } else if !blank && editor.buffer.contains('\n') {
@@ -710,14 +709,8 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         }
     }
     if let Some(note) = context.note.filter(|note| !note.is_empty()) {
-        let mut field = Field::new(
-            1,
-            note,
-            &style::clip_line(&plain(note), 24, 0, "..."),
-            &style::clip_line(&plain(note), 24, 0, "..."),
-            96,
-            false,
-        );
+        let compact = style::clip_line(&plain(note), 24, 0, "...");
+        let mut field = Field::new(1, note, &compact, &compact, 96, false);
         field.note = true;
         fields.push(field);
     }
@@ -734,37 +727,126 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
             .strip_prefix("Approval: ")
             .or_else(|| context.approval.strip_prefix("审批: "))
             .unwrap_or(context.approval);
-        fields.push(Field::new(3, context.approval, compact, compact, 20, false));
+        fields.push(Field::new(3, compact, compact, compact, 20, false));
     }
-    render(
-        &fields,
-        columns,
-        context.color,
-        context.color_depth,
-        context.unicode,
-        &context.theme,
-    )
-}
-
-struct Slots {
-    widths: [usize; 4],
-}
-
-impl Slots {
-    fn new(columns: usize) -> Self {
-        let widths = match columns {
-            0..=15 => [0; 4],
-            16..=31 => [0, columns, 0, 0],
-            32..=55 => [0, columns - 24, 24, 0],
-            56..=75 => [16, columns - 44, 28, 0],
-            76..=111 => [31, columns - 67, 24, 12],
-            _ => {
-                let environment = (columns / 3).clamp(31, 42);
-                [environment, columns - environment - 44, 28, 16]
-            }
+    if context.external_environment.is_none()
+        && let Some((exit, duration)) = context.last_result
+        && (exit != 0 || duration >= std::time::Duration::from_secs(2))
+    {
+        let elapsed = if duration.as_secs() >= 60 {
+            format!(
+                "{}m{:02}s",
+                duration.as_secs() / 60,
+                duration.as_secs() % 60
+            )
+        } else {
+            format!("{:.1}s", duration.as_secs_f64())
         };
-        Self { widths }
+        let compact = if exit == 0 {
+            elapsed.clone()
+        } else {
+            format!("exit {exit}")
+        };
+        let full = if exit == 0 {
+            format!("{} {elapsed}", tr!("上次用时", "last"))
+        } else {
+            format!("{} {exit}", tr!("上次退出", "last exit"))
+        };
+        let full = if exit != 0 && duration >= std::time::Duration::from_secs(2) {
+            format!("{full} {elapsed}")
+        } else {
+            full
+        };
+        let mut field = Field::new(4, &full, &compact, &compact, 70, false);
+        field.tone = if exit == 0 {
+            Tone::Pending
+        } else {
+            Tone::Error
+        };
+        fields.push(field);
     }
+    if let Some(usage) = context.context_usage.filter(|usage| usage.max > 0) {
+        let percent = (usage.used as u128 * 100) / usage.max as u128;
+        let compact = format!("ctx {percent}%");
+        let mut field = Field::new(
+            5,
+            &format!("ctx {}/{}", usage.used, usage.max),
+            &compact,
+            &compact,
+            30,
+            false,
+        );
+        if percent >= 85 {
+            field.tone = Tone::Notice;
+        }
+        fields.push(field);
+    }
+    render(&fields, &context)
+}
+
+fn minimum_width(fields: &[Field], number: u8) -> usize {
+    let mut required = fields
+        .iter()
+        .filter(|field| field.zone == number && (field.required || (number == 1 && !field.note)));
+    if let Some(first) = required.next() {
+        return style::width(&first.variants[2])
+            + required
+                .map(|field| 1 + style::width(&field.variants[2]))
+                .sum::<usize>();
+    }
+    fields
+        .iter()
+        .filter(|field| field.zone == number)
+        .max_by_key(|field| field.priority)
+        .map_or(0, |field| style::width(&field.variants[2]))
+}
+
+fn allocate(
+    columns: usize,
+    minimum: [usize; 6],
+    preferred: [usize; 6],
+    powerline: bool,
+    native_environment: bool,
+) -> [usize; 6] {
+    let mut widths = [0; 6];
+    let mut remaining = columns;
+    let local_segment = |number| matches!(number, 1 | 4) || (number == 0 && !native_environment);
+    for number in [1, 2, 4, 0, 5, 3] {
+        let has_left = [0, 1, 4].iter().any(|&index| widths[index] > 0);
+        let gap = if widths.iter().any(|&width| width > 0)
+            && !(matches!(number, 0 | 1 | 4) && has_left)
+        {
+            2
+        } else {
+            0
+        };
+        let shared_cap = usize::from(
+            powerline
+                && local_segment(number)
+                && [0, 1, 4]
+                    .iter()
+                    .any(|&index| widths[index] > 0 && local_segment(index)),
+        );
+        let available = remaining.saturating_sub(gap) + shared_cap;
+        if minimum[number] == 0
+            || available == 0
+            || (matches!(number, 0 | 3 | 4 | 5) && available < minimum[number])
+        {
+            continue;
+        }
+        widths[number] = minimum[number].min(available);
+        remaining = available - widths[number];
+    }
+    for number in [2, 1, 4, 0, 5, 3] {
+        if widths[number] > 0 {
+            let extra = preferred[number]
+                .saturating_sub(widths[number])
+                .min(remaining);
+            widths[number] += extra;
+            remaining -= extra;
+        }
+    }
+    widths
 }
 
 struct Zone {
@@ -775,8 +857,14 @@ struct Zone {
     state_complete: bool,
 }
 
-fn zone(fields: &[Field], number: u8, columns: usize, allow_correction: bool, edge: bool) -> Zone {
-    let budget = columns.saturating_sub(if edge { 3 } else { 2 });
+fn zone(
+    fields: &[Field],
+    number: u8,
+    columns: usize,
+    allow_correction: bool,
+    inset: usize,
+) -> Zone {
+    let budget = columns.saturating_sub(inset);
     let mut order: Vec<_> = fields
         .iter()
         .filter(|field| {
@@ -791,7 +879,7 @@ fn zone(fields: &[Field], number: u8, columns: usize, allow_correction: bool, ed
             std::cmp::Reverse(field.priority),
         )
     });
-    let mut selected: Vec<(&Field, usize, String)> = Vec::new();
+    let mut selected: Vec<(&Field, String)> = Vec::new();
     let mut used = 0;
     let mut state_complete = true;
     for field in order {
@@ -799,30 +887,29 @@ fn zone(fields: &[Field], number: u8, columns: usize, allow_correction: bool, ed
         let separator = usize::from(!selected.is_empty());
         let width = style::width(text);
         if used + separator + width <= budget {
-            selected.push((field, 2, text.clone()));
+            selected.push((field, text.clone()));
             used += separator + width;
-        } else if selected.is_empty() && !matches!(number, 2 | 3) && budget > 0 {
+        } else if selected.is_empty() && !matches!(number, 2 | 3 | 5) && budget > 0 {
             let clipped = style::clip_line(text, budget, 0, "...");
             used = style::width(&clipped);
-            selected.push((field, 2, clipped));
+            selected.push((field, clipped));
             state_complete = !field.required;
         }
     }
-    // Keep the main action at the slot start and expand it before secondary cancel.
+    // Keep the primary action before secondary cancellation hints.
     if number == 2 {
-        selected.sort_by_key(|(field, _, _)| {
+        selected.sort_by_key(|(field, _)| {
             (
                 matches!(field.tone, Tone::Secondary),
                 std::cmp::Reverse(field.priority),
             )
         });
     }
-    for (field, level, text) in &mut selected {
+    for (field, text) in &mut selected {
         for next in [1, 0] {
             let width = style::width(&field.variants[next]);
             if used - style::width(text) + width <= budget {
                 used = used - style::width(text) + width;
-                *level = next;
                 text.clone_from(&field.variants[next]);
             }
         }
@@ -830,61 +917,257 @@ fn zone(fields: &[Field], number: u8, columns: usize, allow_correction: bool, ed
     Zone {
         tone: selected
             .first()
-            .map_or(Tone::Secondary, |(field, _, _)| field.tone),
+            .map_or(Tone::Secondary, |(field, _)| field.tone),
         note_included: selected
             .iter()
-            .any(|(field, level, text)| field.note && *level == 0 && *text == field.variants[0]),
+            .any(|(field, text)| field.note && *text == field.variants[0]),
         correction_included: selected
             .iter()
-            .any(|(field, _, text)| field.correction && field.variants.contains(text)),
+            .any(|(field, text)| field.correction && field.variants.contains(text)),
         text: selected
             .into_iter()
-            .map(|(_, _, text)| text)
+            .map(|(_, text)| text)
             .collect::<Vec<_>>()
             .join(" "),
         state_complete,
     }
 }
 
-fn render(
-    fields: &[Field],
-    columns: usize,
-    color: bool,
-    depth: ColorDepth,
-    unicode: bool,
-    theme: &Theme,
-) -> Layout {
-    let slots = Slots::new(columns);
-    let mut layout = Layout::default();
-    let mut state_complete = true;
-    for (number, width) in slots.widths.into_iter().enumerate() {
-        if width == 0 {
-            continue;
+fn segment_inset(count: usize, powerline: bool) -> usize {
+    2 * count + if powerline && count > 0 { count + 1 } else { 0 }
+}
+
+fn environment_parts(context: &Context<'_>, columns: usize) -> Vec<(String, ColorPair)> {
+    let Some((cwd, branch)) = context.environment else {
+        return Vec::new();
+    };
+    let theme = context.theme;
+    let inset = segment_inset(1, theme.powerline);
+    if columns <= inset {
+        return Vec::new();
+    }
+    let branch = branch
+        .filter(|branch| !branch.is_empty())
+        .map(|branch| format!("({})", style::clip_line(&plain(branch), 28, 0, "...")));
+    let extra = segment_inset(2, theme.powerline) - inset;
+    let branch = branch.filter(|branch| {
+        style::width(branch) + extra + inset + style::width(&path_summary(cwd, 12)) <= columns
+    });
+    let path_budget = columns
+        - inset
+        - branch
+            .as_ref()
+            .map_or(0, |branch| style::width(branch) + extra);
+    let mut parts = vec![(path_summary(cwd, path_budget.min(64)), theme.environment)];
+    if let Some(branch) = branch {
+        parts.push((branch, theme.git_branch));
+    }
+    parts
+}
+
+pub(crate) fn paint_segments(
+    parts: &[(String, ColorPair)],
+    styles: crate::theme::Styles,
+) -> String {
+    paint_segments_after(parts, styles, None)
+}
+
+fn paint_segments_after(
+    parts: &[(String, ColorPair)],
+    styles: crate::theme::Styles,
+    previous_background: Option<nu_ansi_term::Color>,
+) -> String {
+    let colored = styles.terminal.color && styles.depth != ColorDepth::Plain;
+    let caps = styles.theme.powerline;
+    let shapes = styles.powerline();
+    let depth = styles.depth;
+    let mut output = String::new();
+    for (index, (text, pair)) in parts.iter().enumerate() {
+        if index == 0 && caps {
+            if shapes {
+                if let Some(previous) = previous_background {
+                    let background = styles
+                        .pair_style(*pair, true)
+                        .background
+                        .expect("colored segment");
+                    output.push_str(
+                        &nu_ansi_term::Style::new()
+                            .fg(previous)
+                            .on(background)
+                            .paint("\u{e0b0}")
+                            .to_string(),
+                    );
+                } else {
+                    output.push_str(&format!("{}\u{e0b6}", cap_sgr(*pair, depth)));
+                }
+            } else if let Some(previous) = previous_background.filter(|_| colored) {
+                output.push_str(
+                    &nu_ansi_term::Style::new()
+                        .on(previous)
+                        .paint(" ")
+                        .to_string(),
+                );
+            } else {
+                output.push(' ');
+            }
         }
-        let has_next = slots.widths[number + 1..].iter().any(|width| *width > 0);
-        let zone = zone(fields, number as u8, width, state_complete, has_next);
-        if number == 1 {
-            state_complete = zone.state_complete;
+        if colored {
+            output.push_str(&pair.sgr(depth));
         }
-        layout.note_included |= zone.note_included;
-        layout.correction_included |= zone.correction_included;
-        let padding = width - style::width(&zone.text) - 2;
-        let edge = if has_next {
-            if unicode { '│' } else { '|' }
-        } else {
-            ' '
-        };
-        let block = format!(" {}{}{edge}", zone.text, " ".repeat(padding));
-        if color && depth != ColorDepth::Plain {
-            // Explicit pairs avoid the host's theme-overridable ANSI 0..15 palette.
-            let sgr = theme.pair(number, zone.tone).sgr(depth);
-            layout.text.push_str(&format!("{sgr}{block}\x1b[0m"));
-        } else {
-            layout.text.push_str(&block);
+        output.push(' ');
+        output.push_str(text);
+        output.push(' ');
+        if caps {
+            if shapes {
+                if let Some((_, next)) = parts.get(index + 1) {
+                    let transition = ColorPair::new(
+                        pair.background_rgb(),
+                        next.background_rgb(),
+                        pair.background_index(),
+                        next.background_index(),
+                    )
+                    .expect("validated extended colors");
+                    output.push_str(&format!("{}\u{e0b0}", transition.sgr(depth)));
+                } else {
+                    output.push_str(&format!("{}\u{e0b4}", cap_sgr(*pair, depth)));
+                }
+            } else {
+                output.push(' ');
+            }
+        }
+        if colored {
+            output.push_str("\x1b[0m");
         }
     }
-    layout.correction_included &= state_complete;
-    layout
+    output
+}
+
+fn render(fields: &[Field], context: &Context<'_>) -> Layout {
+    let columns = usize::from(context.editor.columns.saturating_sub(1));
+    if columns < 16 {
+        return Layout::default();
+    }
+    let theme = context.theme;
+    let inset = segment_inset(1, theme.powerline);
+    let environment_width = context.external_environment.map_or_else(
+        || {
+            let parts = environment_parts(context, columns);
+            parts
+                .iter()
+                .map(|(text, _)| style::width(text))
+                .sum::<usize>()
+                + segment_inset(parts.len(), theme.powerline)
+        },
+        crate::theme::Fragment::width,
+    );
+    let mut preferred = [environment_width, 0, 0, 0, 0, 0];
+    let mut minimum = [environment_width.min(12 + inset), 0, 0, 0, 0, 0];
+    for number in 1..6 {
+        let padding = if matches!(number, 1 | 4) { inset } else { 0 };
+        let full = zone(fields, number as u8, columns, true, padding);
+        if !full.text.is_empty() {
+            preferred[number] = style::width(&full.text) + padding;
+            minimum[number] = minimum_width(fields, number as u8) + padding;
+        }
+    }
+    let mut widths = allocate(
+        columns,
+        minimum,
+        preferred,
+        theme.powerline,
+        context.external_environment.is_some(),
+    );
+    let state = zone(fields, 1, widths[1], true, inset);
+    let actions = zone(fields, 2, widths[2], state.state_complete, 0);
+    let mode = zone(fields, 3, widths[3], true, 0);
+    let previous = zone(fields, 4, widths[4], true, inset);
+    let usage = zone(fields, 5, widths[5], true, 0);
+    if widths[0] > 0 {
+        let state_width = if state.text.is_empty() {
+            0
+        } else {
+            style::width(&state.text) + inset
+        };
+        widths[0] += widths[1].saturating_sub(state_width)
+            + widths[2].saturating_sub(style::width(&actions.text))
+            + widths[3].saturating_sub(style::width(&mode.text))
+            + widths[4].saturating_sub(if previous.text.is_empty() {
+                0
+            } else {
+                style::width(&previous.text) + inset
+            })
+            + widths[5].saturating_sub(style::width(&usage.text));
+    }
+    let styles = crate::theme::Styles {
+        theme,
+        terminal: style::Terminal {
+            tty: true,
+            ansi: true,
+            color: context.color,
+            unicode: context.unicode,
+        },
+        depth: context.color_depth,
+    };
+    let mut parts = if widths[0] > 0 && context.external_environment.is_none() {
+        environment_parts(context, widths[0])
+    } else {
+        Vec::new()
+    };
+    for segment in [&previous, &state] {
+        if !segment.text.is_empty() {
+            parts.push((segment.text.clone(), theme.pair(1, segment.tone)));
+        }
+    }
+    let mut left = if let Some(fragment) = context.external_environment.filter(|_| widths[0] > 0) {
+        if parts.is_empty() {
+            fragment.render(widths[0], styles)
+        } else {
+            let (mut prefix, background) = fragment.render_prefix(widths[0], styles);
+            prefix.push_str(&paint_segments_after(&parts, styles, background));
+            prefix
+        }
+    } else {
+        paint_segments(&parts, styles)
+    };
+    let usage_color = if matches!(usage.tone, Tone::Notice) {
+        theme.text_color(crate::theme::Role::Warning)
+    } else {
+        theme.mode
+    };
+    let mut right = String::new();
+    for (text, color) in [
+        (&usage.text, usage_color),
+        (&actions.text, theme.operation),
+        (&mode.text, theme.mode),
+    ] {
+        if text.is_empty() {
+            continue;
+        }
+        if !right.is_empty() {
+            right.push_str("  ");
+        }
+        right.push_str(&styles.pair_style(color, false).paint(text).to_string());
+    }
+    let used = style::width(&style::strip_ansi(&left)) + style::width(&style::strip_ansi(&right));
+    left.push_str(&" ".repeat(columns - used));
+    left.push_str(&right);
+    if context.color && context.color_depth != ColorDepth::Plain {
+        left.push_str("\x1b[0m");
+    }
+    Layout {
+        text: left,
+        note_included: state.note_included,
+        correction_included: state.state_complete && actions.correction_included,
+    }
+}
+
+fn cap_sgr(pair: ColorPair, depth: ColorDepth) -> String {
+    let [r, g, b] = pair.background_rgb();
+    match depth {
+        ColorDepth::Rgb => format!("\x1b[0;49;38;2;{r};{g};{b}m"),
+        ColorDepth::Indexed => format!("\x1b[0;49;38;5;{}m", pair.background_index()),
+        ColorDepth::Plain => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1000,11 +1283,14 @@ mod tests {
         Context {
             editor,
             environment: Some(("~/work/nosh", Some("main"))),
+            external_environment: None,
             feedback: None,
             completion: None,
             assistance: None,
             latest_command: None,
             failed_exit: None,
+            last_result: None,
+            context_usage: None,
             approval: "Approval: Auto",
             note: None,
             bindings: keys,
@@ -1015,25 +1301,15 @@ mod tests {
         }
     }
 
-    fn split_zones(text: &str, columns: usize) -> [String; 4] {
-        let plain = style::strip_ansi(text);
-        let mut remaining = plain.as_str();
-        let result = Slots::new(columns).widths.map(|width| {
-            let part = style::clip_line(remaining, width, 0, "");
-            assert_eq!(style::width(&part), width, "{width}: {part:?}");
-            remaining = &remaining[part.len()..];
-            part
-        });
-        assert!(remaining.is_empty(), "unexpected columns: {remaining:?}");
-        result
-    }
-
-    fn contents(slot: &str) -> &str {
-        slot.trim().trim_end_matches(['│', '|']).trim_end()
+    fn background_cells(text: &str) -> Vec<Option<nu_ansi_term::Color>> {
+        crate::theme::Fragment::parse(text)
+            .runs()
+            .flat_map(|(text, paint)| std::iter::repeat_n(paint.background, style::width(text)))
+            .collect()
     }
 
     #[test]
-    fn zones_have_stable_order_and_reserve_empty_slots() {
+    fn compact_segments_preserve_order_without_empty_status_blocks() {
         let keys = bindings();
         let editor = editor("echo ok");
         let feedback = input_assist::Feedback {
@@ -1045,15 +1321,157 @@ mod tests {
         let mut data = context(&editor, &keys);
         data.feedback = Some(&feedback);
         let text = compose(data).text;
-        let zones = split_zones(&text, 179);
-        assert_eq!(contents(&zones[0]), "~/work/nosh (main)");
-        assert_eq!(contents(&zones[1]), "! example diagnostic");
-        assert!(zones[2].contains("^C cancel"), "{text}");
-        assert_eq!(zones[3].trim(), "Approval: Auto");
-        let text = compose(context(&editor, &keys)).text;
-        assert!(contents(&split_zones(&text, 179)[1]).is_empty(), "{text:?}");
+        let positions = [
+            "~/work/nosh",
+            "(main)",
+            "! example diagnostic",
+            "Ctrl+C cancel",
+            "Auto",
+        ]
+        .map(|part| {
+            text.find(part)
+                .unwrap_or_else(|| panic!("missing {part}: {text}"))
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut data = context(&editor, &keys);
+        data.color = true;
+        let text = compose(data).text;
+        assert_eq!(
+            background_cells(&text)
+                .iter()
+                .filter(|color| color.is_some())
+                .count(),
+            21
+        );
+        let text = style::strip_ansi(&text);
         assert_eq!(style::width(&text), 179);
         assert!(!text.contains("READY"));
+        assert!(text.ends_with("Tab complete  Auto"));
+    }
+
+    #[test]
+    fn command_metrics_use_the_real_exit_and_two_second_duration_threshold() {
+        let keys = bindings();
+        let editor = editor("");
+        for (exit, millis, expected) in [
+            (0, 1999, None),
+            (0, 2000, Some("last 2.0s")),
+            (0, 63000, Some("last 1m03s")),
+            (7, 1, Some("last exit 7")),
+            (7, 2500, Some("last exit 7 2.5s")),
+        ] {
+            let mut data = context(&editor, &keys);
+            data.last_result = Some((exit, std::time::Duration::from_millis(millis)));
+            data.failed_exit = (exit != 0).then_some(exit);
+            let text = compose(data).text;
+            if let Some(expected) = expected {
+                assert!(text.contains(expected), "{text}");
+            } else {
+                assert!(!text.contains("last") && !text.contains("exit"), "{text}");
+            }
+            assert!(!text.contains("Last failure"), "{text}");
+        }
+    }
+
+    #[test]
+    fn context_usage_is_optional_and_high_usage_keeps_a_readable_warning() {
+        let keys = bindings();
+        let editor = editor("");
+        for (used, max) in [(0, 0), (1536, 8192), (870, 1000), (usize::MAX, usize::MAX)] {
+            let mut data = context(&editor, &keys);
+            data.context_usage = Some(crate::repl::ContextUsage { used, max });
+            data.color = true;
+            let row = compose(data).text;
+            let text = style::strip_ansi(&row);
+            assert_eq!(text.contains("ctx"), max > 0, "{text}");
+            if max == 1000 {
+                assert!(text.contains("ctx 870/1000"), "{text}");
+                let warning = Theme::default().text_color(crate::theme::Role::Warning);
+                let style = crate::theme::Styles {
+                    theme: Theme::default(),
+                    terminal: style::Terminal {
+                        tty: true,
+                        ansi: true,
+                        color: true,
+                        unicode: true,
+                    },
+                    depth: ColorDepth::Rgb,
+                };
+                assert!(
+                    row.contains(
+                        &style
+                            .pair_style(warning, false)
+                            .paint("ctx 870/1000")
+                            .to_string()
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_ai_state_requires_a_matching_command_and_never_offers_acceptance() {
+        let keys = bindings();
+        let pending = Assistance::Pending {
+            command_id: 4,
+            intent: "Next".into(),
+        };
+        for (buffer, latest, shown) in [
+            ("", Some(4), true),
+            ("", Some(5), false),
+            ("echo", Some(4), false),
+        ] {
+            let editor = editor(buffer);
+            let mut data = context(&editor, &keys);
+            data.assistance = Some(&pending);
+            data.latest_command = latest;
+            let text = compose(data).text;
+            assert_eq!(text.contains("generating suggestion"), shown, "{text}");
+            assert!(!text.contains("F2"), "{text}");
+        }
+    }
+
+    #[test]
+    fn additional_metrics_yield_to_menu_actions_and_respect_native_ownership() {
+        let keys = bindings();
+        let mut editor = editor("");
+        editor.interaction = PromptInteraction::Menu {
+            name: "completion_menu",
+            count: 9,
+            provisional: false,
+        };
+        for width in 0..=240 {
+            editor.columns = width;
+            let mut data = context(&editor, &keys);
+            data.last_result = Some((2, std::time::Duration::from_millis(2400)));
+            data.context_usage = Some(crate::repl::ContextUsage {
+                used: 7000,
+                max: 8192,
+            });
+            let text = compose(data).text;
+            assert!(
+                style::width(&text) <= usize::from(width.saturating_sub(1)),
+                "{width}: {text}"
+            );
+            if width >= 48 {
+                assert!(
+                    text.contains("Esc") && text.contains("Enter"),
+                    "{width}: {text}"
+                );
+            }
+        }
+        editor.columns = 180;
+        let native = crate::theme::Fragment::parse("native exit 2 2s");
+        let mut data = context(&editor, &keys);
+        data.external_environment = Some(&native);
+        data.last_result = Some((2, std::time::Duration::from_secs(2)));
+        data.failed_exit = Some(2);
+        let text = compose(data).text;
+        assert_eq!(text.matches("exit 2").count(), 1, "{text}");
+        assert!(
+            !text.contains("last") && !text.contains("Last failure"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1089,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_never_shrinks_or_displaces_other_zones() {
+    fn mode_is_optional_and_never_replaces_the_primary_action() {
         let keys = bindings();
         let mut editor = editor("echo hello");
         for width in 1..=160 {
@@ -1099,10 +1517,17 @@ mod tests {
             data.approval = "";
             let without = compose(data).text;
             let columns = usize::from(width.saturating_sub(1));
-            let full = split_zones(&full, columns);
-            let without = split_zones(&without, columns);
-            assert_eq!(full[..3], without[..3], "{width}");
-            assert!(contents(&without[3]).is_empty());
+            assert!(style::width(&full) <= columns && style::width(&without) <= columns);
+            assert!(!without.contains("Auto"));
+            if width >= 32 {
+                assert!(
+                    full.contains("Tab") && without.contains("Tab"),
+                    "{width}: {full}"
+                );
+            }
+            if full.contains("Auto") {
+                assert!(full.ends_with("Auto"));
+            }
         }
     }
 
@@ -1125,7 +1550,10 @@ mod tests {
         data.feedback = Some(&feedback);
         let text = compose(data).text;
         assert!(text.contains("No executable command"), "{text}");
-        assert!(text.contains("^C cancel"), "{text}");
+        assert!(
+            text.contains("^C cancel") || text.contains("Ctrl+C cancel"),
+            "{text}"
+        );
         assert!(!text.contains("Approval:"), "{text}");
     }
 
@@ -1365,23 +1793,18 @@ mod tests {
     }
 
     #[test]
-    fn zero_width_text_still_reserves_its_separators() {
+    fn zero_width_text_still_reserves_its_padding() {
         let fields = [
-            Field::new(0, "~", "~", "~", 80, false),
             Field::new(1, "\u{301}", "\u{301}", "\u{301}", 100, true),
             Field::new(2, "Esc exit", "Esc exit", "Esc exit", 99, true),
         ];
+        let keys = bindings();
+        let mut editor = editor("");
         for columns in 0..40 {
-            let layout = render(
-                &fields,
-                columns,
-                false,
-                ColorDepth::Plain,
-                false,
-                &Theme::default(),
-            );
+            editor.columns = columns + 1;
+            let layout = render(&fields, &context(&editor, &keys));
             assert!(
-                style::width(&layout.text) <= columns,
+                style::width(&layout.text) <= usize::from(columns),
                 "{columns}: {:?}",
                 layout.text
             );
@@ -1404,15 +1827,10 @@ mod tests {
             );
         }
         let mut editor = editor("");
-        assert!(
-            compose(context(&editor, &keys))
-                .text
-                .contains("Approval: Auto")
-        );
+        assert!(compose(context(&editor, &keys)).text.ends_with("Auto"));
         editor.columns = 80;
         let text = compose(context(&editor, &keys)).text;
-        let zones = split_zones(&text, 79);
-        assert_eq!(zones[3].trim(), "Auto");
+        assert!(text.ends_with("Auto"));
     }
 
     #[test]
@@ -1445,7 +1863,11 @@ mod tests {
         let mut data = context(&editor, &keys);
         data.environment = Some((home, Some("main")));
         data.approval = "";
-        assert!(compose(data).text.contains(".../newfuture-glowing-spoon"));
+        let text = compose(data).text;
+        assert!(
+            text.contains(home) || text.contains(".../newfuture-glowing-spoon"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1575,20 +1997,15 @@ mod tests {
     }
 
     #[test]
-    fn narrow_fixed_action_slot_preserves_required_exit() {
+    fn narrow_compact_layout_preserves_required_exit() {
         let mut keys = bindings();
         keys.0.clear();
         keys.0.insert(Action::Close, "Esc".into());
         let label = keys.field(Action::Close, "exit", 99, true, false).unwrap();
+        let mut editor = editor("");
         for columns in 32..=55 {
-            let layout = render(
-                std::slice::from_ref(&label),
-                columns,
-                false,
-                ColorDepth::Plain,
-                false,
-                &Theme::default(),
-            );
+            editor.columns = columns + 1;
+            let layout = render(std::slice::from_ref(&label), &context(&editor, &keys));
             assert!(
                 !layout.text.is_empty()
                     && layout.text.contains("Esc")
@@ -1596,12 +2013,12 @@ mod tests {
                 "{columns}: {}",
                 layout.text
             );
-            assert_eq!(style::width(&layout.text), columns);
+            assert_eq!(style::width(&layout.text), usize::from(columns));
         }
     }
 
     #[test]
-    fn fixed_width_state_transitions_keep_full_row_and_zone_anchors() {
+    fn state_transitions_keep_one_safe_row_without_input_geometry_changes() {
         let keys = bindings();
         let feedback = |text: &str, compact: &str, state, correction| input_assist::Feedback {
             text: text.into(),
@@ -1661,7 +2078,6 @@ mod tests {
             let columns = usize::from(width - 1);
             for unicode in [false, true] {
                 for color in [false, true] {
-                    let mut environment = None;
                     for (index, (buffer, feedback)) in samples.iter().enumerate() {
                         let mut editor = editor(buffer);
                         editor.columns = width;
@@ -1683,28 +2099,16 @@ mod tests {
                             "{width}/{index}"
                         );
                         assert!(!layout.text.contains(['\n', '\r']), "{width}/{index}");
-                        let zones = split_zones(&layout.text, columns);
-                        if let Some(previous) = &environment {
-                            assert_eq!(previous, &zones[0]);
-                        }
-                        environment = Some(zones[0].clone());
-                        if !contents(&zones[2]).is_empty() {
-                            assert!(
-                                zones[2].starts_with(' ') && !zones[2].starts_with("  "),
-                                "operation shifted within its slot: {width}/{index}: {:?}",
-                                zones[2]
-                            );
-                        }
-                        if columns >= 56
+                        let text = style::strip_ansi(&layout.text);
+                        if columns >= 79
                             && !buffer.trim().is_empty()
                             && feedback
                                 .as_ref()
                                 .is_none_or(|feedback| feedback.correction.is_none())
                         {
                             assert!(
-                                zones[2].trim_start().starts_with("Tab "),
-                                "ordinary action moved after asynchronous feedback: {width}/{index}: {:?}",
-                                zones[2]
+                                text.contains("Tab "),
+                                "ordinary action lost after asynchronous feedback: {width}/{index}: {text}"
                             );
                         }
                     }
@@ -1714,12 +2118,11 @@ mod tests {
     }
 
     #[test]
-    fn menu_counts_and_mode_visibility_do_not_move_status_or_operation_slots() {
+    fn menu_counts_and_mode_visibility_preserve_status_and_required_actions() {
         let keys = bindings();
         for width in [48, 80, 120, 160] {
             let mut editor = editor("cat candidate_");
             editor.columns = width;
-            let mut baseline = None;
             for count in [9, 10, 99, 100] {
                 editor.interaction = PromptInteraction::Menu {
                     name: "completion_menu",
@@ -1730,27 +2133,21 @@ mod tests {
                     let mut data = context(&editor, &keys);
                     data.approval = approval;
                     let text = compose(data).text;
-                    let zones = split_zones(&text, usize::from(width - 1));
                     assert!(
-                        contents(&zones[1]).starts_with(if width == 80 {
-                            "Menu"
-                        } else {
-                            "Completion"
-                        }),
+                        (text.contains("Menu") || text.contains("Completion"))
+                            && text.contains(&count.to_string())
+                            && text.contains("Esc")
+                            && text.contains("Enter"),
                         "{text}"
                     );
-                    if let Some((previous_environment, previous_actions)) = &baseline {
-                        assert_eq!(previous_environment, &zones[0]);
-                        assert_eq!(previous_actions, &zones[2]);
-                    }
-                    baseline = Some((zones[0].clone(), zones[2].clone()));
+                    assert_eq!(style::width(&text), usize::from(width - 1));
                 }
             }
         }
     }
 
     #[test]
-    fn backgrounds_cover_padding_and_reset_at_every_block_boundary() {
+    fn backgrounds_cover_only_content_segments_not_gaps_or_right_hints() {
         let keys = bindings();
         let mut editor = editor("gti status");
         editor.columns = 120;
@@ -1774,9 +2171,14 @@ mod tests {
                 "{} ",
                 palette::pair(0, Tone::Environment).sgr(ColorDepth::Rgb)
             )));
-            assert_eq!(text.matches("\x1b[0m").count(), 4);
-            assert!(text.ends_with(" \x1b[0m"));
+            assert!(text.ends_with("\x1b[0m"));
             assert_eq!(style::width(&style::strip_ansi(&text)), 119);
+            let backgrounds = background_cells(&text);
+            let colored = backgrounds.iter().filter(|color| color.is_some()).count();
+            assert!(colored > 21 && colored < 50, "{colored}: {text}");
+            let plain = style::strip_ansi(&text);
+            let right = style::width(&plain[..plain.find("Tab").unwrap()]);
+            assert!(backgrounds[right..].iter().all(Option::is_none));
             match state {
                 input_assist::State::Pending => {
                     assert!(text.contains(&palette::pair(1, Tone::Pending).sgr(ColorDepth::Rgb)))
@@ -1793,12 +2195,141 @@ mod tests {
     }
 
     #[test]
-    fn one_column_region_edges_preserve_padding_text_anchors_and_color_fallbacks() {
+    fn adjacent_left_segments_have_no_host_background_between_them() {
+        let keys = bindings();
+        let feedback = input_assist::Feedback {
+            text: "display issue".into(),
+            compact: "issue".into(),
+            state: input_assist::State::Error,
+            correction: None,
+        };
+        let mut editor = editor("missing");
+        for width in [48, 80, 120, 219] {
+            editor.columns = width;
+            for powerline in [false, true] {
+                for unicode in [false, true] {
+                    for depth in [ColorDepth::Rgb, ColorDepth::Indexed] {
+                        let mut data = context(&editor, &keys);
+                        data.color = true;
+                        data.color_depth = depth;
+                        data.unicode = unicode;
+                        data.theme.powerline = powerline;
+                        data.feedback = Some(&feedback);
+                        data.last_result = Some((7, std::time::Duration::from_millis(2400)));
+                        let row = compose(data).text;
+                        let cells = background_cells(&row);
+                        let first = cells.iter().position(Option::is_some).unwrap();
+                        let last = cells.iter().rposition(Option::is_some).unwrap();
+                        assert!(
+                            cells[first..=last].iter().all(Option::is_some),
+                            "{width}: {row:?}"
+                        );
+                        assert!(cells[last + 1..].iter().all(Option::is_none));
+                        let text = style::strip_ansi(&row);
+                        assert_eq!(style::width(&text), usize::from(width - 1));
+                        if powerline && unicode {
+                            assert_eq!(text.matches('\u{e0b6}').count(), 1, "{text}");
+                            assert_eq!(text.matches('\u{e0b4}').count(), 1, "{text}");
+                        } else {
+                            assert!(!text.contains(['\u{e0b6}', '\u{e0b4}', '\u{e0b0}']));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_environment_joins_following_state_without_double_caps_or_white_ellipsis() {
+        let keys = bindings();
+        let feedback = input_assist::Feedback {
+            text: "display issue".into(),
+            compact: "issue".into(),
+            state: input_assist::State::Error,
+            correction: None,
+        };
+        let mut editor = editor("missing");
+        for powerline in [false, true] {
+            for unicode in [false, true] {
+                let theme = Theme {
+                    powerline,
+                    ..Theme::default()
+                };
+                let native_styles = crate::theme::Styles {
+                    theme: Theme {
+                        powerline: powerline && unicode,
+                        ..theme
+                    },
+                    terminal: style::Terminal {
+                        tty: true,
+                        ansi: true,
+                        color: true,
+                        unicode: true,
+                    },
+                    depth: ColorDepth::Rgb,
+                };
+                let fragment = crate::theme::Fragment::parse(&paint_segments(
+                    &[
+                        ("native directory".into(), theme.environment),
+                        ("main".into(), theme.git_branch),
+                    ],
+                    native_styles,
+                ));
+                for depth in [ColorDepth::Rgb, ColorDepth::Indexed, ColorDepth::Plain] {
+                    for color in [false, true] {
+                        for columns in 32..=160 {
+                            editor.columns = columns;
+                            let mut data = context(&editor, &keys);
+                            data.color = color;
+                            data.color_depth = depth;
+                            data.unicode = unicode;
+                            data.theme = theme;
+                            data.external_environment = Some(&fragment);
+                            data.feedback = Some(&feedback);
+                            let row = compose(data).text;
+                            let text = style::strip_ansi(&row);
+                            assert_eq!(style::width(&text), usize::from(columns - 1));
+                            if !powerline || !unicode {
+                                assert!(!text.contains(['\u{e0b6}', '\u{e0b4}', '\u{e0b0}']));
+                            }
+                            let cells = background_cells(&row);
+                            if !color || depth == ColorDepth::Plain {
+                                assert!(!row.contains('\x1b'));
+                                assert!(cells.iter().all(Option::is_none));
+                                continue;
+                            }
+                            if powerline && unicode {
+                                assert_eq!(
+                                    text.matches('\u{e0b6}').count(),
+                                    1,
+                                    "{columns}: {text}"
+                                );
+                                assert_eq!(
+                                    text.matches('\u{e0b4}').count(),
+                                    1,
+                                    "{columns}: {text}"
+                                );
+                            }
+                            let first = cells.iter().position(Option::is_some).unwrap();
+                            let last = cells.iter().rposition(Option::is_some).unwrap();
+                            assert!(
+                                cells[first..=last].iter().all(Option::is_some),
+                                "{columns}/{powerline}/{unicode}/{depth:?}: {row:?}"
+                            );
+                            assert!(cells[last + 1..].iter().all(Option::is_none));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_background_area_does_not_grow_with_terminal_width() {
         let keys = bindings();
         let mut editor = editor("echo 中文 e\u{301}");
         for width in 17..=240 {
             editor.columns = width;
-            let slots = Slots::new(usize::from(width - 1));
             for unicode in [false, true] {
                 for depth in [ColorDepth::Plain, ColorDepth::Indexed, ColorDepth::Rgb] {
                     for color in [false, true] {
@@ -1808,53 +2339,112 @@ mod tests {
                         data.unicode = unicode;
                         let text = compose(data).text;
                         let visible = style::strip_ansi(&text);
-                        let zones = split_zones(&text, usize::from(width - 1));
                         assert_eq!(style::width(&visible), usize::from(width - 1));
-                        let edge = if unicode { '│' } else { '|' };
-                        assert_eq!(
-                            visible
-                                .chars()
-                                .filter(|character| *character == edge)
-                                .count(),
-                            slots.widths.iter().filter(|&&columns| columns > 0).count() - 1
-                        );
-                        for (zone, columns) in zones.iter().zip(slots.widths) {
-                            if columns == 0 {
-                                continue;
-                            }
-                            assert!(zone.starts_with(' '));
-                            if zone.ends_with(edge) {
-                                assert!(
-                                    zone.ends_with(&format!(" {edge}")),
-                                    "text touched the region edge at {width}: {zone:?}"
-                                );
-                            } else {
-                                assert!(zone.ends_with(' '));
-                            }
-                        }
+                        assert!(!visible.contains(['│', '|']));
                         if !color || depth == ColorDepth::Plain {
                             assert!(!text.contains('\x1b'));
                         } else {
                             assert!(text.ends_with("\x1b[0m"));
-                            assert_eq!(
-                                text.matches("\x1b[0m").count(),
-                                slots.widths.iter().filter(|&&columns| columns > 0).count()
+                            assert!(
+                                background_cells(&text)
+                                    .iter()
+                                    .filter(|color| color.is_some())
+                                    .count()
+                                    <= 21
                             );
                         }
                     }
                 }
             }
         }
-        editor.columns = 80;
-        let mut data = context(&editor, &keys);
-        data.color = false;
-        let text = compose(data).text;
-        assert_eq!(style::width(text.split("Tab").next().unwrap()), 44);
-        assert_eq!(style::width(text.split("Auto").next().unwrap()), 68);
+        for width in [80, 120, 219, 500] {
+            editor.columns = width;
+            let mut data = context(&editor, &keys);
+            data.color = true;
+            let text = compose(data).text;
+            assert_eq!(
+                background_cells(&text)
+                    .iter()
+                    .filter(|color| color.is_some())
+                    .count(),
+                21
+            );
+            assert!(style::strip_ansi(&text).ends_with("Tab complete  Auto"));
+        }
     }
 
     #[test]
-    fn narrow_insets_keep_marked_leaf_and_complete_recommendation_and_adoption_keys() {
+    fn powerline_caps_only_content_segments_and_preserves_non_nerd_fallbacks() {
+        let keys = bindings();
+        for width in [17, 32, 48, 64, 80, 120, 160] {
+            let mut editor = editor("echo value");
+            editor.columns = width;
+            for unicode in [false, true] {
+                for color in [false, true] {
+                    let mut data = context(&editor, &keys);
+                    data.theme.powerline = true;
+                    data.unicode = unicode;
+                    data.color = color;
+                    let row = compose(data).text;
+                    let text = style::strip_ansi(&row);
+                    assert_eq!(style::width(&text), usize::from(width - 1));
+                    if color && unicode && width >= 64 {
+                        assert!(text.starts_with('\u{e0b6}') && text.contains('\u{e0b4}'));
+                        assert!(!text.ends_with('\u{e0b4}'));
+                    } else if !color || !unicode {
+                        assert!(!text.contains(['\u{e0b6}', '\u{e0b4}', '\u{e0b0}']));
+                    }
+                    if width >= 80 {
+                        assert!(text.ends_with("Tab complete  Auto"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_external_environment_keeps_native_styles_without_an_extra_wrapper() {
+        let keys = bindings();
+        let fragment = crate::theme::Fragment::parse(
+            "\x1b[38;2;80;160;220m\u{e0b6}project (main)\u{e0b4}\x1b[0m",
+        );
+        let mut editor = editor("echo value");
+        for width in [48, 80, 120, 160] {
+            editor.columns = width;
+            let mut data = context(&editor, &keys);
+            data.color = true;
+            data.theme.powerline = true;
+            data.external_environment = Some(&fragment);
+            let after = compose(data);
+            let text = style::strip_ansi(&after.text);
+            assert_eq!(text.matches('\u{e0b6}').count(), 1);
+            assert_eq!(text.matches('\u{e0b4}').count(), 1);
+            assert!(after.text.contains("38;2;80;160;220"));
+            assert!(text.ends_with("Tab complete  Auto"));
+            assert!(background_cells(&after.text).iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn removing_dividers_does_not_strip_literal_text_from_regions() {
+        let fields = [Field::new(
+            1,
+            "literal │",
+            "literal │",
+            "literal │",
+            100,
+            true,
+        )];
+        let keys = bindings();
+        let editor = editor("");
+        let mut data = context(&editor, &keys);
+        data.environment = Some(("~/literal|", None));
+        let layout = render(&fields, &data);
+        assert!(layout.text.contains("~/literal|") && layout.text.contains("literal │"));
+    }
+
+    #[test]
+    fn narrow_layout_keeps_complete_recommendation_and_adoption_keys() {
         let keys = bindings();
         let mut editor = editor("gti status");
         editor.columns = 80;
@@ -1881,38 +2471,24 @@ mod tests {
                 data.unicode = unicode;
                 data.color = color;
                 let layout = compose(data);
-                let zones = split_zones(&layout.text, 79);
                 let visible = style::strip_ansi(&layout.text);
-                let edge = if unicode { '│' } else { '|' };
-                assert_eq!(contents(&zones[0]), ".../newfuture-glowing-spoon");
-                assert_eq!(
-                    contents(&zones[1]),
-                    if unicode { "gti→git" } else { "gti->git" }
+                assert!(
+                    visible.contains("gti") && visible.contains("git"),
+                    "{visible}"
                 );
-                assert!(contents(&zones[2]).starts_with(if unicode {
-                    "→ accept"
-                } else {
-                    "Right use"
-                }));
-                assert!(contents(&zones[2]).contains("^C cancel"));
+                assert!(
+                    visible.contains(if unicode { "→" } else { "Right" }),
+                    "{visible}"
+                );
+                assert!(
+                    visible.contains("^C cancel") || visible.contains("Ctrl+C cancel"),
+                    "{visible}"
+                );
                 assert!(
                     layout.correction_included,
                     "narrow display lost complete candidate/adoption meaning"
                 );
-                for zone in &zones[..3] {
-                    assert!(zone.ends_with(&format!(" {edge}")), "{zone:?}");
-                }
-                assert_eq!(contents(&zones[3]), "Auto");
-                assert_eq!(
-                    style::width(
-                        visible
-                            .split(if unicode { "→ accept" } else { "Right use" })
-                            .next()
-                            .unwrap()
-                    ),
-                    44
-                );
-                assert_eq!(style::width(visible.split("Auto").next().unwrap()), 68);
+                assert!(visible.contains(".../"), "{visible}");
                 assert_eq!(style::width(&visible), 79);
             }
         }
@@ -1926,10 +2502,15 @@ mod tests {
         };
         let mut data = context(&editor, &keys);
         data.feedback = Some(&feedback);
-        let zones = split_zones(&compose(data).text, 79);
-        assert_eq!(contents(&zones[1]), "! No cmd");
-        assert!(contents(&zones[2]).starts_with("Tab menu"));
-        assert!(contents(&zones[2]).contains("^C cancel"));
+        let text = compose(data).text;
+        assert!(
+            text.contains("No executable command") || text.contains("No cmd"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Tab") && (text.contains("^C cancel") || text.contains("Ctrl+C cancel")),
+            "{text}"
+        );
     }
 
     #[test]

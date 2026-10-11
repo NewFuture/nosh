@@ -6,6 +6,7 @@ use std::io::Write;
 
 use nosh_permissions::{ApprovalMode, Risk};
 use nosh_platform::tr;
+use nosh_shell::theme::{Styles, ThemeHandle};
 use nosh_shell::{style, term};
 
 #[derive(Debug, Clone)]
@@ -91,37 +92,53 @@ impl ApprovalChannel for Scripted {
 /// The interactive approval card.
 pub struct TerminalApproval {
     pub bar: String,
+    pub theme: ThemeHandle,
 }
 
 impl Default for TerminalApproval {
     fn default() -> Self {
         Self {
-            bar: crate::ui::bar(),
+            bar: style::glyph("│", "|").into(),
+            theme: ThemeHandle::default(),
         }
     }
 }
 
-fn risk_color(risk: Risk, s: &str) -> String {
+fn risk_color(styles: Styles, risk: Risk, s: &str) -> String {
     match risk {
-        Risk::Safe => style::green(s),
-        Risk::Mutating => style::yellow(s),
-        _ => style::red_bold(s),
+        Risk::Safe => styles.green(s),
+        Risk::Mutating => styles.yellow(s),
+        _ => styles.red_bold(s),
     }
 }
 
 impl TerminalApproval {
     /// Picks the terminal channel when a terminal exists, else [`NoTerminal`].
     pub fn detect() -> Box<dyn ApprovalChannel> {
+        Self::detect_with_theme(ThemeHandle::default())
+    }
+
+    pub fn detect_with_theme(theme: ThemeHandle) -> Box<dyn ApprovalChannel> {
         if term::available() {
-            Box::new(TerminalApproval::default())
+            Box::new(TerminalApproval {
+                theme,
+                ..Default::default()
+            })
         } else {
             Box::new(NoTerminal)
         }
     }
 
-    fn card(&self, req: &ApprovalRequest) {
-        let b = &self.bar;
-        let mut err = std::io::stderr();
+    fn styles(&self) -> Styles {
+        self.theme.snapshot().styles(style::stderr())
+    }
+
+    fn render_card(&self, req: &ApprovalRequest) -> String {
+        use std::fmt::Write as _;
+        let terminal = style::stderr();
+        let styles = self.styles();
+        let b = styles.cyan(&self.bar);
+        let mut err = String::new();
         let _ = writeln!(
             err,
             "{b} {} | {}",
@@ -139,11 +156,12 @@ impl TerminalApproval {
         let _ = writeln!(
             err,
             "{b} {} {} {}",
-            style::dim(style::glyph("╭─", "+-")),
-            style::bold(&req.tool),
+            styles.dim(terminal.glyph("├─", "+-")),
+            styles.bold(&req.tool),
             risk_color(
+                styles,
                 req.risk,
-                &format!("{} {}", style::glyph("·", "-"), req.risk)
+                &format!("{} {}", terminal.glyph("·", "-"), req.risk)
             )
         );
         for (i, line) in req.command.split('\n').enumerate() {
@@ -151,7 +169,7 @@ impl TerminalApproval {
             let _ = writeln!(
                 err,
                 "{b} {} {p}{}",
-                style::dim(style::glyph("│", "|")),
+                styles.dim(terminal.glyph("│", "|")),
                 style::visible(line)
             );
         }
@@ -159,17 +177,63 @@ impl TerminalApproval {
             let _ = writeln!(
                 err,
                 "{b} {} {}",
-                style::dim(style::glyph("│", "|")),
-                style::dim(&format!("! {}", style::visible(r)))
+                styles.dim(terminal.glyph("│", "|")),
+                styles.dim(&format!("! {}", style::visible(r)))
             );
         }
+        err
+    }
+
+    fn render_choices(&self, req: &ApprovalRequest) -> String {
+        let terminal = style::stderr();
+        let styles = self.styles();
+        let b = styles.cyan(&self.bar);
+        if req.strong {
+            return format!(
+                "{b} {} ",
+                styles.red_bold(&format!(
+                    "{} {} {}",
+                    terminal.glyph("└─", "+-"),
+                    tr!(
+                        "危险操作：键入 yes 执行，其他任意输入拒绝",
+                        "dangerous: type yes to run, anything else denies"
+                    ),
+                    terminal.glyph("›", ">")
+                ))
+            );
+        }
+        let grant = if req.can_grant {
+            tr!(
+                "  [a] 本会话相同操作与范围放行",
+                "  [a] allow same operation and scope"
+            )
+        } else {
+            ""
+        };
+        format!(
+            "{b} {}{}{} ",
+            styles.dim(&format!(
+                "{} {}",
+                terminal.glyph("└─", "+-"),
+                if req.can_edit {
+                    tr!(
+                        "[y] 执行  [n] 拒绝  [e] 编辑",
+                        "[y] run  [n] deny  [e] edit"
+                    )
+                } else {
+                    tr!("[y] 执行  [n] 拒绝", "[y] run  [n] deny")
+                }
+            )),
+            styles.dim(grant),
+            styles.dim(terminal.glyph(" ›", " >"))
+        )
     }
 
     fn deny_reason(&self) -> Option<String> {
         let prompt = format!(
             "{} {}",
-            self.bar,
-            style::dim(tr!(
+            self.styles().cyan(&self.bar),
+            self.styles().dim(tr!(
                 "拒绝理由（可选，回车跳过）：",
                 "reason (optional, Enter to skip): "
             ))
@@ -187,24 +251,18 @@ impl ApprovalChannel for TerminalApproval {
         }
         if let Err(error) = term::flush_input() {
             let reason = format!("cannot discard terminal typeahead: {error}");
-            eprintln!("{}", style::red(&format!("nosh: {reason}")));
+            eprintln!("{}", self.styles().red(&format!("nosh: {reason}")));
             return ApprovalResponse::Unavailable { reason };
         }
-        self.card(req);
-        let b = &self.bar;
+        if let Err(error) = std::io::stderr().write_all(self.render_card(req).as_bytes()) {
+            let reason = format!("cannot display approval: {error}");
+            eprintln!("nosh: {reason}");
+            return ApprovalResponse::Unavailable { reason };
+        }
+        let styles = self.styles();
+        let b = styles.cyan(&self.bar);
         if req.strong {
-            let prompt = format!(
-                "{b} {} ",
-                style::red_bold(&format!(
-                    "{} {} {}",
-                    style::glyph("╰─", "+-"),
-                    tr!(
-                        "危险操作：键入 yes 执行，其他任意输入拒绝",
-                        "dangerous: type yes to run, anything else denies"
-                    ),
-                    style::glyph("›", ">")
-                ))
-            );
+            let prompt = self.render_choices(req);
             return match term::read_text(&prompt, "") {
                 Some(s) if s.trim().eq_ignore_ascii_case("yes") => ApprovalResponse::Approve,
                 Some(_) => ApprovalResponse::Deny {
@@ -213,31 +271,7 @@ impl ApprovalChannel for TerminalApproval {
                 None => ApprovalResponse::Deny { reason: None },
             };
         }
-        let grant = if req.can_grant {
-            tr!(
-                "  [a] 本会话相同操作与范围放行",
-                "  [a] allow same operation and scope"
-            )
-        } else {
-            ""
-        };
-        eprint!(
-            "{b} {}{}{} ",
-            style::dim(&format!(
-                "{} {}",
-                style::glyph("╰─", "+-"),
-                if req.can_edit {
-                    tr!(
-                        "[y] 执行  [n] 拒绝  [e] 编辑",
-                        "[y] run  [n] deny  [e] edit"
-                    )
-                } else {
-                    tr!("[y] 执行  [n] 拒绝", "[y] run  [n] deny")
-                }
-            )),
-            style::dim(grant),
-            style::dim(style::glyph(" ›", " >"))
-        );
+        eprint!("{}", self.render_choices(req));
         let _ = std::io::stderr().flush();
         loop {
             let Some(k) = term::read_key() else {

@@ -18,7 +18,7 @@ fn redirected_answers_have_no_thinking_newline_or_decoration() {
     }
     .run();
     assert!(
-        out.contains("\x1b[36m"),
+        out.contains("\x1b[38;5;111m") || out.contains("\x1b[38;2;137;180;250m"),
         "stdout colors do not depend on stderr"
     );
     assert!(!err.contains('\x1b'));
@@ -55,7 +55,9 @@ fn terminal_and_locale_matrix_has_safe_fallbacks() {
         }
         .run();
         assert!(!out.contains('\x1b') && !err.contains('\x1b'));
-        assert!(out.starts_with("\u{2503} answer\n"));
+        assert!(out.starts_with("\u{2502} answer\n"));
+        assert_no_styles(&out);
+        assert_no_styles(&err);
     }
     for locale in [
         None,
@@ -116,7 +118,7 @@ fn tool_labels_follow_the_destination_without_rewriting_command_text() {
             let stride = if stderr_tty { 3 } else { 2 };
             assert_eq!(lines.len(), TOOL_LABELS.len() * stride);
             let (bar, marker, separator) = if unicode {
-                ("\u{2503}", "\u{2699}", " \u{b7} ")
+                ("\u{2502}", "\u{2699}", " \u{b7} ")
             } else {
                 ("|", "*", " | ")
             };
@@ -152,7 +154,7 @@ fn tool_labels_follow_the_destination_without_rewriting_command_text() {
 #[test]
 fn proposal_explanations_keep_the_detail_prefix_in_both_renderers() {
     for (terminal, bar, arrow) in [
-        ("xterm-256color", "\u{2503}", "\u{21b3}"),
+        ("xterm-256color", "\u{2502}", "\u{21b3}"),
         ("dumb", "|", "->"),
     ] {
         let (out, err) = Probe {

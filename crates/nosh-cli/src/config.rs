@@ -1,6 +1,8 @@
 //! `~/.config/nosh/config.toml` (design §11): common keys only; unknown keys
 //! and bad values produce warnings and fall back to defaults.
 
+pub mod theme;
+
 use std::path::PathBuf;
 
 use nosh_hub::SourceSelection;
@@ -19,6 +21,7 @@ pub struct Config {
     pub completion: bool,
     pub completion_scripts: bool,
     pub status_bar: bool,
+    pub theme: theme::Selection,
     pub command_assist: bool,
     pub editing: nosh_shell::editing::Config,
     pub nl_guard: bool,
@@ -56,6 +59,7 @@ impl Default for Config {
             completion: true,
             completion_scripts: true,
             status_bar: true,
+            theme: Default::default(),
             command_assist: true,
             editing: Default::default(),
             nl_guard: true,
@@ -96,6 +100,9 @@ const KNOWN: &[(&str, &[&str])] = &[
             "completion",
             "completion_scripts",
             "status_bar",
+            "theme",
+            "starship",
+            "nerd_font",
             "command_assist",
             "nl_guard",
             "edit_mode",
@@ -210,7 +217,7 @@ impl Config {
     /// defaults, but with a warning, since its rules would be lost silently.
     fn load_from(path: PathBuf) -> Self {
         let mut cfg = match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text),
+            Ok(text) => Self::parse_at(&text, &path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => Self {
                 warnings: vec![format!("cannot be read, using defaults: {e}")],
@@ -222,7 +229,12 @@ impl Config {
         cfg
     }
 
+    #[cfg(test)]
     pub fn parse(text: &str) -> Self {
+        Self::parse_at(text, &nosh_platform::paths::config_file())
+    }
+
+    fn parse_at(text: &str, path: &std::path::Path) -> Self {
         let mut c = Self::default();
         let table: toml::Table = match text.parse() {
             Ok(t) => t,
@@ -237,6 +249,12 @@ impl Config {
             table: &table,
             warnings: Vec::new(),
         };
+        match theme::resolve_at(&table, None, path) {
+            Ok(selection) => c.theme = selection,
+            Err(error) => r
+                .warnings
+                .push(format!("theme: {error}; using {}", c.theme.label())),
+        }
         for (sec, v) in &table {
             let Some(known) = KNOWN.iter().find(|(s, _)| s == sec).map(|(_, k)| *k) else {
                 r.warnings.push(format!("unknown section [{sec}]"));

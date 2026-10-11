@@ -4,6 +4,10 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum Assistance {
+    Pending {
+        command_id: u64,
+        intent: String,
+    },
     Command {
         command_id: u64,
         intent: String,
@@ -31,10 +35,13 @@ impl AssistDisplay {
         state.version += 1;
         let version = state.version;
         let cancel = state.cancel.take();
-        state.result = None;
+        let repaint = state.result.take().and_then(|_| state.repaint.clone());
         drop(state);
         if let Some(cancel) = cancel {
             cancel();
+        }
+        if let Some(repaint) = repaint {
+            repaint();
         }
         version
     }
@@ -55,13 +62,27 @@ impl AssistDisplay {
 
     /// Returns whether this version was still current at publication.
     pub fn publish(&self, version: u64, result: Option<Assistance>) -> bool {
+        self.update(version, result, true)
+    }
+
+    pub fn pending(&self, version: u64, command_id: u64, intent: String) -> bool {
+        self.update(
+            version,
+            Some(Assistance::Pending { command_id, intent }),
+            false,
+        )
+    }
+
+    fn update(&self, version: u64, result: Option<Assistance>, finished: bool) -> bool {
         let repaint = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.version != version {
                 return false;
             }
             state.result = result;
-            state.cancel = None;
+            if finished {
+                state.cancel = None;
+            }
             state.repaint.clone()
         };
         if let Some(repaint) = repaint {
@@ -85,6 +106,11 @@ impl AssistDisplay {
 
 pub(crate) fn status_text(result: Option<&Assistance>, key: Option<&str>) -> String {
     match result {
+        Some(Assistance::Pending { intent, .. }) => format!(
+            "AI {}: {}",
+            crate::style::visible_text(intent),
+            nosh_platform::tr!("生成建议中", "generating suggestion")
+        ),
         Some(Assistance::Command {
             intent, program, ..
         }) => format!(
@@ -191,5 +217,91 @@ mod tests {
             version,
             Arc::new(move || assert!(shared.state.try_lock().is_ok())),
         );
+    }
+
+    #[test]
+    fn pending_state_preserves_cancellation_and_cannot_revive_old_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let display = AssistDisplay::default();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let observed = cancelled.clone();
+        let version = display.invalidate();
+        display.on_cancel(
+            version,
+            Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        assert!(display.pending(version, 7, "Next".into()));
+        assert!(matches!(
+            display.result(),
+            Some(Assistance::Pending { command_id: 7, .. })
+        ));
+        assert!(display.status(Some("F2")).contains("generating suggestion"));
+        assert!(!display.status(Some("F2")).contains("F2"));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+        display.invalidate();
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(display.result().is_none());
+        assert!(!display.pending(version, 7, "Next".into()));
+        assert!(!display.publish(version, Some(Assistance::Message("late".into()))));
+    }
+
+    #[test]
+    fn invalidating_visible_assistance_repaints_even_for_an_unbound_key() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use reedline::EditMode;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let display = AssistDisplay::default();
+        let repaints = Arc::new(AtomicUsize::new(0));
+        let observed = repaints.clone();
+        let state = Arc::downgrade(&display.state);
+        display.on_repaint(Arc::new(move || {
+            assert!(state.upgrade().unwrap().try_lock().is_ok());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        let mut mode = AssistEditMode {
+            inner: Box::new(reedline::Emacs::default()),
+            display: display.clone(),
+            completion_pending: false,
+        };
+        for result in [
+            Assistance::Pending {
+                command_id: 1,
+                intent: "Next".into(),
+            },
+            Assistance::Command {
+                command_id: 1,
+                intent: "Next".into(),
+                program: "true".into(),
+            },
+            Assistance::Message("unavailable".into()),
+        ] {
+            let version = display.invalidate();
+            display.publish(version, Some(result));
+            repaints.store(0, Ordering::SeqCst);
+            let key = reedline::ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+                KeyCode::F(12),
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+            assert!(matches!(
+                mode.parse_event(key),
+                reedline::ReedlineEvent::None
+            ));
+            assert!(display.result().is_none());
+            assert_eq!(
+                repaints.load(Ordering::SeqCst),
+                1,
+                "cleared assistance stayed painted"
+            );
+            display.invalidate();
+            assert_eq!(
+                repaints.load(Ordering::SeqCst),
+                1,
+                "empty state caused an extra repaint"
+            );
+        }
     }
 }

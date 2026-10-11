@@ -174,7 +174,11 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                             let _ = out.flush();
                         }
                         Event::Think(t) => {
-                            let _ = write!(out, "{}", style::stdout().paint("2", &t));
+                            let _ = write!(
+                                out,
+                                "{}",
+                                setup.theme.snapshot().styles(style::stdout()).dim(&t)
+                            );
                             let _ = out.flush();
                         }
                         Event::ToolCall(c) => {

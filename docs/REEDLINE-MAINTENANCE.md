@@ -117,6 +117,22 @@ source and binary files, participate in export/check.
 
 ## Editing nosh and Reedline together
 
+The maintained columnar-menu patch includes a paint-time style provider and a
+no-I/O preview layout entry point. nosh uses them to recolor the same live menu
+and to render reproducible theme fixtures; neither entry point reloads candidates,
+changes selection, or reads terminal input.
+
+`Prompt::begin_paint` freezes the shared theme before syntax highlighting, hints
+and menus run. `update_context` can then recompute prompt facts after providers
+finish without mixing old and new theme colors in the same frame.
+
+The completer's optional `automatic_menu` hook opens the existing menu after
+text insertion or completion acceptance in ordinary contextual editing. It
+does not authorize quick completion or prefix insertion, and does not run
+while a search, selection, menu or pending modal operation owns input.
+The separate `input_changed` notification tracks scope exits after edits or
+cursor moves; it never opens a menu, including after deletion or undo.
+
 Edit nosh normally and the library under `.nosh/reedline`; root Cargo already
 uses this copy. Unexported library edits are allowed for local compilation, but
 `check` and subsequent preparation refuse them until exported.

@@ -282,23 +282,10 @@ pub(super) fn terminal_probe() {
                             );
                             thread::sleep(Duration::from_millis(5));
                         }
-                        let theme = if revision == 3 {
-                            nosh_shell::status::Theme::default()
+                        let theme = if revision == 2 {
+                            nosh_shell::theme::Builtin::Dark.palette()
                         } else {
-                            nosh_shell::status::Theme {
-                                environment: nosh_shell::status::ColorPair::new(
-                                    [238, 243, 248],
-                                    if revision == 1 {
-                                        [30, 64, 83]
-                                    } else {
-                                        [41, 54, 70]
-                                    },
-                                    231,
-                                    if revision == 1 { 24 } else { 25 },
-                                )
-                                .unwrap(),
-                                ..Default::default()
-                            }
+                            nosh_shell::theme::Builtin::Light.palette()
                         };
                         assert!(themes.replace(theme));
                     }

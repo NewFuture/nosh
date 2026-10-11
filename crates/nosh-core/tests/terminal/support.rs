@@ -15,6 +15,24 @@ pub(super) use nosh_hub::{BarProgress, Progress};
 pub(super) use nosh_permissions::Risk;
 pub(super) use nosh_shell::{style, term};
 
+pub(super) fn assert_no_styles(text: &str) {
+    struct Check;
+    impl vte::Perform for Check {
+        fn csi_dispatch(&mut self, params: &vte::Params, _: &[u8], _: bool, action: char) {
+            if action == 'm' {
+                assert!(
+                    params
+                        .iter()
+                        .flatten()
+                        .all(|code| matches!(*code, 0 | 39 | 49)),
+                    "NO_COLOR emitted styling: {params:?}"
+                );
+            }
+        }
+    }
+    vte::Parser::<0>::new_with_size().advance(&mut Check, text.as_bytes());
+}
+
 pub(super) const BEGIN: &str = "nosh-terminal-probe-begin\n";
 pub(super) const END: &str = "nosh-terminal-probe-end";
 pub(super) const TOOL_LABELS: [(Risk, &str); 4] = [

@@ -30,8 +30,7 @@ nosh-shell.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
-
-[dev-dependencies]
+toml_edit.workspace = true
 tempfile.workspace = true
 
 [lints]

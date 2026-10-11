@@ -122,16 +122,19 @@ pub fn run_agent(
         attachment: stdin.map(|b| Attachment::from_bytes("stdin", &b)),
     };
     let env = Environment::detect(&shell);
+    let themes = nosh_shell::theme::ThemeHandle::new(cfg.theme.palette);
     let mut agent = Agent::new(loaded.engine, agent_config(cfg, mode, seed), env, tools)
-        .with_user_input(Box::new(nosh_core::user_input::TerminalUserInput));
-    let mut approval = TerminalApproval::detect();
+        .with_user_input(Box::new(
+            nosh_core::user_input::TerminalUserInput.with_theme(themes.clone()),
+        ));
+    let mut approval = TerminalApproval::detect_with_theme(themes.clone());
     let mut term_ui;
     let mut json_ui;
     let ui: &mut dyn AgentUi = if json {
         json_ui = JsonUi;
         &mut json_ui
     } else {
-        term_ui = TermUi::new(true);
+        term_ui = TermUi::with_theme(true, themes);
         term_ui.show_think = cfg.thinking;
         &mut term_ui
     };

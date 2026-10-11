@@ -28,6 +28,12 @@ pub type SelectionObserver = Arc<dyn Fn(&AbbreviationSelection) + Send + Sync>;
 // generation covers Reedline's buffer/base copies and derived menu metrics.
 const DISPLAY_GENERATION_BYTES: usize = 512 * 1024;
 
+#[derive(Default)]
+struct PromptChoices {
+    current: crate::inline_commands::Current,
+    automatic_scope: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Completion {
     service: Service,
@@ -39,6 +45,7 @@ pub struct Completion {
     selections: Vec<(usize, AbbreviationSelection)>,
     explicit: bool,
     automatic: bool,
+    choices: Arc<Mutex<PromptChoices>>,
 }
 
 fn quote_before(line: &str, position: usize) -> Option<char> {
@@ -284,7 +291,7 @@ fn suggestions(answer: &Answer) -> Suggestions {
                     && !candidate.nospace,
                 match_indices: Some(matches),
                 style: (candidate.kind == Kind::Directory)
-                    .then(|| nu_ansi_term::Color::Green.normal()),
+                    .then(|| nu_ansi_term::Style::new().underline()),
                 ..Suggestion::default()
             }
         })
@@ -307,7 +314,30 @@ impl Completion {
             selections: Vec::new(),
             explicit: false,
             automatic: false,
+            choices: Default::default(),
         }
+    }
+
+    pub(crate) fn begin_prompt(&self, current: crate::inline_commands::Current) {
+        *self.choices.lock().unwrap_or_else(|e| e.into_inner()) = PromptChoices {
+            current,
+            automatic_scope: None,
+        };
+    }
+
+    fn automatic_scope<'a>(
+        &self,
+        line: &'a str,
+        cursor: usize,
+    ) -> Option<crate::inline_commands::CompletionScope<'a>> {
+        self.config
+            .inline_prefix
+            .as_deref()
+            .filter(|_| {
+                self.config.enabled && line.len() <= MAX_INPUT && line.get(..cursor).is_some()
+            })
+            .and_then(|prefix| crate::inline_commands::completion_scope(line, cursor, prefix))
+            .filter(|scope| scope.automatic)
     }
 
     pub(crate) fn prepare(&self, shell: &crate::EmbeddedShell) {
@@ -424,6 +454,42 @@ impl Completer for Completion {
         }
     }
 
+    fn input_changed(&mut self, line: &str, cursor: usize) {
+        let mut choices = self.choices.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = choices.automatic_scope.as_deref()
+            && !self
+                .automatic_scope(line, cursor)
+                .is_some_and(|scope| line[..scope.span.start].trim_end() == previous)
+        {
+            choices.automatic_scope = None;
+        }
+    }
+
+    fn automatic_menu(&mut self, line: &str, cursor: usize) -> Option<String> {
+        let scope = self.automatic_scope(line, cursor);
+        let mut choices = self.choices.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(scope) = scope else {
+            choices.automatic_scope = None;
+            return None;
+        };
+        let key = line[..scope.span.start].trim_end();
+        if choices.automatic_scope.as_deref() == Some(key) {
+            return None;
+        }
+        if scope
+            .values
+            .iter()
+            .any(|(value, _)| super::matching::rank(value, scope.word, true, false).is_some())
+        {
+            choices.automatic_scope = Some(key.to_owned());
+            self.explicit = false;
+            self.automatic = false;
+            Some("completion_menu".into())
+        } else {
+            None
+        }
+    }
+
     fn complete(&mut self, line: &str, cursor: usize) -> CompletionResult {
         if !self.config.enabled {
             let message = tr!("补全已关闭", "Completion disabled").to_string();
@@ -470,13 +536,27 @@ impl Completer for Completion {
             }
             let scope = crate::inline_commands::completion_scope(line, cursor, prefix)
                 .expect("command completion scope");
+            let current = self
+                .choices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .current;
             let mut candidates = scope
                 .values
                 .iter()
                 .filter_map(|(value, description)| {
                     let (rank, matches) = super::matching::rank(value, scope.word, true, false)?;
+                    let selected = scope.automatic && current.matches(value);
+                    let description = description.map(|description| {
+                        if selected {
+                            format!("{} · {description}", tr!("当前", "current"))
+                        } else {
+                            description.to_owned()
+                        }
+                    });
                     Some((
                         rank,
+                        !selected,
                         Candidate {
                             source: Source::Command,
                             value: (*value).into(),
@@ -485,7 +565,7 @@ impl Completer for Completion {
                             } else {
                                 Kind::Value
                             },
-                            description: description.map(str::to_owned),
+                            description,
                             span: scope.span.clone(),
                             noquote: true,
                             nospace: false,
@@ -495,12 +575,16 @@ impl Completer for Completion {
                     ))
                 })
                 .collect::<Vec<_>>();
-            candidates.sort_by(|a, b| (&a.0, &a.1.value).cmp(&(&b.0, &b.1.value)));
+            if scope.automatic && scope.word.is_empty() {
+                candidates.sort_by_key(|(_, not_current, _)| *not_current);
+            } else {
+                candidates.sort_by(|a, b| (&a.0, &a.2.value).cmp(&(&b.0, &b.2.value)));
+            }
             let mut answer = Answer {
                 query,
                 candidates: candidates
                     .into_iter()
-                    .map(|(_, candidate)| candidate)
+                    .map(|(_, _, candidate)| candidate)
                     .collect(),
                 state: State::Complete,
             };
@@ -663,8 +747,9 @@ mod tests {
     fn inline_commands_complete_locally_without_a_worker_or_escaping_prefixes() {
         for (prefix, line, value, completed) in [
             ("#", "#mo", "mode", "#mode"),
-            ("##", "##th", "think", "##think"),
-            ("问", "  问he", "help", "  问help"),
+            ("##", "##thi", "think", "##think"),
+            ("#", "#the", "theme", "#theme"),
+            ("问", "  问hel", "help", "  问help"),
         ] {
             let state = Arc::new(Mutex::new(None));
             let mut completer = Completion::new(
@@ -679,7 +764,7 @@ mod tests {
             else {
                 panic!("local command completion did not finish");
             };
-            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions.len(), 1, "{line}");
             assert_eq!(suggestions[0].value, value);
             let mut text = line.to_owned();
             text.replace_range(suggestions[0].span.start..suggestions[0].span.end, value);
@@ -707,9 +792,12 @@ mod tests {
             Arc::new(|| {}),
         );
         for (line, expected) in [
-            ("#", 9),
-            ("# ", 9),
+            ("#", 10),
+            ("# ", 10),
+            ("#th", 2),
             ("#mode ", 3),
+            ("#theme ", 2),
+            ("#theme soft-l", 1),
             ("#think ", 2),
             ("#auto ", 2),
             ("#mode au", 1),
@@ -759,7 +847,7 @@ mod tests {
                 else {
                     panic!("inline menu must complete locally");
                 };
-                assert_eq!(suggestions.len(), 9);
+                assert_eq!(suggestions.len(), 10);
                 let entry = &suggestions[0];
                 assert_eq!(entry.display_value(), format!("{prefix} <task>"));
                 assert_eq!(entry.value, " ");
@@ -853,6 +941,117 @@ mod tests {
             MenuUpdate::Unchanged
         );
         assert!(completer.current.is_none());
+    }
+
+    #[test]
+    fn automatic_parameter_menus_are_local_and_stay_cancelled_until_reentry() {
+        for prefix in ["#", "##", "问"] {
+            let mut completion = Completion::new(
+                Config {
+                    inline_prefix: Some(prefix.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+                Arc::new(|| {}),
+            );
+            let controller = completion.clone();
+            let current = crate::inline_commands::Current {
+                theme: Some(crate::theme::Builtin::Light),
+                mode: Some(crate::inline_commands::ApprovalMode::Confirm),
+            };
+            controller.begin_prompt(current);
+            for name in ["theme", "mode"] {
+                let bare = format!("{prefix}{name}");
+                assert!(completion.automatic_menu(&bare, bare.len()).is_none());
+                let input = format!("{bare} ");
+                assert_eq!(
+                    completion.automatic_menu(&input, input.len()).as_deref(),
+                    Some("completion_menu")
+                );
+                assert!(!completion.automatic_completion_allowed());
+                let result = completion.complete(&input, input.len());
+                let values = result.suggestions();
+                assert_eq!(
+                    values[0].value,
+                    if name == "theme" {
+                        "soft-light"
+                    } else {
+                        "confirm"
+                    }
+                );
+                assert!(
+                    values[0]
+                        .description
+                        .as_deref()
+                        .unwrap()
+                        .contains("current")
+                );
+                assert!(values.iter().all(|value| value.description.is_some()));
+                assert!(completion.current.is_none());
+                assert!(matches!(
+                    completion.poll_completion(),
+                    CompletionStatus::Idle
+                ));
+
+                completion.completion_cancelled();
+                let filtered = format!("{input}{}", if name == "theme" { "soft-l" } else { "c" });
+                assert!(
+                    completion
+                        .automatic_menu(&filtered, filtered.len())
+                        .is_none()
+                );
+                let spaced = format!("{input} ");
+                assert!(completion.automatic_menu(&spaced, spaced.len()).is_none());
+                assert!(completion.automatic_menu(&bare, bare.len()).is_none());
+                assert!(completion.automatic_menu(&input, input.len()).is_some());
+                completion.completion_cancelled();
+                controller.begin_prompt(current);
+                assert!(completion.automatic_menu(&input, input.len()).is_some());
+            }
+            for suffix in [
+                "",
+                "help ",
+                "think ",
+                "auto ",
+                "fix ",
+                "mode auto extra",
+                "theme soft-light\n",
+                "theme ./custom.toml",
+            ] {
+                let line = format!("{prefix}{suffix}");
+                assert!(
+                    completion.automatic_menu(&line, line.len()).is_none(),
+                    "{line:?}"
+                );
+            }
+            completion.config.enabled = false;
+            let line = format!("{prefix}theme ");
+            assert!(completion.automatic_menu(&line, line.len()).is_none());
+        }
+    }
+
+    #[test]
+    fn native_theme_choices_do_not_mark_a_builtin_as_current() {
+        let mut completion = Completion::new(
+            Config {
+                inline_prefix: Some("#".into()),
+                ..Default::default()
+            },
+            Default::default(),
+            Arc::new(|| {}),
+        );
+        completion.begin_prompt(crate::inline_commands::Current::default());
+        let result = completion.complete("#theme ", 7);
+        assert!(
+            result.suggestions().iter().all(|value| !value
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("current"))
+        );
+        let line = format!("#theme {}", "x".repeat(MAX_INPUT));
+        assert!(completion.automatic_menu(&line, line.len()).is_none());
+        assert!(completion.automatic_menu("#theme ", 99).is_none());
     }
 
     #[test]

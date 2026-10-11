@@ -1,7 +1,7 @@
 //! EmbeddedShell, trigger classification and the line pipeline (no model).
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use nosh_shell::inline_commands::{ApprovalMode as CommandMode, Command as InlineCommand};
@@ -635,6 +635,76 @@ fn pipeline_ai_tasks_and_management_commands_keep_their_routes() {
 }
 
 #[test]
+fn pipeline_theme_commands_use_the_host_without_ai_or_shell_execution() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ai = RecordingAi::default();
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Cancel,
+        notices: Vec::new(),
+    };
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    let mut pipeline = Pipeline::new(ReplConfig {
+        trigger: TriggerConfig {
+            ai_prefix: "?".into(),
+            ..Default::default()
+        },
+        theme_command: Some(nosh_shell::repl::ThemeCommand(Arc::new(
+            move |shell, name| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((shell.cwd(), name.map(str::to_owned)));
+                if name == Some("missing") {
+                    Err("\x1b[31mtheme cannot be saved".into())
+                } else {
+                    Ok(format!("theme: {}", name.unwrap_or("soft-dark")))
+                }
+            },
+        ))),
+        ..Default::default()
+    });
+    for line in [
+        "?theme",
+        "?theme soft-light",
+        "?theme './my theme.toml'",
+        "?theme missing",
+    ] {
+        assert_eq!(
+            pipeline.process(&mut sh, &mut ai, &mut ui, line),
+            LineOutcome::Continue(None)
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            None,
+            Some("soft-light"),
+            Some("./my theme.toml"),
+            Some("missing")
+        ]
+        .map(|name| (sh.cwd(), name.map(str::to_owned)))
+    );
+    assert_eq!(
+        ui.notices.last().unwrap(),
+        "nosh: \\e[31mtheme cannot be saved"
+    );
+    assert!(ai.commands.is_empty() && ai.requests.is_empty());
+    assert!(sh.recent_commands().is_empty());
+
+    pipeline.cfg.theme_command = None;
+    pipeline.process(&mut sh, &mut ai, &mut ui, "?theme");
+    assert!(
+        ui.notices
+            .last()
+            .unwrap()
+            .contains("theme selection is unavailable")
+    );
+    assert!(ai.commands.is_empty() && ai.requests.is_empty());
+}
+
+#[test]
 fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
     let _g = serial();
     let mut sh = shell();
@@ -646,6 +716,8 @@ fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
     let mut pipeline = Pipeline::new(ReplConfig::default());
     for line in [
         "#mode bad",
+        "#theme soft-light extra",
+        "#theme $(touch marker)",
         "#think maybe",
         "#auto on extra",
         "#clear extra",

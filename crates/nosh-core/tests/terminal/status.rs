@@ -35,7 +35,8 @@ fn inline_feedback_keeps_no_color_and_cancels_without_submission() {
         assert_normal_flow(&err);
         let text = style::strip_ansi(&err);
         assert!(
-            text.contains("^C cancel") && text.contains("Incomplete:"),
+            (text.contains("^C cancel") || text.contains("Ctrl+C cancel"))
+                && text.contains("Incomplete:"),
             "{text}"
         );
         assert!(
@@ -83,7 +84,7 @@ fn inline_missing_command_explanation_arrives_without_another_key() {
         no_color: "1",
         steps: &[
             ("(main)", b"absent_inline_fixture_command"),
-            ("No cmd", b"\x15exit 0\r"),
+            ("No executable command", b"\x15exit 0\r"),
         ],
         ..Default::default()
     }
@@ -221,6 +222,7 @@ fn inline_no_color_and_ascii_still_show_real_error_and_key_labels() {
     for color in ["\x1b[31m", "\x1b[33m", "\x1b[34m", "\x1b[1;36;40m"] {
         assert!(!err.contains(color), "{err:?}");
     }
+    assert_no_styles(&err);
 }
 
 #[test]
@@ -241,16 +243,18 @@ fn inline_clicolor_zero_disables_keycap_color_without_hiding_semantics() {
     .run();
     let text = style::strip_ansi(&err);
     assert!(
-        text.contains("^C cancel") && text.contains("Incomplete:"),
+        (text.contains("^C cancel") || text.contains("Ctrl+C cancel"))
+            && text.contains("Incomplete:"),
         "{text}"
     );
     for code in ["\x1b[31m", "\x1b[33m", "\x1b[34m", "\x1b[1;36;40m"] {
         assert!(!err.contains(code), "{err:?}");
     }
+    assert_no_styles(&err);
 }
 
 #[test]
-fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
+fn compact_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
     for (no_color, clicolor, locale, colorterm) in [
         ("", None, "C.UTF-8", Some("truecolor")),
         ("", None, "C.UTF-8", None),
@@ -273,7 +277,7 @@ fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
                 ("(main)", b"e"),
                 ("Tab", b"cho hi"),
                 ("echo hi", b"\x15absent_stable_fixture"),
-                ("No cmd", b"\x15gti status"),
+                ("No executable command", b"\x15gti status"),
                 ("try git", b"\x1b[C"),
                 ("git status", b"\x15cat candidate_\t"),
                 ("Completion", b"\x1b"),
@@ -330,11 +334,19 @@ fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
                 "status wrote the autowrap column: {frame:?}"
             );
             let colored = no_color.is_empty() && clicolor != Some("0");
+            let backgrounds = &frame.backgrounds[row - 1][..frame.columns - 1];
+            assert_eq!(
+                backgrounds.iter().any(Option::is_some),
+                colored,
+                "{frame:?}"
+            );
             assert!(
-                frame.backgrounds[row - 1][..frame.columns - 1]
-                    .iter()
-                    .all(|background| background.is_some() == colored),
-                "missing/forbidden background: {frame:?}"
+                backgrounds.iter().any(Option::is_none),
+                "empty space was colored: {frame:?}"
+            );
+            assert!(
+                backgrounds.last().unwrap().is_none(),
+                "right hints have a background: {frame:?}"
             );
             assert!(
                 frame.backgrounds[row].iter().all(Option::is_none),
@@ -355,7 +367,7 @@ fn stable_full_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
 }
 
 #[test]
-fn full_row_background_never_reaches_submitted_command_output() {
+fn compact_segment_background_never_reaches_submitted_command_output() {
     let (_, err, observations) = Probe {
         mode: "repl-inline",
         stdout_tty: true,
@@ -409,24 +421,43 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
             ("(main)", b"echo theme_draft"),
             ("echo theme_draft", b"@theme-switch"),
             (
-                "\x1b[0;38;2;238;243;248;48;2;30;64;83m",
+                "\x1b[0;38;2;17;17;27;48;2;254;100;11m",
                 b"\x15cat candidate_\t",
             ),
             ("Completion", b"@theme-switch"),
-            ("\x1b[0;38;2;238;243;248;48;2;41;54;70m", b"\x1b"),
+            ("\x1b[0;38;2;17;17;27;48;2;250;179;135m", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
             ("History search: history_accepted", b"@theme-switch"),
-            ("\x1b[0;38;2;238;243;248;48;2;20;60;64m", b"\x1b"),
+            ("\x1b[0;38;2;17;17;27;48;2;254;100;11m", b"\x1b"),
             ("❯ touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
     }
     .run_with_timings();
     assert_normal_flow(&err);
+    let updated = err
+        .split_once("\x1b[0;38;2;17;17;27;48;2;254;100;11m")
+        .expect("light theme status row")
+        .1;
+    let draft_end = updated.find("theme_draft").expect("repainted draft") + "theme_draft".len();
+    let first_frame = nosh_shell::theme::Fragment::parse(&updated[..draft_end]);
+    let foreground = first_frame
+        .runs()
+        .last()
+        .and_then(|(_, style)| style.foreground)
+        .map(nosh_shell::theme::color_rgb)
+        .transpose()
+        .unwrap()
+        .flatten();
+    assert_eq!(
+        foreground,
+        Some([76, 79, 105]),
+        "the first new-theme paint used the previous theme for the draft"
+    );
     for (background, draft, state) in [
-        ([30, 64, 83], "echo theme_draft", ""),
-        ([41, 54, 70], "cat candidate_", "Completion"),
-        ([20, 60, 64], "touch history_accepted", "History search"),
+        ([254, 100, 11], "echo theme_draft", ""),
+        ([250, 179, 135], "cat candidate_", "Completion"),
+        ([254, 100, 11], "touch history_accepted", "History search"),
     ] {
         let frame = observations
             .frames
@@ -446,4 +477,16 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
         assert!(!frame.painted[1][119]);
         assert!(frame.backgrounds[2].iter().all(Option::is_none));
     }
+    assert!(
+        observations.frames.iter().any(|frame| {
+            frame.lines.iter().any(|line| line.contains("Completion"))
+                && frame
+                    .backgrounds
+                    .iter()
+                    .skip(3)
+                    .flatten()
+                    .any(|color| *color == Some(super::screen::Color::Rgb([69, 65, 106])))
+        }),
+        "the active completion selection did not adopt the new theme"
+    );
 }

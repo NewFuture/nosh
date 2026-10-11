@@ -11,6 +11,7 @@ use crate::handler::{EngineLoader, LoadMode};
 use crate::{Agent, AgentConfig, Environment, ToolSet};
 
 pub(crate) struct EngineState {
+    pub theme: nosh_shell::theme::ThemeHandle,
     pub loader: EngineLoader,
     pub agent: Option<Agent>,
     pub description: Option<String>,
@@ -33,10 +34,12 @@ pub(crate) struct Worker {
     mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
     display: AssistDisplay,
     thread: Option<JoinHandle<EngineState>>,
+    context: Option<(usize, usize)>,
 }
 
 impl Worker {
     pub fn start(state: EngineState, display: AssistDisplay) -> Self {
+        let context = state.agent.as_ref().and_then(Agent::context_usage);
         let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
         let worker_mailbox = mailbox.clone();
         let worker_display = display.clone();
@@ -45,6 +48,7 @@ impl Worker {
             mailbox,
             display,
             thread: Some(thread),
+            context,
         }
     }
 
@@ -54,6 +58,11 @@ impl Worker {
         let flag = cancel.clone();
         self.display
             .on_cancel(version, Arc::new(move || flag.cancel()));
+        self.display.pending(
+            version,
+            request.command.as_ref().expect("completion request").id,
+            request.intent.name().into(),
+        );
         let mut mailbox = self.mailbox.0.lock().unwrap_or_else(|e| e.into_inner());
         mailbox.job = Some(Job {
             request,
@@ -62,6 +71,10 @@ impl Worker {
             cancel,
         });
         self.mailbox.1.notify_one();
+    }
+
+    pub fn context_usage(&self) -> Option<(usize, usize)> {
+        self.context
     }
 
     pub fn reclaim(mut self) -> Result<EngineState, String> {
@@ -109,13 +122,12 @@ fn serve(
             }
             queued.job.take().expect("queued assistance")
         };
-        if let Err(error) = run_job(&mut state, &job, &display)
-            && !matches!(error, AssistError::Cancelled)
-        {
-            display.publish(
-                job.version,
-                Some(Assistance::Message(format!("nosh: {error}"))),
-            );
+        if let Err(error) = run_job(&mut state, &job, &display) {
+            let result = match error {
+                AssistError::Cancelled => None,
+                error => Some(Assistance::Message(format!("nosh: {error}"))),
+            };
+            display.publish(job.version, result);
         }
     }
 
@@ -137,7 +149,9 @@ fn serve(
                     Environment::from_snapshot(&job.request.commands, &job.request.context),
                     ToolSet::Full,
                 )
-                .with_user_input(Box::new(crate::user_input::TerminalUserInput)),
+                .with_user_input(Box::new(
+                    crate::user_input::TerminalUserInput.with_theme(state.theme.clone()),
+                )),
             );
         }
         if job.cancel.is_cancelled() {

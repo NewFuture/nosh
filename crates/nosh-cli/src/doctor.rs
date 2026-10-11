@@ -26,18 +26,6 @@ fn memory_warning(model: &ModelEntry, available: u64) -> Option<String> {
     })
 }
 
-fn ok(label: &str, msg: &str) {
-    eprintln!("{} {label:<10} {msg}", style::green(style::glyph("✔", "+")));
-}
-
-fn warn(label: &str, msg: &str) {
-    eprintln!("{} {label:<10} {msg}", style::yellow("!"));
-}
-
-fn bad(label: &str, msg: &str) {
-    eprintln!("{} {label:<10} {msg}", style::red(style::glyph("✗", "x")));
-}
-
 fn meminfo(key: &str) -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     text.lines()
@@ -66,6 +54,16 @@ fn cpu_features() -> (Vec<&'static str>, bool) {
 }
 
 pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
+    let styles = cfg.theme.palette.styles(style::stderr());
+    let ok = |label: &str, msg: &str| {
+        eprintln!("{} {label:<10} {msg}", styles.green(style::glyph("✔", "+")));
+    };
+    let warn = |label: &str, msg: &str| {
+        eprintln!("{} {label:<10} {msg}", styles.yellow("!"));
+    };
+    let bad = |label: &str, msg: &str| {
+        eprintln!("{} {label:<10} {msg}", styles.red(style::glyph("✗", "x")));
+    };
     let mut problems = 0;
     eprintln!(
         "nosh {} ({} {})",

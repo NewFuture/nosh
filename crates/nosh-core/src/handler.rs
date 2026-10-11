@@ -31,6 +31,7 @@ pub enum LoadMode {
 pub type EngineLoader = Box<dyn FnMut(LoadMode) -> Result<LoadedEngine, String> + Send>;
 
 pub struct ShellAi {
+    theme: nosh_shell::theme::ThemeHandle,
     foreground: Option<EngineState>,
     background: Option<Worker>,
     display: nosh_shell::AssistDisplay,
@@ -42,7 +43,9 @@ pub struct ShellAi {
 impl ShellAi {
     pub fn new(loader: EngineLoader, cfg: AgentConfig, approval: Box<dyn ApprovalChannel>) -> Self {
         Self {
+            theme: Default::default(),
             foreground: Some(EngineState {
+                theme: Default::default(),
                 loader,
                 agent: None,
                 description: None,
@@ -53,6 +56,14 @@ impl ShellAi {
             cfg,
             approval,
         }
+    }
+
+    pub fn with_theme(mut self, theme: nosh_shell::theme::ThemeHandle) -> Self {
+        if let Some(state) = &mut self.foreground {
+            state.theme = theme.clone();
+        }
+        self.theme = theme;
+        self
     }
 
     pub fn mode(&self) -> ApprovalMode {
@@ -87,11 +98,19 @@ impl ShellAi {
                             Environment::detect(shell),
                             ToolSet::Full,
                         )
-                        .with_user_input(Box::new(crate::user_input::TerminalUserInput)),
+                        .with_user_input(Box::new(
+                            crate::user_input::TerminalUserInput.with_theme(state.theme.clone()),
+                        )),
                     );
                 }
                 Err(e) => {
-                    eprintln!("{}", style::red(&format!("nosh: {e}")));
+                    eprintln!(
+                        "{}",
+                        self.theme
+                            .snapshot()
+                            .styles(style::stderr())
+                            .red(&format!("nosh: {e}"))
+                    );
                     return None;
                 }
             }
@@ -116,7 +135,13 @@ impl ShellAi {
             a.cfg.mode = mode;
         }
         if mode == ApprovalMode::Yolo {
-            eprintln!("{}", style::red_bold(&yolo_warning()));
+            eprintln!(
+                "{}",
+                self.theme
+                    .snapshot()
+                    .styles(style::stderr())
+                    .red_bold(&yolo_warning())
+            );
         }
     }
 }
@@ -152,7 +177,13 @@ impl AiHandler for ShellAi {
         }
         // Ctrl-C while the model was downloading or loading: stop here.
         if shell.interrupts().count() > ints {
-            eprintln!("{}", style::dim(tr!("已取消", "cancelled")));
+            eprintln!(
+                "{}",
+                self.theme
+                    .snapshot()
+                    .styles(style::stderr())
+                    .dim(tr!("已取消", "cancelled"))
+            );
             return AiOutcome {
                 prefill: None,
                 exit_code: 130,
@@ -166,7 +197,7 @@ impl AiHandler for ShellAi {
         ) else {
             return AiOutcome::default();
         };
-        let mut ui = TermUi::new(false);
+        let mut ui = TermUi::with_theme(false, self.theme.clone());
         ui.show_think = show_think;
         let input = TaskInput {
             trigger: req.trigger,
@@ -279,7 +310,13 @@ impl AiHandler for ShellAi {
         let interrupts = shell.interrupts().count();
         let agent = self.agent(shell)?;
         if shell.interrupts().count() != interrupts {
-            eprintln!("{}", style::dim(tr!("已取消", "cancelled")));
+            eprintln!(
+                "{}",
+                self.theme
+                    .snapshot()
+                    .styles(style::stderr())
+                    .dim(tr!("已取消", "cancelled"))
+            );
             return None;
         }
         let cancel = agent.engine_mut().cancel_handle();
@@ -294,7 +331,7 @@ impl AiHandler for ShellAi {
                 }
             };
         let u = outcome.usage;
-        TermUi::new(false).finish(&crate::ui::TaskSummary {
+        TermUi::with_theme(false, self.theme.clone()).finish(&crate::ui::TaskSummary {
             status: "completed".into(),
             steps: outcome.steps,
             secs: started.elapsed().as_secs_f64(),
@@ -317,6 +354,24 @@ impl AiHandler for ShellAi {
     fn badge(&self) -> Badge {
         Badge {
             mode: approval_label(self.cfg.mode),
+            current_mode: Some(match self.cfg.mode {
+                ApprovalMode::Confirm => CommandApprovalMode::Confirm,
+                ApprovalMode::Auto => CommandApprovalMode::Auto,
+                ApprovalMode::Yolo => CommandApprovalMode::Yolo,
+            }),
+            context: self
+                .background
+                .as_ref()
+                .map_or_else(
+                    || {
+                        self.foreground
+                            .as_ref()
+                            .and_then(|state| state.agent.as_ref())
+                            .and_then(Agent::context_usage)
+                    },
+                    Worker::context_usage,
+                )
+                .map(|(used, max)| nosh_shell::repl::ContextUsage { used, max }),
             yolo: self.cfg.mode == ApprovalMode::Yolo,
             note: None,
         }
@@ -409,6 +464,7 @@ mod tests {
             ManagementCommand::Status,
         ] {
             ai.command(&mut shell, command);
+            assert!(ai.badge().context.is_none());
         }
         assert_eq!(loads.load(Ordering::SeqCst), 0);
         assert_eq!(ai.mode(), ApprovalMode::Confirm);
@@ -438,6 +494,7 @@ mod tests {
             (ApprovalMode::Auto, CommandApprovalMode::Auto),
         ] {
             ai.command(&mut shell, ManagementCommand::Mode(Some(command_mode)));
+            assert_eq!(ai.badge().current_mode, Some(command_mode));
             for _ in 0..2 {
                 ai.handle(
                     &mut shell,
@@ -487,7 +544,11 @@ mod tests {
             None,
         );
         let deadline = Instant::now() + Duration::from_secs(2);
-        while ai.display.result().is_none() && Instant::now() < deadline {
+        while matches!(
+            ai.display.result(),
+            None | Some(nosh_shell::Assistance::Pending { .. })
+        ) && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(
@@ -499,5 +560,54 @@ mod tests {
             *modes.lock().unwrap(),
             [LoadMode::Background, LoadMode::Foreground]
         );
+    }
+
+    #[test]
+    fn badge_context_uses_the_existing_conversation_even_while_the_worker_owns_it() {
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        let mut ai = ShellAi::new(
+            Box::new(|_| {
+                Ok(LoadedEngine {
+                    engine: Box::new(nosh_engine::MockChatEngine::new(vec![
+                        vec![nosh_engine::mock::text("done")],
+                        vec![nosh_engine::mock::text("[None]")],
+                    ])),
+                    description: "fixture".into(),
+                })
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        assert!(ai.badge().context.is_none());
+        ai.handle(
+            &mut shell,
+            AiRequest {
+                trigger: Trigger::Hash,
+                text: "fixture".into(),
+                failed: None,
+                user_output: None,
+            },
+        );
+        let usage = ai.badge().context.expect("existing conversation");
+        let actual = ai
+            .foreground
+            .as_ref()
+            .unwrap()
+            .agent
+            .as_ref()
+            .unwrap()
+            .context_usage()
+            .unwrap();
+        assert_eq!((usage.used, usage.max), actual);
+        shell.run_user_line("true");
+        ai.after_command(
+            &shell,
+            shell.recent_commands().last().unwrap().clone(),
+            None,
+        );
+        assert!(ai.foreground.is_none());
+        assert_eq!(ai.badge().context, Some(usage));
+        ai.command(&mut shell, ManagementCommand::Clear);
+        assert!(ai.badge().context.is_none());
     }
 }

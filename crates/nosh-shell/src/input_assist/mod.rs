@@ -23,6 +23,7 @@ pub use allocation::WorkerAllocator;
 pub(crate) use correction::{Correction, right_navigation};
 pub(crate) use editor::Feedback;
 pub use editor::InputAssist;
+pub(crate) use editor::role_style;
 pub(crate) use lookup::scan_index;
 
 #[cfg(test)]

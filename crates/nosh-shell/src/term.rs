@@ -25,9 +25,17 @@ pub fn available() -> bool {
 
 /// Query the actual output descriptor, not stdout or an unrelated `/dev/tty`.
 pub fn stderr_columns() -> Option<usize> {
+    columns(libc::STDERR_FILENO)
+}
+
+pub fn stdout_columns() -> Option<usize> {
+    columns(libc::STDOUT_FILENO)
+}
+
+fn columns(fd: i32) -> Option<usize> {
     let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
     // SAFETY: ioctl writes a winsize into valid storage; it is read only on success.
-    let result = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) };
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) };
     if result != 0 {
         return None;
     }

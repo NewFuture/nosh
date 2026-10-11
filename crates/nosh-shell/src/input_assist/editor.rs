@@ -5,7 +5,9 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use nosh_platform::tr;
-use nu_ansi_term::{Color, Style};
+#[cfg(test)]
+use nu_ansi_term::Color;
+use nu_ansi_term::Style;
 use reedline::{
     EditContext, EditMode, EventStatus, Highlighter, Hinter, History, PromptContext,
     PromptInteraction, ReedlineEvent, ReedlineRawEvent, StyledText,
@@ -238,11 +240,20 @@ impl InputAssist {
         self.shared.wake.notify_one();
     }
 
-    pub(crate) fn highlighter(&self) -> Box<dyn Highlighter> {
+    pub(crate) fn highlighter_with_theme(
+        &self,
+        theme: crate::theme::FrameTheme,
+    ) -> Box<dyn Highlighter> {
         Box::new(InputHighlighter {
             assist: self.clone(),
             cache: RefCell::new(RenderCache::default()),
+            theme,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn highlighter(&self) -> Box<dyn Highlighter> {
+        self.highlighter_with_theme(crate::theme::FrameTheme::test())
     }
 
     pub(crate) fn hinter(&self, inner: reedline::DefaultHinter) -> Box<dyn Hinter> {
@@ -373,7 +384,7 @@ impl InputAssist {
                     "Diagnostics unavailable: status busy"
                 )
                 .into(),
-                compact: tr!("诊断状态忙", "Diagnostic status busy").into(),
+                compact: tr!("诊断忙", "Diag busy").into(),
                 state: State::Unavailable,
                 correction: None,
             });
@@ -410,7 +421,11 @@ impl InputAssist {
             None,
             (!text.is_empty()).then(|| Feedback {
                 text: crate::status::plain(text),
-                compact: style::clip_line(&crate::status::plain(text), 28, 0, "..."),
+                compact: if state == State::Unavailable {
+                    tr!("不可用", "Unavail.").into()
+                } else {
+                    style::clip_line(&crate::status::plain(text), 28, 0, "...")
+                },
                 state,
                 correction: None,
             }),
@@ -494,10 +509,12 @@ struct RenderCache {
 struct InputHighlighter {
     assist: InputAssist,
     cache: RefCell<RenderCache>,
+    theme: crate::theme::FrameTheme,
 }
 
 impl Highlighter for InputHighlighter {
     fn highlight(&self, line: &str, cursor: usize) -> StyledText {
+        let styles = self.theme.styles();
         let mut cache = self.cache.borrow_mut();
         if line.len() > MAX_INPUT {
             self.assist.shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -506,10 +523,10 @@ impl Highlighter for InputHighlighter {
                 "输入诊断已暂停：超出分析大小上限，原文仍可编辑",
                 "Input diagnostics paused: size limit; the full text remains editable"
             ));
-            return plain(line);
+            return plain(line, styles);
         }
         if !self.assist.shared.context_ok.load(Ordering::Acquire) {
-            return plain(line);
+            return plain(line, styles);
         }
         self.assist
             .shared
@@ -536,11 +553,11 @@ impl Highlighter for InputHighlighter {
                     State::Pending,
                 );
                 (self.assist.shared.repaint)();
-                return plain(line);
+                return plain(line, styles);
             }
         }
         let Some(input) = cache.input.clone() else {
-            return plain(line);
+            return plain(line, styles);
         };
         let publication = self
             .assist
@@ -646,7 +663,7 @@ impl Highlighter for InputHighlighter {
                 .map(|finding| finding_feedback(finding, &input, cache.correction.as_ref())),
         );
         if cache.spans.is_empty() {
-            return plain(line);
+            return plain(line, styles);
         }
         let mut styled = StyledText::new();
         for span in &cache.spans {
@@ -657,12 +674,12 @@ impl Highlighter for InputHighlighter {
                         .any(|finding| contains_span(finding, span))
                 {
                     if reveal_missing_commands {
-                        editing_missing_command_style()
+                        role_style(Role::Error, styles)
                     } else {
-                        role_style(Role::Command)
+                        role_style(Role::Command, styles)
                     }
                 } else {
-                    role_style(span.role)
+                    role_style(span.role, styles)
                 };
                 styled.push((style, text.to_owned()));
             }
@@ -785,9 +802,9 @@ impl Hinter for CorrectionHinter {
     }
 }
 
-fn plain(line: &str) -> StyledText {
+fn plain(line: &str, styles: crate::theme::Styles) -> StyledText {
     let mut text = StyledText::new();
-    text.push((Style::new(), line.to_owned()));
+    text.push((styles.style(crate::theme::Role::Text), line.to_owned()));
     text
 }
 
@@ -929,7 +946,7 @@ fn finding_feedback(finding: &Finding, input: &Input, correction: Option<&Correc
         Reason::Worker(reason) | Reason::Io(reason) => style::clip_line(
             &format!(
                 "{}: {}",
-                tr!("不可用", "Unavailable"),
+                tr!("不可用", "Unavail."),
                 crate::status::plain(reason)
             ),
             28,
@@ -1003,32 +1020,27 @@ fn finding_text(finding: &Finding) -> String {
     format!("{label}: {}", style::visible_text(reason))
 }
 
-fn role_style(role: Role) -> Style {
+pub(crate) fn role_style(role: Role, styles: crate::theme::Styles) -> Style {
+    use crate::theme::Role as Text;
+    if styles.style(Text::Text).foreground.is_none() {
+        return Style::new();
+    }
     match role {
-        Role::Builtin | Role::External => Color::Green.normal(),
-        Role::Alias | Role::Function => Color::Blue.bold(),
-        Role::Abbreviation | Role::Ai => Color::Cyan.normal(),
-        Role::Keyword | Role::Operator => Color::Magenta.normal(),
-        Role::String => Color::Yellow.normal(),
-        Role::Variable => Color::Cyan.normal(),
-        Role::Comment => Style::new().dimmed(),
-        Role::Path => Style::new().underline(),
-        Role::Incomplete => Color::Yellow.underline(),
-        Role::Error => invalid_style(),
-        Role::Text | Role::Command => Style::new(),
+        Role::Builtin | Role::External => styles.style(Text::Positive),
+        Role::Alias | Role::Function => styles.style(Text::Accent).bold(),
+        Role::Abbreviation | Role::Ai | Role::Variable => styles.style(Text::Accent),
+        Role::Keyword | Role::Operator => styles.style(Text::Keyword),
+        Role::String => styles.style(Text::String),
+        Role::Comment => styles.style(Text::Muted),
+        Role::Path => styles.style(Text::Text).underline(),
+        Role::Incomplete => styles.style(Text::Warning).underline(),
+        Role::Error => styles.style(Text::Error).strikethrough(),
+        Role::Text | Role::Command => styles.style(Text::Text),
     }
 }
 
 fn contains_span(finding: &Finding, span: &Span) -> bool {
     finding.range.start <= span.range.start && span.range.end <= finding.range.end
-}
-
-fn editing_missing_command_style() -> Style {
-    invalid_style()
-}
-
-fn invalid_style() -> Style {
-    Color::Red.strikethrough()
 }
 
 #[derive(Default)]
@@ -1444,6 +1456,7 @@ mod tests {
         let highlighter = InputHighlighter {
             assist: assist.clone(),
             cache: RefCell::new(RenderCache::default()),
+            theme: crate::theme::FrameTheme::test(),
         };
         (fixture, assist, highlighter)
     }
@@ -1474,6 +1487,7 @@ mod tests {
         let highlighter = InputHighlighter {
             assist: assist.clone(),
             cache: RefCell::new(RenderCache::default()),
+            theme: crate::theme::FrameTheme::test(),
         };
         let mailbox = assist.shared.mailbox.lock().unwrap();
         assert_eq!(mailbox.context.as_deref(), Some(&context));
@@ -1842,17 +1856,16 @@ mod tests {
         );
         assert_eq!(editing_status, "");
         assert!(
-            !editing
-                .buffer
-                .iter()
-                .any(|(style, text)| { text == "missing" && style.foreground == Some(Color::Red) }),
+            !editing.buffer.iter().any(|(style, text)| {
+                text == "missing" && style.foreground == Some(Color::Rgb(243, 139, 168))
+            }),
             "typing should not immediately turn command-not-found red"
         );
         std::thread::sleep(MISSING_COMMAND_IDLE + Duration::from_millis(25));
         let idle = highlighter.highlight(text, 3);
         assert!(idle.buffer.iter().any(|(style, text)| {
             text == "missing"
-                && style.foreground == Some(Color::Red)
+                && style.foreground == Some(Color::Rgb(243, 139, 168))
                 && style.is_strikethrough
                 && !style.is_underline
         }));
@@ -1863,7 +1876,8 @@ mod tests {
             finished
                 .buffer
                 .iter()
-                .any(|(s, text)| text == "missing" && s.foreground == Some(Color::Red))
+                .any(|(s, text)| text == "missing"
+                    && s.foreground == Some(Color::Rgb(243, 139, 168)))
         );
         assert_eq!(generation, assist.shared.generation.load(Ordering::Acquire));
         assert!(
@@ -1923,7 +1937,7 @@ mod tests {
                 .buffer
                 .iter()
                 .any(|(style, text)| text.contains("missing")
-                    && style.foreground == Some(Color::Red)),
+                    && style.foreground == Some(Color::Rgb(243, 139, 168))),
             "command-not-found should stay quiet while typing elsewhere"
         );
 
@@ -1931,7 +1945,7 @@ mod tests {
         let idle = highlighter.highlight(text, text.len());
         assert!(idle.buffer.iter().any(|(style, text)| {
             text.contains("missing")
-                && style.foreground == Some(Color::Red)
+                && style.foreground == Some(Color::Rgb(243, 139, 168))
                 && style.is_strikethrough
         }));
     }
@@ -2144,6 +2158,7 @@ mod measurements {
         let highlighter = InputHighlighter {
             assist: assist.clone(),
             cache: RefCell::new(RenderCache::default()),
+            theme: crate::theme::FrameTheme::test(),
         };
         let mut targets = 0;
         for i in 0..30 {
@@ -2238,6 +2253,7 @@ mod measurements {
         let highlighter = InputHighlighter {
             assist: assist.clone(),
             cache: RefCell::new(RenderCache::default()),
+            theme: crate::theme::FrameTheme::test(),
         };
         for size in [4 * 1024, MAX_INPUT] {
             let content = "a".repeat(size - 32);
@@ -2246,7 +2262,7 @@ mod measurements {
             for i in 0..300 {
                 let text = format!("echo '{content}{i:04}'");
                 let start = Instant::now();
-                std::hint::black_box(plain(&text));
+                std::hint::black_box(plain(&text, highlighter.theme.styles()));
                 disabled.push(start.elapsed());
                 let start = Instant::now();
                 std::hint::black_box(highlighter.highlight(&text, text.len()));

@@ -20,6 +20,7 @@
 | [命令与参数补全](COMPLETION.md) | 内置与脚本补全、候选语义、后台执行和资源限制 |
 | [实时输入辅助](INPUT-ASSIST.md) | 高亮、语法与命令判定、快照、缓存和 worker |
 | [提示符状态行](STATUS-BAR.md) | 布局、主题、终端所有权、兼容性与已知限制 |
+| [Shell 主题](THEMES.md) | 深浅配色、预览、自动保存与原生 Starship 兼容 |
 | [项目上下文](PROJECT-CONTEXT.md) | 项目识别、AGENTS / README 加载与缓存边界 |
 | [项目环境与终端集成](SHELL-INTEGRATION.md) | direnv/mise、刷新与失败恢复、通用 OSC 7/133、自动发现和支持边界 |
 | [LLM 工具](LLM-TOOLS.md) | 工具集合、读取与搜索、提问、权限和结果 |
