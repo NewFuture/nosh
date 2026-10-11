@@ -168,8 +168,11 @@ __nosh_bash_bind() {
                 continue
             fi
             if [[ $__nosh_entry == "\"$__nosh_key\":"* || $__nosh_entry == "\"$__nosh_key\" "* ]]; then
-                __nosh_original=$__nosh_entry
-                __nosh_original_kind=$__nosh_kind
+                # bind -f can leave a stale -X entry after a function/macro rebind.
+                if [[ $__nosh_kind != X || -z $__nosh_original ]]; then
+                    __nosh_original=$__nosh_entry
+                    __nosh_original_kind=$__nosh_kind
+                fi
                 continue
             fi
             if [[ $__nosh_entry == "\"$__nosh_key"* ]]; then

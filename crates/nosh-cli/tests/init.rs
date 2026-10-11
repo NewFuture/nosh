@@ -98,6 +98,36 @@ fn init_bash_shared_startup_script_does_not_install_readline_hooks_in_nosh() {
 }
 
 #[test]
+fn init_bash_relative_model_path_reports_unavailable_working_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let removed = home.path().join("removed");
+    fs::create_dir(&removed).unwrap();
+    let output = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "rmdir -- \"$2\" && exec \"$1\" --model-path model.gguf init bash",
+            "test",
+        ])
+        .arg(env!("CARGO_BIN_EXE_nosh"))
+        .arg(&removed)
+        .current_dir(&removed)
+        .env("HOME", home.path())
+        .env("NOSH_HOME", home.path())
+        .env_remove("NOSH_INTERNAL_PTY_FD")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot resolve model path"),
+        "{:?}",
+        output.stderr,
+    );
+}
+
+#[test]
 fn shell_flags_execute_init_named_script_instead_of_dispatching_init() {
     let home = tempfile::tempdir().unwrap();
     fs::write(home.path().join("init"), "printf script-ran\n").unwrap();
@@ -470,17 +500,31 @@ fn init_bash_restores_displaced_readline_functions_and_macros() {
         (r#"bind '"\eOQ":beginning-of-line'"#, "draft", 0),
         (r#"bind '"\eOQ":"HOST"'"#, "draftHOST", 9),
     ] {
-        let mut bash = Bash::new(
-            "[shell.keybindings]\nai_suggest = ['F2']\n",
-            binding,
-            "",
-            true,
-        );
-        bash.reload("[shell.keybindings]\nai_suggest = []\n");
-        bash.type_text("draft");
-        bash.suggest();
-        assert_eq!(bash.snapshot(), (expected_line.into(), expected_point));
-        assert!(!bash.path("calls").exists());
+        for stale_shell_binding in ["", r#"bind -x '"\eOQ":printf obsolete > obsolete-ran'"#] {
+            let before = if stale_shell_binding.is_empty() {
+                binding.to_string()
+            } else {
+                format!(
+                    "{stale_shell_binding}\nprintf '%s\\n' {} > host.inputrc\nbind -f host.inputrc\nbind -X > prior-shell-bindings",
+                    binding.strip_prefix("bind ").unwrap(),
+                )
+            };
+            let mut bash = Bash::new(
+                "[shell.keybindings]\nai_suggest = ['F2']\n",
+                &before,
+                "",
+                true,
+            );
+            if !stale_shell_binding.is_empty() {
+                assert!(bash.read("prior-shell-bindings").contains("obsolete"));
+            }
+            bash.reload("[shell.keybindings]\nai_suggest = []\n");
+            bash.type_text("draft");
+            bash.suggest();
+            assert_eq!(bash.snapshot(), (expected_line.into(), expected_point));
+            assert!(!bash.path("calls").exists());
+            assert!(!bash.path("obsolete-ran").exists());
+        }
     }
 }
 

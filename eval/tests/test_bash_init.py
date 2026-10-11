@@ -92,14 +92,14 @@ printf '\nINIT_DONE\n'
         except (TimeoutError, driver.DriverError) as error:
             self.fail(f"{error}\n{child.result.transcript!r}")
 
-    def snapshot(self, child):
+    def snapshot(self, child, directory=None):
         count = child.result.transcript.count("\nSNAPSHOT_DONE\r")
         child.send(b"\x1b[21~")
         self.wait(child, lambda: child.result.transcript.count("\nSNAPSHOT_DONE\r") > count,
                   "Readline snapshot")
         marker = child.result.transcript.rfind("\nSNAPSHOT_DONE\r")
         self.wait(child, lambda: "BASH> " in child.result.transcript[marker:], "snapshot redraw")
-        line, point, _ = (self.root / "snapshot").read_bytes().split(b"\0")
+        line, point, _ = ((directory or self.root) / "snapshot").read_bytes().split(b"\0")
         return line.decode(), int(point)
 
     def suggest(self, child, draft):
@@ -141,6 +141,22 @@ printf '\nINIT_DONE\n'
             child.send(b"\r")
             self.wait(child, lambda: (self.root / "created").exists(), "manual execution")
             self.assertEqual((self.root / "created").read_text(), "\u4e2d\u6587\n")
+
+    def test_explicit_relative_model_path_survives_changing_directory(self):
+        self.argv += ["--model-path", os.path.relpath(self.weights, self.root)]
+        destination = self.root / "after"
+        destination.mkdir()
+        command = "printf retained-model"
+        with ScriptedWorker(self.socket, [{"text": command}]) as server, self.shell() as child:
+            child.send(b"cd after; printf '\\nCHANGED_CWD\\n'\r")
+            self.wait(child, lambda: "\nCHANGED_CWD\r" in child.result.transcript, "directory change")
+            marker = child.result.transcript.rfind("\nCHANGED_CWD\r")
+            self.wait(child, lambda: "BASH> " in child.result.transcript[marker:], "new prompt")
+            child.send(b"use the original model\x1bOQ")
+            self.wait(child, lambda: command in child.result.transcript, "suggestion after cd")
+            self.assertEqual(self.snapshot(child, destination)[0], command)
+            hello = next(request for request in server.requests if request["op"] == "hello")
+            self.assertEqual(hello["config"]["weights"], str(self.weights))
 
     def test_invalid_responses_are_rejected_by_production_validator(self):
         for response in [

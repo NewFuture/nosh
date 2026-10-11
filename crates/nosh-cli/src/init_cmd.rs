@@ -22,8 +22,15 @@ pub fn run(shell: Shell, options: &GlobalOpts) -> i32 {
             return 2;
         }
     };
+    let command = match command(executable.as_os_str(), options) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("nosh init: cannot resolve model path: {error}");
+            return 2;
+        }
+    };
     let script = match shell {
-        Shell::Bash => render_bash(executable.as_os_str(), options, &config),
+        Shell::Bash => render_bash(&command, &config),
     };
     if let Err(error) = std::io::stdout().lock().write_all(script.as_bytes()) {
         eprintln!("nosh init: cannot write script: {error}");
@@ -32,7 +39,13 @@ pub fn run(shell: Shell, options: &GlobalOpts) -> i32 {
     0
 }
 
-fn command(executable: &OsStr, options: &GlobalOpts) -> String {
+fn command(executable: &OsStr, options: &GlobalOpts) -> std::io::Result<String> {
+    let model_path = options
+        .model_path
+        .as_ref()
+        .map(std::path::absolute)
+        .transpose()?
+        .map(std::path::PathBuf::into_os_string);
     let mut arguments = vec![executable.to_owned()];
     for (enabled, flag) in [
         (options.offline, "--offline"),
@@ -53,13 +66,7 @@ fn command(executable: &OsStr, options: &GlobalOpts) -> String {
                 .device
                 .map(|device| OsString::from(device.to_string())),
         ),
-        (
-            "--model-path",
-            options
-                .model_path
-                .as_ref()
-                .map(|path| path.as_os_str().to_owned()),
-        ),
+        ("--model-path", model_path),
         ("--model", options.model.as_ref().map(OsString::from)),
         (
             "--seed",
@@ -71,14 +78,14 @@ fn command(executable: &OsStr, options: &GlobalOpts) -> String {
         }
     }
     arguments.extend([OsString::from("-s"), OsString::from("--")]);
-    format!(
+    Ok(format!(
         "builtin command {} \"$1\"",
         arguments
             .iter()
             .map(|value| quote(value))
             .collect::<Vec<_>>()
             .join(" ")
-    )
+    ))
 }
 
 fn quote(value: &OsStr) -> String {
@@ -98,8 +105,7 @@ fn quote(value: &OsStr) -> String {
     quoted
 }
 
-fn render_bash(executable: &OsStr, options: &GlobalOpts, config: &Config) -> String {
-    let command = command(executable, options);
+fn render_bash(command: &str, config: &Config) -> String {
     let (bindings, warnings) = config.editing.bash_suggestions();
     for warning in warnings {
         eprintln!("nosh: {warning}");
@@ -127,7 +133,7 @@ fn render_bash(executable: &OsStr, options: &GlobalOpts, config: &Config) -> Str
     include_str!("init/bash.sh")
         .replace("\r\n", "\n")
         .replace("# NOSH_BINDINGS", &installs)
-        .replace("# NOSH_COMMAND", &command)
+        .replace("# NOSH_COMMAND", command)
 }
 
 #[cfg(test)]
@@ -170,8 +176,10 @@ mod tests {
             "init",
             "bash",
         ]);
-        let text = command(OsStr::new("/a'b/nosh"), &cli.global);
+        let text = command(OsStr::new("/a'b/nosh"), &cli.global).unwrap();
         assert!(text.starts_with("builtin command $'/a\\'b/nosh' "));
+        let model_path = std::path::absolute("a'b/model.gguf").unwrap();
+        assert!(text.contains(&quote(model_path.as_os_str())));
         for flag in [
             "--offline",
             "--no-download",
@@ -185,7 +193,7 @@ mod tests {
         assert!(text.ends_with("$'-s' $'--' \"$1\""));
         let cli = crate::Cli::parse_from(["nosh", "init", "bash"]);
         assert_eq!(
-            command(OsStr::new("nosh"), &cli.global),
+            command(OsStr::new("nosh"), &cli.global).unwrap(),
             "builtin command $'nosh' $'-s' $'--' \"$1\"",
         );
     }
