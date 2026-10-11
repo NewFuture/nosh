@@ -34,7 +34,9 @@ fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
     let command = sh.recent_commands().last().unwrap().clone();
     let display = ai.assistance().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while display.result().is_none() && Instant::now() < deadline {
+    while matches!(display.result(), None | Some(Assistance::Pending { .. }))
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(
@@ -109,7 +111,9 @@ fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
     let command = sh.recent_commands().last().unwrap().clone();
     let display = ai.assistance().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while display.result().is_none() && Instant::now() < deadline {
+    while matches!(display.result(), None | Some(Assistance::Pending { .. }))
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(
@@ -243,7 +247,11 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
     sh.run_user_line("true");
     let current = sh.recent_commands().last().unwrap().clone();
     ai.after_command(&sh, current.clone(), None);
-    while ai.assistance().unwrap().result().is_none() && Instant::now() < deadline {
+    while matches!(
+        ai.assistance().unwrap().result(),
+        None | Some(Assistance::Pending { .. })
+    ) && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(matches!(ai.assistance().unwrap().result(),
