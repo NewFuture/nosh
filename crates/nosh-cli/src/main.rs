@@ -11,6 +11,8 @@ mod eval_trace;
 mod eval_worker;
 mod model_cmd;
 mod shell_cmd;
+mod starship;
+mod theme_cmd;
 
 use clap::{Parser, Subcommand};
 
@@ -110,6 +112,11 @@ struct GlobalOpts {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Preview and select the shell's color theme.
+    Theme {
+        #[command(subcommand)]
+        cmd: theme_cmd::ThemeCmd,
+    },
     /// Manage local models.
     Model {
         #[command(subcommand)]
@@ -187,6 +194,7 @@ fn main() {
         nosh_hub::net::set_offline(true);
     }
     let code = match cli.cmd.take() {
+        Some(Cmd::Theme { cmd }) => theme_cmd::run(cmd),
         Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
         Some(Cmd::Debug { cmd }) => {
             let cfg = config::Config::load();
@@ -204,6 +212,7 @@ fn main() {
 
 fn engine_setup(cli: &Cli, cfg: &config::Config) -> engine::EngineSetup {
     engine::EngineSetup {
+        theme: nosh_shell::theme::ThemeHandle::new(cfg.theme.palette),
         device: cli
             .global
             .device
@@ -274,7 +283,10 @@ fn run_shell(
             if mode == nosh_permissions::ApprovalMode::Yolo {
                 eprintln!(
                     "{}",
-                    nosh_shell::style::red_bold(&nosh_core::handler::yolo_warning())
+                    cfg.theme
+                        .palette
+                        .styles(nosh_shell::style::stderr())
+                        .red_bold(&nosh_core::handler::yolo_warning())
                 );
             }
             agent_cmd::run_agent(&cli.rest, cli.json, &cfg, mode, &setup, cli.global.seed)
@@ -298,12 +310,31 @@ fn run_shell(
     // Ctrl-C stops a model download (the partial file is kept).
     shell.interrupts().on_interrupt(nosh_hub::net::cancel);
     let ai_on = !ai_disabled(cli);
+    let themes = nosh_shell::theme::ThemeHandle::new(cfg.theme.palette);
+    let theme_path = cfg
+        .path
+        .clone()
+        .unwrap_or_else(nosh_platform::paths::config_file);
+    let theme_loader = std::sync::Arc::new(config::theme::Loader::new(
+        theme_path.clone(),
+        cfg.theme.clone(),
+    ));
+    let theme_reload = theme_loader.clone();
     let repl_cfg = nosh_shell::ReplConfig {
         terminal_integration: cfg.terminal_integration,
         status_bar: nosh_shell::status::Config {
             enabled: cfg.status_bar,
-            ..Default::default()
+            theme: themes.clone(),
         },
+        theme_loader: Some(nosh_shell::repl::ThemeLoader(std::sync::Arc::new(
+            move || theme_reload.refresh(),
+        ))),
+        theme_command: Some(nosh_shell::repl::ThemeCommand(std::sync::Arc::new(
+            move |shell, name| theme_cmd::select(&theme_path, &shell.cwd(), name),
+        ))),
+        environment_loader: Some(nosh_shell::repl::EnvironmentLoader(std::sync::Arc::new(
+            move |shell| theme_loader.environment(shell),
+        ))),
         trigger: nosh_shell::TriggerConfig {
             ai_prefix: cfg.ai_prefix.clone(),
             trigger_on_error: cfg.trigger_on_error,
@@ -350,21 +381,26 @@ fn run_shell(
     if !ai_on {
         return nosh_shell::repl::run(&mut shell, &mut nosh_shell::repl::NoAi, repl_cfg);
     }
-    let setup = engine_setup(cli, &cfg);
+    let mut setup = engine_setup(cli, &cfg);
+    setup.theme = themes.clone();
     engine::offer_first_download(&setup);
     let mode = approval_mode(cli, &cfg);
     if mode == nosh_permissions::ApprovalMode::Yolo {
         eprintln!(
             "{}",
-            nosh_shell::style::red_bold(&nosh_core::handler::yolo_warning())
+            cfg.theme
+                .palette
+                .styles(nosh_shell::style::stderr())
+                .red_bold(&nosh_core::handler::yolo_warning())
         );
     }
     let loader_setup = setup.clone();
     let mut ai = nosh_core::ShellAi::new(
         Box::new(move |mode| engine::load(&loader_setup, mode)),
         agent_cmd::agent_config(&cfg, mode, cli.global.seed),
-        nosh_core::TerminalApproval::detect(),
-    );
+        nosh_core::TerminalApproval::detect_with_theme(themes.clone()),
+    )
+    .with_theme(themes);
     let login = args.login;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         nosh_shell::repl::run(&mut shell, &mut ai, repl_cfg)

@@ -48,6 +48,23 @@ class SourceSelectionTests(unittest.TestCase):
 
 
 class BuildToolchainTests(unittest.TestCase):
+    def test_ci_runs_starship_compatibility_with_a_pinned_binary(self):
+        workflow = runtime.ROOT.joinpath(".github", "workflows", "ci.yml").read_text()
+        check = workflow.split("\n  check:", 1)[1].split("\n  linux-arm64:", 1)[0]
+        name = "      - name: Starship theme compatibility\n"
+        step = check.split(name, 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(workflow.count(name), 1)
+        self.assertIn("STARSHIP_VERSION: '1.26.0'", step)
+        self.assertRegex(step, r"STARSHIP_SHA256: '[0-9a-f]{64}'")
+        self.assertIn(
+            "releases/download/v${STARSHIP_VERSION}/starship-x86_64-unknown-linux-musl.tar.gz",
+            step,
+        )
+        self.assertIn("sha256sum --check --strict", step)
+        self.assertIn("cargo test -p nosh-cli --bin nosh --test theme --locked -- --ignored", step)
+        self.assertNotIn("cargo install", step)
+        self.assertLess(check.index("cargo test --workspace --locked"), check.index(name))
+
     def test_compiler_pin_matches_workspace_and_ci(self):
         toolchain = tomllib.loads(runtime.ROOT.joinpath("rust-toolchain.toml").read_text())
         version = toolchain["toolchain"]["channel"]

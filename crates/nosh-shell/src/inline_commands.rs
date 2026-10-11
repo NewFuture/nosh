@@ -18,6 +18,21 @@ const MODES: &[(&str, ApprovalMode)] = &[
 ];
 const SWITCHES: &[(&str, bool)] = &[("on", true), ("off", false)];
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Current {
+    pub theme: Option<crate::theme::Builtin>,
+    pub mode: Option<ApprovalMode>,
+}
+
+impl Current {
+    pub fn matches(self, value: &str) -> bool {
+        self.theme.is_some_and(|theme| theme.name() == value)
+            || MODES
+                .iter()
+                .any(|(name, mode)| *name == value && Some(*mode) == self.mode)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementCommand {
     Mode(Option<ApprovalMode>),
@@ -30,6 +45,7 @@ pub enum ManagementCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
+    Theme(Option<String>),
     Auto(Option<bool>),
     Fix(String),
     Manage(ManagementCommand),
@@ -87,6 +103,7 @@ impl Error {
 #[derive(Clone, Copy)]
 enum Kind {
     Help,
+    Theme,
     Mode,
     Think,
     Auto,
@@ -118,6 +135,13 @@ const COMMANDS: &[Definition] = &[
         zh: "查看或切换审批模式",
         en: "show or switch approval mode",
         kind: Kind::Mode,
+    },
+    Definition {
+        name: "theme",
+        syntax: "theme [name-or-path]",
+        zh: "查看或保存主题选择",
+        en: "show or save the theme selection",
+        kind: Kind::Theme,
     },
     Definition {
         name: "think",
@@ -170,7 +194,30 @@ impl Definition {
 
     fn values(&self) -> Vec<(&'static str, Option<&'static str>)> {
         match self.kind {
-            Kind::Mode => MODES.iter().map(|(name, _)| (*name, None)).collect(),
+            Kind::Theme => crate::theme::Builtin::ALL
+                .into_iter()
+                .map(|theme| {
+                    let description = match theme {
+                        crate::theme::Builtin::Dark => tr!("深色主题", "Dark theme"),
+                        crate::theme::Builtin::Light => tr!("浅色主题", "Light theme"),
+                    };
+                    (theme.name(), Some(description))
+                })
+                .collect(),
+            Kind::Mode => MODES
+                .iter()
+                .map(|(name, mode)| {
+                    let description = match mode {
+                        ApprovalMode::Confirm => tr!("询问审批", "Ask for approval"),
+                        ApprovalMode::Auto => tr!("按安全规则自动执行", "Apply safety rules"),
+                        ApprovalMode::Yolo => tr!(
+                            "跳过常规审批（高风险）",
+                            "Skip routine approval (high risk)"
+                        ),
+                    };
+                    (*name, Some(description))
+                })
+                .collect(),
             Kind::Think | Kind::Auto => SWITCHES.iter().map(|(name, _)| (*name, None)).collect(),
             _ => Vec::new(),
         }
@@ -179,6 +226,23 @@ impl Definition {
     fn parse(&self, args: &str) -> Option<Command> {
         if matches!(self.kind, Kind::Fix) {
             return Some(Command::Fix(args.to_owned()));
+        }
+        if matches!(self.kind, Kind::Theme) {
+            if args.is_empty() {
+                return Some(Command::Theme(None));
+            }
+            let tokens = brush_parser::tokenize_str(args).ok()?;
+            let [brush_parser::Token::Word(value, _)] = tokens.as_slice() else {
+                return None;
+            };
+            if value != args {
+                return None;
+            }
+            let name = crate::trigger::static_word_with_tilde(
+                &brush_parser::ast::Word::new(value),
+                &|expr| matches!(expr, brush_parser::word::TildeExpr::Home).then(|| "~".into()),
+            )?;
+            return (!name.is_empty()).then_some(Command::Theme(Some(name)));
         }
         let mut words = args.split_whitespace();
         let arg = words.next();
@@ -207,7 +271,7 @@ impl Definition {
             Kind::Clear => Some(Command::Manage(ManagementCommand::Clear)),
             Kind::Ctx => Some(Command::Manage(ManagementCommand::Ctx)),
             Kind::Status => Some(Command::Manage(ManagementCommand::Status)),
-            Kind::Fix => unreachable!(),
+            Kind::Fix | Kind::Theme => unreachable!(),
         }
     }
 }
@@ -295,6 +359,7 @@ pub(crate) struct CompletionScope<'a> {
     pub span: Range<usize>,
     pub values: Vec<(&'static str, Option<&'static str>)>,
     pub command_name: bool,
+    pub automatic: bool,
 }
 
 pub(crate) fn completion_scope<'a>(
@@ -311,6 +376,7 @@ pub(crate) fn completion_scope<'a>(
         span: cursor..cursor,
         values: Vec::new(),
         command_name: false,
+        automatic: false,
     };
     if cursor < start {
         return Some(scope);
@@ -351,6 +417,8 @@ pub(crate) fn completion_scope<'a>(
     scope.word = line.get(start..cursor)?;
     scope.span = start..arg_end;
     scope.values = definition.values();
+    scope.automatic =
+        matches!(definition.kind, Kind::Theme | Kind::Mode) && !line.contains(['\n', '\r']);
     Some(scope)
 }
 
@@ -380,7 +448,10 @@ mod tests {
         for (line, prefix, enabled) in [
             ("#help", "#", false),
             ("#help", "", true),
+            ("#theme soft-light", "#", false),
+            ("#theme soft-light", "", true),
             ("echo hello #mode auto", "#", true),
+            ("echo hello #theme soft-light", "#", true),
             ("ai help", "#", true),
         ] {
             assert_eq!(parse(line, prefix, enabled), Input::Shell);
@@ -390,7 +461,7 @@ mod tests {
 
     #[test]
     fn catalog_and_fixed_parameters_share_the_contract() {
-        assert_eq!(COMMANDS.len(), 8);
+        assert_eq!(COMMANDS.len(), 9);
         for definition in COMMANDS {
             assert!(matches!(
                 parse(&format!("#{}", definition.name), "#", true),
@@ -414,6 +485,28 @@ mod tests {
     }
 
     #[test]
+    fn theme_arguments_are_single_literal_names_or_paths() {
+        assert_eq!(
+            parse("#theme", "#", true),
+            Input::Command(Command::Theme(None))
+        );
+        for (argument, name) in [
+            ("soft-light", "soft-light"),
+            ("'./my theme.toml'", "./my theme.toml"),
+            ("\"./my theme.toml\"", "./my theme.toml"),
+            ("./my\\ theme.toml", "./my theme.toml"),
+            ("'./theme\\name.toml'", "./theme\\name.toml"),
+            ("~/theme.toml", "~/theme.toml"),
+        ] {
+            assert_eq!(
+                parse(&format!("?theme {argument}"), "?", true),
+                Input::Command(Command::Theme(Some(name.into()))),
+                "{argument}"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_commands_and_arguments_never_become_tasks() {
         for line in [
             "#modeXYZ",
@@ -424,6 +517,14 @@ mod tests {
             "#undo",
             "#model",
             "#mode bad",
+            "#theme ''",
+            "#theme 'unfinished",
+            "#theme soft-dark extra",
+            "#theme soft-dark #ignored",
+            "#theme soft-dark; echo bad",
+            "#theme $(touch marker)",
+            "#theme `touch marker`",
+            "#theme \"$HOME/theme.toml\"",
             "#think maybe",
             "#auto on extra",
             "#help extra",
@@ -464,7 +565,7 @@ mod tests {
             let mut result = line.to_owned();
             result.replace_range(scope.span, "help");
             assert_eq!(result, if prefix == "#" { "#help" } else { "  问help" });
-            assert_eq!(scope.values.len(), 8);
+            assert_eq!(scope.values.len(), 9);
         }
         let line = "#mode au";
         let scope = completion_scope(line, line.len(), "#").unwrap();
@@ -477,6 +578,17 @@ mod tests {
                 .map(|(value, _)| *value)
                 .collect::<Vec<_>>(),
             ["confirm", "auto", "yolo"]
+        );
+        let line = "#theme soft-l";
+        let scope = completion_scope(line, line.len(), "#").unwrap();
+        assert_eq!(&line[scope.span], "soft-l");
+        assert_eq!(
+            scope
+                .values
+                .iter()
+                .map(|(value, _)| *value)
+                .collect::<Vec<_>>(),
+            ["soft-dark", "soft-light"]
         );
         assert!(completion_scope("# 任务", "# 任务".len(), "#").is_none());
         assert!(

@@ -11,6 +11,7 @@ use nosh_shell::{style, term};
 
 #[derive(Debug, Clone)]
 pub struct EngineSetup {
+    pub theme: nosh_shell::theme::ThemeHandle,
     pub device: Result<nosh_llm::InferenceDevice, String>,
     pub model_id: Option<String>,
     pub model_path: Option<PathBuf>,
@@ -158,16 +159,17 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
 
 /// First interactive start without a model: offer the download once.
 pub fn offer_first_download(setup: &EngineSetup) {
+    let styles = setup.theme.snapshot().styles(style::stderr());
     match first_download_needed(setup) {
         Ok(true) => {
             if let Err(e) = download(setup, true) {
-                eprintln!("{}", style::dim(&format!("nosh: {e}")));
+                eprintln!("{}", styles.dim(&format!("nosh: {e}")));
             }
         }
         Ok(false) => {}
         // A configured model that cannot be used (`--model-path` missing or
         // ambiguous) is reported; downloading another one would not help.
-        Err(e) => eprintln!("{}", style::dim(&format!("nosh: {e}"))),
+        Err(e) => eprintln!("{}", styles.dim(&format!("nosh: {e}"))),
     }
 }
 
@@ -231,7 +233,7 @@ pub(crate) fn load_local(
                 0,
                 "",
             );
-            eprint!("{}", style::dim(&status));
+            eprint!("{}", setup.theme.snapshot().styles(terminal).dim(&status));
         } else {
             eprintln!("{status}");
         }
@@ -321,6 +323,7 @@ mod tests {
 
     fn setup(model_path: PathBuf) -> EngineSetup {
         EngineSetup {
+            theme: Default::default(),
             device: Ok(nosh_llm::InferenceDevice::Cpu),
             model_id: None,
             model_path: Some(model_path),

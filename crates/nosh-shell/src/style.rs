@@ -14,40 +14,40 @@ pub fn glyph<'a>(unicode: &'a str, ascii: &'a str) -> &'a str {
     stderr().glyph(unicode, ascii)
 }
 
-fn paint(code: &str, s: &str) -> String {
-    stderr().paint(code, s)
+fn styles() -> crate::theme::Styles {
+    crate::theme::Theme::default().styles(stderr())
 }
 
 pub fn dim(s: &str) -> String {
-    paint("2", s)
+    styles().dim(s)
 }
 
 pub fn bold(s: &str) -> String {
-    paint("1", s)
+    styles().bold(s)
 }
 
 pub fn red(s: &str) -> String {
-    paint("31", s)
+    styles().red(s)
 }
 
 pub fn red_bold(s: &str) -> String {
-    paint("1;31", s)
+    styles().red_bold(s)
 }
 
 pub fn green(s: &str) -> String {
-    paint("32", s)
+    styles().green(s)
 }
 
 pub fn yellow(s: &str) -> String {
-    paint("33", s)
+    styles().yellow(s)
 }
 
 pub fn cyan(s: &str) -> String {
-    paint("36", s)
+    styles().cyan(s)
 }
 
 pub fn blue_bold(s: &str) -> String {
-    paint("1;34", s)
+    styles().blue_bold(s)
 }
 
 /// Removes ANSI escape sequences (for width calculations and logs).
@@ -150,18 +150,23 @@ pub fn clip_line(s: &str, columns: usize, offset: usize, ellipsis: &str) -> Stri
         })
         .collect();
     let budget = columns.saturating_sub(width(&marker));
+    expanded.truncate(prefix_end(&expanded, budget));
+    expanded.push_str(&marker);
+    expanded
+}
+
+/// Byte end of a grapheme-aligned prefix; tabs must already be expanded.
+pub(crate) fn prefix_end(text: &str, columns: usize) -> usize {
     let mut used = 0;
     let mut end = 0;
-    for (i, g) in expanded.grapheme_indices(true) {
+    for (i, g) in text.grapheme_indices(true) {
         used += width(g);
-        if used > budget {
+        if used > columns {
             break;
         }
         end = i + g.len();
     }
-    expanded.truncate(end);
-    expanded.push_str(&marker);
-    expanded
+    end
 }
 
 const MAX_OUTPUT_LINE: usize = 4096;

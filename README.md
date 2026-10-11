@@ -5,7 +5,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 > 只维护当前版本。支持范围与限制见[系统设计](docs/DESIGN.md#03-实现状态)。
 
 - **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`# 任务` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
-- **前缀命令**：单独键入 `#` 自动弹出本地命令补全，`#help` 查看帮助，`#mode auto` 等管理命令本地解析；`#fix [补充说明]` 由 Agent 诊断上次失败。子命令和固定参数也支持 Tab 补全，未知命令或错误参数不转交模型。完整语法见[交互命令](docs/DESIGN.md#91-shell-界面)。
+- **前缀命令**：单独键入 `#` 自动弹出本地命令补全，`#help` 查看帮助，`#mode auto` 切换审批模式，`#theme soft-light` 保存主题选择；`#fix [补充说明]` 由 Agent 诊断上次失败。`#theme ` / `#mode ` 自动展示参数候选，子命令和固定参数也支持 Tab 补全；未知命令或错误参数不转交模型。完整语法见[交互命令](docs/DESIGN.md#91-shell-界面)。
 - **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
 - **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
 - **上下文补全**：命令与路径默认 smart-case 模糊；内置 Git `switch`、GNU Make 静态目标及 `npm run`／Yarn 项目脚本补全，保留已加载定义的语义。共用一个有界、可取消的补全进程；覆盖和限制见[补全说明](docs/COMPLETION.md)。
@@ -58,7 +58,7 @@ input_assist = false
 
 ## 命令建议与终端交接
 
-交互 shell 在**提示符上方**显示环境、输入状态、操作提示与模式，不预留屏底区域；`[shell] status_bar = false` 可关闭。**tmux 的未提交草稿历史残留仍未解决**。布局、主题注入和兼容边界见[状态行设计](docs/STATUS-BAR.md)。
+交互 shell 在**提示符上方**显示环境、输入状态、操作提示与模式，不预留屏底区域；`[shell] status_bar = false` 可关闭。内建 `soft-dark` / `soft-light` 不依赖 Starship，选择自动保存、无需重启；预览、原生 Starship 主题和可选 Powerline 见[主题说明](docs/THEMES.md)。**tmux 的未提交草稿历史残留仍未解决**；布局与兼容边界见[状态行设计](docs/STATUS-BAR.md)。
 
 Agent 使用 `exec`、`read_file`、`grep`，有交互终端时可提问；管道附件模式不开放命令执行，也不从管道读取提问回答。项目指引优先使用适用的 `AGENTS.md`，否则使用 README 简介与索引。详见[工具契约](docs/LLM-TOOLS.md)和[项目上下文](docs/PROJECT-CONTEXT.md)。
 

@@ -56,6 +56,23 @@ jobs:
         run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked
+      - name: Starship theme compatibility
+        env:
+          STARSHIP_VERSION: '1.26.0'
+          STARSHIP_SHA256: 'b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3'
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/nosh-starship"
+          mkdir -p "$install_dir"
+          archive="$install_dir/starship.tar.gz"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://github.com/starship/starship/releases/download/v${STARSHIP_VERSION}/starship-x86_64-unknown-linux-musl.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$STARSHIP_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$install_dir" starship
+          export PATH="$install_dir:$PATH"
+          starship --version
+          cargo test -p nosh-cli --bin nosh --test theme --locked -- --ignored
       - name: patched editor regressions
         run: cargo test --manifest-path .nosh/reedline/Cargo.toml --lib --features external_printer --locked --target-dir target/reedline
       - name: completion regressions

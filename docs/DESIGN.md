@@ -254,6 +254,7 @@ CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，
 | 键入 `#` | 自动弹出本地命令补全；首项 `# <task>` 只补空格，不请求模型 |
 | `#help` | 显示帮助，不请求模型 |
 | `#mode [confirm\|auto\|yolo]` | 查看或切换审批模式 |
+| `#theme [名称或路径]` | 查看当前主题，或校验并自动保存主题选择；无需重启 |
 | `#think [on\|off]` | 查看或开关思考；改变设置时重置对话 |
 | `#auto [on\|off]` | 查看或暂停自动错误路由及自动 Next/Fix |
 | `#fix [补充说明]` | 始终由 Agent 诊断上次失败，自动附带失败命令、退出码及匹配输出；说明可省略，工具调用按 Agent 审批规则执行 |
@@ -264,7 +265,7 @@ CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，
 
 无空格的 `#任务` 是未知子命令；`#next`、`#history`、`#private`、`#undo`、`#model` 不在命令目录中。除显式 `#fix` 外，帮助和管理操作不发起推理或模型下载。
 
-子命令和固定参数支持本地 Tab 补全，采用候选只修改草稿。自动菜单随输入和删除更新，不打断完整命令或 `# 任务` 的提交；筛选、取消和恢复规则见[补全说明](COMPLETION.md)。未提交的有效名称前缀只标为待完成，提交仍要求完整命令名。管理输入的 F2 和 Tab 无结果不触发 AI。关闭补全时不自动弹出菜单；关闭 AI 时不拦截前缀；空 `ai_prefix` 关闭显式入口及相应提示。中间的 `#`、脚本、`source`、函数体和 `-c` 保持正常 Shell 语义。
+子命令和固定参数支持本地 Tab 补全，`#mode ` / `#theme ` 自动展示参数候选；采用只修改草稿，不执行命令。前缀菜单随输入和删除更新，不打断完整命令或 `# 任务` 的提交；筛选、取消和恢复规则见[补全说明](COMPLETION.md)。未提交的有效名称前缀只标为待完成，提交仍要求完整命令名。管理输入的 F2 和 Tab 无结果不触发 AI。关闭补全时不自动弹出菜单；关闭 AI 时不拦截前缀；空 `ai_prefix` 关闭显式入口及相应提示。中间的 `#`、脚本、`source`、函数体和 `-c` 保持正常 Shell 语义。
 
 ### 9.1.1 实时输入提示
 
@@ -303,6 +304,9 @@ completion = true
 completion_scripts = true
 command_assist = true
 status_bar = true
+theme = "soft-dark"           # soft-dark | soft-light | 原生 Starship TOML 路径
+starship = false              # 启用提示符边界的 Starship 环境模块
+nerd_font = "auto"            # 默认自动选择 Powerline；true 显式启用，false 关闭
 nl_guard = "destructive"      # destructive | off
 edit_mode = "auto"            # auto | emacs | vi
 
@@ -337,6 +341,8 @@ fallback_shell = "/bin/bash"
 ```
 
 键位列表是显式覆盖示例，不是所有原生别名。安全规则使用 TOML 条目，可改用 `[[safety.allow]]` 表数组，但同一个键只能定义一次；条件、路径 glob 与 workspace 作用域见[用户规则](APPROVAL-MODES.md#4-用户规则与会话授权)。
+
+`nosh theme set <name-or-path>` 自动保存主题，无需重启。自定义配色使用原生 Starship TOML；生效时机、静态样式、可选环境模块、Powerline 和保存失败规则见[主题说明](THEMES.md)。
 
 `nosh model` 子命令使用自己的位置参数与选项，不继承交互模式的模型/下载配置。键、默认值与范围的实现来源为 [config.rs](../crates/nosh-cli/src/config.rs)。
 

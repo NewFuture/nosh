@@ -55,7 +55,31 @@ impl UserInput for NoUserInput {
 
 pub struct TerminalUserInput;
 
+pub struct ThemedUserInput {
+    theme: nosh_shell::theme::ThemeHandle,
+}
+
+impl TerminalUserInput {
+    pub fn with_theme(&self, theme: nosh_shell::theme::ThemeHandle) -> ThemedUserInput {
+        ThemedUserInput { theme }
+    }
+}
+
 impl UserInput for TerminalUserInput {
+    fn available(&self) -> bool {
+        term::available()
+    }
+
+    fn ask(
+        &mut self,
+        question: &UserQuestion,
+        cancel: &CancelHandle,
+    ) -> Result<String, InputError> {
+        self.with_theme(Default::default()).ask(question, cancel)
+    }
+}
+
+impl UserInput for ThemedUserInput {
     fn available(&self) -> bool {
         term::available()
     }
@@ -80,7 +104,10 @@ impl UserInput for TerminalUserInput {
             writeln!(
                 err,
                 "{} {}",
-                crate::ui::bar(),
+                self.theme
+                    .snapshot()
+                    .styles(style::stderr())
+                    .cyan(style::glyph("│", "|")),
                 style::visible_text(&question.question)
             )
             .map_err(unavailable)?;

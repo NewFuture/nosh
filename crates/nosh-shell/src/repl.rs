@@ -7,17 +7,58 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use nosh_platform::tr;
-use nu_ansi_term::{Color, Style};
+use nu_ansi_term::Color;
 use reedline::{
-    ColumnarMenu, KeyCode, MenuBuilder, Prompt, PromptContext, PromptEditMode, PromptHistorySearch,
-    PromptHistorySearchStatus, Reedline, ReedlineMenu, Signal, ValidationResult,
+    KeyCode, Prompt, PromptContext, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus,
+    Reedline, ReedlineMenu, Signal, ValidationResult,
 };
 
 use crate::UserOutput;
 use crate::backend::{BrushShell, EmbeddedShell, UserCommand};
 use crate::inline_commands::{self, Command};
+use crate::theme::{FrameTheme, Role, Theme, ThemedHinter};
 use crate::trigger::{self, Action, Trigger, TriggerConfig};
 use crate::{editing, input_assist, style, term};
+
+/// Reads only presentation configuration at a new prompt, never on an input event.
+#[derive(Clone)]
+pub struct ThemeLoader(pub Arc<dyn Fn() -> Result<LoadedTheme, String> + Send + Sync>);
+
+#[derive(Clone, Copy, Debug)]
+pub struct LoadedTheme {
+    pub palette: Theme,
+    pub builtin: Option<crate::theme::Builtin>,
+}
+
+impl std::fmt::Debug for ThemeLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThemeLoader")
+    }
+}
+
+#[derive(Clone)]
+pub struct ThemeCommand(pub Arc<ThemeCommandCallback>);
+
+pub type ThemeCommandCallback =
+    dyn Fn(&EmbeddedShell, Option<&str>) -> Result<String, String> + Send + Sync;
+
+impl std::fmt::Debug for ThemeCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThemeCommand")
+    }
+}
+
+#[derive(Clone)]
+pub struct EnvironmentLoader(pub Arc<EnvironmentCallback>);
+
+pub type EnvironmentCallback =
+    dyn Fn(&EmbeddedShell) -> Result<Option<crate::theme::Fragment>, String> + Send + Sync;
+
+impl std::fmt::Debug for EnvironmentLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EnvironmentLoader")
+    }
+}
 
 /// A request for the AI, produced by the pipeline.
 #[derive(Debug, Clone)]
@@ -40,8 +81,16 @@ pub struct AiOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct Badge {
     pub mode: String,
+    pub current_mode: Option<inline_commands::ApprovalMode>,
+    pub context: Option<ContextUsage>,
     pub yolo: bool,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub used: usize,
+    pub max: usize,
 }
 
 pub trait AiHandler {
@@ -123,6 +172,9 @@ impl OnFailure {
 pub struct ReplConfig {
     pub terminal_integration: crate::terminal_integration::Mode,
     pub status_bar: crate::status::Config,
+    pub theme_loader: Option<ThemeLoader>,
+    pub theme_command: Option<ThemeCommand>,
+    pub environment_loader: Option<EnvironmentLoader>,
     pub trigger: TriggerConfig,
     pub on_failure: OnFailure,
     pub command_assist: bool,
@@ -137,6 +189,9 @@ impl Default for ReplConfig {
         Self {
             terminal_integration: Default::default(),
             status_bar: Default::default(),
+            theme_loader: None,
+            theme_command: None,
+            environment_loader: None,
             trigger: Default::default(),
             on_failure: Default::default(),
             command_assist: true,
@@ -162,13 +217,16 @@ pub trait ReplUi {
 }
 
 /// Terminal implementation of [`ReplUi`].
-pub struct TermUi;
+#[derive(Default)]
+pub struct TermUi {
+    pub theme: crate::theme::ThemeHandle,
+}
 
 impl ReplUi for TermUi {
     fn guard(&mut self, _line: &str) -> GuardChoice {
         eprint!(
             "{} ",
-            style::yellow(style::glyph(
+            self.theme.snapshot().styles(style::stderr()).yellow(style::glyph(
                 tr!(
                     "看起来像自然语言：↵ 交给 AI · Ctrl+E 仍按命令执行 · Esc 取消",
                     "Looks like natural language: ↵ ask AI · Ctrl+E run as command · Esc cancel"
@@ -210,6 +268,10 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    fn styles(&self) -> crate::theme::Styles {
+        self.cfg.status_bar.theme.snapshot().styles(style::stderr())
+    }
+
     pub fn new(cfg: ReplConfig) -> Self {
         Self {
             cfg,
@@ -265,8 +327,9 @@ impl Pipeline {
             } => {
                 ui.notice(&format!(
                     "{} {from} → {to}  {}",
-                    style::cyan("nosh:"),
-                    style::dim(tr!("（回车执行）", "(press Enter to run)"))
+                    self.styles().cyan("nosh:"),
+                    self.styles()
+                        .dim(tr!("（回车执行）", "(press Enter to run)"))
                 ));
                 LineOutcome::Continue(Some(corrected))
             }
@@ -311,7 +374,7 @@ impl Pipeline {
                     "{} <task>",
                     style::visible_text(&self.cfg.trigger.ai_prefix)
                 );
-                ui.notice(&style::dim(&tr!(
+                ui.notice(&self.styles().dim(&tr!(
                     format!("nosh: 没有失败的命令；用 {entry} 描述任务"),
                     format!("nosh: no failed command; use {entry} to describe a task")
                 )));
@@ -330,6 +393,21 @@ impl Pipeline {
         match command {
             Command::Help => {
                 ui.notice(&inline_commands::help(&self.cfg.trigger.ai_prefix));
+                LineOutcome::Continue(None)
+            }
+            Command::Theme(name) => {
+                let result = match &self.cfg.theme_command {
+                    Some(command) => (command.0)(shell, name.as_deref()),
+                    None => Err(tr!(
+                        "当前宿主未提供主题选择",
+                        "theme selection is unavailable in this host"
+                    )
+                    .into()),
+                };
+                match result {
+                    Ok(message) => ui.notice(&message),
+                    Err(error) => ui.notice(&format!("nosh: {}", style::visible_text(&error))),
+                }
                 LineOutcome::Continue(None)
             }
             Command::Fix(text) => self.fix_with_text(shell, ai, ui, text),
@@ -407,7 +485,7 @@ impl Pipeline {
                 .cloned();
             let _ = isolate(|| ai.after_command(shell, command, output));
             if ai.assistance().is_some() {
-                ui.notice(&style::dim(&failure_notice));
+                ui.notice(&self.styles().dim(&failure_notice));
                 return LineOutcome::Continue(None);
             }
         }
@@ -427,7 +505,7 @@ impl Pipeline {
                 cmd,
             ),
             _ => {
-                ui.notice(&style::dim(&failure_notice));
+                ui.notice(&self.styles().dim(&failure_notice));
                 LineOutcome::Continue(None)
             }
         }
@@ -477,7 +555,7 @@ pub fn isolate<T>(f: impl FnOnce() -> T) -> Option<T> {
                 .unwrap_or("unknown error");
             eprintln!(
                 "{}",
-                style::red(&format!(
+                style::visible_text(&format!(
                     "{}: {msg}",
                     tr!("nosh: AI 子系统出错", "nosh: AI subsystem failed")
                 ))
@@ -489,6 +567,7 @@ pub fn isolate<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 pub(crate) const SUGGEST_COMMAND: &str = "__nosh_suggest__";
 const PROJECT_ENV_READY: &str = "__nosh_project_env_ready__";
+pub(crate) const INLINE_HISTORY_INDICATOR: &str = "? ";
 
 #[derive(Clone, Default)]
 struct EditorState {
@@ -497,6 +576,7 @@ struct EditorState {
     editing: Option<Arc<editing::Compiled>>,
     _theme_subscription: Option<crate::status::ThemeSubscription>,
     completion_controller: Option<crate::completion::Completion>,
+    frame_theme: FrameTheme,
 }
 
 struct RenderedPrompt {
@@ -511,17 +591,20 @@ struct ReplPrompt {
     status_feedback: bool,
     theme: crate::status::ThemeHandle,
     environment: Option<(String, Option<String>)>,
+    external_environment: Option<crate::theme::Fragment>,
     approval: String,
     note: Option<String>,
     latest_command: Option<u64>,
     failed_exit: Option<i32>,
+    last_result: Option<(i32, std::time::Duration)>,
+    context_usage: Option<ContextUsage>,
     editor: EditorState,
     rendered: RefCell<Option<RenderedPrompt>>,
     left: String,
     indicator: String,
-    indicator_color: Color,
+    indicator_role: Role,
     right: String,
-    right_color: Color,
+    right_role: Role,
     continuation: String,
     input_assist: Option<input_assist::InputAssist>,
     command_assist: Option<crate::AssistDisplay>,
@@ -530,6 +613,10 @@ struct ReplPrompt {
 
 impl ReplPrompt {
     fn refresh_environment(&mut self, shell: &EmbeddedShell, badge: &Badge) {
+        let mut prompt = Self::build(shell, badge);
+        if prompt.environment.is_some() {
+            prompt.external_environment = self.external_environment.clone();
+        }
         *self = Self {
             status_enabled: self.status_enabled,
             status_feedback: self.status_feedback,
@@ -538,8 +625,30 @@ impl ReplPrompt {
             failed_exit: self.failed_exit,
             input_assist: self.input_assist.clone(),
             command_assist: self.command_assist.clone(),
-            ..Self::build(shell, badge)
+            inline_prefix: self.inline_prefix.clone(),
+            ..prompt
         };
+    }
+
+    fn fallback_left(&self) -> String {
+        if let Some(environment) = &self.external_environment {
+            format!(
+                "{} ",
+                environment.render(4096, self.editor.frame_theme.styles())
+            )
+        } else if let Some((cwd, branch)) = &self.environment {
+            let styles = self.editor.frame_theme.styles();
+            format!(
+                "{}{} ",
+                styles.blue_bold(cwd),
+                branch
+                    .as_ref()
+                    .map(|b| styles.dim(&format!(" ({b})")))
+                    .unwrap_or_default()
+            )
+        } else {
+            self.left.clone()
+        }
     }
 
     fn build(shell: &EmbeddedShell, badge: &Badge) -> Self {
@@ -562,11 +671,7 @@ impl ReplPrompt {
                 .map(|b| format!(" ({b})"))
                 .unwrap_or_default();
             (
-                format!(
-                    "{}{} ",
-                    style::stdout().paint("1;34", &left),
-                    style::stdout().paint("2", &branch)
-                ),
+                format!("{left}{branch} "),
                 style::stdout().glyph("❯ ", "> ").to_string(),
             )
         };
@@ -582,20 +687,26 @@ impl ReplPrompt {
             status_feedback: false,
             theme: crate::status::ThemeHandle::default(),
             environment,
+            external_environment: None,
             approval: badge.mode.clone(),
             note: badge.note.clone(),
             latest_command: shell.recent_commands().last().map(|command| command.id),
             failed_exit: None,
+            last_result: shell
+                .recent_commands()
+                .last()
+                .map(|command| (command.exit, command.duration)),
+            context_usage: badge.context,
             editor: EditorState::default(),
             rendered: RefCell::new(None),
             left,
             indicator,
-            indicator_color: if ok { Color::Green } else { Color::Red },
+            indicator_role: if ok { Role::Positive } else { Role::Error },
             right,
-            right_color: if badge.yolo {
-                Color::LightRed
+            right_role: if badge.yolo {
+                Role::Warning
             } else {
-                Color::DarkGray
+                Role::Muted
             },
             continuation: shell.continuation_prompt(),
             input_assist: None,
@@ -606,8 +717,13 @@ impl ReplPrompt {
 }
 
 impl Prompt for ReplPrompt {
+    fn begin_paint(&self) {
+        self.editor.frame_theme.latch(self.theme.snapshot());
+    }
+
     fn update_context(&self, context: PromptContext<'_>) {
-        let theme = self.theme.snapshot();
+        let styles = self.editor.frame_theme.styles();
+        let theme = styles.theme;
         let command_input = self
             .inline_prefix
             .as_ref()
@@ -657,11 +773,14 @@ impl Prompt for ReplPrompt {
                     .environment
                     .as_ref()
                     .map(|(cwd, branch)| (cwd.as_str(), branch.as_deref())),
+                external_environment: self.external_environment.as_ref(),
                 feedback,
                 completion,
                 assistance: assistance.as_ref(),
                 latest_command: self.latest_command,
                 failed_exit: self.failed_exit,
+                last_result: self.last_result,
+                context_usage: self.context_usage,
                 approval: &self.approval,
                 note: self.note.as_deref(),
                 bindings,
@@ -699,10 +818,11 @@ impl Prompt for ReplPrompt {
                 },
             )
         } else {
-            let mut left = if self.left.starts_with('\n') {
-                format!(" {}", self.left)
+            let base = self.fallback_left();
+            let mut left = if base.starts_with('\n') {
+                format!(" {base}")
             } else {
-                self.left.clone()
+                base
             };
             let command_status =
                 if matches!(context.interaction, reedline::PromptInteraction::Editing) {
@@ -711,7 +831,7 @@ impl Prompt for ReplPrompt {
                     String::new()
                 };
             if !command_status.is_empty() {
-                left = format!("{}\n{left}", style::stdout().paint("2", &command_status));
+                left = format!("{}\n{left}", styles.dim(&command_status));
             }
             let status =
                 if let Some(error) = completion.and_then(|snapshot| snapshot.error.as_ref()) {
@@ -734,7 +854,7 @@ impl Prompt for ReplPrompt {
                     0,
                     "...",
                 );
-                left = format!("{}\n{left}", style::stdout().paint("2", &status));
+                left = format!("{}\n{left}", styles.dim(&status));
             }
             (left, self.right.clone())
         };
@@ -750,17 +870,19 @@ impl Prompt for ReplPrompt {
         if let Some(rendered) = self.rendered.borrow().as_ref() {
             return Cow::Owned(rendered.left.clone());
         }
-        let left: Cow<'_, str> = if self.left.starts_with('\n') {
-            format!(" {}", self.left).into()
+        let base = self.fallback_left();
+        let styles = self.editor.frame_theme.styles();
+        let left: Cow<'_, str> = if base.starts_with('\n') {
+            format!(" {base}").into()
         } else {
-            self.left.as_str().into()
+            base.into()
         };
         let left = if let Some(assist) = &self.command_assist {
             let status = assist.status(None);
             if status.is_empty() {
                 left
             } else {
-                Cow::Owned(format!("{}\n{left}", style::stdout().paint("2", &status)))
+                Cow::Owned(format!("{}\n{left}", styles.dim(&status)))
             }
         } else {
             left
@@ -768,7 +890,7 @@ impl Prompt for ReplPrompt {
         if let Some(assist) = &self.input_assist {
             let status = assist.status();
             if !status.is_empty() {
-                return format!("{}\n{left}", style::stdout().paint("2", &status)).into();
+                return format!("{}\n{left}", styles.dim(&status)).into();
             }
         }
         left
@@ -799,7 +921,7 @@ impl Prompt for ReplPrompt {
             .as_ref()
             .is_some_and(|rendered| rendered.inline)
         {
-            return "? ".into();
+            return INLINE_HISTORY_INDICATOR.into();
         }
         let indicator = match hs.status {
             PromptHistorySearchStatus::Passing if hs.term.is_empty() => {
@@ -828,11 +950,21 @@ impl Prompt for ReplPrompt {
     }
 
     fn get_indicator_color(&self) -> Color {
-        self.indicator_color
+        self.editor
+            .frame_theme
+            .styles()
+            .style(self.indicator_role)
+            .foreground
+            .unwrap_or(Color::Default)
     }
 
     fn get_prompt_right_color(&self) -> Color {
-        self.right_color
+        self.editor
+            .frame_theme
+            .styles()
+            .style(self.right_role)
+            .foreground
+            .unwrap_or(Color::Default)
     }
 
     fn get_prompt_multiline_color(&self) -> Color {
@@ -962,22 +1094,12 @@ fn build_editor(
         editing: Some(compiled),
         _theme_subscription: None,
         completion_controller: None,
+        frame_theme: FrameTheme::new(cfg.status_bar.theme.snapshot().styles(style::stdout())),
     };
-    let menu = |name: &str| {
-        ColumnarMenu::default()
-            .with_name(name)
-            .with_preserve_case(true)
-            .with_input_mode(reedline::InputMode::FullBuffer)
-            .with_marker("")
-            .with_columns(10)
-            .with_selected_text_style(Color::Blue.bold().reverse())
-            .with_selected_match_text_style(Color::Blue.bold().reverse())
-    };
-    let colors = style::stdout().color;
-    let mut hinter = reedline::DefaultHinter::default();
-    if colors {
-        hinter = hinter.with_style(Style::new().italic().fg(Color::DarkGray));
-    }
+    let menu = |name| crate::theme::completion_menu(name, state.frame_theme.clone());
+    let colors =
+        style::stdout().color && crate::status::color_depth() != crate::status::ColorDepth::Plain;
+    let hinter = reedline::DefaultHinter::default();
     let mut editor = Reedline::create()
         .with_semantic_markers(semantic_markers.then(reedline::Osc133Markers::boxed))
         .with_ansi_colors(colors)
@@ -998,7 +1120,7 @@ fn build_editor(
             prefix: cfg.trigger.ai_prefix.clone(),
             ai_enabled: cfg.trigger.ai_enabled,
         }))
-        .with_highlighter(Box::new(NoHighlight));
+        .with_highlighter(Box::new(NoHighlight(state.frame_theme.clone())));
     let repaint = editor.repaint_signal();
     state._theme_subscription = Some(
         cfg.status_bar
@@ -1015,10 +1137,14 @@ fn build_editor(
             columns,
         )
     });
-    editor = editor.with_hinter(match &assist {
+    let inner = match &assist {
         Some(assist) => assist.hinter(hinter),
-        None => Box::new(hinter),
-    });
+        None => Box::new(hinter) as Box<dyn reedline::Hinter>,
+    };
+    editor = editor.with_hinter(Box::new(ThemedHinter {
+        inner,
+        frame: state.frame_theme.clone(),
+    }));
     let repaint = editor.repaint_signal();
     let mut completion_config = cfg.completion.clone();
     completion_config.abbreviations = cfg.input_abbreviations.clone();
@@ -1035,7 +1161,7 @@ fn build_editor(
     state.completion_controller = Some(completion.clone());
     editor = editor.with_completer(Box::new(completion));
     let edit_mode: Box<dyn reedline::EditMode> = if let Some(assist) = &assist {
-        editor = editor.with_highlighter(assist.highlighter());
+        editor = editor.with_highlighter(assist.highlighter_with_theme(state.frame_theme.clone()));
         assist.edit_mode(native_mode)
     } else {
         native_mode
@@ -1054,12 +1180,12 @@ fn build_editor(
     (editor, assist, state)
 }
 
-struct NoHighlight;
+struct NoHighlight(FrameTheme);
 
 impl reedline::Highlighter for NoHighlight {
     fn highlight(&self, line: &str, _cursor: usize) -> reedline::StyledText {
         let mut t = reedline::StyledText::new();
-        t.push((Style::new(), line.to_string()));
+        t.push((self.0.styles().style(Role::Text), line.to_string()));
         t
     }
 }
@@ -1160,13 +1286,53 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let mut pipeline = Pipeline::new(cfg);
     pipeline.terminal = terminal;
     let status_supported = pipeline.cfg.status_bar.enabled && crate::status::supported();
-    let mut ui = TermUi;
+    let mut ui = TermUi {
+        theme: pipeline.cfg.status_bar.theme.clone(),
+    };
     let mut prefill: Option<String> = None;
+    let mut theme_error = None;
+    let mut environment_error = None;
+    let mut current_theme = None;
     let code = loop {
+        if let Some(loader) = &pipeline.cfg.theme_loader {
+            match (loader.0)() {
+                Ok(theme) => {
+                    theme_error = None;
+                    pipeline.cfg.status_bar.theme.replace(theme.palette);
+                    current_theme = theme.builtin;
+                }
+                Err(error) => {
+                    if theme_error.as_ref() != Some(&error) {
+                        eprintln!("nosh: theme unchanged: {}", style::visible_text(&error));
+                    }
+                    theme_error = Some(error);
+                }
+            }
+        }
         shell.pre_prompt();
         shell.begin_project_env();
         pipeline.terminal.cwd(&shell.cwd());
-        let mut prompt = ReplPrompt::build(shell, &ai.badge());
+        let badge = ai.badge();
+        let mut prompt = ReplPrompt::build(shell, &badge);
+        if prompt.environment.is_some()
+            && let Some(loader) = &pipeline.cfg.environment_loader
+        {
+            match (loader.0)(shell) {
+                Ok(environment) => {
+                    prompt.external_environment = environment;
+                    environment_error = None;
+                }
+                Err(error) => {
+                    if environment_error.as_ref() != Some(&error) {
+                        eprintln!(
+                            "nosh: Starship environment unavailable; using native context: {}",
+                            style::visible_text(&error)
+                        );
+                    }
+                    environment_error = Some(error);
+                }
+            }
+        }
         prompt.status_enabled = status_supported && !shell.has_running_jobs();
         prompt.status_feedback = pipeline.cfg.status_bar.enabled;
         prompt.theme = pipeline.cfg.status_bar.theme.clone();
@@ -1178,6 +1344,10 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             .then(|| pipeline.cfg.trigger.ai_prefix.clone())
             .filter(|prefix| !prefix.is_empty());
         if let Some(completion) = &editor_state.completion_controller {
+            completion.begin_prompt(inline_commands::Current {
+                theme: current_theme,
+                mode: badge.current_mode,
+            });
             completion.prepare(shell);
         }
         *editor_state
@@ -1187,9 +1357,10 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         prompt.failed_exit = pipeline.last_failure().map(|command| command.exit);
         if !pipeline.cfg.trigger.ai_enabled {
             prompt.approval.clear();
+            prompt.context_usage = None;
             prompt.right = prompt.note.clone().unwrap_or_default();
         }
-        prompt.command_assist = ai.assistance();
+        prompt.command_assist = ai.assistance().filter(|_| pipeline.cfg.trigger.ai_enabled);
         if let Some(assist) = &input_assist {
             if shell.project_env_loading() {
                 assist.suspend();
@@ -1230,6 +1401,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                     prompt.refresh_environment(shell, &ai.badge());
                     if !pipeline.cfg.trigger.ai_enabled {
                         prompt.approval.clear();
+                        prompt.context_usage = None;
                         prompt.right = prompt.note.clone().unwrap_or_default();
                     }
                     if let Some(completion) = &editor_state.completion_controller {
@@ -1555,6 +1727,9 @@ mod tests {
             "#mode bad",
             "#out",
             "#out 1",
+            "#theme",
+            "#theme soft-light",
+            "#theme soft-light extra",
             "#unknown",
             "#找文件",
         ] {
@@ -1615,16 +1790,20 @@ mod tests {
             status_feedback: true,
             theme: crate::status::ThemeHandle::default(),
             environment: (!custom).then(|| ("~/project".into(), Some("main".into()))),
+            external_environment: None,
             approval: "Approval: Auto".into(),
             note: None,
             latest_command: None,
             failed_exit: None,
+            last_result: None,
+            context_usage: None,
             editor: EditorState {
                 completion: Default::default(),
                 bindings: crate::status::Bindings::from_editor(&keys),
                 editing: None,
                 _theme_subscription: None,
                 completion_controller: None,
+                frame_theme: FrameTheme::test(),
             },
             rendered: RefCell::new(None),
             left: if custom {
@@ -1633,14 +1812,37 @@ mod tests {
                 "~/project (main) ".into()
             },
             indicator: if custom { "".into() } else { "> ".into() },
-            indicator_color: Color::Red,
+            indicator_role: Role::Error,
             right: "Approval: Auto".into(),
-            right_color: Color::DarkGray,
+            right_role: Role::Muted,
             continuation: "PS2> ".into(),
             input_assist: None,
             command_assist: None,
             inline_prefix: Some("#".into()),
         }
+    }
+
+    #[test]
+    fn project_environment_refresh_preserves_theme_cache_and_inline_prefix() {
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        shell.run_user_line("unset PS1");
+        let mut prompt = status_prompt(false);
+        let theme = crate::theme::Builtin::Light.palette();
+        prompt.theme.replace(theme);
+        prompt.inline_prefix = Some("?".into());
+        prompt.external_environment = Some(crate::theme::Fragment::parse("CACHED_ENV"));
+        prompt.refresh_environment(&shell, &Badge::default());
+        assert_eq!(prompt.theme.snapshot(), theme);
+        assert_eq!(prompt.inline_prefix.as_deref(), Some("?"));
+        assert_eq!(
+            prompt.external_environment.as_ref().unwrap().text(),
+            "CACHED_ENV"
+        );
+
+        shell.run_user_line("PS1='custom> '");
+        prompt.refresh_environment(&shell, &Badge::default());
+        assert!(prompt.external_environment.is_none());
+        assert_eq!(prompt.fallback_left(), "custom> ");
     }
 
     #[test]
@@ -1703,6 +1905,7 @@ mod tests {
                 edit_mode: PromptEditMode::Emacs,
                 interaction,
             };
+            prompt.begin_paint();
             prompt.update_context(snapshot());
             let plain = style::strip_ansi(&prompt.render_prompt_left());
             let theme = crate::status::Theme {
@@ -1714,6 +1917,7 @@ mod tests {
                 themes.replace(theme),
                 "each interaction must exercise an actual theme change"
             );
+            prompt.begin_paint();
             prompt.update_context(snapshot());
             assert_eq!(style::strip_ansi(&prompt.render_prompt_left()), plain);
             assert_eq!(editor.current_buffer_contents(), draft);
@@ -1731,6 +1935,38 @@ mod tests {
             editor.current_buffer_contents(),
             draft,
             "theme replacement lost the undo history"
+        );
+    }
+
+    #[test]
+    fn theme_snapshot_is_shared_from_the_first_highlight_through_the_entire_paint() {
+        use reedline::Highlighter;
+
+        let prompt = status_prompt(false);
+        let light = crate::theme::Builtin::Light.palette();
+        let dark = crate::theme::Builtin::Dark.palette();
+        prompt.theme.replace(light);
+        prompt.begin_paint();
+        let highlighter = NoHighlight(prompt.editor.frame_theme.clone());
+        let first = highlighter.highlight("draft", 5);
+        assert_eq!(first.buffer[0].0.foreground, Some(Color::Rgb(76, 79, 105)));
+
+        prompt.theme.replace(dark);
+        prompt.update_context(prompt_context(120, 24));
+        assert_eq!(prompt.editor.frame_theme.styles().theme, light);
+        let [r, g, b] = light.text_color(prompt.indicator_role).foreground_rgb();
+        assert_eq!(prompt.get_indicator_color(), Color::Rgb(r, g, b));
+        assert_eq!(
+            highlighter.highlight("draft", 5).buffer[0].0,
+            first.buffer[0].0
+        );
+
+        prompt.begin_paint();
+        prompt.update_context(prompt_context(120, 24));
+        assert_eq!(prompt.editor.frame_theme.styles().theme, dark);
+        assert_eq!(
+            highlighter.highlight("draft", 5).buffer[0].0.foreground,
+            Some(Color::Rgb(205, 214, 244))
         );
     }
 
@@ -1761,7 +1997,7 @@ mod tests {
                 assert_eq!(left.matches("~/project").count(), 1, "{left}");
             }
             assert!(prompt.render_prompt_right().is_empty());
-            assert_eq!(prompt.get_indicator_color(), Color::Red);
+            assert_eq!(prompt.get_indicator_color(), Color::Rgb(243, 139, 168));
             assert_eq!(prompt.render_prompt_multiline_indicator(), "PS2> ");
         }
     }
@@ -1772,11 +2008,19 @@ mod tests {
             let mut prompt = status_prompt(custom);
             prompt.status_enabled = false;
             prompt.update_context(prompt_context(100, 24));
-            assert_eq!(prompt.render_prompt_left(), prompt.left);
+            if custom {
+                assert_eq!(prompt.render_prompt_left(), prompt.left);
+            } else {
+                assert_eq!(style::strip_ansi(&prompt.render_prompt_left()), prompt.left);
+            }
             assert_eq!(prompt.render_prompt_right(), prompt.right);
             prompt.status_enabled = true;
             prompt.update_context(prompt_context(100, 2));
-            assert_eq!(prompt.render_prompt_left(), prompt.left);
+            if custom {
+                assert_eq!(prompt.render_prompt_left(), prompt.left);
+            } else {
+                assert_eq!(style::strip_ansi(&prompt.render_prompt_left()), prompt.left);
+            }
             assert_eq!(prompt.render_prompt_right(), prompt.right);
         }
     }
@@ -1880,7 +2124,7 @@ mod tests {
     #[test]
     fn help_uses_only_latest_input_syntax() {
         let help = inline_commands::help("?");
-        assert!(help.contains("?help") && help.contains("?fix"));
+        assert!(help.contains("?help") && help.contains("?fix") && help.contains("?theme"));
         assert!(help.starts_with("  ? <task>"));
         assert!(!help.contains("ai ") && !help.contains("?next"));
     }
