@@ -88,7 +88,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(screen.line(), driver.PROMPT + "git status")
 
     def test_draft_clearing_waits_for_an_editor_repaint_after_task_stats(self):
-        stats = "\r\n┃ stats: prompt 10\r\n"
+        stats = "\r\n│ stats: prompt 10\r\n"
         for incomplete in (
             "\x1b[?25h",
             "\x1b[?25h" + stats,
@@ -100,6 +100,21 @@ class DriverTests(unittest.TestCase):
         frame = stats + "\x1b[6n\x1b[?25l" + "中文" * 1800 + "\x1b[?25h"
         self.assertTrue(driver.editor_repainted_after_stats(frame))
         self.assertTrue(driver.editor_repainted_after_stats(frame + "\x1b[6n"))
+
+    def test_summary_and_stats_follow_current_unicode_and_ascii_borders(self):
+        for border, marker, separator in (("│", "✔", "·"), ("|", "+", "|")):
+            with self.subTest(border=border):
+                output = driver.plain(
+                    f"\x1b[38;2;137;180;250m{border}\x1b[0m {marker} 2 steps {separator} 0.1 s\r\n"
+                    f"{border} stats: prompt 10\r\n"
+                )
+                summary = driver.SUMMARY.search(output)
+                self.assertIsNotNone(summary, output)
+                self.assertEqual(summary.groups(), (marker, "2", "0.1"))
+                self.assertIsNotNone(driver.STATS.search(output), output)
+        for output in ("2 steps · 0.1 s", "draft │ ✔ 2 steps · 0.1 s", "stats: prompt 10"):
+            self.assertIsNone(driver.SUMMARY.search(output))
+            self.assertIsNone(driver.STATS.search(output))
 
     def test_logical_prompt_survives_wrapping_scrolling_and_continuation_lines(self):
         for width in (24, 40, 160):
@@ -213,16 +228,16 @@ def line():
     return data
 out("__NOSH_EVAL_PROMPT__ ")
 line()
-out("\r\n┃ inspecting\r\n┃ ╭─ exec · MUTATING\r\n┃ │ $ touch fixture\r\n┃ ╰─ [y] run")
+out("\r\n│ inspecting\r\n│ ├─ exec · MUTATING\r\n│ │ $ touch fixture\r\n│ └─ [y] run")
 time.sleep(.01)
 out("  [n] deny  [e] edit › ")
 assert os.read(0, 1) == b"y"
-out("y\r\n┃ answer\r\n┃ ✔ 1 steps · 0.1 s\r\n┃ stats: ttft 0.01s\r\n__NOSH_EVAL_PROMPT__ ")
+out("y\r\n│ answer\r\n│ ✔ 1 steps · 0.1 s\r\n│ stats: ttft 0.01s\r\n__NOSH_EVAL_PROMPT__ ")
 assert b"exit 0" in line()
 '''
         scenario = {"inputs": ["# task"], "check": "largest", "completions": [{"kind": "agent"}]}
         ascii_script = script.translate(str.maketrans({
-            "┃": "|", "╭": "+", "╰": "+", "─": "-", "│": "|",
+            "│": "|", "├": "+", "└": "+", "─": "-",
             "·": "|", "›": ">", "✔": "+",
         }))
         badge_script = script.replace("__NOSH_EVAL_PROMPT__ ", r"__NOSH_EVAL_PROMPT__ \x1b7Approval: Confirm\x1b8")

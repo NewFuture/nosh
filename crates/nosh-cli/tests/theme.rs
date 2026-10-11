@@ -165,7 +165,7 @@ impl Shell {
 
     fn start(home: &Path, mut command: Command) -> Self {
         let (mut master, mut slave) = (-1, -1);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 24,
             ws_col: 80,
             ws_xpixel: 0,
@@ -178,8 +178,8 @@ impl Shell {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    std::ptr::null_mut(),
+                    &raw mut size,
                 )
             },
             0

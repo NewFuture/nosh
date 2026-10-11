@@ -21,8 +21,9 @@ PROMPT = "__NOSH_EVAL_PROMPT__ "
 CONTINUATION = "__NOSH_EVAL_CONTINUATION__ "
 OUTPUT_LIMIT = 8 * 1024 * 1024
 ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78=>]")
-SUMMARY = re.compile(r"(?m)^[┃|] ([✔⚠✗+!x]) .*?(\d+) steps [·|] ([\d.]+) s")
-STATS = re.compile(r"(?m)^[┃|] stats:")
+UI_BAR = r"[│|]"
+SUMMARY = re.compile(rf"(?m)^{UI_BAR} ([✔⚠✗+!x]) .*?(\d+) steps [·|] ([\d.]+) s")
+STATS = re.compile(rf"(?m)^{UI_BAR} stats:")
 SHELL_EXIT = re.compile(r"(?m)^\s*[✗x] exit (\d+) [·|] ")
 
 
@@ -506,13 +507,13 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
             denial_pending = False
             approval_offset = len(text)
             return
-        match = re.search(r"(?s)(?:╭─|\+-) (.*?)(?:╰─|\+-) ([^\n]*[›>])(?: |\n)", tail)
+        match = re.search(r"(?s)(?:├─|\+-) (.*?)(?:└─|\+-) ([^\n]*[›>])(?: |\n)", tail)
         if not match:
             return
         card, question = match.groups()
         command_lines = []
         for line in card.splitlines()[1:]:
-            line = re.sub(r"^[┃|] ", "", line)
+            line = re.sub(rf"^{UI_BAR} ", "", line)
             if line.startswith(("│ $ ", "| $ ")):
                 command_lines.append(line[4:])
             elif line.startswith(("│   ", "|   ")):
