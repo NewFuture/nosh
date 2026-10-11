@@ -134,18 +134,21 @@ pub(super) fn probe(mode: &str) {
     };
     let cancellation = wait_cancel.then(|| {
         let interrupts = shell.interrupts();
+        let ready = process_file.with_file_name("environment-editor-ready");
+        let process_file = process_file.clone();
         std::thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(5);
             let mut editing = false;
             while Instant::now() < until {
-                let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
-                if unsafe { libc::tcgetattr(0, &raw mut attributes) } == 0 {
-                    if attributes.c_lflag & libc::ICANON == 0 {
+                if crossterm::terminal::is_raw_mode_enabled().unwrap() {
+                    if !editing && process_file.exists() {
+                        // Do not submit until this observer has seen the editor.
+                        std::fs::write(&ready, "").unwrap();
                         editing = true;
-                    } else if editing {
-                        interrupts.fire();
-                        return;
                     }
+                } else if editing {
+                    interrupts.fire();
+                    return;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -200,7 +203,10 @@ fn integration_cancelling_a_submitted_environment_wait_never_executes_the_draft(
         stdout_tty: true,
         stderr_tty: true,
         steps: &[
-            ("@file:environment-pids", b"touch cancelled-command\r"),
+            (
+                "@file:environment-editor-ready",
+                b"touch cancelled-command\r",
+            ),
             ("refresh cancelled", b"\x15\x04"),
         ],
         ..Default::default()
