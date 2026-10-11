@@ -41,6 +41,18 @@ AI 任务默认显示 **`审批: 自动`**；可用 `#mode confirm|auto|yolo` �
 
 `#auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc），此时也不拦截前缀命令。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
 
+## 在现有 Bash 中使用建议
+
+保留原 Bash，在 Linux（含 WSL）或 macOS 的 **Bash 5.1+** 交互终端中加载：
+
+```bash
+eval "$(nosh init bash)"
+```
+
+输入描述，按现有 `ai_suggest` 按键（默认 **F2**）生成命令；**只回填，检查、修改后自行回车执行**。空白输入不请求模型，失败或取消保留原文和光标。模型、下载和安全策略复用 `nosh -s`，不另设 Bash 配置。
+
+初始化只输出脚本，不加载模型、联网、修改 rc 或默认 shell；可自行把加载命令加入 `.bashrc`，nosh 读取同一份 rc 时会跳过此外部绑定。实际建议仍有模型冷启动成本，可先 `nosh model pull`。按键冲突、版本限制及宿主边界见[Bash 集成](docs/DESIGN.md#92-现有-bash-集成)和[绑定说明](docs/INPUT-EDITING.md#外部-bash-的轻量建议入口)。
+
 ## 实时输入提示与语法高亮
 
 正常交互终端默认启用 `input_assist`，无需插件或模型；`--safe` / `NOSH_DISABLE_AI=1` 不会关闭它。输入按语法高亮，命令与路径状态异步查询；未知或动态行为不伪装成确定错误，路径存在不代表已获执行授权。可在用户配置中关闭：

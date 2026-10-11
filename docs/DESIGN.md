@@ -14,6 +14,7 @@ nosh -c 'printf "%s\n" hello'       # 纯 shell，不加载模型
 nosh script.sh                     # 纯 shell 脚本
 nosh -a "解释当前项目的构建方式"     # 一次性 Agent
 nosh -s "列出最大的十个文件"         # 只输出命令建议
+nosh init bash                     # 只输出现有 Bash 的集成脚本
 ```
 
 交互输入以 `# 任务` 显式请求 AI，`#subcommand` 调用内置命令，单独键入 `#` 自动弹出本地命令补全，`#help` 显示帮助。执行命令、生成草稿和输入诊断是不同路径，不把“建议有效”当作授权执行。
@@ -25,6 +26,8 @@ nosh -s "列出最大的十个文件"         # 只输出命令建议
 ### 0.3 实现状态
 
 支持 Linux（含 WSL）和 macOS 的本地 shell、共享会话、Agent、命令辅助、模型下载与离线使用。默认 CPU 推理，可显式构建单卡 CUDA。原生 Windows shell、远程会话服务、跨进程共享模型、沙箱和自动回滚均不提供。
+
+现有 Bash 可通过 `eval "$(nosh init bash)"` 接入主动建议，要求 Bash 5.1+、交互 Readline 和可用终端；不替换宿主 shell。其它 shell 的初始化集成尚未提供。
 
 ## 1. 目标与边界
 
@@ -274,6 +277,14 @@ CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，
 ### 9.1.2 编辑与补全
 
 Emacs / Vi、作用域改键、搜索、取消和建议采用见[输入编辑](INPUT-EDITING.md)。命令、路径、Git、Make、npm/Yarn 和脚本补全见[补全契约](COMPLETION.md)。明确无匹配与查询失败不同，采用候选不等于提交执行。
+
+### 9.2 现有 Bash 集成
+
+`nosh init bash` 在模型与终端宿主初始化前分派，只读取现有配置并输出脚本；不联网、准备模型或写 rc。加载后，`bind -x` 回调复用现有 `nosh -s` 的受限查询和完整命令校验，stdout 仅承载命令，诊断写 stderr。共享 rc 在 nosh/brush 中加载时跳过外部绑定。
+
+建议只回填，用户自行回车执行；不接管 Bash 的编辑模式、补全、历史、提示符或 `on_failure`，不增加自动 Fix/Next 或 AI Tab 兜底。Bash 5.1+ 的版本依据、取消恢复、冲突与重载规则统一见[绑定说明](INPUT-EDITING.md#外部-bash-的轻量建议入口)。
+
+每次建议由独立子进程读取模型、下载和安全配置，保留初始化时显式传入的 `--offline`、`--no-download`、`--model-path` 等选项；仍有冷启动成本，不承诺共享模型缓存。只继承 cwd 和导出环境，不采集整份历史或同步非导出变量、函数、alias；手动 `-a` 也不能改变父 Bash 状态。
 
 ## 10. 进程与观测
 

@@ -56,6 +56,22 @@ jobs:
         run: cargo test --workspace --locked --test trigger_corpus -- --show-output
       - name: test
         run: cargo test --workspace --locked
+      - name: minimum supported Bash integration
+        env:
+          BASH_VERSION_UNDER_TEST: '5.1'
+          BASH_SHA256: 'cc012bc860406dcf42f64431bcd3d2fa7560c02915a601aba9cd597a39329baa'
+        run: |
+          set -euo pipefail
+          build_dir="$RUNNER_TEMP/nosh-bash"
+          mkdir -p "$build_dir"
+          archive="$build_dir/bash.tar.gz"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://ftp.gnu.org/gnu/bash/bash-${BASH_VERSION_UNDER_TEST}.tar.gz" --output "$archive"
+          printf '%s  %s\n' "$BASH_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$build_dir"
+          source_dir="$build_dir/bash-${BASH_VERSION_UNDER_TEST}"
+          (cd "$source_dir" && CC='gcc -std=gnu89' ./configure --quiet --without-bash-malloc --disable-nls && make -s -j2 bash)
+          NOSH_TEST_BASH="$source_dir/bash" cargo test -p nosh-cli --test init --locked
       - name: Starship theme compatibility
         env:
           STARSHIP_VERSION: '1.26.0'
@@ -132,6 +148,11 @@ jobs:
       - name: prepare patched sources before Cargo metadata
         run: cargo run --manifest-path tools/source/Cargo.toml --locked -- prepare --offline
       - uses: Swatinem/rust-cache@v2.9.2
+      - name: supported Bash for integration tests
+        run: |
+          if ! brew list --versions bash >/dev/null; then brew install bash; fi
+          echo "NOSH_TEST_BASH=$(brew --prefix bash)/bin/bash" >> "$GITHUB_ENV"
+          echo "NOSH_TEST_OLD_BASH=/bin/bash" >> "$GITHUB_ENV"
       - name: source lifecycle
         run: cargo test --manifest-path tools/source/Cargo.toml --locked
       - name: clippy
