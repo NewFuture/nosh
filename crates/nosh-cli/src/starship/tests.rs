@@ -419,8 +419,24 @@ fn official_modules_render_git_changes_runtime_environment_and_command_metrics()
         duration: Duration::from_millis(2400),
     };
     let table = export(Builtin::Dark, false).parse().unwrap();
-    let output = run(&table, directory.path(), None, Some(&previous), &|| false).unwrap();
+    let variables: Vec<_> = shell
+        .scalar_vars()
+        .into_iter()
+        .filter(|(_, _, exported)| *exported)
+        .map(|(name, value, _)| (name, value))
+        .collect();
+    let output = run(
+        &table,
+        directory.path(),
+        Some(&variables),
+        Some(&previous),
+        &|| false,
+    )
+    .unwrap();
     let text = Fragment::parse(&output);
+    for version in ["22.9.0", "1.25.0", "3.12.4"] {
+        assert!(text.text().contains(version), "{}", text.text());
+    }
     assert!(
         text.text().contains("exit 7") && text.text().contains("2s"),
         "{}",

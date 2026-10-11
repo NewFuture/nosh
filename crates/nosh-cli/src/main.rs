@@ -9,12 +9,13 @@ mod doctor;
 mod engine;
 mod eval_trace;
 mod eval_worker;
+mod init_cmd;
 mod model_cmd;
 mod shell_cmd;
 mod starship;
 mod theme_cmd;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[cfg(target_os = "macos")]
 #[global_allocator]
@@ -76,6 +77,35 @@ struct Cli {
     rest: Vec<String>,
 }
 
+impl Cli {
+    fn parse_modes_from(
+        arguments: impl IntoIterator<Item = impl Into<std::ffi::OsString>>,
+    ) -> Result<Self, clap::Error> {
+        let arguments: Vec<_> = arguments.into_iter().map(Into::into).collect();
+        // In shell/task modes, "init" and other subcommand names are input.
+        // Global options alone must still allow `nosh --offline init bash`.
+        let matches = Self::command()
+            .args_conflicts_with_subcommands(true)
+            .try_get_matches_from(&arguments)?;
+        let cli = Self::from_arg_matches(&matches)?;
+        if cli.cmd.is_some()
+            || cli.command.is_some()
+            || cli.agent
+            || cli.suggest
+            || cli.login
+            || cli.interactive
+            || cli.errexit
+            || cli.xtrace
+            || cli.nounset
+            || cli.json
+        {
+            Ok(cli)
+        } else {
+            Self::try_parse_from(arguments)
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 struct GlobalOpts {
     /// Inference device: auto (default; available CUDA memory), cpu, cuda or cuda:N.
@@ -112,6 +142,11 @@ struct GlobalOpts {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Print shell integration code; does not modify startup files.
+    Init {
+        #[arg(value_enum)]
+        shell: init_cmd::Shell,
+    },
     /// Preview and select the shell's color theme.
     Theme {
         #[command(subcommand)]
@@ -140,6 +175,10 @@ fn main() {
         });
         std::process::exit(code);
     }
+    let mut cli = Cli::parse_modes_from(std::env::args_os()).unwrap_or_else(|error| error.exit());
+    if let Some(Cmd::Init { shell }) = cli.cmd {
+        std::process::exit(init_cmd::run(shell, &cli.global));
+    }
     // SAFETY: bootstrap runs before runtime threads or environment readers.
     let control = match unsafe { nosh_shell::pty::inherited_control() } {
         Ok(control) => control,
@@ -151,7 +190,6 @@ fn main() {
     let argv0_login = std::env::args_os()
         .next()
         .is_some_and(|a| a.to_string_lossy().starts_with('-'));
-    let mut cli = Cli::parse();
     use std::io::IsTerminal;
     let interactive = cli.cmd.is_none()
         && !cli.agent
@@ -194,6 +232,7 @@ fn main() {
         nosh_hub::net::set_offline(true);
     }
     let code = match cli.cmd.take() {
+        Some(Cmd::Init { .. }) => unreachable!("init is dispatched before runtime setup"),
         Some(Cmd::Theme { cmd }) => theme_cmd::run(cmd),
         Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
         Some(Cmd::Debug { cmd }) => {

@@ -12,6 +12,9 @@ use reedline::{
 };
 use serde::Deserialize;
 
+mod bash;
+pub use bash::{BashBinding, BashKey};
+
 pub(crate) const COMPLETION_AI_COMMAND: &str = "__nosh_completion_ai__";
 pub(crate) const FOCUS_NOTICE: &str = "__nosh_edit_focus__";
 pub(crate) const VI_LIMIT_NOTICE: &str = "__nosh_vi_limit__";
