@@ -38,10 +38,13 @@ def captured_evidence(scenario: dict, facts: dict, root: Path, after: dict,
     if (fields.count("exit: 17") != 1 or len(commands) != 1
             or commands[0] not in (expected, json.dumps(expected, ensure_ascii=False))):
         reasons.append("captured diagnosis context does not identify the failed command and exit 17")
-    question = scenario["inputs"][-1].removeprefix("#fix").strip()
+    additional = scenario["inputs"][-1].removeprefix("#fix").strip()
+    request = "Explain why the command failed and how to fix it."
+    if additional:
+        request += "\n\nAdditional context from the user:\n" + additional
     requests = [message for message in messages if message.get("role") == "user"]
-    if len(requests) != 1 or requests[0]["text"] != question or messages[-1] != requests[0]:
-        reasons.append("the #fix question is missing or changed in the first model request")
+    if len(requests) != 1 or requests[0]["text"] != request or messages[-1] != requests[0]:
+        reasons.append("the #fix diagnosis request or additional context is missing or changed")
     header, separator, body = context.split("\n[user_output ", 1)[1].partition("\n")
     try:
         metadata = json.loads(header[:-1]) if header.endswith("]") and separator else None

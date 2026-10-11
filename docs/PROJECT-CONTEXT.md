@@ -8,7 +8,7 @@ shell 与本地 agent 都代表当前用户操作，不是彼此隔离的权限�
 
 初始 System 与工具 schema 在对话内保持稳定。动态背景使用独立 System 消息；只有角色边界采用特殊 token，正文按普通文本编码，不能注入角色或工具调用 token。消息角色不改变“参考资料不是任务”的规则或执行权限。
 
-Agent 发送 **System 背景 + User 原始请求**，包含 context、最近命令、项目文档、附件和真实失败事实；请求不改写、不拼接背景。内部 `Trigger` 只负责路由。
+普通 Agent 发送 **System 背景 + User 原始请求**；context、最近命令、项目文档、附件和真实失败事实放在背景中，原始请求不改写、不拼接背景。`#fix [补充说明]` 始终是 Agent 诊断上次失败的任务：User 自动包含失败诊断请求，有说明时原样作为 `Additional context from the user` 附加；失败命令、退出码和匹配输出仍由宿主放入 System 背景。内部 `Trigger` 不作为模型可见标签。
 
 Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
 

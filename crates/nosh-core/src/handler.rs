@@ -5,9 +5,7 @@ use nosh_engine::ChatEngine;
 use nosh_permissions::ApprovalMode;
 use nosh_platform::tr;
 use nosh_shell::inline_commands::ApprovalMode as CommandApprovalMode;
-use nosh_shell::{
-    AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, ManagementCommand, Trigger, style,
-};
+use nosh_shell::{AiHandler, AiOutcome, AiRequest, Badge, EmbeddedShell, ManagementCommand, style};
 
 use crate::agent::{Agent, AgentConfig};
 use crate::approval::ApprovalChannel;
@@ -121,85 +119,6 @@ impl ShellAi {
             eprintln!("{}", style::red_bold(&yolo_warning()));
         }
     }
-
-    fn assist(
-        &mut self,
-        shell: &EmbeddedShell,
-        intent: crate::command_assist::Intent,
-        text: String,
-        command: Option<nosh_shell::UserCommand>,
-        output: Option<nosh_shell::UserOutput>,
-    ) -> AiOutcome {
-        use crate::command_assist::{AssistRequest, AssistResult};
-        use crate::ui::AgentUi;
-        let started = std::time::Instant::now();
-        let cfg = self.cfg.clone();
-        let request = match AssistRequest::capture(shell, &cfg, intent, text, command, output) {
-            Ok(request) => request,
-            Err(error) => {
-                eprintln!("nosh: {error}");
-                return AiOutcome {
-                    prefill: None,
-                    exit_code: 2,
-                };
-            }
-        };
-        let interrupts = shell.interrupts().count();
-        let Some(agent) = self.agent(shell) else {
-            return AiOutcome {
-                prefill: None,
-                exit_code: 2,
-            };
-        };
-        if shell.interrupts().count() != interrupts {
-            return AiOutcome {
-                prefill: None,
-                exit_code: 130,
-            };
-        }
-        let cancel = agent.engine_mut().cancel_handle();
-        cancel.reset();
-        match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel, |_| true) {
-            Ok(outcome) => {
-                let mut ui = TermUi::new(false);
-                let prefill = match outcome.result {
-                    AssistResult::Command(program) => Some(program),
-                    AssistResult::NoSuggestion => None,
-                };
-                let u = outcome.usage;
-                ui.finish(&crate::ui::TaskSummary {
-                    status: "completed".into(),
-                    steps: outcome.steps,
-                    secs: started.elapsed().as_secs_f64(),
-                    prompt_tokens: u.prompt_tokens,
-                    cached_tokens: u.cached_tokens,
-                    completion_tokens: u.completion_tokens,
-                    ttft_secs: u.ttft_secs,
-                    context_used: u.context_used,
-                    context_max: u.context_max,
-                    prefill_tps: u.prefill_tps(),
-                    decode_tps: u.decode_tps(),
-                    note: None,
-                });
-                AiOutcome {
-                    prefill,
-                    exit_code: 0,
-                }
-            }
-            Err(error) => {
-                let exit_code = if matches!(error, crate::command_assist::AssistError::Cancelled) {
-                    130
-                } else {
-                    2
-                };
-                eprintln!("nosh: {error}");
-                AiOutcome {
-                    prefill: None,
-                    exit_code,
-                }
-            }
-        }
-    }
 }
 
 pub fn yolo_warning() -> String {
@@ -216,15 +135,6 @@ fn say(msg: &str) {
 
 impl AiHandler for ShellAi {
     fn handle(&mut self, shell: &mut EmbeddedShell, req: AiRequest) -> AiOutcome {
-        if matches!(req.trigger, Trigger::Failed { .. }) && req.text.trim().is_empty() {
-            return self.assist(
-                shell,
-                crate::command_assist::Intent::Fix,
-                req.text,
-                req.failed,
-                req.user_output,
-            );
-        }
         if let Some(error) = &self.cfg.rules_error {
             eprintln!("nosh: AI execution blocked by invalid safety configuration: {error}");
             return AiOutcome {
@@ -349,36 +259,59 @@ impl AiHandler for ShellAi {
                     say(&format!("context: {used} / {max} tokens"));
                 }
             }
-            ManagementCommand::Out(id) => {
-                let Some(agent) = agent else {
-                    say(tr!("还没有 agent 命令", "no agent commands yet"));
-                    return AiOutcome::default();
-                };
-                let id = id.or_else(|| agent.last_output_id());
-                match id.and_then(|i| agent.output(i)) {
-                    Some(o) => {
-                        eprintln!("{}", style::dim(&format!("$ {}", o.command)));
-                        print!("{}", o.text);
-                        if !o.text.ends_with('\n') {
-                            println!();
-                        }
-                    }
-                    None => say(tr!("没有这个编号的输出", "no output with that number")),
-                }
-            }
         }
         AiOutcome::default()
     }
 
     fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String> {
-        self.assist(
-            shell,
-            crate::command_assist::Intent::Generate,
-            line.into(),
-            None,
-            None,
-        )
-        .prefill
+        use crate::command_assist::{AssistRequest, AssistResult, Intent};
+        use crate::ui::AgentUi;
+        let started = std::time::Instant::now();
+        let cfg = self.cfg.clone();
+        let request =
+            match AssistRequest::capture(shell, &cfg, Intent::Generate, line.into(), None, None) {
+                Ok(request) => request,
+                Err(error) => {
+                    eprintln!("nosh: {error}");
+                    return None;
+                }
+            };
+        let interrupts = shell.interrupts().count();
+        let agent = self.agent(shell)?;
+        if shell.interrupts().count() != interrupts {
+            eprintln!("{}", style::dim(tr!("已取消", "cancelled")));
+            return None;
+        }
+        let cancel = agent.engine_mut().cancel_handle();
+        cancel.reset();
+        let outcome =
+            match crate::command_assist::run(agent.engine_mut(), &request, &cfg, &cancel, |_| true)
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!("nosh: {error}");
+                    return None;
+                }
+            };
+        let u = outcome.usage;
+        TermUi::new(false).finish(&crate::ui::TaskSummary {
+            status: "completed".into(),
+            steps: outcome.steps,
+            secs: started.elapsed().as_secs_f64(),
+            prompt_tokens: u.prompt_tokens,
+            cached_tokens: u.cached_tokens,
+            completion_tokens: u.completion_tokens,
+            ttft_secs: u.ttft_secs,
+            context_used: u.context_used,
+            context_max: u.context_max,
+            prefill_tps: u.prefill_tps(),
+            decode_tps: u.decode_tps(),
+            note: None,
+        });
+        match outcome.result {
+            AssistResult::Command(program) => Some(program),
+            AssistResult::NoSuggestion => None,
+        }
     }
 
     fn badge(&self) -> Badge {
@@ -447,6 +380,7 @@ impl AiHandler for ShellAi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nosh_shell::Trigger;
 
     #[test]
     fn local_management_commands_do_not_load_an_engine() {
@@ -473,8 +407,6 @@ mod tests {
             ManagementCommand::Clear,
             ManagementCommand::Ctx,
             ManagementCommand::Status,
-            ManagementCommand::Out(None),
-            ManagementCommand::Out(Some(1)),
         ] {
             ai.command(&mut shell, command);
         }

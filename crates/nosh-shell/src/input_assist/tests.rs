@@ -230,7 +230,6 @@ fn inline_command_feedback_is_local_and_uses_the_configured_prefix() {
         "#mode auto",
         "#think off",
         "#auto on",
-        "#out 1",
         "#clear",
         "#ctx",
         "#status",
@@ -246,6 +245,15 @@ fn inline_command_feedback_is_local_and_uses_the_configured_prefix() {
             "{text}"
         );
         assert_eq!(role_at(&result, 0), Role::Builtin, "{text}");
+    }
+    for text in ["#out", "#out 1"] {
+        let result = analysis::analyze(&fixture.input(text));
+        assert!(result.queries.is_empty(), "{text}");
+        assert_eq!(role_at(&result, 1), Role::Error, "{text}");
+        assert!(result.findings.iter().any(|finding| {
+            finding.state == State::Error
+                && matches!(&finding.reason, Reason::Syntax(message) if message.contains("#out"))
+        }));
     }
     let mut input = fixture.input("  问mode bad");
     Arc::make_mut(&mut input.context).ai_prefix = "问".into();
@@ -266,6 +274,51 @@ fn inline_command_feedback_is_local_and_uses_the_configured_prefix() {
             .iter()
             .all(|finding| finding.reason.bounded())
     );
+}
+
+#[test]
+fn unfinished_inline_names_are_draft_feedback_not_unknown_commands() {
+    let fixture = Fixture::new();
+    for prefix in ["#", "##", "问"] {
+        for name in ["s", "stat", "mo", "th"] {
+            let mut input = fixture.input(&format!("  {prefix}{name}"));
+            Arc::make_mut(&mut input.context).ai_prefix = prefix.into();
+            let result = analysis::analyze(&input);
+            assert!(result.queries.is_empty());
+            assert!(
+                !result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.state == State::Error)
+            );
+            assert_eq!(role_at(&result, input.text.len() - 1), Role::Incomplete);
+            assert!(result.findings.iter().any(|finding| {
+                finding.state == State::Incomplete
+                    && matches!(finding.reason, Reason::Incomplete(_))
+            }));
+            assert!(matches!(
+                crate::inline_commands::parse(&input.text, prefix, true),
+                crate::inline_commands::Input::Error(_)
+            ));
+        }
+        for name in ["s ", "s argument", "unknown", "out", "mode invalid"] {
+            let mut input = fixture.input(&format!("{prefix}{name}"));
+            Arc::make_mut(&mut input.context).ai_prefix = prefix.into();
+            let result = analysis::analyze(&input);
+            assert!(result.queries.is_empty());
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.state == State::Error)
+            );
+        }
+    }
+    let mut input = fixture.input("#s");
+    Arc::make_mut(&mut input.context).ai_enabled = false;
+    let result = analysis::analyze(&input);
+    assert_eq!(role_at(&result, 0), Role::Comment);
+    assert!(result.findings.is_empty());
 }
 
 #[test]

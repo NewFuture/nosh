@@ -74,6 +74,112 @@ fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
 }
 
 #[test]
+fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
+    use nosh_shell::{AiHandler, Assistance};
+    use std::time::{Duration, Instant};
+
+    let _guard = setup();
+    let directory = tmpdir("manual-and-automatic-fix");
+    let mut sh = EmbeddedShell::new(ShellOptions {
+        working_dir: Some(directory.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let model = MockChatEngine::new(vec![
+        vec![text("touch suggested")],
+        vec![text("Failure diagnosed.")],
+        vec![text("Additional context received.")],
+        vec![text("Failure diagnosed again.")],
+    ]);
+    let received = model.received();
+    let specs = model.specs();
+    let mut model = Some(model);
+    let mut ai = ShellAi::new(
+        Box::new(move |_| {
+            Ok(nosh_core::LoadedEngine {
+                engine: Box::new(model.take().unwrap()),
+                description: "mock".into(),
+            })
+        }),
+        AgentConfig::default(),
+        Box::new(Scripted::new([])),
+    );
+    let mut pipeline = Pipeline::new(ReplConfig::default());
+    pipeline.process(&mut sh, &mut ai, &mut Ui, "sh -c 'exit 7'");
+    let command = sh.recent_commands().last().unwrap().clone();
+    let display = ai.assistance().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while display.result().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        matches!(display.result(), Some(Assistance::Command { command_id, intent, program })
+        if command_id == command.id && intent == "fix" && program == "touch suggested")
+    );
+    assert!(!directory.join("suggested").exists());
+
+    pipeline.process(&mut sh, &mut ai, &mut Ui, "#auto off");
+    let additional = "REGION should be eu-west-1; do not change files.";
+    for context in ["", additional, " \t"] {
+        assert_eq!(
+            pipeline.process(&mut sh, &mut ai, &mut Ui, &format!("#fix {context}")),
+            LineOutcome::Continue(None)
+        );
+        assert!(display.result().is_none());
+    }
+    let specs = specs.lock().unwrap();
+    assert_eq!(
+        specs
+            .iter()
+            .map(|spec| spec.label.as_str())
+            .collect::<Vec<_>>(),
+        ["command_assist.fix.background", "agent"]
+    );
+    assert_eq!(
+        specs[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["command_help", "read_file", "grep"]
+    );
+    assert!(specs[1].tools.iter().any(|tool| tool.name == "exec"));
+    assert!(
+        !specs[1]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "command_help")
+    );
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 4);
+    for (index, (messages, additional)) in
+        received[1..].iter().zip(["", additional, ""]).enumerate()
+    {
+        let [Message::System(context), Message::User(request)] = messages.as_slice() else {
+            panic!("manual fix must use the Agent context and request");
+        };
+        assert_eq!(context_field(context, "exit"), Some("7"));
+        assert_eq!(
+            context_field(context, "failed_command"),
+            Some("\"sh -c 'exit 7'\"")
+        );
+        assert_eq!(context.contains("[user_output "), index == 0);
+        let mut expected = "Explain why the command failed and how to fix it.".to_string();
+        if !additional.is_empty() {
+            expected.push_str("\n\nAdditional context from the user:\n");
+            expected.push_str(additional);
+        }
+        assert_eq!(request, &expected);
+    }
+    assert_eq!(sh.recent_commands().len(), 1);
+    assert!(!directory.join("suggested").exists());
+    drop(received);
+    drop(specs);
+    drop(ai);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
     use nosh_shell::{AiHandler, Assistance};
     use std::sync::Arc;

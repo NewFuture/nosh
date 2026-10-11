@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use brush_parser::{ParseError, SourceSpan, Token, TokenizerError, ast, word};
+use nosh_platform::tr;
 
 use super::*;
 use crate::command_context::{self, Scope};
@@ -64,13 +65,24 @@ pub(super) fn analyze(input: &Input) -> Analysis {
             a.paint(0..input.text.len(), Role::Builtin);
         }
         crate::inline_commands::Input::Error(error) => {
+            let (role, state, reason) = if error.is_incomplete_name(&input.text) {
+                (
+                    Role::Incomplete,
+                    State::Incomplete,
+                    Reason::Incomplete(
+                        tr!("内置命令名尚未输入完整", "incomplete inline command name").into(),
+                    ),
+                )
+            } else {
+                (
+                    Role::Error,
+                    State::Error,
+                    Reason::Syntax(error.message(&ctx.ai_prefix).chars().take(256).collect()),
+                )
+            };
             a.paint(0..input.text.len(), Role::Builtin);
-            a.paint(error.span.clone(), Role::Error);
-            a.find(
-                error.span.clone(),
-                State::Error,
-                Reason::Syntax(error.message(&ctx.ai_prefix).chars().take(256).collect()),
-            );
+            a.paint(error.span.clone(), role);
+            a.find(error.span, state, reason);
         }
         crate::inline_commands::Input::Task(_) => {
             a.paint(0..input.text.len(), Role::Ai);

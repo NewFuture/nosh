@@ -269,7 +269,7 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// System context followed by the unchanged user request; both bodies are plain text.
+/// System context followed by the task request; both bodies are plain text.
 pub fn task_messages(
     shell: &EmbeddedShell,
     input: &TaskInput,
@@ -337,11 +337,13 @@ pub fn task_messages(
         msg.push('\n');
         msg.push_str(&crate::tools::format_user_output(output));
     }
-    let request = if matches!(input.trigger, Trigger::Failed { .. })
-        && input.failed.is_some()
-        && input.text.trim().is_empty()
-    {
-        "Explain why the command failed and how to fix it.".into()
+    let request = if matches!(input.trigger, Trigger::Failed { .. }) && input.failed.is_some() {
+        let mut request = "Explain why the command failed and how to fix it.".to_string();
+        if !input.text.trim().is_empty() {
+            request.push_str("\n\nAdditional context from the user:\n");
+            request.push_str(&input.text);
+        }
+        request
     } else {
         input.text.clone()
     };
@@ -461,14 +463,15 @@ mod tests {
     }
 
     #[test]
-    fn failed_task_keeps_exit_and_command_context() {
+    fn failed_task_keeps_diagnosis_intent_with_additional_context() {
         let dir = tempfile::tempdir().unwrap();
         let shell = EmbeddedShell::new(ShellOptions {
             working_dir: Some(dir.path().to_path_buf()),
             ..ShellOptions::default()
         })
         .unwrap();
-        let mut input = TaskInput::new(Trigger::Failed { exit: 101 }, "解释错误，不要修改文件");
+        let additional = "  部署环境是 Ubuntu 24.04\n不要修改文件  ";
+        let mut input = TaskInput::new(Trigger::Failed { exit: 101 }, additional);
         input.failed = Some(UserCommand {
             id: 1,
             line: "cargo build --offline".into(),
@@ -485,14 +488,21 @@ mod tests {
         assert!(background.contains("\nfailed_command: cargo build --offline"));
         assert!(!background.contains("trigger="));
         assert!(background.contains("\nlang: zh"));
-        assert_eq!(request, "解释错误，不要修改文件");
-        input.text.clear();
         assert_eq!(
-            task_messages(&shell, &input, None, &context).last(),
-            Some(&Message::User(
-                "Explain why the command failed and how to fix it.".into()
-            ))
+            request,
+            &format!(
+                "Explain why the command failed and how to fix it.\n\nAdditional context from the user:\n{additional}"
+            )
         );
+        for text in ["", " \t\n"] {
+            input.text = text.into();
+            assert_eq!(
+                task_messages(&shell, &input, None, &context).last(),
+                Some(&Message::User(
+                    "Explain why the command failed and how to fix it.".into()
+                ))
+            );
+        }
     }
 
     #[test]

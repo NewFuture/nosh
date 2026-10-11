@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use brush_core::escape::QuoteMode;
 use nosh_platform::tr;
 use reedline::{
-    Completer, CompletionAcceptance, CompletionResult, CompletionStatus, Partial, Span, Suggestion,
-    Suggestions,
+    Completer, CompletionAcceptance, CompletionResult, CompletionStatus, MenuUpdate, Partial, Span,
+    Suggestion, Suggestions,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -399,6 +399,31 @@ impl Completer for Completion {
         self.automatic
     }
 
+    fn menu_on_edit(&self, line: &str, cursor: usize, active_menu: Option<&str>) -> MenuUpdate<'_> {
+        if active_menu.is_some_and(|name| name != super::INLINE_MENU) {
+            return MenuUpdate::Unchanged;
+        }
+        if !self.config.enabled || line.len() > MAX_INPUT || cursor != line.len() {
+            return MenuUpdate::Close;
+        }
+        let Some(name) = self
+            .config
+            .inline_prefix
+            .as_deref()
+            .and_then(|prefix| crate::inline_commands::name_fragment(line, prefix))
+        else {
+            return MenuUpdate::Close;
+        };
+        if !crate::inline_commands::names().any(|candidate| candidate == name)
+            && crate::inline_commands::names()
+                .any(|candidate| super::matching::rank(candidate, name, true, false).is_some())
+        {
+            MenuUpdate::Show(super::INLINE_MENU)
+        } else {
+            MenuUpdate::Close
+        }
+    }
+
     fn complete(&mut self, line: &str, cursor: usize) -> CompletionResult {
         if !self.config.enabled {
             let message = tr!("补全已关闭", "Completion disabled").to_string();
@@ -471,7 +496,7 @@ impl Completer for Completion {
                 })
                 .collect::<Vec<_>>();
             candidates.sort_by(|a, b| (&a.0, &a.1.value).cmp(&(&b.0, &b.1.value)));
-            let answer = Answer {
+            let mut answer = Answer {
                 query,
                 candidates: candidates
                     .into_iter()
@@ -479,6 +504,32 @@ impl Completer for Completion {
                     .collect(),
                 state: State::Complete,
             };
+            if scope.command_name
+                && line
+                    .get(scope.span.clone())
+                    .is_some_and(|name| name.trim().is_empty())
+            {
+                answer.candidates.insert(
+                    0,
+                    Candidate {
+                        source: Source::Command,
+                        value: " ".into(),
+                        kind: Kind::Value,
+                        description: Some(
+                            tr!(
+                                "空格后输入任务，由 Agent 处理",
+                                "space, then enter a task for Agent"
+                            )
+                            .into(),
+                        ),
+                        span: scope.span,
+                        noquote: true,
+                        nospace: true,
+                        matches: Vec::new(),
+                        display: Some(format!("{prefix} <task>")),
+                    },
+                );
+            }
             self.values = suggestions(&answer);
             self.status(&answer.query, Phase::Complete, None, self.values.len());
             return CompletionResult::fresh(self.values.clone())
@@ -662,6 +713,8 @@ mod tests {
             ("#think ", 2),
             ("#auto ", 2),
             ("#mode au", 1),
+            ("#out", 0),
+            ("#out 1", 0),
             ("#out invalid", 0),
             ("#fix explain", 0),
             ("#unknown", 0),
@@ -683,6 +736,123 @@ mod tests {
             completer.complete("#mode ", 999),
             CompletionResult::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn inline_prefix_menu_opens_for_enabled_unfinished_names() {
+        for prefix in ["#", "##", "问", "# "] {
+            let mut completer = Completion::new(
+                Config {
+                    inline_prefix: Some(prefix.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+                Arc::new(|| {}),
+            );
+            for line in [prefix.to_owned(), format!("  {prefix}")] {
+                assert_eq!(
+                    completer.menu_on_edit(&line, line.len(), None),
+                    MenuUpdate::Show(super::super::INLINE_MENU)
+                );
+                let CompletionResult::Fresh { suggestions, .. } =
+                    completer.complete(&line, line.len())
+                else {
+                    panic!("inline menu must complete locally");
+                };
+                assert_eq!(suggestions.len(), 9);
+                let entry = &suggestions[0];
+                assert_eq!(entry.display_value(), format!("{prefix} <task>"));
+                assert_eq!(entry.value, " ");
+                assert!(!entry.append_whitespace);
+                let mut draft = line.clone();
+                draft.replace_range(entry.span.start..entry.span.end, &entry.value);
+                assert_eq!(draft, format!("{line} "));
+                assert!(!completer.automatic_completion_allowed());
+                assert!(completer.current.is_none());
+            }
+            for suffix in ["s", "stat", "mo"] {
+                let line = format!("{prefix}{suffix}");
+                assert_eq!(
+                    completer.menu_on_edit(&line, line.len(), None),
+                    MenuUpdate::Show(super::super::INLINE_MENU)
+                );
+                assert!(
+                    completer
+                        .complete(&line, line.len())
+                        .suggestions()
+                        .iter()
+                        .all(|suggestion| suggestion.value != " ")
+                );
+            }
+            for line in [
+                format!("{prefix} "),
+                format!("{prefix} task"),
+                format!("{prefix}help"),
+                format!("echo {prefix}"),
+                format!("'{prefix}'"),
+            ] {
+                assert_eq!(
+                    completer.menu_on_edit(&line, line.len(), None),
+                    MenuUpdate::Close
+                );
+            }
+            assert_eq!(completer.menu_on_edit(prefix, 0, None), MenuUpdate::Close);
+        }
+        for (enabled, prefix) in [(false, Some("#")), (true, None), (true, Some(""))] {
+            let completer = Completion::new(
+                Config {
+                    enabled,
+                    inline_prefix: prefix.map(str::to_owned),
+                    ..Default::default()
+                },
+                Default::default(),
+                Arc::new(|| {}),
+            );
+            assert_eq!(completer.menu_on_edit("#", 1, None), MenuUpdate::Close);
+        }
+    }
+
+    #[test]
+    fn inline_prefix_menu_yields_to_task_text_and_completed_names() {
+        let completer = Completion::new(
+            Config {
+                inline_prefix: Some("#".into()),
+                ..Default::default()
+            },
+            Default::default(),
+            Arc::new(|| {}),
+        );
+        let active = Some(super::super::INLINE_MENU);
+        for line in ["#", "#h", "#f", "#mo"] {
+            assert_eq!(
+                completer.menu_on_edit(line, line.len(), active),
+                MenuUpdate::Show(super::super::INLINE_MENU)
+            );
+        }
+        for line in [
+            "",
+            "# ",
+            "# task",
+            "#help",
+            "#fix",
+            "#mode",
+            "#mode auto",
+            "#out",
+            "#unknown",
+            "echo #",
+        ] {
+            assert_eq!(
+                completer.menu_on_edit(line, line.len(), active),
+                MenuUpdate::Close,
+                "{line}"
+            );
+        }
+        assert_eq!(completer.menu_on_edit("#mo", 1, active), MenuUpdate::Close);
+        assert_eq!(
+            completer.menu_on_edit("ordinary command", 16, Some("completion_menu")),
+            MenuUpdate::Unchanged
+        );
+        assert!(completer.current.is_none());
     }
 
     #[test]

@@ -28,6 +28,13 @@ fn multi_step_task_uses_tool_results() {
     assert_eq!(out.status, TaskStatus::Completed);
     assert_eq!(out.steps, 2);
     assert_eq!(out.answer, "It printed hello.");
+    assert_eq!(ui.output, "hello-from-shell\n");
+    assert!(
+        ui.events
+            .iter()
+            .any(|event| event.starts_with("end exit 0"))
+    );
+    assert!(!ui.events.iter().any(|event| event.contains("#out")));
     let rec = received.lock().unwrap();
     let [Message::System(background), Message::User(task)] = rec[0].as_slice() else {
         panic!("background and request must be separate");
@@ -182,7 +189,6 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
                 .unwrap()
                 .contains("one-time compaction failure")
         );
-        assert_eq!(agent.last_output_id(), Some(1));
         std::fs::remove_file(guidance).unwrap();
 
         if idle_reset.is_zero() {
@@ -198,7 +204,6 @@ fn compaction_failure_preserves_executed_results_for_the_next_task() {
         assert_eq!(second.commands_run, 0, "the command must not be run again");
         assert_eq!(second.steps, 1);
         assert_eq!(second.answer, "The command printed printed-once.");
-        assert_eq!(agent.last_output_id(), Some(1));
         assert_eq!(specs.lock().unwrap().len(), expected_sessions);
 
         let received = received.lock().unwrap();
@@ -294,7 +299,7 @@ fn long_output_is_truncated_and_saved() {
         .expect("full output path");
     let full = std::fs::read_to_string(log).unwrap();
     assert!(full.contains("\n10000\n"));
-    assert_eq!(a.output(1).map(|o| o.text.lines().count()), Some(20000));
+    assert!(full.contains("\n20000\n"));
 }
 
 #[test]
@@ -402,7 +407,7 @@ fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
         "{:?}",
         ui.events
     );
-    assert!(a.output(2).is_none());
+    assert!(!ui.output.contains("must-not-run"));
 }
 
 #[test]
@@ -432,7 +437,6 @@ fn compound_terminal_handoff_warns_about_partial_execution_without_replaying() {
         "charged\n"
     );
     assert!(!dir.join("must-not-run").exists());
-    assert!(a.output(2).is_none());
     assert_eq!(out.steps, 1);
     assert_eq!(out.commands_run, 1);
     assert_eq!(received.lock().unwrap().len(), 1);

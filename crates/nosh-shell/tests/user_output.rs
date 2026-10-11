@@ -195,10 +195,15 @@ fn pty_probe() {
                 &mut shell,
                 &mut ai,
                 &mut QuietUi,
-                "#fix cite the diagnostic id",
+                "#fix REGION should be eu-west-1; do not change files.",
             );
             let request = &ai.0[0];
-            assert_eq!(request.text, "cite the diagnostic id");
+            assert_eq!(
+                request.text,
+                "REGION should be eu-west-1; do not change files."
+            );
+            assert_eq!(request.trigger, Trigger::Failed { exit: 17 });
+            assert_eq!(request.failed.as_ref().unwrap().line, "sh once.sh");
             let output = request.user_output.as_ref().unwrap();
             assert_eq!(output.state, OutputState::Captured);
             assert_eq!(output.command_id, request.failed.as_ref().unwrap().id);

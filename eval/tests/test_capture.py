@@ -35,12 +35,15 @@ def capture_trial(base, scenario):
     return root, facts, original.stderr, metadata, result, answer, metrics
 
 
-def observed_input(text, metadata, question):
+def observed_input(text, metadata, additional):
     block = f"[user_output {json.dumps(metadata)}]\n{text}\n[/user_output]"
     header = f"[context]\ncwd: {metadata['execution_cwd']}\nexit: 17\nfailed_command: {metadata['command']}"
+    request = "Explain why the command failed and how to fix it."
+    if additional:
+        request += "\n\nAdditional context from the user:\n" + additional
     return {"inputs": [{"ev": "step_start", "messages": [
         {"role": "system", "text": f"{header}\n{block}"},
-        {"role": "user", "text": question},
+        {"role": "user", "text": request},
     ]}]}
 
 
@@ -81,8 +84,8 @@ class CaptureEvaluationTests(unittest.TestCase):
         return capture_trial(self.base, self.scenario)
 
     def evidence(self, text, metadata):
-        question = self.scenario["inputs"][-1].removeprefix("#fix").strip()
-        return observed_input(text, metadata, question)
+        additional = self.scenario["inputs"][-1].removeprefix("#fix").strip()
+        return observed_input(text, metadata, additional)
 
     def test_real_one_shot_error_requires_original_engine_input_and_count(self):
         root, facts, text, metadata, result, answer, metrics = self.prepare()
