@@ -129,10 +129,10 @@ RGB 和 256 色后备自动解析/生成，用户不必手写索引。映射到 
 
 实现分工：`nosh-cli/src/starship.rs` 适配官方 CLI，`config/theme.rs` 管理选择与保存，`nosh-shell/src/theme.rs` 提供语义样式。`ThemeHandle` 与现有 editor 共用重绘入口；嵌入宿主把同一句柄传给 `ReplConfig.status_bar.theme`、`ShellAi::with_theme`、`TermUi::with_theme` 和 `TerminalApproval::detect_with_theme`。`ReplConfig.theme_command` 提供查询/持久化入口，`theme_loader` 在提示符边界应用结果；未提供选择入口的宿主会明确提示不可用。
 
-核心回归使用现有 shell、CLI 和终端测试；安装 Starship 后可显式运行官方引擎集成用例：
+核心回归使用现有 shell、CLI 和终端测试。[Linux CI](../.github/workflows/ci.yml) 额外下载并校验官方 Starship 1.26.0 预编译二进制，执行原生主题兼容用例；不从源码构建 Starship，也不改变内建主题的运行依赖。本地安装 Starship 后可显式运行这些用例：
 
 ```bash
-cargo test -p nosh-cli --bin nosh --test theme --locked -- --include-ignored
+cargo test -p nosh-cli --bin nosh --test theme --locked -- --ignored
 cargo test -p nosh-shell --lib --locked
 cargo test -p nosh-core --test terminal --locked
 ```
