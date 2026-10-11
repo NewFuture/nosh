@@ -191,6 +191,19 @@ impl Shell {
                 -1
             );
         }
+        // Readiness can be spurious; a blocking read would bypass wait's deadline.
+        let flags = unsafe { libc::fcntl(terminal.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_ne!(
+            unsafe {
+                libc::fcntl(
+                    terminal.as_raw_fd(),
+                    libc::F_SETFL,
+                    flags | libc::O_NONBLOCK,
+                )
+            },
+            -1
+        );
         command
             .current_dir(home)
             .stdin(slave.try_clone().unwrap())
@@ -226,7 +239,18 @@ impl Shell {
         };
         if unsafe { libc::poll(&mut poll, 1, milliseconds) } > 0 {
             let mut bytes = [0; 8192];
-            let count = self.terminal.read(&mut bytes).unwrap();
+            let count = match self.terminal.read(&mut bytes) {
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    return;
+                }
+                Err(error) => panic!("theme PTY read failed: {error}"),
+            };
             self.bytes.extend_from_slice(&bytes[..count]);
             let queries = self
                 .bytes
@@ -257,6 +281,15 @@ impl Shell {
                 .expect("observed terminal text")
             + text.len()
     }
+}
+
+#[test]
+fn theme_pty_master_is_nonblocking() {
+    let home = tempfile::tempdir().unwrap();
+    let shell = Shell::new(home.path());
+    let flags = unsafe { libc::fcntl(shell.terminal.as_raw_fd(), libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    assert_ne!(flags & libc::O_NONBLOCK, 0);
 }
 
 #[test]
@@ -337,12 +370,13 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     shell.wait(0, DARK);
     let start = shell.bytes.len();
     shell.send(b"?theme\r");
-    shell.wait(start, "theme: soft-dark");
+    let start = shell.wait(start, "theme: soft-dark");
+    shell.wait(start, DARK);
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
 
     let start = shell.bytes.len();
     shell.send(b"?theme soft-light\r");
-    shell.wait(start, "soft-light saved");
+    let start = shell.wait(start, "soft-light saved");
     shell.wait(start, LIGHT);
     let saved = fs::read_to_string(&config).unwrap();
     let table: toml::Table = saved.parse().unwrap();
@@ -350,7 +384,8 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
 
     let start = shell.bytes.len();
     shell.send(b"?theme\r");
-    shell.wait(start, "theme: soft-light");
+    let start = shell.wait(start, "theme: soft-light");
+    shell.wait(start, LIGHT);
     for (input, error) in [
         (
             "?theme soft-dark extra\r",
@@ -364,7 +399,7 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     ] {
         let start = shell.bytes.len();
         shell.send(input.as_bytes());
-        shell.wait(start, error);
+        let start = shell.wait(start, error);
         shell.wait(start, LIGHT);
         assert_eq!(fs::read_to_string(&config).unwrap(), saved);
     }
@@ -373,7 +408,7 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o400)).unwrap();
     let start = shell.bytes.len();
     shell.send(b"?theme soft-dark\r");
-    shell.wait(start, "read-only; selection was not saved");
+    let start = shell.wait(start, "read-only; selection was not saved");
     shell.wait(start, LIGHT);
     assert_eq!(fs::read_to_string(&config).unwrap(), saved);
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
