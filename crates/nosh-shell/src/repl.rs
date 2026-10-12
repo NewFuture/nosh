@@ -256,7 +256,14 @@ impl ReplUi for TermUi {
     }
 
     fn notice(&mut self, msg: &str) {
-        eprintln!("{msg}");
+        match crossterm::terminal::is_raw_mode_enabled() {
+            Ok(true) => eprint!("{msg}\r\n"),
+            Ok(false) => eprintln!("{msg}"),
+            Err(error) => {
+                eprintln!("nosh: terminal mode unavailable: {error}");
+                eprintln!("{msg}");
+            }
+        }
     }
 }
 
@@ -1538,7 +1545,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                     pipeline.cfg.input_abbreviations = approved;
                     if let Some(error) = abbreviations.take_error() {
                         if editor.is_some() {
-                            eprintln!();
+                            eprint!("\r\n");
                         }
                         ui.notice(&format!("nosh: {}", style::visible_text(&error)));
                     }
@@ -1548,7 +1555,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                         editor.cancel_completions();
                         if withdrawn && !editor.current_buffer_contents().is_empty() {
                             editor.preserve_literal_input();
-                            eprintln!();
+                            eprint!("\r\n");
                             ui.notice(tr!(
                                 "nosh: 缩写已失效；保留本条原文",
                                 "nosh: abbreviation became unavailable; draft kept literal"

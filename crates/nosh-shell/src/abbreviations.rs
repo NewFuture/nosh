@@ -103,6 +103,9 @@ impl Config {
         if size > MAX_BYTES {
             return Err("abbreviation configuration exceeds 256 KiB".into());
         }
+        for (name, rule) in &self.rules {
+            validate_expansion(&rule.expansion).map_err(|error| format!("{name}: {error}"))?;
+        }
         Ok(())
     }
 

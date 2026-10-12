@@ -36,10 +36,7 @@ impl State {
             .registry
             .entries
             .iter()
-            .filter(|entry| {
-                (entry.available || entry.reason.starts_with("checking"))
-                    && !self.approved.applicable.contains(&entry.name)
-            })
+            .filter(|entry| entry.available && !self.approved.applicable.contains(&entry.name))
             .filter(|entry| {
                 let override_existing = self
                     .config
@@ -375,14 +372,13 @@ impl Session {
         if self.refresh() {
             (self.shared.notify)();
         }
-        self.shared.state.try_lock().is_ok_and(|state| {
-            state.approved.revision == revision
-                && state
-                    .approved
-                    .definitions
-                    .get(name)
-                    .is_some_and(|rule| rule.expansion == value)
-        })
+        let view = self.shared.view.lock().unwrap_or_else(|e| e.into_inner());
+        view.rules.revision == revision
+            && view
+                .rules
+                .definitions
+                .get(name)
+                .is_some_and(|rule| rule.expansion == value)
     }
 
     pub fn inspect(
@@ -408,7 +404,7 @@ impl Session {
                     return Ok((*state.registry).clone());
                 }
             }
-            if started.elapsed() > Duration::from_secs(3) {
+            if started.elapsed() > crate::input_assist::INDEX_TIMEOUT * 3 {
                 return Err(
                     "abbreviation inspection timed out; no rule was assumed available".into(),
                 );
@@ -571,6 +567,7 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
                     })) if received == serial => {
                         match child.residual_children() {
                             Ok(children) if children.is_empty() => {
+                                failures = 0;
                                 publish(&shared, serial, Ok(registry))
                             }
                             result => {
@@ -799,6 +796,87 @@ mod tests {
     }
 
     #[test]
+    fn cold_probe_has_bounded_startup_allowance_and_warm_probe_keeps_normal_deadline() {
+        let (_directory, shell) = crate::abbreviations::tests::fixture();
+        let probe = Probe {
+            serial: 1,
+            config: Config::default(),
+            context: shell
+                .input_context(&crate::TriggerConfig::default(), &Default::default())
+                .unwrap(),
+        };
+        let mut worker = Worker::spawn(&launcher(), Kind::Abbreviations).unwrap();
+        worker
+            .start(&Request::Abbreviations(Box::new(probe.clone())))
+            .unwrap();
+        assert_eq!(worker.timeout, crate::input_assist::INDEX_TIMEOUT * 2);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while worker.poll().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker
+            .start(&Request::Abbreviations(Box::new(probe)))
+            .unwrap();
+        assert_eq!(worker.timeout, crate::input_assist::INDEX_TIMEOUT);
+    }
+
+    #[test]
+    fn successful_probe_resets_consecutive_failures_before_later_transient_failures() {
+        let (directory, shell) = crate::abbreviations::tests::fixture();
+        let git = directory.path().join("git");
+        let session = Session::new(Some(launcher()), Arc::new(|| {}));
+        for fail in [true, false, true, false] {
+            std::fs::write(
+                &git,
+                if fail {
+                    "#!/bin/sh\nexec /bin/sleep 60\n"
+                } else {
+                    "#!/bin/sh\nprintf 'git version 2.40.0\\n'\n"
+                },
+            )
+            .unwrap();
+            session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+            let deadline = Instant::now() + Duration::from_secs(6);
+            loop {
+                session.refresh();
+                let state = session.shared.state.lock().unwrap();
+                let ready = if fail {
+                    state
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.contains("deadline"))
+                } else {
+                    state
+                        .registry
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == "gst" && entry.available)
+                        && state.error.is_none()
+                };
+                drop(state);
+                if ready {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "probe did not recover after a clean response"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if fail {
+                while session.shared.child.lock().unwrap().is_some() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "failed worker did not release its slot"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn abbreviation_unreaped_worker_holds_its_slot_and_latest_queue_is_bounded() {
         let (directory, mut shell) = crate::abbreviations::tests::fixture();
         std::fs::write(
@@ -866,19 +944,14 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_abbreviations_are_not_submitted_as_typos() {
+    fn pending_rules_are_inert_and_confirmed_rules_respect_draft_freezing() {
         let mut session = Session::new(None, Arc::new(|| {}));
         {
             let mut state = session.shared.state.lock().unwrap();
             state.registry = Arc::new(Registry::pending(&Config::default()));
             session.update_view(&state);
         }
-        assert!(
-            session
-                .expand("gst", 3, true, &[])
-                .unwrap_err()
-                .contains("not confirmed")
-        );
+        assert!(session.expand("gst", 3, true, &[]).unwrap().is_empty());
         assert!(session.expand("echo gst", 8, true, &[]).unwrap().is_empty());
         {
             let mut state = session.shared.state.lock().unwrap();
@@ -902,6 +975,9 @@ mod tests {
         let background = session.clone();
         let _held = background.shared.state.lock().unwrap();
         assert!(session.expand("exit 0", 6, true, &[]).unwrap().is_empty());
+        assert!(session.accepts("gst", 1, "git status"));
+        assert!(!session.accepts("gst", 2, "git status"));
+        assert!(!session.accepts("gst", 1, "git diff"));
         assert_eq!(
             session.expand("gst", 3, true, &[]).unwrap()[0].replacement,
             "git status"
@@ -911,5 +987,27 @@ mod tests {
             session.take_error().as_deref(),
             Some("explicit editing failure")
         );
+    }
+
+    #[test]
+    fn pending_nonoverride_rule_does_not_block_an_unhashed_executable() {
+        let (directory, shell) = crate::abbreviations::tests::fixture();
+        let program = directory.path().join("gst");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let context = shell
+            .input_context(&crate::TriggerConfig::default(), &Default::default())
+            .unwrap();
+        assert!(!context.hashed_commands.contains_key("gst"));
+        let mut session = Session::new(None, Arc::new(|| {}));
+        {
+            let mut state = session.shared.state.lock().unwrap();
+            state.context = Some(context);
+            state.registry = Arc::new(Registry::pending(&Config::default()));
+            session.update_view(&state);
+        }
+        assert!(session.expand("gst", 3, true, &[]).unwrap().is_empty());
+        assert!(matches!(shell.resolve("gst"), crate::Resolution::File(path) if path == program));
     }
 }

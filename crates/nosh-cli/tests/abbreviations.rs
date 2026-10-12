@@ -134,6 +134,20 @@ fn abbreviation_malformed_configuration_is_not_overwritten() {
 }
 
 #[test]
+fn malformed_shell_text_in_toml_is_rejected_without_rewriting_the_file() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    let source = "[shell.abbreviations.rules]\nzzq = { expansion = \"echo '\" }\n";
+    fs::write(&path, source).unwrap();
+    for arguments in [vec!["list"], vec!["set", "another", "echo valid"]] {
+        let result = abbr(home.path(), &arguments);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("invalid expansion"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    }
+}
+
+#[test]
 fn setting_a_user_rule_does_not_probe_unrelated_tools() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
@@ -151,6 +165,31 @@ fn setting_a_user_rule_does_not_probe_unrelated_tools() {
         fs::read_to_string(home.path().join("config.toml"))
             .unwrap()
             .contains("echo independent")
+    );
+}
+
+#[test]
+fn first_management_inspection_allows_bounded_cold_tool_startup() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(
+        &git,
+        "#!/bin/sh\n/bin/sleep 2\nprintf 'git version 2.40.0\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    let listing = success(
+        command(home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .args(["abbr", "list"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        listing.contains("gst -> git status [builtin] available"),
+        "{listing}"
     );
 }
 
@@ -468,4 +507,43 @@ fn actual_binary_abbreviations_work_with_ai_disabled() {
         !output.contains("Downloading") && !output.contains("not installed"),
         "{output}"
     );
+}
+
+#[test]
+fn actual_binary_pending_rule_preserves_an_unhashed_path_executable() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, source) in [
+        ("git", "#!/bin/sh\n: > probe-started\nexec /bin/sleep 60\n"),
+        ("zzq", "#!/bin/sh\nprintf 'REAL_UNHASHED_EXECUTABLE\\n'\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, source).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations.rules]\nzzq = { expansion = 'touch must-not-run' }\n",
+    );
+    let mut launch = command(home.path());
+    launch
+        .current_dir(home.path())
+        .env("PS1", "abbr-real> ")
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .args(["--safe", "-i"]);
+    let mut terminal = Terminal::new(launch, 24, 120);
+    terminal.wait_for("abbr-real> ");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !home.path().join("probe-started").exists() {
+        assert!(Instant::now() < deadline);
+        assert!(terminal.poll().is_none());
+    }
+    terminal.send(b"zzq\r");
+    terminal.wait_for("REAL_UNHASHED_EXECUTABLE\r\n");
+    terminal.wait_for("abbr-real> ");
+    assert!(!home.path().join("must-not-run").exists());
+    finish(&mut terminal);
 }

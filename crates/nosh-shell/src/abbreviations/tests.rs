@@ -28,6 +28,30 @@ fn abbreviation_names_limits_and_explicit_overrides() {
 }
 
 #[test]
+fn file_and_command_configuration_share_shell_syntax_validation() {
+    for expansion in ["echo '", "# only a comment", "echo value |"] {
+        let mut config = Config::default();
+        config.rules.insert(
+            "custom".into(),
+            Rule {
+                expansion: expansion.into(),
+                override_existing: false,
+            },
+        );
+        assert!(config.validate("#").is_err(), "{expansion}");
+        assert!(
+            Operation::Set {
+                name: "custom".into(),
+                expansion: expansion.into(),
+                override_existing: false,
+            }
+            .apply(&mut Config::default(), "#")
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn abbreviation_management_does_not_silently_replace_builtins() {
     let mut config = Config::default();
     let operation =

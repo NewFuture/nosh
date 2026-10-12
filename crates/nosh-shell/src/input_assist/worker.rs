@@ -421,6 +421,7 @@ pub(crate) struct Worker {
     pub busy: bool,
     pub stopping: bool,
     kind: Kind,
+    first_request: bool,
     #[cfg(test)]
     hold_reaping: bool,
 }
@@ -765,6 +766,7 @@ impl Worker {
             busy: false,
             stopping: false,
             kind,
+            first_request: true,
             #[cfg(test)]
             hold_reaping: false,
         })
@@ -796,6 +798,7 @@ impl Worker {
             return Err(error);
         }
         self.timeout = match request {
+            Request::Abbreviations(_) if self.first_request => INDEX_TIMEOUT * 2,
             Request::Abbreviations(_) => INDEX_TIMEOUT,
             Request::Complete { context, .. } if context.requires_execution => INDEX_TIMEOUT,
             Request::Complete { .. } => LOOKUP_TIMEOUT,
@@ -807,6 +810,7 @@ impl Worker {
         self.written = 0;
         self.incoming.clear();
         self.started = Instant::now();
+        self.first_request = false;
         self.busy = true;
         Ok(())
     }
