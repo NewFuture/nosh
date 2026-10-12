@@ -101,13 +101,20 @@ pub(crate) struct Checker {
     capabilities: BTreeMap<String, Cached>,
 }
 
-fn capability(context: &Context, target: &str, cache: &mut Checker) -> Result<String, String> {
+fn capability(probe: &Probe, target: &str, cache: &mut Checker) -> Result<String, String> {
+    let context = &probe.context;
     if target == "cd" {
         return if local(context, "cd") == Some("builtin") {
             Ok("available: shell cd builtin".into())
         } else {
             Err("cd is disabled or shadowed by an alias/function".into())
         };
+    }
+    if !probe.config.probe_commands {
+        return Err(
+            "external capability probes disabled; opt in with shell.abbreviations.probe_commands = true only for a trusted PATH"
+                .into(),
+        );
     }
     let resolved = program(context, target)?;
     let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
@@ -221,7 +228,7 @@ impl Checker {
                 let target = entry.expansion.split_whitespace().next().unwrap_or("");
                 capabilities
                     .entry(target.to_owned())
-                    .or_insert_with(|| capability(&probe.context, target, self))
+                    .or_insert_with(|| capability(probe, target, self))
                     .clone()
             })();
             match result {

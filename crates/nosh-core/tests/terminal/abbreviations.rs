@@ -105,6 +105,7 @@ pub(super) fn probe(mode: &str) {
     }
     if mode.contains("-slow") {
         config.abbreviations.builtins = true;
+        config.abbreviations.probe_commands = true;
         let path = bin.join("git");
         std::fs::write(
             &path,

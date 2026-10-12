@@ -71,7 +71,8 @@ fn abbreviation_overrides_and_invalid_updates_are_explicit() {
     let path = home.path().join("config.toml");
     fs::write(
         &path,
-        "# keep\n[shell]\ntheme='soft-dark'\nstatus_bar=false\n",
+        "# keep\n[shell]\ntheme='soft-dark'\nstatus_bar=false\n\
+         [shell.abbreviations]\nprobe_commands = true\n",
     )
     .unwrap();
     let original = fs::read(&path).unwrap();
@@ -94,6 +95,7 @@ fn abbreviation_overrides_and_invalid_updates_are_explicit() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("# keep"));
     assert!(text.contains("theme='soft-dark'"));
+    assert!(text.contains("probe_commands = true"));
     success(
         command(home.path())
             .args(["theme", "set", "soft-light"])
@@ -150,6 +152,11 @@ fn malformed_shell_text_in_toml_is_rejected_without_rewriting_the_file() {
 #[test]
 fn setting_a_user_rule_does_not_probe_unrelated_tools() {
     let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    )
+    .unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let git = bin.join("git");
@@ -171,6 +178,11 @@ fn setting_a_user_rule_does_not_probe_unrelated_tools() {
 #[test]
 fn first_management_inspection_allows_bounded_cold_tool_startup() {
     let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    )
+    .unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let git = bin.join("git");
@@ -222,8 +234,13 @@ fn interactive_config(home: &Path, rules: &str) {
 }
 
 fn launch(home: &Path, ai_enabled: bool) -> Terminal {
+    launch_with_path(home, ai_enabled, "/usr/bin:/bin")
+}
+
+fn launch_with_path(home: &Path, ai_enabled: bool, path: &str) -> Terminal {
     let mut command = command(home);
     command
+        .env("PATH", path)
         .env("PS1", "abbr-real> ")
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")
@@ -300,9 +317,79 @@ fn barrier(terminal: &mut Terminal) {
 }
 
 #[test]
+fn default_inspection_and_interactive_startup_never_execute_path_programs() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o777)).unwrap();
+    for (name, version) in [
+        ("git", "git version 2.40.0"),
+        ("ls", "ls (GNU coreutils) 9.0"),
+    ] {
+        let program = bin.join(name);
+        fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf x >> {name}-probed\nprintf '{version}\\n'\n"),
+        )
+        .unwrap();
+        fs::set_permissions(program, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let listing = success(
+        command(home.path())
+            .current_dir(home.path())
+            .env("PATH", &path)
+            .args(["abbr", "list"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        listing.contains("external capability probes disabled"),
+        "{listing}"
+    );
+    for name in ["git", "ls"] {
+        assert!(!home.path().join(format!("{name}-probed")).exists());
+    }
+    interactive_config(home.path(), "");
+    let mut terminal = launch_with_path(home.path(), true, &path);
+    wait_rule(&mut terminal, "gst", "external capability probes disabled");
+    wait_rule(&mut terminal, "..", ".. -> cd .. [builtin] available");
+    let start = terminal.output.len();
+    terminal.send(b"gst ");
+    pump(&mut terminal, Duration::from_millis(100));
+    assert!(
+        !nosh_shell::style::strip_ansi(&String::from_utf8_lossy(&terminal.output[start..]))
+            .contains("git status ")
+    );
+    terminal.send(b"\x15");
+    finish(&mut terminal);
+    for name in ["git", "ls"] {
+        assert!(!home.path().join(format!("{name}-probed")).exists());
+    }
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    );
+    let mut terminal = launch_with_path(home.path(), true, &path);
+    wait_rule(
+        &mut terminal,
+        "gst",
+        "gst -> git status [builtin] available",
+    );
+    wait_rule(&mut terminal, "ll", "ll -> ls -lh [builtin] available");
+    for name in ["git", "ls"] {
+        assert!(home.path().join(format!("{name}-probed")).exists());
+    }
+    finish(&mut terminal);
+}
+
+#[test]
 fn actual_binary_expands_builtin_git_status_and_preserves_aliases() {
     let home = tempfile::tempdir().unwrap();
-    interactive_config(home.path(), "");
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    );
     let init = Command::new("/usr/bin/git")
         .args(["init", "--quiet"])
         .arg(home.path())
@@ -472,7 +559,10 @@ fn actual_binary_prefix_management_persists_add_disable_and_remove() {
 #[test]
 fn actual_binary_ll_and_la_use_confirmed_host_ls_flags() {
     let home = tempfile::tempdir().unwrap();
-    interactive_config(home.path(), "");
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    );
     let mut terminal = launch(home.path(), true);
     wait_rule(&mut terminal, "ll", "ll -> ls -lh [builtin] available");
     wait_rule(&mut terminal, "la", "la -> ls -lAh [builtin] available");
@@ -524,7 +614,8 @@ fn actual_binary_pending_rule_preserves_an_unhashed_path_executable() {
     }
     interactive_config(
         home.path(),
-        "[shell.abbreviations.rules]\nzzq = { expansion = 'touch must-not-run' }\n",
+        "[shell.abbreviations]\nprobe_commands = true\n\
+         [shell.abbreviations.rules]\nzzq = { expansion = 'touch must-not-run' }\n",
     );
     let mut launch = command(home.path());
     launch

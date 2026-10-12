@@ -49,6 +49,7 @@ pub struct Rule {
 pub struct Config {
     pub enabled: bool,
     pub builtins: bool,
+    pub probe_commands: bool,
     pub disabled: BTreeSet<String>,
     pub rules: BTreeMap<String, Rule>,
 }
@@ -58,6 +59,7 @@ impl Default for Config {
         Self {
             enabled: true,
             builtins: true,
+            probe_commands: false,
             disabled: BTreeSet::new(),
             rules: BTreeMap::new(),
         }

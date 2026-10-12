@@ -132,6 +132,70 @@ pub(super) fn fixture() -> (tempfile::TempDir, EmbeddedShell) {
     (directory, shell)
 }
 
+pub(super) fn probe_config() -> Config {
+    Config {
+        probe_commands: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn external_capability_probes_require_explicit_opt_in_even_with_cached_results() {
+    let (directory, mut shell) = fixture();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    for (name, version) in [
+        ("git", "git version 2.40.0"),
+        ("ls", "ls (GNU coreutils) 9.0"),
+    ] {
+        std::fs::write(
+            directory.path().join(name),
+            format!("#!/bin/sh\nprintf x >> {name}-probed\nprintf '{version}\\n'\n"),
+        )
+        .unwrap();
+    }
+    shell.run_user_line("PATH=.");
+    let mut config = Config::default();
+    config.rules.insert(
+        "zzq".into(),
+        Rule {
+            expansion: "echo custom".into(),
+            override_existing: false,
+        },
+    );
+    let mut probe = Probe {
+        serial: 1,
+        config,
+        context: shell
+            .input_context(&TriggerConfig::default(), &Default::default())
+            .unwrap(),
+    };
+    let mut checker = Checker::default();
+    let registry = checker.check(&probe);
+    let applicable = BTreeSet::from(["..".into(), "...".into(), "zzq".into()]);
+    assert_eq!(registry.approved(1).applicable, applicable);
+    assert!(
+        registry
+            .display()
+            .contains("shell.abbreviations.probe_commands")
+    );
+    for name in ["git", "ls"] {
+        assert!(!directory.path().join(format!("{name}-probed")).exists());
+    }
+    probe.config.probe_commands = true;
+    let registry = checker.check(&probe);
+    assert!(registry.entries.iter().all(|entry| entry.available));
+    for name in ["git", "ls"] {
+        let marker = directory.path().join(format!("{name}-probed"));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+        std::fs::remove_file(marker).unwrap();
+    }
+    probe.config.probe_commands = false;
+    assert_eq!(checker.check(&probe).approved(2).applicable, applicable);
+    for name in ["git", "ls"] {
+        assert!(!directory.path().join(format!("{name}-probed")).exists());
+    }
+}
+
 #[test]
 fn abbreviation_probe_confirms_targets_and_rejects_conflicts() {
     let (_directory, mut shell) = fixture();
@@ -142,14 +206,14 @@ fn abbreviation_probe_confirms_targets_and_rejects_conflicts() {
             .input_context(&TriggerConfig::default(), &Default::default())
             .unwrap(),
     };
-    let registry = check(&probe(&shell, Config::default()));
+    let registry = check(&probe(&shell, probe_config()));
     assert!(
         registry.entries.iter().all(|entry| entry.available),
         "{registry:?}"
     );
     assert_eq!(registry.approved(4).revision, 4);
     shell.run_user_line("gst() { :; }; alias ll='printf original'; alias ls='printf shadow'");
-    let registry = check(&probe(&shell, Config::default()));
+    let registry = check(&probe(&shell, probe_config()));
     for name in ["gst", "ll", "la"] {
         assert!(
             !registry
@@ -186,7 +250,7 @@ fn abbreviation_probe_missing_or_unsupported_targets_are_not_candidates() {
     std::fs::remove_file(directory.path().join("ls")).unwrap();
     let registry = check(&Probe {
         serial: 1,
-        config: Config::default(),
+        config: probe_config(),
         context: shell
             .input_context(&TriggerConfig::default(), &Default::default())
             .unwrap(),
@@ -210,7 +274,7 @@ fn abbreviation_capability_cache_rechecks_file_identity_and_missing_targets() {
     .unwrap();
     let probe = Probe {
         serial: 1,
-        config: Config::default(),
+        config: probe_config(),
         context: shell
             .input_context(&TriggerConfig::default(), &Default::default())
             .unwrap(),
@@ -238,7 +302,7 @@ fn uutils_ls_requires_a_successful_probe_of_the_expansion_flags() {
     let ls = directory.path().join("ls");
     let probe = Probe {
         serial: 1,
-        config: Config::default(),
+        config: probe_config(),
         context: shell
             .input_context(&TriggerConfig::default(), &Default::default())
             .unwrap(),
@@ -261,7 +325,7 @@ fn command_hash_warming_retains_only_confirmed_program_bindings() {
     let previous = shell
         .input_context(&TriggerConfig::default(), &Default::default())
         .unwrap();
-    let config = Config::default();
+    let config = probe_config();
     let registry = check(&Probe {
         serial: 1,
         config: config.clone(),

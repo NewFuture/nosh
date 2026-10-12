@@ -710,7 +710,7 @@ mod tests {
         let context = shell
             .input_context(&crate::TriggerConfig::default(), &Default::default())
             .unwrap();
-        let config = Config::default();
+        let config = crate::abbreviations::tests::probe_config();
         let registry = super::super::check(&Probe {
             serial: 1,
             config: config.clone(),
@@ -721,6 +721,7 @@ mod tests {
         session.available = true;
         {
             let mut state = session.shared.state.lock().unwrap();
+            state.config = config.clone();
             state.context = Some(context);
             state.registry = Arc::new(registry);
             state.serial = 1;
@@ -733,6 +734,9 @@ mod tests {
             assert!(session.approved().applicable.contains("la"));
             assert_eq!(session.shared.state.lock().unwrap().checked, Some(checked));
         }
+        session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+        assert!(session.approved().applicable.is_empty());
+        assert!(session.shared.state.lock().unwrap().checked.is_none());
     }
 
     #[test]
@@ -800,7 +804,7 @@ mod tests {
         let (_directory, shell) = crate::abbreviations::tests::fixture();
         let probe = Probe {
             serial: 1,
-            config: Config::default(),
+            config: crate::abbreviations::tests::probe_config(),
             context: shell
                 .input_context(&crate::TriggerConfig::default(), &Default::default())
                 .unwrap(),
@@ -836,7 +840,11 @@ mod tests {
                 },
             )
             .unwrap();
-            session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+            session.begin_prompt(
+                &shell,
+                crate::abbreviations::tests::probe_config(),
+                &crate::TriggerConfig::default(),
+            );
             let deadline = Instant::now() + Duration::from_secs(6);
             loop {
                 session.refresh();
@@ -886,7 +894,11 @@ mod tests {
         .unwrap();
         let session = Session::new(Some(launcher()), Arc::new(|| {}));
         session.shared.hold_reaping.store(true, Ordering::Release);
-        session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+        session.begin_prompt(
+            &shell,
+            crate::abbreviations::tests::probe_config(),
+            &crate::TriggerConfig::default(),
+        );
         let started = Instant::now();
         while session.shared.state.lock().unwrap().error.is_none() {
             assert!(started.elapsed() < Duration::from_secs(5));
@@ -895,7 +907,11 @@ mod tests {
         assert_eq!(session.shared.spawns.load(Ordering::Acquire), 1);
         for index in 0..20 {
             shell.run_user_line(&format!("alias latest{index}='echo unchanged'"));
-            session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+            session.begin_prompt(
+                &shell,
+                crate::abbreviations::tests::probe_config(),
+                &crate::TriggerConfig::default(),
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(session.shared.spawns.load(Ordering::Acquire), 1);
