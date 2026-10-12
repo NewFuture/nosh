@@ -408,7 +408,7 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o400)).unwrap();
     let start = shell.bytes.len();
     shell.send(b"?theme soft-dark\r");
-    let start = shell.wait(start, "read-only; selection was not saved");
+    let start = shell.wait(start, "read-only; changes were not saved");
     shell.wait(start, LIGHT);
     assert_eq!(fs::read_to_string(&config).unwrap(), saved);
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();

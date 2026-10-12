@@ -133,6 +133,10 @@ pub(crate) struct Version {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Input {
+    #[serde(default)]
+    pub literal: bool,
+    #[serde(default)]
+    pub expanded_abbreviations: Vec<Range<usize>>,
     pub version: Version,
     pub text: String,
     pub context: Arc<Context>,
@@ -289,6 +293,7 @@ pub(crate) type SharedIndex = Arc<std::sync::Mutex<Option<Index>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
+    Abbreviations(Box<crate::abbreviations::Probe>),
     Complete {
         query: crate::completion::types::Query,
         context: Box<crate::completion::context::Context>,
@@ -311,6 +316,10 @@ pub(crate) enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Response {
+    Abbreviations {
+        serial: u64,
+        registry: crate::abbreviations::Registry,
+    },
     Completion(crate::completion::types::Outcome),
     Analysis(Analysis),
     Lookup {

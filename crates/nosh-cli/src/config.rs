@@ -1,6 +1,8 @@
 //! `~/.config/nosh/config.toml` (design §11): common keys only; unknown keys
 //! and bad values produce warnings and fall back to defaults.
 
+pub mod abbreviations;
+mod document;
 pub mod theme;
 
 use std::path::PathBuf;
@@ -24,6 +26,7 @@ pub struct Config {
     pub theme: theme::Selection,
     pub command_assist: bool,
     pub editing: nosh_shell::editing::Config,
+    pub abbreviations: nosh_shell::abbreviations::Config,
     pub nl_guard: bool,
     pub approval: ApprovalMode,
     pub max_steps: usize,
@@ -62,6 +65,7 @@ impl Default for Config {
             theme: Default::default(),
             command_assist: true,
             editing: Default::default(),
+            abbreviations: Default::default(),
             nl_guard: true,
             approval: ApprovalMode::default(),
             max_steps: 10,
@@ -107,6 +111,7 @@ const KNOWN: &[(&str, &[&str])] = &[
             "nl_guard",
             "edit_mode",
             "keybindings",
+            "abbreviations",
         ],
     ),
     (
@@ -222,6 +227,7 @@ impl Config {
             Err(e) => Self {
                 warnings: vec![format!("cannot be read, using defaults: {e}")],
                 safety_error: Some(format!("configuration cannot be read: {e}")),
+                abbreviations: nosh_shell::abbreviations::Config::disabled(),
                 ..Self::default()
             },
         };
@@ -240,6 +246,7 @@ impl Config {
             Ok(t) => t,
             Err(e) => {
                 c.safety_error = Some(format!("invalid configuration: {e}"));
+                c.abbreviations = nosh_shell::abbreviations::Config::disabled();
                 c.warnings
                     .push(format!("invalid TOML, using defaults: {e}"));
                 return c;
@@ -249,6 +256,13 @@ impl Config {
             table: &table,
             warnings: Vec::new(),
         };
+        match abbreviations::parse(&table) {
+            Ok(config) => c.abbreviations = config,
+            Err(error) => {
+                c.abbreviations = nosh_shell::abbreviations::Config::disabled();
+                r.warnings.push(error);
+            }
+        }
         match theme::resolve_at(&table, None, path) {
             Ok(selection) => c.theme = selection,
             Err(error) => r

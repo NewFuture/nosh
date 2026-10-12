@@ -50,6 +50,8 @@ Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存�
 | `nosh-core/src/command_assist.rs`、`command_assist/tests.rs` | Generate / Fix / Next 的固定查询集合和直接终态 |
 | `nosh-core/src/command_help/`、`user_input/` | 命令帮助与提问能力的实现辅助及测试 |
 | `nosh-shell/src/completion/`、`input_assist/` | 编辑器适配、后台服务、分析和有界查询 |
+| `nosh-shell/src/abbreviations.rs`、`abbreviations/` | 内置/用户规则、能力检查、版本化目录及交互展开策略；不改写执行层文本 |
+| `nosh-cli/src/config/document.rs` | 主题与缩写共用的 TOML 原子更新、配置锁及并发变更检查 |
 | `tests/agent_flow.rs`、`tests/flows/` | 跨 crate 的 Agent、CommandAssist、context、permissions 流程；共用 `support.rs` 的夹具与进程内锁 |
 | `nosh-core/tests/terminal.rs`、`nosh-core/tests/terminal/` | 同一测试目标和三个精确命名的子进程 probe；按显示、审批、输入、命令辅助分文件，共用 PTY 驱动 |
 | `tests/fixtures/model_context.txt` | 推理与 ARM 内存测试共用的固定语料；不是设计文档，不随文档改写 |

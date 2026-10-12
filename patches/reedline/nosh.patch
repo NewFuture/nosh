@@ -544,8 +544,87 @@ index 3ba6144e7b74f6dd6fe9029b11523b651e4f98cf..52a379ba9f5cd3eec9d5ec6f9fe7010d
  ![GitHub](https://img.shields.io/github/license/nushell/reedline)
  [![Crates.io](https://img.shields.io/crates/v/reedline)](https://crates.io/crates/reedline)
  [![docs.rs](https://img.shields.io/docsrs/reedline)](https://docs.rs/reedline/)
+diff --git a/src/abbreviations.rs b/src/abbreviations.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1094dfc04887d1930bab04041b4d71dfd13a82d0
+--- /dev/null
++++ b/src/abbreviations.rs
+@@ -0,0 +1,73 @@
++//! Host-owned abbreviation policy and undoable draft provenance.
++
++use std::ops::Range;
++
++/// Whether automatic abbreviation expansion is appropriate for this draft.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum InputIntent {
++    /// Ordinary, manually entered input.
++    #[default]
++    Typed,
++    /// Imported text; only an explicit completion may expand it.
++    Imported,
++    /// The user chose to preserve the literal draft.
++    Literal,
++}
++
++/// One exact, non-overlapping replacement in the original input.
++#[derive(Clone, Debug)]
++pub struct AbbreviationEdit {
++    /// UTF-8 byte range in the original input.
++    pub range: Range<usize>,
++    /// Literal text to insert, without evaluating it.
++    pub replacement: String,
++}
++
++/// A bounded, non-blocking host policy. No shell parsing or I/O belongs in this callback.
++pub trait AbbreviationExpander: Send {
++    /// Return replacements for a space boundary or a submitted draft.
++    fn expand(
++        &mut self,
++        input: &str,
++        cursor: usize,
++        submitted: bool,
++        excluded: &[Range<usize>],
++    ) -> Result<Vec<AbbreviationEdit>, String>;
++
++    /// Observe actual draft provenance, including changes without a text change.
++    fn input_changed(&mut self, _input: &str, _intent: InputIntent) {}
++
++    /// Ranges already chosen or expanded in this draft; kept separate from display text.
++    fn expanded_ranges(&mut self, _ranges: &[Range<usize>]) {}
++
++    /// Report an expansion or acceptance failure without blocking editing.
++    fn error(&mut self, _message: &str) {}
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(crate) struct DraftAbbreviations {
++    pub intent: InputIntent,
++    pub expanded: Vec<Range<usize>>,
++    pub generation: u64,
++}
++
++impl DraftAbbreviations {
++    pub fn replace(&mut self, range: Range<usize>, length: usize) {
++        let removed = range.end - range.start;
++        self.expanded.retain_mut(|span| {
++            if range.end <= span.start {
++                span.start = span.start - removed + length;
++                span.end = span.end - removed + length;
++            } else if range.start < span.end {
++                let start = span.start.min(range.start);
++                let end = if span.end >= range.end {
++                    span.end - removed + length
++                } else {
++                    range.start + length
++                };
++                *span = start..end;
++            }
++            span.start < span.end
++        });
++    }
++}
 diff --git a/src/completion/base.rs b/src/completion/base.rs
-index 571df96c69f3c53b67724ab5addb9e203ea40306..debed6bfa430a8913681a50161de07a279ce5a0d 100644
+index 571df96c69f3c53b67724ab5addb9e203ea40306..b54e95a4a297c23aed1ef2262ac91382b6704888 100644
 --- a/src/completion/base.rs
 +++ b/src/completion/base.rs
 @@ -71,9 +71,40 @@ pub struct Partial {
@@ -633,7 +712,7 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..debed6bfa430a8913681a50161de07a2
          }
      }
  
-@@ -182,9 +217,59 @@ pub enum CompletionStatus {
+@@ -182,9 +217,64 @@ pub enum CompletionStatus {
      Ready,
  }
  
@@ -652,6 +731,11 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..debed6bfa430a8913681a50161de07a2
  /// A trait that defines how to convert some text and a position to a list of potential completions in that position.
  /// The text could be a part of the whole line, and the position is the index of the end of the text in the original line.
  pub trait Completer {
++    /// Recheck a selected value before any insertion. A rejection preserves the draft.
++    fn completion_allowed(&mut self, _suggestion: &Suggestion) -> Result<(), String> {
++        Ok(())
++    }
++
 +    /// A current, explicitly selected suggestion was accepted. Prefix extension,
 +    /// stale results and cancelled interactions never call this hook.
 +    fn completion_accepted(&mut self, _suggestion: &Suggestion) -> CompletionAcceptance {
@@ -693,7 +777,7 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..debed6bfa430a8913681a50161de07a2
      /// the action that will take the line and position and convert it to a vector of completions, which include the
      /// span to replace and the contents of that replacement
      fn complete(&mut self, line: &str, pos: usize) -> CompletionResult;
-@@ -242,6 +327,8 @@ pub trait Completer {
+@@ -242,6 +332,8 @@ pub trait Completer {
  /// Suggestion returned by the Completer
  #[derive(Debug, Default, Clone, PartialEq, Eq)]
  pub struct Suggestion {
@@ -716,23 +800,40 @@ index e8eb948e52bc5c81a07326cfbddf4d19a8d5ee88..e6204146c3bd9ad5763511504b510750
 +    CompletionStatus, MenuUpdate, Partial, Span, Suggestion, Suggestions,
  };
  pub use default::DefaultCompleter;
+diff --git a/src/core_editor/edit_stack.rs b/src/core_editor/edit_stack.rs
+index 5467328deb81c0d8f6736bac469dee6c70bdd1a7..795ac05d64c524e71dfa4535bc9cdb03482acb46 100644
+--- a/src/core_editor/edit_stack.rs
++++ b/src/core_editor/edit_stack.rs
+@@ -63,6 +63,10 @@ where
+     pub(super) fn current(&mut self) -> &T {
+         &self.current
+     }
++
++    pub(super) fn replace_current(&mut self, value: T) {
++        self.current = value;
++    }
+ }
+ 
+ #[cfg(test)]
 diff --git a/src/core_editor/editor.rs b/src/core_editor/editor.rs
-index c44c64e7a4f887eba8910f8d5f8d1f5b20783baf..e4ea11143f30d17eb65d31033275c8225bc3031b 100644
+index c44c64e7a4f887eba8910f8d5f8d1f5b20783baf..10a0f58d85585b6af47dc42134dd6a1d530f581b 100644
 --- a/src/core_editor/editor.rs
 +++ b/src/core_editor/editor.rs
-@@ -37,6 +37,7 @@ pub struct Editor {
+@@ -37,6 +37,8 @@ pub struct Editor {
      /// carets (emacs, vi insert) always cross regardless, since a bar may rest in
      /// the gap around a `\n`. Defaults to `true`.
      cross_line_cursor: bool,
 +    revision: u64,
++    pub(crate) abbreviation_tracking: bool,
  }
  
  /// Whether an [`EditCommand`] could be applied in the current editor state.
-@@ -80,11 +81,16 @@ impl Default for Editor {
+@@ -80,11 +82,17 @@ impl Default for Editor {
              edit_mode: PromptEditMode::Default,
              policy_unsettled: false,
              cross_line_cursor: true,
 +            revision: 0,
++            abbreviation_tracking: false,
          }
      }
  }
@@ -745,7 +846,71 @@ index c44c64e7a4f887eba8910f8d5f8d1f5b20783baf..e4ea11143f30d17eb65d31033275c822
      /// Get the current [`LineBuffer`]
      pub const fn line_buffer(&self) -> &LineBuffer {
          &self.line_buffer
-@@ -928,6 +934,7 @@ impl Editor {
+@@ -103,6 +111,14 @@ impl Editor {
+ 
+     pub(crate) fn run_edit_command(&mut self, command: &EditCommand) -> EditCommandStatus {
+         let initial_cursor = self.line_buffer.cursor();
++        let imported = self.abbreviation_tracking
++            && matches!(
++                command,
++                EditCommand::PasteCutBufferBefore
++                    | EditCommand::PasteCutBufferAfter
++                    | EditCommand::PasteAtSelectionEdge { .. }
++            );
++        let was_literal = self.line_buffer.abbreviations.intent == crate::InputIntent::Literal;
+         let mut status = EditCommandStatus::Applied;
+ 
+         match command {
+@@ -428,6 +444,13 @@ impl Editor {
+             return EditCommandStatus::Inapplicable;
+         }
+ 
++        if imported && !self.line_buffer.is_empty() {
++            self.line_buffer.abbreviations.intent = if was_literal {
++                crate::InputIntent::Literal
++            } else {
++                crate::InputIntent::Imported
++            };
++        }
+         let new_undo_behavior = match (command, command.edit_type()) {
+             (_, EditType::MoveCursor { .. }) => UndoBehavior::MoveCursor,
+             (EditCommand::InsertChar(c), EditType::EditText) => UndoBehavior::InsertCharacter(*c),
+@@ -790,6 +813,9 @@ impl Editor {
+     /// Insertion point update to the end of the buffer.
+     pub(crate) fn set_buffer(&mut self, buffer: String, undo_behavior: UndoBehavior) {
+         self.line_buffer.set_buffer(buffer);
++        if self.abbreviation_tracking && !self.line_buffer.is_empty() {
++            self.line_buffer.abbreviations.intent = crate::InputIntent::Imported;
++        }
+         // History navigation replaces the buffer outside the command path, so
+         // normalize the cursor here too (e.g. Vi normal must not sit past the end).
+         self.commit_cursor();
+@@ -918,20 +944,37 @@ impl Editor {
+     }
+ 
+     fn undo(&mut self) {
++        let previous = self.line_buffer.abbreviations.clone();
++        let was_empty = self.line_buffer.is_empty();
+         let val = self.edit_stack.undo();
+         self.line_buffer = val.clone();
++        if self.abbreviation_tracking
++            && !self.line_buffer.is_empty()
++            && (previous.intent == crate::InputIntent::Literal
++                || (was_empty
++                    && self.line_buffer.abbreviations.intent == crate::InputIntent::Typed)
++                || previous.generation != self.line_buffer.abbreviations.generation)
++        {
++            self.line_buffer.abbreviations.intent = crate::InputIntent::Literal;
++        }
+     }
+ 
+     fn redo(&mut self) {
++        let literal = self.line_buffer.abbreviations.intent == crate::InputIntent::Literal;
+         let val = self.edit_stack.redo();
+         self.line_buffer = val.clone();
++        if self.abbreviation_tracking && literal && !self.line_buffer.is_empty() {
++            self.line_buffer.abbreviations.intent = crate::InputIntent::Literal;
++        }
      }
  
      pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
@@ -753,6 +918,129 @@ index c44c64e7a4f887eba8910f8d5f8d1f5b20783baf..e4ea11143f30d17eb65d31033275c822
          if matches!(undo_behavior, UndoBehavior::NoOp) {
              self.last_undo_behavior = UndoBehavior::NoOp;
              return;
+         }
++
+         if !undo_behavior.create_undo_point_after(&self.last_undo_behavior) {
+             self.edit_stack.undo();
+         }
+@@ -939,6 +982,38 @@ impl Editor {
+         self.last_undo_behavior = undo_behavior;
+     }
+ 
++    pub(crate) fn abbreviation_transaction(&mut self, buffer: LineBuffer) {
++        self.edit_stack.replace_current(self.line_buffer.clone());
++        self.line_buffer = buffer;
++        self.commit_cursor();
++        self.update_undo_state(UndoBehavior::CreateUndoPoint);
++    }
++
++    pub(crate) fn mark_abbreviation(&mut self, span: crate::Span) {
++        if !self.abbreviation_tracking {
++            return;
++        }
++        let state = &mut self.line_buffer.abbreviations;
++        if state.expanded.len() < 256 {
++            state.expanded.push(span.start..span.end);
++        } else if state.intent == crate::InputIntent::Typed {
++            state.intent = crate::InputIntent::Imported;
++        }
++        state.generation = state.generation.wrapping_add(1);
++        self.edit_stack.replace_current(self.line_buffer.clone());
++    }
++
++    pub(crate) fn import_draft(&mut self, literal: bool) {
++        if self.abbreviation_tracking && !self.line_buffer.is_empty() {
++            self.line_buffer.abbreviations.intent = if literal {
++                crate::InputIntent::Literal
++            } else {
++                crate::InputIntent::Imported
++            };
++            self.edit_stack.replace_current(self.line_buffer.clone());
++        }
++    }
++
+     // The dedicated `*Linewise` cut/copy methods below back the legacy public
+     // `EditCommand` variants only — every builtin binding now lowers through
+     // `operate` + `Granularity::LineWise` (with the `Change` verb covering the
+diff --git a/src/core_editor/line_buffer.rs b/src/core_editor/line_buffer.rs
+index 509e8797be18f64cac0c2ba7b9eb6747a487620d..e6016281f4213afd76c01458f754e277b8e07b6a 100644
+--- a/src/core_editor/line_buffer.rs
++++ b/src/core_editor/line_buffer.rs
+@@ -26,6 +26,7 @@ use {
+ #[derive(Debug, PartialEq, Eq, Clone, Default)]
+ pub struct LineBuffer {
+     lines: String,
++    pub(crate) abbreviations: crate::abbreviations::DraftAbbreviations,
+     /// The cursor as a (possibly empty) range. An empty cursor (anchor == head)
+     /// is a plain insertion point; a wider one carries the active selection.
+     /// Single source of truth — the old `insertion_point` + `selection_anchor`
+@@ -210,6 +211,7 @@ impl LineBuffer {
+     /// Set to a single line of `buffer` and reset the `InsertionPoint` cursor to the end
+     pub fn set_buffer(&mut self, buffer: String) {
+         self.lines = buffer;
++        self.abbreviations = Default::default();
+         self.set_head(self.lines.len());
+     }
+ 
+@@ -372,6 +374,8 @@ impl LineBuffer {
+ 
+     ///Insert a single character at the insertion point and move right
+     pub fn insert_char(&mut self, c: char) {
++        self.abbreviations
++            .replace(self.cursor.head()..self.cursor.head(), c.len_utf8());
+         self.lines.insert(self.cursor.head(), c);
+         self.move_right();
+     }
+@@ -383,6 +387,8 @@ impl LineBuffer {
+     /// ## Unicode safety:
+     /// Does not validate the incoming string or the current cursor position
+     pub fn insert_str(&mut self, string: &str) {
++        self.abbreviations
++            .replace(self.insertion_point()..self.insertion_point(), string.len());
+         self.lines.insert_str(self.insertion_point(), string);
+         self.set_head(self.insertion_point() + string.len());
+     }
+@@ -400,6 +406,7 @@ impl LineBuffer {
+     /// Empty buffer and reset cursor
+     pub fn clear(&mut self) {
+         self.lines = String::new();
++        self.abbreviations = Default::default();
+         self.set_head(0);
+     }
+ 
+@@ -410,7 +417,7 @@ impl LineBuffer {
+         // callers (`cut_from_end`) copy the slice from `insertion_point()`, so a
+         // Block/selection cursor (head past the caret) would otherwise leave the
+         // covered grapheme behind while reporting it as cut.
+-        self.lines.truncate(self.insertion_point());
++        self.replace_range(self.insertion_point()..self.lines.len(), "");
+     }
+ 
+     /// Clear beginning at the cursor up to the end of the line.
+@@ -466,7 +473,22 @@ impl LineBuffer {
+     where
+         R: std::ops::RangeBounds<usize>,
+     {
+-        self.lines.replace_range(range, replace_with);
++        use std::ops::Bound;
++        let start = match range.start_bound() {
++            Bound::Included(&value) => value,
++            Bound::Excluded(&value) => value + 1,
++            Bound::Unbounded => 0,
++        };
++        let end = match range.end_bound() {
++            Bound::Included(&value) => value + 1,
++            Bound::Excluded(&value) => value,
++            Bound::Unbounded => self.lines.len(),
++        };
++        self.lines.replace_range(start..end, replace_with);
++        self.abbreviations.replace(start..end, replace_with.len());
++        if self.lines.is_empty() {
++            self.abbreviations = Default::default();
++        }
+     }
+ 
+     /// Checks to see if the current edit position is pointing to whitespace
 diff --git a/src/edit_mode/base.rs b/src/edit_mode/base.rs
 index 517108b75abe3643dd7c0dbc7cd50d81f141ec71..9b8fd39ae038f255d3765cf46ec35e74d332d7e4 100644
 --- a/src/edit_mode/base.rs
@@ -1128,7 +1416,7 @@ index 79dd9beb22d76020b8e5bd2e9b2762ca4303d6bb..f8c7006a2aa2308b9b9fc4cca5895331
  }
  
 diff --git a/src/engine.rs b/src/engine.rs
-index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed3dfef51f 100644
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367a9277b13 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -37,7 +37,8 @@ use {
@@ -1150,7 +1438,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          },
          time::Duration,
          time::SystemTime,
-@@ -146,6 +147,10 @@ pub struct Reedline {
+@@ -146,10 +147,15 @@ pub struct Reedline {
      /// Last failed `history.save`, until [`Reedline::take_history_save_error`].
      history_save_error: Option<ReedlineError>,
      input_mode: InputMode,
@@ -1161,7 +1449,12 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
  
      // State of the painter after a `ReedlineEvent::ExecuteHostCommand` was requested, used after
      // execution to decide if we can re-use the previous prompt or paint a new one.
-@@ -169,6 +174,7 @@ pub struct Reedline {
+     suspended_state: Option<PainterSuspendedState>,
++    context_notification: bool,
+     last_render_snapshot: Option<RenderSnapshot>,
+ 
+     // Validator
+@@ -169,6 +175,7 @@ pub struct Reedline {
      // Provides the tab completions
      completer: Box<dyn Completer + Send>,
      quick_completions: bool,
@@ -1169,15 +1462,18 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      partial_completions: bool,
      persistent_menus: bool,
      // Completions owed to a menu activation the completer could not answer in time
-@@ -204,6 +210,7 @@ pub struct Reedline {
+@@ -204,6 +211,10 @@ pub struct Reedline {
      menus: Vec<ReedlineMenu>,
  
      abbreviations: HashMap<String, String>,
 +    accepted_abbreviation: Option<(crate::Span, String)>,
++    abbreviation_expander: Option<Box<dyn crate::AbbreviationExpander>>,
++    submitted_intent: crate::InputIntent,
++    abbreviation_error: Option<String>,
  
      // Text editor used to open the line buffer for editing
      buffer_editor: Option<BufferEditor>,
-@@ -260,20 +267,29 @@ struct DeferredMenuCompletion {
+@@ -260,20 +271,29 @@ struct DeferredMenuCompletion {
      menu: String,
      /// The line this was armed on, stamped as a completer stamps its own results.
      origin: CompletionOrigin,
@@ -1209,25 +1505,32 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              && self
                  .origin
                  .matches(editor.get_buffer(), editor.insertion_point())
-@@ -286,9 +302,17 @@ impl DeferredMenuCompletion {
+@@ -286,9 +306,24 @@ impl DeferredMenuCompletion {
  #[derive(Clone, Debug, Default)]
  pub struct RepaintSignal {
      flag: Arc<AtomicBool>,
-+    host_command: Arc<Mutex<Option<String>>>,
++    host_command: Arc<Mutex<Option<(String, bool)>>>,
  }
  
  impl RepaintSignal {
 +    /// Suspend editing for a host-side update without submitting or clearing
 +    /// the draft. Multiple pending notifications share one coalescing slot.
 +    pub fn request_host_command(&self, command: String) {
-+        *self.host_command.lock().unwrap_or_else(|e| e.into_inner()) = Some(command);
++        *self.host_command.lock().unwrap_or_else(|e| e.into_inner()) = Some((command, false));
++        self.request_repaint();
++    }
++
++    /// Notify the host without cancelling an unrelated completion request.
++    /// The host must call `cancel_completions` if the actual context changed.
++    pub fn request_context_update(&self, command: String) {
++        *self.host_command.lock().unwrap_or_else(|e| e.into_inner()) = Some((command, true));
 +        self.request_repaint();
 +    }
 +
      /// Request that the prompt is re-evaluated and repainted in place.
      pub fn request_repaint(&self) {
          self.flag.store(true, Ordering::Relaxed);
-@@ -302,6 +326,9 @@ impl RepaintSignal {
+@@ -302,6 +337,9 @@ impl RepaintSignal {
  
  impl Drop for Reedline {
      fn drop(&mut self) {
@@ -1237,7 +1540,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          if self.cursor_shapes.is_some() {
              let _ignore = terminal::enable_raw_mode();
              let mut stdout = std::io::stdout();
-@@ -366,6 +393,10 @@ impl Reedline {
+@@ -366,7 +404,12 @@ impl Reedline {
              history_cursor_on_excluded: false,
              history_save_error: None,
              input_mode: InputMode::Regular,
@@ -1246,9 +1549,11 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +            pending_input: std::collections::VecDeque::new(),
 +            buffered_input: false,
              suspended_state: None,
++            context_notification: false,
              last_render_snapshot: None,
              painter,
-@@ -374,6 +405,7 @@ impl Reedline {
+             transient_prompt: None,
+@@ -374,6 +417,7 @@ impl Reedline {
              standby_edit_modes: Vec::new(),
              completer,
              quick_completions: false,
@@ -1256,15 +1561,18 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              partial_completions: false,
              persistent_menus: false,
              deferred_menu_completion: None,
-@@ -389,6 +421,7 @@ impl Reedline {
+@@ -389,6 +433,10 @@ impl Reedline {
              cwd: None,
              menus: Vec::new(),
              abbreviations: HashMap::new(),
 +            accepted_abbreviation: None,
++            abbreviation_expander: None,
++            submitted_intent: crate::InputIntent::Typed,
++            abbreviation_error: None,
              buffer_editor: None,
              cursor_shapes: None,
              bracketed_paste: BracketedPasteGuard::default(),
-@@ -513,6 +546,22 @@ impl Reedline {
+@@ -513,6 +561,22 @@ impl Reedline {
          self
      }
  
@@ -1287,7 +1595,136 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// Control whether the cursor crosses line boundaries on left/right motions
      /// in a block caret (vi normal/visual mode). When `true` (the default), `l`
      /// at the end of a line moves to the next line's first character and `h` at
-@@ -990,16 +1039,41 @@ impl Reedline {
+@@ -845,6 +909,128 @@ impl Reedline {
+         self
+     }
+ 
++    /// Install a host's bounded abbreviation policy and provenance tracking.
++    pub fn with_abbreviation_expander(
++        mut self,
++        expander: Box<dyn crate::AbbreviationExpander>,
++    ) -> Self {
++        self.abbreviation_expander = Some(expander);
++        self.editor.abbreviation_tracking = true;
++        self.contextual_input = true;
++        self
++    }
++
++    /// Intent of the most recently submitted line, retained after clearing its buffer.
++    pub fn submitted_input_intent(&self) -> crate::InputIntent {
++        self.submitted_intent
++    }
++
++    /// Current draft intent; unrelated to whether AI is enabled in the host.
++    pub fn input_intent(&self) -> crate::InputIntent {
++        self.editor.line_buffer().abbreviations.intent
++    }
++
++    /// Close active completion interactions after the host invalidates their context.
++    pub fn cancel_completions(&mut self) {
++        self.deactivate_menus();
++    }
++
++    /// Preserve an unchanged draft after its previously applicable rules were withdrawn.
++    pub fn preserve_literal_input(&mut self) {
++        self.editor.import_draft(true);
++        self.notify_abbreviation_input();
++    }
++
++    /// Consume a non-fatal abbreviation failure without changing the draft.
++    pub fn take_abbreviation_error(&mut self) -> Option<String> {
++        self.abbreviation_error.take()
++    }
++
++    fn abbreviation_failure(&mut self, error: String) {
++        if let Some(policy) = &mut self.abbreviation_expander {
++            policy.error(&error);
++        }
++        self.abbreviation_error = Some(error);
++    }
++
++    fn notify_abbreviation_input(&mut self) {
++        let intent = self.input_intent();
++        if let Some(policy) = &mut self.abbreviation_expander {
++            policy.input_changed(self.editor.get_buffer(), intent);
++            policy.expanded_ranges(&self.editor.line_buffer().abbreviations.expanded);
++        }
++    }
++
++    fn import_abbreviation_input(&mut self) {
++        if self.abbreviation_expander.is_some()
++            && self.input_intent() != crate::InputIntent::Literal
++        {
++            self.editor.line_buffer_mut().abbreviations.intent = crate::InputIntent::Imported;
++        }
++    }
++
++    fn expand_owned_abbreviations(&mut self, submitted: bool) -> bool {
++        self.abbreviation_error = None;
++        if self.input_intent() != crate::InputIntent::Typed || self.editor.get_selection().is_some()
++        {
++            return false;
++        }
++        let Some(policy) = &mut self.abbreviation_expander else {
++            return false;
++        };
++        let input = self.editor.get_buffer();
++        let cursor = self.editor.completion_point();
++        let replacements = policy.expand(
++            input,
++            cursor,
++            submitted,
++            &self.editor.line_buffer().abbreviations.expanded,
++        );
++        let edits = match replacements {
++            Ok(edits) if edits.is_empty() => return false,
++            Ok(edits) => edits,
++            Err(error) => {
++                self.abbreviation_failure(error);
++                return false;
++            }
++        };
++        let mut end = 0;
++        if edits.iter().any(|edit| {
++            let valid = edit.range.start >= end
++                && edit.range.start < edit.range.end
++                && input.get(edit.range.clone()).is_some();
++            end = edit.range.end;
++            !valid
++        }) {
++            self.abbreviation_failure("invalid abbreviation replacement range".into());
++            return false;
++        }
++        let mut buffer = self.editor.line_buffer().clone();
++        let mut insertion = cursor;
++        for edit in edits.iter().rev() {
++            if edit.range.end <= insertion {
++                insertion = insertion - edit.range.len() + edit.replacement.len();
++            } else if edit.range.start < insertion {
++                insertion = edit.range.start + edit.replacement.len();
++            }
++            buffer.replace_range(edit.range.clone(), &edit.replacement);
++            buffer
++                .abbreviations
++                .expanded
++                .push(edit.range.start..edit.range.start + edit.replacement.len());
++        }
++        buffer.abbreviations.generation = buffer.abbreviations.generation.wrapping_add(1);
++        buffer.clear_selection();
++        buffer.set_insertion_point(insertion);
++        if !submitted {
++            buffer.insert_char(' ');
++        }
++        self.editor.abbreviation_transaction(buffer);
++        self.cancel_completion_request();
++        self.notify_abbreviation_input();
++        true
++    }
++
+     /// A builder that adds the history item id
+     #[must_use]
+     pub fn with_history_session_id(mut self, session: Option<HistorySessionId>) -> Self {
+@@ -990,16 +1176,48 @@ impl Reedline {
      /// Returns a [`std::io::Result`] in which the `Err` type is [`std::io::Result`]
      /// and the `Ok` variant wraps a [`Signal`] which handles user inputs.
      pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
@@ -1304,12 +1741,19 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +            Ok(()) => self.read_line_helper(prompt),
 +            Err(error) => Err(error),
 +        };
++        if self.context_notification && matches!(&result, Ok(Signal::HostCommand(_))) {
++            self.context_notification = false;
++            return result;
++        }
 +        if self.suspended_state.is_some() {
-+            self.cancel_completion_request();
++            if !self.context_notification {
++                self.cancel_completion_request();
++            }
 +        } else {
 +            self.deactivate_menus();
 +            self.accepted_abbreviation = None;
 +        }
++        self.context_notification = false;
  
          self.bracketed_paste.exit();
 -        self.kitty_protocol.exit();
@@ -1336,7 +1780,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      }
  
      /// Returns the current insertion point of the input buffer.
-@@ -1007,6 +1081,11 @@ impl Reedline {
+@@ -1007,6 +1225,11 @@ impl Reedline {
          self.editor.insertion_point()
      }
  
@@ -1348,7 +1792,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// Returns the current contents of the input buffer.
      pub fn current_buffer_contents(&self) -> &str {
          self.editor.get_buffer()
-@@ -1017,6 +1096,16 @@ impl Reedline {
+@@ -1017,6 +1240,17 @@ impl Reedline {
          self.editor.get_selection()
      }
  
@@ -1360,24 +1804,28 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +        self.editor.clear_selection();
 +        self.editor
 +            .set_buffer(buffer, UndoBehavior::CreateUndoPoint);
++        self.notify_abbreviation_input();
 +    }
 +
      /// Writes `msg` to the terminal with a following carriage return and newline
      fn print_line(&mut self, msg: &str) -> Result<()> {
          self.painter.paint_line(msg)
-@@ -1045,6 +1134,20 @@ impl Reedline {
+@@ -1045,6 +1279,23 @@ impl Reedline {
              .is_some_and(RepaintSignal::take)
      }
  
 +    fn take_host_command_request(&mut self) -> Option<Signal> {
-+        let command = self
++        let (command, preserve_completion) = self
 +            .repaint_signal
 +            .as_ref()?
 +            .host_command
 +            .lock()
 +            .unwrap_or_else(|e| e.into_inner())
 +            .take()?;
-+        self.cancel_completion_request();
++        self.context_notification = preserve_completion;
++        if !preserve_completion {
++            self.cancel_completion_request();
++        }
 +        self.last_render_snapshot = None;
 +        self.suspended_state = Some(self.painter.state_before_suspension());
 +        Some(Signal::HostCommand(command))
@@ -1386,7 +1834,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// Whether the input loop must poll with a timeout instead of blocking
      /// indefinitely, so external triggers (break signal, repaint signal,
      /// external printer, idle callback) are noticed while waiting for input.
-@@ -1086,6 +1189,9 @@ impl Reedline {
+@@ -1086,6 +1337,9 @@ impl Reedline {
  
          loop {
              // Call idle callback if set (for processing external events like GUI updates)
@@ -1396,7 +1844,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              if let Some(ref mut callback) = self.idle_callback {
                  callback();
                  // The callback owns stdout while it runs and may have
-@@ -1097,6 +1203,7 @@ impl Reedline {
+@@ -1097,6 +1351,7 @@ impl Reedline {
              if let Some(ref signal) = self.break_signal {
                  if signal.swap(false, std::sync::atomic::Ordering::Relaxed) {
                      let buffer = self.editor.get_buffer().to_string();
@@ -1404,7 +1852,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      self.input_mode = InputMode::Regular;
                      self.last_render_snapshot = None;
                      self.suspended_state = Some(self.painter.state_before_suspension());
-@@ -1154,7 +1261,10 @@ impl Reedline {
+@@ -1154,7 +1409,10 @@ impl Reedline {
  
              let mut events: Vec<Event> = vec![];
  
@@ -1416,7 +1864,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  if self.input_needs_polling() || completer_pending {
                      if event::poll(self.poll_interval)? {
                          events.push(crossterm::event::read()?);
-@@ -1166,7 +1276,10 @@ impl Reedline {
+@@ -1166,7 +1424,10 @@ impl Reedline {
  
                  // Receive all events in the queue without blocking. Will stop when
                  // a line of input is completed.
@@ -1428,7 +1876,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      events.push(crossterm::event::read()?);
                  }
  
-@@ -1175,7 +1288,10 @@ impl Reedline {
+@@ -1175,7 +1436,10 @@ impl Reedline {
                  if events.len() > EVENTS_THRESHOLD
                      || events.iter().any(|e| matches!(e, Event::Resize(_, _)))
                  {
@@ -1440,7 +1888,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                          events.push(crossterm::event::read()?);
                      }
                  }
-@@ -1222,7 +1338,10 @@ impl Reedline {
+@@ -1222,7 +1486,10 @@ impl Reedline {
          let owed = self
              .deferred_menu_completion
              .as_ref()
@@ -1452,7 +1900,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
  
          // Values were just refreshed above, so the menu must not re-fetch them.
          let accept_lone_value =
-@@ -1256,7 +1375,10 @@ impl Reedline {
+@@ -1256,7 +1523,10 @@ impl Reedline {
      fn decide_menu_completion(&mut self, menu_index: usize, values_updated: bool) -> bool {
          let menu = &mut self.menus[menu_index];
  
@@ -1464,7 +1912,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              if !values_updated {
                  menu.update_values(
                      &mut self.editor,
-@@ -1267,12 +1389,17 @@ impl Reedline {
+@@ -1267,12 +1537,17 @@ impl Reedline {
              // Accepting a lone *stale* value is refused downstream, since its span
              // belongs to another line, so the menu would close over a completion that
              // never happened.
@@ -1484,7 +1932,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              menu.can_partially_complete(
                  values_updated || self.quick_completions,
                  &mut self.editor,
-@@ -1289,6 +1416,9 @@ impl Reedline {
+@@ -1289,6 +1564,9 @@ impl Reedline {
          prompt: &dyn Prompt,
          events: Vec<Event>,
      ) -> Result<ControlFlow<Signal>> {
@@ -1494,7 +1942,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          // Convert `Event` into `ReedlineEvent`. Also, fuse consecutive
          // `ReedlineEvent::EditCommand` into one. Also, if there're multiple
          // `ReedlineEvent::Resize`, only keep the last one.
-@@ -1297,7 +1427,16 @@ impl Reedline {
+@@ -1297,7 +1575,16 @@ impl Reedline {
          let mut resize = None;
          for event in events {
              if let Ok(event) = ReedlineRawEvent::try_from(event) {
@@ -1512,7 +1960,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      ReedlineEvent::Edit(edit) => edits.extend(edit),
                      ReedlineEvent::Resize(x, y) => resize = Some((x, y)),
                      event => {
-@@ -1369,7 +1508,118 @@ impl Reedline {
+@@ -1369,7 +1656,128 @@ impl Reedline {
          Ok(ControlFlow::Continue(()))
      }
  
@@ -1534,6 +1982,12 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +        let mut events = events.into_iter();
 +        let mut repaint = false;
 +        while let Some(raw) = events.next() {
++            let imported =
++                matches!(&raw, Event::Paste(_)) && self.input_mode != InputMode::HistorySearch;
++            let literal = self.input_intent() == crate::InputIntent::Literal;
++            if imported {
++                self.import_abbreviation_input();
++            }
 +            let Ok(raw) = ReedlineRawEvent::try_from(raw) else {
 +                continue;
 +            };
@@ -1559,6 +2013,10 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +            }
 +            self.editor.sync_edit_mode(self.edit_mode.edit_mode());
 +            let status = self.handle_event(prompt, event)?;
++            if imported {
++                self.editor.import_draft(literal);
++            }
++            self.notify_abbreviation_input();
 +            let after = if self.input_mode == InputMode::HistorySearch {
 +                crate::EditContext::HistorySearch
 +            } else if self.menus.iter().any(|menu| menu.is_active()) {
@@ -1631,7 +2089,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          if self.input_mode == InputMode::HistorySearch {
              self.handle_history_search_event(event)
          } else {
-@@ -1377,6 +1627,43 @@ impl Reedline {
+@@ -1377,6 +1785,43 @@ impl Reedline {
          }
      }
  
@@ -1675,7 +2133,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
          match event {
              ReedlineEvent::UntilFound(events) => {
-@@ -1406,6 +1693,11 @@ impl Reedline {
+@@ -1406,6 +1851,11 @@ impl Reedline {
              }
              ReedlineEvent::CtrlC => {
                  self.input_mode = InputMode::Regular;
@@ -1687,7 +2145,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  Ok(EventStatus::Exits(Signal::CtrlC))
              }
              ReedlineEvent::ClearScreen => {
-@@ -1429,6 +1721,7 @@ impl Reedline {
+@@ -1429,6 +1879,7 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -1695,20 +2153,32 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.last_render_snapshot = None;
                  self.suspended_state = Some(self.painter.state_before_suspension());
                  Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
-@@ -1492,6 +1785,9 @@ impl Reedline {
+@@ -1492,6 +1943,10 @@ impl Reedline {
              | ReedlineEvent::MenuPageNext
              | ReedlineEvent::MenuPagePrevious
              | ReedlineEvent::SwitchMode(_) => Ok(EventStatus::Inapplicable),
 +            ReedlineEvent::AcceptHistorySearch
 +            | ReedlineEvent::CancelHistorySearch
 +            | ReedlineEvent::CompleteOrHostCommand { .. } => Ok(EventStatus::Inapplicable),
++            ReedlineEvent::LiteralSpace => Ok(EventStatus::Inapplicable),
          }
      }
  
-@@ -1501,34 +1797,70 @@ impl Reedline {
+@@ -1501,34 +1956,81 @@ impl Reedline {
          event: ReedlineEvent,
      ) -> io::Result<EventStatus> {
          match event {
++            ReedlineEvent::LiteralSpace => {
++                if self.active_menu().is_some() || self.editor.get_selection().is_some() {
++                    return Ok(EventStatus::Inapplicable);
++                }
++                let mut buffer = self.editor.line_buffer().clone();
++                buffer.insert_char(' ');
++                buffer.abbreviations.intent = crate::InputIntent::Literal;
++                self.editor.abbreviation_transaction(buffer);
++                self.notify_abbreviation_input();
++                Ok(EventStatus::Handled)
++            }
 +            ReedlineEvent::CompleteOrHostCommand { menu, host_command } => {
 +                let status = self.handle_editor_event(
 +                    prompt,
@@ -1723,7 +2193,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +                        && menu.get_values().is_empty()
 +                        && !menu.results_are_provisional()
 +                });
-+                if exhausted {
++                if exhausted && self.input_intent() != crate::InputIntent::Literal {
 +                    self.deactivate_menus();
 +                    self.handle_editor_event(
 +                        prompt,
@@ -1800,7 +2270,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              }
              ReedlineEvent::MenuAccept => {
                  // Where a menu's claim on a keypress is decided, for the submit
-@@ -1541,16 +1873,26 @@ impl Reedline {
+@@ -1541,16 +2043,32 @@ impl Reedline {
                  // leaves the key to reach the line instead of appearing dead.
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu)
@@ -1809,11 +2279,17 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      {
 -                        menu.replace_in_buffer(&mut self.editor);
 -                        menu.menu_event(MenuEvent::Deactivate);
++                        if let Err(error) = menu.selection_allowed(self.completer.as_mut()) {
++                            self.abbreviation_failure(error);
++                            self.deactivate_menus();
++                            return Ok(EventStatus::Handled);
++                        }
 +                        if let Some(accepted) = menu.accept_selected(&mut self.editor) {
 +                            if menu
 +                                .completion_accepted(self.completer.as_mut(), &accepted.suggestion)
 +                                == crate::CompletionAcceptance::SuppressAbbreviationExpansion
 +                            {
++                                self.editor.mark_abbreviation(accepted.inserted_span);
 +                                self.accepted_abbreviation =
 +                                    Some((accepted.inserted_span, accepted.suggestion.value));
 +                            }
@@ -1830,7 +2306,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  if let Some(menu) = self.menus.iter_mut().find(|menu| menu.is_active()) {
                      // The second route to the lone-value accept, so it carries the same
                      // provisional guard as `decide_menu_completion`: accepting a lone
-@@ -1560,10 +1902,13 @@ impl Reedline {
+@@ -1560,10 +2078,13 @@ impl Reedline {
                      if menu.get_values().len() == 1
                          && menu.can_quick_complete()
                          && !menu.results_are_provisional()
@@ -1845,7 +2321,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                              menu.can_partially_complete(
                                  self.quick_completions,
                                  &mut self.editor,
-@@ -1580,6 +1925,7 @@ impl Reedline {
+@@ -1580,6 +2101,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPrevious => {
@@ -1853,7 +2329,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::PreviousElement);
-@@ -1587,6 +1933,7 @@ impl Reedline {
+@@ -1587,6 +2109,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuUp => {
@@ -1861,7 +2337,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveUp);
-@@ -1594,6 +1941,7 @@ impl Reedline {
+@@ -1594,6 +2117,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuDown => {
@@ -1869,7 +2345,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveDown);
-@@ -1601,6 +1949,7 @@ impl Reedline {
+@@ -1601,6 +2125,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuLeft => {
@@ -1877,7 +2353,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveLeft);
-@@ -1608,6 +1957,7 @@ impl Reedline {
+@@ -1608,6 +2133,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuRight => {
@@ -1885,7 +2361,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveRight);
-@@ -1617,6 +1967,7 @@ impl Reedline {
+@@ -1617,6 +2143,7 @@ impl Reedline {
              // These two spell out `active_menu()`, since that borrows all of `self` and
              // the painter has to stay reachable alongside the menu.
              ReedlineEvent::MenuPageNext => {
@@ -1893,7 +2369,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::NextPage);
-@@ -1627,6 +1978,7 @@ impl Reedline {
+@@ -1627,6 +2154,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPagePrevious => {
@@ -1901,7 +2377,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::PreviousPage);
-@@ -1645,12 +1997,16 @@ impl Reedline {
+@@ -1645,12 +2173,16 @@ impl Reedline {
                  Ok(self.accept_history_hint(hint))
              }
              ReedlineEvent::Esc => {
@@ -1919,7 +2395,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      self.editor.reset_undo_stack();
                      Ok(EventStatus::Exits(Signal::CtrlD))
                  } else {
-@@ -1675,6 +2031,9 @@ impl Reedline {
+@@ -1675,9 +2207,16 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::Enter => {
@@ -1929,7 +2405,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  if self.menu_took_the_key(prompt)? {
                      return Ok(EventStatus::Handled);
                  }
-@@ -1697,6 +2056,9 @@ impl Reedline {
++                self.expand_owned_abbreviations(true);
++                if self.abbreviation_error.is_some() {
++                    return Ok(EventStatus::Handled);
++                }
+                 #[cfg(feature = "bashisms")]
+                 if let Some(event) = self.parse_bang_command() {
+                     return self.handle_editor_event(prompt, event);
+@@ -1697,9 +2236,16 @@ impl Reedline {
                  }
              }
              ReedlineEvent::Submit => {
@@ -1939,7 +2422,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  if self.menu_took_the_key(prompt)? {
                      return Ok(EventStatus::Handled);
                  }
-@@ -1711,6 +2073,9 @@ impl Reedline {
++                self.expand_owned_abbreviations(true);
++                if self.abbreviation_error.is_some() {
++                    return Ok(EventStatus::Handled);
++                }
+                 #[cfg(feature = "bashisms")]
+                 if let Some(event) = self.parse_bang_command() {
+                     return self.handle_editor_event(prompt, event);
+@@ -1711,9 +2257,16 @@ impl Reedline {
                  Ok(self.submit_buffer(prompt)?)
              }
              ReedlineEvent::SubmitOrNewline => {
@@ -1949,7 +2439,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  if self.menu_took_the_key(prompt)? {
                      return Ok(EventStatus::Handled);
                  }
-@@ -1738,19 +2103,24 @@ impl Reedline {
++                self.expand_owned_abbreviations(true);
++                if self.abbreviation_error.is_some() {
++                    return Ok(EventStatus::Handled);
++                }
+                 #[cfg(feature = "bashisms")]
+                 if let Some(event) = self.parse_bang_command() {
+                     return self.handle_editor_event(prompt, event);
+@@ -1738,19 +2291,30 @@ impl Reedline {
                  }
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -1960,6 +2457,12 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              }
              ReedlineEvent::Edit(commands) => {
 +                let had_menu = self.menus.iter().any(|menu| menu.is_active());
++                if !had_menu
++                    && matches!(commands.as_slice(), [EditCommand::InsertChar(' ')])
++                    && self.expand_owned_abbreviations(false)
++                {
++                    return Ok(EventStatus::Handled);
++                }
                  let status = self.run_edit_commands_with_status(&commands);
  
                  // Ahead of everything below, which would otherwise ask a
@@ -1976,7 +2479,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
  
                  // Check if a space was just inserted and try to expand abbreviations
                  if status == EditCommandStatus::Applied
-@@ -1766,6 +2136,7 @@ impl Reedline {
+@@ -1766,6 +2330,7 @@ impl Reedline {
                      // Dismissing a menu handles the event even when the cursor didn't move.
                      if quick_complete
                          && !self.persistent_menus
@@ -1984,7 +2487,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                          && matches!(
                              commands.first(),
                              Some(EditCommand::Backspace)
-@@ -1773,12 +2144,16 @@ impl Reedline {
+@@ -1773,12 +2338,16 @@ impl Reedline {
                                  | Some(EditCommand::MoveToLineStart { select: false })
                          )
                      {
@@ -2002,7 +2505,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                      if quick_complete {
                          menu.menu_event(MenuEvent::Edit(self.quick_completions));
                          invalidate_anchor_if_host_completer_runs(menu, &mut self.painter);
-@@ -1788,9 +2163,14 @@ impl Reedline {
+@@ -1788,9 +2357,14 @@ impl Reedline {
                              self.history.as_ref(),
                          );
                          if let Some(&EditCommand::Complete) = commands.first() {
@@ -2018,7 +2521,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                                  && menu.can_partially_complete(
                                      self.quick_completions,
                                      &mut self.editor,
-@@ -1803,15 +2183,29 @@ impl Reedline {
+@@ -1803,15 +2377,29 @@ impl Reedline {
                          }
                      }
                      if !self.persistent_menus && self.editor.line_buffer().get_buffer().is_empty() {
@@ -2050,7 +2553,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              ReedlineEvent::Resize(width, height) => {
                  self.last_render_snapshot = None;
                  self.painter.handle_resize(width, height);
-@@ -1837,7 +2231,7 @@ impl Reedline {
+@@ -1837,7 +2425,7 @@ impl Reedline {
                  } else {
                      EditCommand::MoveRight { select: false }
                  };
@@ -2059,7 +2562,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              }
              ReedlineEvent::ToStart | ReedlineEvent::ToEnd => {
                  let initial_cursor = self.editor.line_buffer().cursor();
-@@ -1851,6 +2245,9 @@ impl Reedline {
+@@ -1851,6 +2439,9 @@ impl Reedline {
                  // Compare after settling under the rest policy, including vi's
                  // block caret resting on the last grapheme rather than past it.
                  self.editor.commit_cursor();
@@ -2069,7 +2572,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  Ok(if self.editor.line_buffer().cursor() == initial_cursor {
                      EventStatus::Inapplicable
                  } else {
-@@ -1957,6 +2354,9 @@ impl Reedline {
+@@ -1957,6 +2548,9 @@ impl Reedline {
          }
  
          let after = self.edit_mode.edit_mode();
@@ -2079,7 +2582,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          if matches!(status, EventStatus::Handled) && !after.rest_policy().is_block() {
              // Collapse first, while the editor still holds the mode being left
              // and so knows where its caret shows. Adopting the new policy
-@@ -1992,15 +2392,108 @@ impl Reedline {
+@@ -1992,15 +2586,108 @@ impl Reedline {
          self.menus.iter_mut().find(|menu| menu.is_active())
      }
  
@@ -2190,7 +2693,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          self.history_cursor_on_excluded = false;
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
-@@ -2030,6 +2523,7 @@ impl Reedline {
+@@ -2030,6 +2717,7 @@ impl Reedline {
      }
  
      fn next_history(&mut self) -> io::Result<()> {
@@ -2198,7 +2701,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
              self.history_cursor = HistoryCursor::new(
-@@ -2089,6 +2583,13 @@ impl Reedline {
+@@ -2089,6 +2777,13 @@ impl Reedline {
      ///
      /// This mode uses a separate prompt and handles keybindings slightly differently!
      fn enter_history_search(&mut self) {
@@ -2212,7 +2715,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          self.history_cursor = HistoryCursor::new(
              HistoryNavigationQuery::SubstringSearch("".to_string()),
              self.get_history_session_id(),
-@@ -2102,6 +2603,19 @@ impl Reedline {
+@@ -2102,6 +2797,19 @@ impl Reedline {
      fn run_history_commands(&mut self, commands: &[EditCommand]) -> io::Result<()> {
          for command in commands {
              match command {
@@ -2232,7 +2735,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
                  EditCommand::InsertChar(c) => {
                      let navigation = self.history_cursor.get_navigation();
                      if let HistoryNavigationQuery::SubstringSearch(mut substring) = navigation {
-@@ -2174,7 +2688,12 @@ impl Reedline {
+@@ -2174,7 +2882,12 @@ impl Reedline {
  
      /// Executes [`EditCommand`] actions by modifying the internal state appropriately. Does not output itself.
      pub fn run_edit_commands(&mut self, commands: &[EditCommand]) {
@@ -2246,7 +2749,22 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      }
  
      fn run_edit_commands_with_status(&mut self, commands: &[EditCommand]) -> EditCommandStatus {
-@@ -2214,6 +2733,14 @@ impl Reedline {
+@@ -2202,6 +2915,14 @@ impl Reedline {
+         let mut status = EditCommandStatus::Inapplicable;
+ 
+         for command in commands {
++            if matches!(
++                command,
++                EditCommand::PasteCutBufferBefore
++                    | EditCommand::PasteCutBufferAfter
++                    | EditCommand::PasteAtSelectionEdge { .. }
++            ) {
++                self.import_abbreviation_input();
++            }
+             if let Some(command) = self.auto_pair_command(command) {
+                 if self.editor.run_edit_command(&command) == EditCommandStatus::Applied {
+                     status = EditCommandStatus::Applied;
+@@ -2214,6 +2935,15 @@ impl Reedline {
              }
          }
  
@@ -2257,11 +2775,20 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +                self.completer
 +                    .input_changed(self.editor.get_buffer(), self.editor.insertion_point());
 +            }
++            self.notify_abbreviation_input();
 +        }
          status
      }
  
-@@ -2375,6 +2902,38 @@ impl Reedline {
+@@ -2357,6 +3087,7 @@ impl Reedline {
+             && !hint.is_empty()
+             && self.active_menu().is_none()
+         {
++            self.import_abbreviation_input();
+             self.editor.prepare_append_at_buffer_end();
+             self.run_edit_commands(&[EditCommand::InsertString(hint)]);
+             EventStatus::Handled
+@@ -2375,11 +3106,46 @@ impl Reedline {
          }
      }
  
@@ -2300,7 +2827,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// Expands an abbreviation at the word before the cursor, if any exists
      ///
      /// Calls [`Highlighter::should_expand_abbr`] with [`AbbrExpandContext::WordAbbreviation`]
-@@ -2421,6 +2980,15 @@ impl Reedline {
+     /// to decide whether expansion is permitted at the cursor position
+     fn try_expand_abbreviation_at_cursor(&mut self, submitted: bool) -> Option<ReedlineEvent> {
++        if self.abbreviation_expander.is_some() {
++            return None;
++        }
+         let buffer = self.editor.get_buffer();
+         let cursor_position_in_buffer = self.editor.insertion_point();
+         if cursor_position_in_buffer == 0 {
+@@ -2421,6 +3187,15 @@ impl Reedline {
              return None;
          }
  
@@ -2316,7 +2851,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          if !self.highlighter.should_expand_abbr(
              buffer,
              word_start,
-@@ -2658,6 +3226,8 @@ impl Reedline {
+@@ -2658,6 +3433,8 @@ impl Reedline {
      /// Overwrites the prompt indicator and highlights the search string
      /// separately from the result buffer.
      fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -2325,7 +2860,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          let use_ansi_coloring = self.effective_ansi_coloring();
          let navigation = self.history_cursor.get_navigation();
  
-@@ -2708,6 +3278,7 @@ impl Reedline {
+@@ -2708,6 +3485,7 @@ impl Reedline {
      ///
      /// Includes the highlighting and hinting calls.
      fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -2333,7 +2868,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          let use_ansi_coloring = self.effective_ansi_coloring();
          let cursor_position_in_buffer = self.editor.insertion_point();
          let buffer_to_paint = self.editor.get_buffer();
-@@ -2735,6 +3306,7 @@ impl Reedline {
+@@ -2735,6 +3513,7 @@ impl Reedline {
              }
          }
  
@@ -2341,7 +2876,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
              cursor_position_in_buffer,
              prompt,
-@@ -2804,6 +3376,23 @@ impl Reedline {
+@@ -2804,6 +3583,23 @@ impl Reedline {
              }
          }
  
@@ -2365,7 +2900,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          let menu = self.menus.iter().find(|menu| menu.is_visible());
  
          self.painter.repaint_buffer(
-@@ -2819,10 +3408,14 @@ impl Reedline {
+@@ -2819,10 +3615,14 @@ impl Reedline {
              if let Some(layout) = &self.painter.last_layout {
                  let buffer = self.editor.get_buffer();
                  let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
@@ -2384,7 +2919,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
              }
          } else {
              self.last_render_snapshot = None;
-@@ -2917,10 +3510,15 @@ impl Reedline {
+@@ -2917,10 +3717,15 @@ impl Reedline {
      /// Offer an open menu first refusal on a keypress that would otherwise
      /// submit, and report whether it took it.
      fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
@@ -2402,7 +2937,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      }
  
      /// Close an active menu when a typed character ends the word it was opened
-@@ -2945,7 +3543,7 @@ impl Reedline {
+@@ -2945,7 +3750,7 @@ impl Reedline {
              _ => false,
          });
          if word_ended {
@@ -2411,15 +2946,17 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          }
      }
  
-@@ -2953,6 +3551,7 @@ impl Reedline {
+@@ -2953,7 +3758,9 @@ impl Reedline {
          // A menu that let the submit through (no suggestions to accept) must
          // not stay active into the next line's editing.
          self.deactivate_menus();
 +        self.accepted_abbreviation = None;
          let buffer = self.editor.get_buffer().to_string();
++        self.submitted_intent = self.input_intent();
          self.hide_hints = true;
          // Additional repaint to show the content without hints etc.
-@@ -3004,6 +3603,10 @@ impl Reedline {
+         if let Some(transient_prompt) = self.transient_prompt.take() {
+@@ -3004,6 +3811,14 @@ impl Reedline {
      }
  }
  
@@ -2427,10 +2964,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
 +#[path = "engine_input_tests.rs"]
 +mod input_tests;
 +
++#[cfg(test)]
++#[path = "engine_abbreviation_tests.rs"]
++mod abbreviation_tests;
++
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -4310,6 +4913,8 @@ mod tests {
+@@ -4310,6 +5125,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -2439,7 +2980,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
          });
  
          let result = reedline.handle_event(
-@@ -5437,6 +6042,22 @@ mod tests {
+@@ -5437,6 +6254,22 @@ mod tests {
          assert!(!reedline.take_repaint_request());
      }
  
@@ -2462,7 +3003,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      #[test]
      fn repaint_signal_switches_input_loop_to_polling() {
          let mut reedline = Reedline::create();
-@@ -6176,6 +6797,470 @@ mod tests {
+@@ -6176,6 +7009,470 @@ mod tests {
              .unwrap();
      }
  
@@ -2933,7 +3474,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// The regression: a lone suggestion that arrives after the menu opened must still be
      /// accepted, exactly as a synchronous completer's would have been.
      #[test]
-@@ -6467,6 +7552,118 @@ mod tests {
+@@ -6467,6 +7764,118 @@ mod tests {
          );
      }
  
@@ -3052,6 +3593,269 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..be166310a5aef261639cfd095e2701ed
      /// A menu whose filtered suggestions are empty has nothing to accept:
      /// Enter must close it and submit the line, not be swallowed.
      #[test]
+diff --git a/src/engine_abbreviation_tests.rs b/src/engine_abbreviation_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f777c898075af0385c6c755a64d2a438127bbe51
+--- /dev/null
++++ b/src/engine_abbreviation_tests.rs
+@@ -0,0 +1,257 @@
++use super::*;
++use crate::{AbbreviationEdit, AbbreviationExpander, DefaultPrompt, InputIntent};
++use std::ops::Range;
++
++struct Policy;
++
++impl AbbreviationExpander for Policy {
++    fn expand(
++        &mut self,
++        text: &str,
++        cursor: usize,
++        submitted: bool,
++        excluded: &[Range<usize>],
++    ) -> std::result::Result<Vec<AbbreviationEdit>, String> {
++        Ok(text
++            .match_indices("gst")
++            .filter_map(|(start, _)| {
++                let range = start..start + 3;
++                ((submitted || range.end == cursor)
++                    && !excluded
++                        .iter()
++                        .any(|span| span.start <= start && start < span.end))
++                .then_some(AbbreviationEdit {
++                    range,
++                    replacement: "git status".into(),
++                })
++            })
++            .collect())
++    }
++}
++
++fn editor() -> Reedline {
++    let mut editor = Reedline::create()
++        .with_edit_mode(Box::<crate::Emacs>::default())
++        .with_abbreviation_expander(Box::new(Policy));
++    editor.painter.force_prompt_anchored_for_test(0);
++    editor
++}
++
++fn edit(editor: &mut Reedline, command: EditCommand) {
++    editor
++        .handle_event(
++            &DefaultPrompt::default(),
++            ReedlineEvent::Edit(vec![command]),
++        )
++        .unwrap();
++}
++
++fn type_text(editor: &mut Reedline, text: &str) {
++    for c in text.chars() {
++        edit(editor, EditCommand::InsertChar(c));
++    }
++}
++
++#[test]
++fn abbreviation_space_and_undo_are_one_protected_transaction() {
++    let mut editor = editor();
++    type_text(&mut editor, "gst ");
++    assert_eq!(editor.current_buffer_contents(), "git status ");
++    edit(&mut editor, EditCommand::Undo);
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(editor.current_insertion_point(), 3);
++    assert_eq!(editor.input_intent(), InputIntent::Literal);
++    edit(&mut editor, EditCommand::Redo);
++    assert_eq!(editor.current_buffer_contents(), "git status ");
++    edit(&mut editor, EditCommand::Undo);
++    type_text(&mut editor, " ");
++    assert_eq!(editor.current_buffer_contents(), "gst ");
++}
++
++#[test]
++fn abbreviation_enter_expands_and_submits_once() {
++    let mut editor = editor();
++    type_text(&mut editor, "gst");
++    let result = editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::Enter)
++        .unwrap();
++    assert!(matches!(result, EventStatus::Exits(Signal::Success(text)) if text == "git status"));
++    assert_eq!(editor.submitted_input_intent(), InputIntent::Typed);
++}
++
++#[test]
++fn abbreviation_literal_space_and_clear_restore_expected_intent() {
++    let mut editor = editor();
++    type_text(&mut editor, "gst");
++    editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::LiteralSpace)
++        .unwrap();
++    assert_eq!(editor.current_buffer_contents(), "gst ");
++    assert_eq!(editor.input_intent(), InputIntent::Literal);
++    let result = editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::Enter)
++        .unwrap();
++    assert!(matches!(result, EventStatus::Exits(Signal::Success(text)) if text == "gst "));
++    assert_eq!(editor.submitted_input_intent(), InputIntent::Literal);
++    type_text(&mut editor, "gst ");
++    assert_eq!(editor.current_buffer_contents(), "git status ");
++}
++
++#[test]
++fn abbreviation_paste_and_following_keys_are_protected_in_one_batch() {
++    let mut editor = editor();
++    let _ = editor
++        .process_input_batch(
++            &DefaultPrompt::default(),
++            vec![
++                Event::Paste("gst".into()),
++                Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
++                Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
++                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
++            ],
++        )
++        .unwrap();
++    assert_eq!(editor.submitted_input_intent(), InputIntent::Imported);
++    let last = editor
++        .history
++        .search(SearchQuery::everything(SearchDirection::Backward, None))
++        .unwrap();
++    assert_eq!(last.first().unwrap().command_line, "gst x");
++}
++
++#[test]
++fn abbreviation_host_replacement_history_and_undo_clear_keep_provenance() {
++    let mut editor = editor();
++    editor.replace_buffer("gst".into());
++    type_text(&mut editor, " ");
++    assert_eq!(editor.current_buffer_contents(), "gst ");
++    assert_eq!(editor.input_intent(), InputIntent::Imported);
++    edit(&mut editor, EditCommand::Clear);
++    assert_eq!(editor.input_intent(), InputIntent::Typed);
++    edit(&mut editor, EditCommand::Undo);
++    assert_eq!(editor.input_intent(), InputIntent::Imported);
++    editor
++        .history
++        .save(HistoryItem::from_command_line("gst"))
++        .unwrap();
++    editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::PreviousHistory)
++        .unwrap();
++    assert_eq!(editor.input_intent(), InputIntent::Imported);
++}
++
++#[test]
++fn abbreviation_middle_edits_preserve_unicode_and_expanded_ranges() {
++    let mut editor = editor();
++    edit(&mut editor, EditCommand::InsertString("中 gst 尾".into()));
++    edit(
++        &mut editor,
++        EditCommand::MoveToPosition {
++            position: 7,
++            select: false,
++        },
++    );
++    type_text(&mut editor, " ");
++    assert_eq!(editor.current_buffer_contents(), "中 git status  尾");
++    edit(&mut editor, EditCommand::Undo);
++    assert_eq!(editor.current_buffer_contents(), "中 gst 尾");
++}
++
++#[test]
++fn abbreviation_stale_completion_is_rejected_before_insertion() {
++    use crate::{ColumnarMenu, Completer, MenuBuilder, Span, Suggestion};
++    struct Stale;
++    impl Completer for Stale {
++        fn complete(&mut self, _: &str, _: usize) -> crate::CompletionResult {
++            crate::CompletionResult::Fresh {
++                suggestions: vec![Suggestion {
++                    value: "git status".into(),
++                    span: Span::new(0, 3),
++                    ..Default::default()
++                }]
++                .into(),
++                partial: None,
++            }
++        }
++        fn completion_allowed(&mut self, _: &Suggestion) -> std::result::Result<(), String> {
++            Err("rule revision changed".into())
++        }
++    }
++    let mut editor = editor()
++        .with_completer(Box::new(Stale))
++        .with_quick_completions(false)
++        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
++            ColumnarMenu::default().with_name("abbreviations"),
++        )));
++    type_text(&mut editor, "gst");
++    editor
++        .handle_event(
++            &DefaultPrompt::default(),
++            ReedlineEvent::Menu("abbreviations".into()),
++        )
++        .unwrap();
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    assert_eq!(editor.menus[0].get_values().len(), 1);
++    editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::MenuAccept)
++        .unwrap();
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(
++        editor.take_abbreviation_error().as_deref(),
++        Some("rule revision changed")
++    );
++}
++
++#[test]
++fn abbreviation_undo_clear_does_not_activate_a_different_rule() {
++    let mut editor = editor();
++    type_text(&mut editor, "gst");
++    edit(&mut editor, EditCommand::Clear);
++    edit(&mut editor, EditCommand::Undo);
++    assert_eq!(editor.input_intent(), InputIntent::Literal);
++    type_text(&mut editor, " ");
++    assert_eq!(editor.current_buffer_contents(), "gst ");
++}
++
++#[test]
++fn abbreviation_error_preserves_the_draft_instead_of_submitting_partial_work() {
++    struct Failed;
++    impl AbbreviationExpander for Failed {
++        fn expand(
++            &mut self,
++            _: &str,
++            _: usize,
++            _: bool,
++            _: &[Range<usize>],
++        ) -> std::result::Result<Vec<AbbreviationEdit>, String> {
++            Err("replacement limit".into())
++        }
++    }
++    let mut editor = editor().with_abbreviation_expander(Box::new(Failed));
++    type_text(&mut editor, "gst");
++    let result = editor
++        .handle_event(&DefaultPrompt::default(), ReedlineEvent::Enter)
++        .unwrap();
++    assert!(matches!(result, EventStatus::Handled));
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(
++        editor.take_abbreviation_error().as_deref(),
++        Some("replacement limit")
++    );
++    editor.preserve_literal_input();
++    assert!(
++        matches!(editor.handle_event(&DefaultPrompt::default(), ReedlineEvent::Enter).unwrap(),
++        EventStatus::Exits(Signal::Success(text)) if text == "gst")
++    );
++}
++
++#[test]
++fn exceeding_expanded_range_tracking_preserves_literal_intent() {
++    let mut editor = editor();
++    type_text(&mut editor, "gst");
++    editor.preserve_literal_input();
++    for _ in 0..257 {
++        editor.editor.mark_abbreviation(crate::Span::new(0, 3));
++    }
++    assert_eq!(editor.input_intent(), InputIntent::Literal);
++}
 diff --git a/src/engine_input_tests.rs b/src/engine_input_tests.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..3db0e14ec838ff604d6a72c8cd6e45b50e110268
@@ -3592,10 +4396,20 @@ index 0000000000000000000000000000000000000000..3db0e14ec838ff604d6a72c8cd6e45b5
 +    assert_eq!(requests.load(Ordering::SeqCst), 0);
 +}
 diff --git a/src/enums.rs b/src/enums.rs
-index 084936a9214ce8ab071f77c0aa144002d3c6be71..6987ef510a3d1feb11c59314c2e7c4ca43ef61cf 100644
+index 084936a9214ce8ab071f77c0aa144002d3c6be71..330d551d717df51ff1d5a521a1db8efcafb2bef5 100644
 --- a/src/enums.rs
 +++ b/src/enums.rs
-@@ -1100,6 +1100,12 @@ pub enum ReedlineEvent {
+@@ -1050,6 +1050,9 @@ pub enum ReedlineEvent {
+     /// Submit at the end of the *complete* text, otherwise newline
+     SubmitOrNewline,
+ 
++    /// Insert a space while protecting this draft from automatic rewriting.
++    LiteralSpace,
++
+     /// Esc event
+     #[strum_discriminants(strum(serialize = "Esc", serialize = "Escape"))]
+     Esc,
+@@ -1100,6 +1103,12 @@ pub enum ReedlineEvent {
      /// Search the history for a string
      SearchHistory,
  
@@ -3608,7 +4422,7 @@ index 084936a9214ce8ab071f77c0aa144002d3c6be71..6987ef510a3d1feb11c59314c2e7c4ca
      /// In vi mode multiple reedline events can be chained while parsing the
      /// command or movement characters
      Multiple(Vec<ReedlineEvent>),
-@@ -1110,6 +1116,15 @@ pub enum ReedlineEvent {
+@@ -1110,6 +1119,15 @@ pub enum ReedlineEvent {
      /// Trigger a menu event. It activates a menu with the event name
      Menu(String),
  
@@ -3624,7 +4438,7 @@ index 084936a9214ce8ab071f77c0aa144002d3c6be71..6987ef510a3d1feb11c59314c2e7c4ca
      /// Accept the highlighted menu item without submitting the line.
      ///
      /// Splices the selection into the buffer and closes the menu, as `Enter` does while
-@@ -1174,9 +1189,13 @@ pub enum ReedlineEvent {
+@@ -1174,9 +1192,13 @@ pub enum ReedlineEvent {
      SwitchMode(PromptEditMode),
  }
  
@@ -3639,10 +4453,10 @@ index 084936a9214ce8ab071f77c0aa144002d3c6be71..6987ef510a3d1feb11c59314c2e7c4ca
  }
  
 diff --git a/src/lib.rs b/src/lib.rs
-index 2cb3662efdf8a8a764d0213a664db8120469e339..e776973ba6d1c111dc827c2bb822e9d4e4d975f0 100644
+index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646b089d5a7 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -280,9 +280,9 @@ pub use auto_pairs::{AutoPairAction, AutoPairContext, AutoPairs};
+@@ -280,14 +280,16 @@ pub use auto_pairs::{AutoPairAction, AutoPairContext, AutoPairs};
  
  mod enums;
  pub use enums::{
@@ -3655,7 +4469,14 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..e776973ba6d1c111dc827c2bb822e9d4
  };
  
  mod painting;
-@@ -306,17 +306,18 @@ pub use history::{
+ pub use painting::{Painter, StyledText};
+ 
++mod abbreviations;
++pub use abbreviations::{AbbreviationEdit, AbbreviationExpander, InputIntent};
+ mod engine;
+ pub use engine::{MouseClickMode, Reedline};
+ 
+@@ -306,17 +308,18 @@ pub use history::{
  mod prompt;
  pub use prompt::PromptHelixMode;
  pub use prompt::{
@@ -3680,7 +4501,7 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..e776973ba6d1c111dc827c2bb822e9d4
  };
  pub use edit_mode::{
      default_helix_insert_keybindings, default_helix_normal_keybindings,
-@@ -328,8 +329,8 @@ pub use highlighter::{AbbrExpandContext, ExampleHighlighter, Highlighter, Simple
+@@ -328,8 +331,8 @@ pub use highlighter::{AbbrExpandContext, ExampleHighlighter, Highlighter, Simple
  
  mod completion;
  pub use completion::{
@@ -3692,7 +4513,7 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..e776973ba6d1c111dc827c2bb822e9d4
  
  mod hinter;
 diff --git a/src/menu/columnar_menu.rs b/src/menu/columnar_menu.rs
-index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9bbe6f1d7 100644
+index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e5d9af594 100644
 --- a/src/menu/columnar_menu.rs
 +++ b/src/menu/columnar_menu.rs
 @@ -10,6 +10,8 @@ use crate::{
@@ -4028,7 +4849,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
          }
      }
  
-@@ -691,13 +828,21 @@ impl Menu for ColumnarMenu {
+@@ -691,13 +828,25 @@ impl Menu for ColumnarMenu {
  
      /// Replace buffer at span via completion display
      fn replace_in_buffer(&self, editor: &mut Editor) {
@@ -4044,6 +4865,10 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
 +        } else {
 +            None
 +        }
++    }
++
++    fn selected_suggestion(&self) -> Option<&Suggestion> {
++        self.get_values().get(self.index())
      }
  
      /// Minimum rows that should be displayed by the menu
@@ -4053,7 +4878,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
      }
  
      /// Gets values from filler that will be displayed in the menu
-@@ -709,28 +854,40 @@ impl Menu for ColumnarMenu {
+@@ -709,28 +858,40 @@ impl Menu for ColumnarMenu {
          self.phase.provisional()
      }
  
@@ -4097,7 +4922,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
                  TraversalDirection::Vertical => {
                      // `grid_rows`, since `step_by(0)` panics: the type proves
                      // what the enclosing non-empty branch implies.
-@@ -786,11 +943,43 @@ impl Menu for ColumnarMenu {
+@@ -786,11 +947,43 @@ impl Menu for ColumnarMenu {
                          })
                          .collect()
                  }
@@ -4141,7 +4966,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
  #[cfg(test)]
  mod tests {
      use crate::painting::W;
-@@ -974,6 +1163,252 @@ mod tests {
+@@ -974,6 +1167,252 @@ mod tests {
          );
      }
  
@@ -4394,7 +5219,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..1e65bea8aa0af86cfd091a15b6fd88b9
      #[test]
      fn test_menu_replace_backtick() {
          // https://github.com/nushell/nushell/issues/7885
-@@ -1340,6 +1775,20 @@ mod tests {
+@@ -1340,6 +1779,20 @@ mod tests {
          );
      }
  
@@ -4566,13 +5391,18 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..e993d9bfd83b7fb070881805445e7fd6
  
  #[derive(Debug, PartialEq)]
 diff --git a/src/menu/mod.rs b/src/menu/mod.rs
-index 55069ba475e473074532bcfb6859388932570aa7..09e879a987de82deb4bf3ec24b094de8047051eb 100644
+index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee8070ea8355 100644
 --- a/src/menu/mod.rs
 +++ b/src/menu/mod.rs
-@@ -172,6 +172,13 @@ pub trait Menu: Send {
+@@ -172,6 +172,18 @@ pub trait Menu: Send {
      /// Indicates how to replace in the line buffer the selected value from the menu
      fn replace_in_buffer(&self, editor: &mut Editor);
  
++    /// Current selection for a host's last-moment validity check.
++    fn selected_suggestion(&self) -> Option<&Suggestion> {
++        None
++    }
++
 +    /// Accept a current selection and report the inserted value. Legacy menus
 +    /// keep their replacement behavior without emitting a selection notification.
 +    fn accept_selected(&self, editor: &mut Editor) -> Option<crate::AcceptedCompletion> {
@@ -4583,7 +5413,7 @@ index 55069ba475e473074532bcfb6859388932570aa7..09e879a987de82deb4bf3ec24b094de8
      /// Calculates the real required lines for the menu considering how many lines
      /// wrap the terminal or if entries have multiple lines
      fn menu_required_lines(&self, terminal_columns: u16) -> u16;
-@@ -196,6 +203,11 @@ pub trait Menu: Send {
+@@ -196,6 +208,11 @@ pub trait Menu: Send {
          false
      }
  
@@ -4595,10 +5425,24 @@ index 55069ba475e473074532bcfb6859388932570aa7..09e879a987de82deb4bf3ec24b094de8
      /// Whether the menu is activated but not yet drawn, having heard no answer
      /// about the line on screen. It claims no prompt indicator and reserves no
      /// rows, so a menu about to be closed by a lone suggestion never appears.
-@@ -465,6 +477,18 @@ pub enum ReedlineMenu {
+@@ -465,6 +482,32 @@ pub enum ReedlineMenu {
  }
  
  impl ReedlineMenu {
++    pub(crate) fn selection_allowed(
++        &mut self,
++        completer: &mut dyn Completer,
++    ) -> Result<(), String> {
++        let Some(suggestion) = self.as_ref().selected_suggestion().cloned() else {
++            return Ok(());
++        };
++        match self {
++            Self::EngineCompleter(_) => completer.completion_allowed(&suggestion),
++            Self::WithCompleter { completer, .. } => completer.completion_allowed(&suggestion),
++            Self::HistoryMenu(_) => Ok(()),
++        }
++    }
++
 +    pub(crate) fn completion_accepted(
 +        &mut self,
 +        completer: &mut dyn Completer,
@@ -4614,7 +5458,7 @@ index 55069ba475e473074532bcfb6859388932570aa7..09e879a987de82deb4bf3ec24b094de8
      fn as_ref(&self) -> &dyn Menu {
          match self {
              Self::EngineCompleter(menu)
-@@ -653,6 +677,10 @@ impl Menu for ReedlineMenu {
+@@ -653,6 +696,10 @@ impl Menu for ReedlineMenu {
          self.as_ref().replace_in_buffer(editor);
      }
  
@@ -4625,7 +5469,7 @@ index 55069ba475e473074532bcfb6859388932570aa7..09e879a987de82deb4bf3ec24b094de8
      fn menu_required_lines(&self, terminal_columns: u16) -> u16 {
          self.as_ref().menu_required_lines(terminal_columns)
      }
-@@ -674,6 +702,10 @@ impl Menu for ReedlineMenu {
+@@ -674,6 +721,10 @@ impl Menu for ReedlineMenu {
          self.as_ref().results_are_provisional()
      }
  

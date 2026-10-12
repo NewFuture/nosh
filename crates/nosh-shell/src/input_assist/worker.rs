@@ -26,6 +26,7 @@ pub(crate) enum Kind {
     Syntax,
     Lookup,
     Completion,
+    Abbreviations,
 }
 
 impl Kind {
@@ -34,11 +35,12 @@ impl Kind {
             Self::Syntax => "syntax",
             Self::Lookup => "lookup",
             Self::Completion => "completion",
+            Self::Abbreviations => "abbreviations",
         }
     }
 
     fn completion(self) -> bool {
-        matches!(self, Self::Completion)
+        matches!(self, Self::Completion | Self::Abbreviations)
     }
 }
 
@@ -63,6 +65,7 @@ fn worker_main(kind: &str) -> io::Result<()> {
         "syntax" => Kind::Syntax,
         "lookup" => Kind::Lookup,
         "completion" => Kind::Completion,
+        "abbreviations" => Kind::Abbreviations,
         _ => return Err(invalid("invalid worker kind")),
     };
     // SAFETY: fcntl only inspects the descriptor; ownership is transferred below
@@ -112,11 +115,16 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
     limit_memory()?;
     let mut lookup = lookup::Lookup::default();
     let mut completion = crate::completion::worker::Server::default();
+    let mut abbreviations = crate::abbreviations::Checker::default();
     while let Some(bytes) = read_frame(stream)? {
         limit_cpu()?;
         let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         validate_request(&request)?;
         let response = match (kind, request) {
+            (Kind::Abbreviations, Request::Abbreviations(probe)) => Response::Abbreviations {
+                serial: probe.serial,
+                registry: abbreviations.check(&probe),
+            },
             (
                 Kind::Completion,
                 Request::Complete {
@@ -166,6 +174,14 @@ fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
 }
 
 fn validate_request(request: &Request) -> io::Result<()> {
+    if let Request::Abbreviations(probe) = request {
+        probe
+            .config
+            .validate(&probe.context.ai_prefix)
+            .map_err(io::Error::other)?;
+        write_json(probe, &mut io::sink(), MAX_FRAME)?;
+        return Ok(());
+    }
     if let Request::Complete {
         query,
         context,
@@ -196,15 +212,23 @@ fn validate_request(request: &Request) -> io::Result<()> {
         | Request::Correction { input, .. } => (&input.context, Some(input.as_ref())),
         Request::Index { context, .. } => (context, None),
         Request::Complete { .. } => return Err(invalid("unexpected completion validation path")),
+        Request::Abbreviations(_) => {
+            return Err(invalid("unexpected abbreviation validation path"));
+        }
     };
     write_json(context, &mut io::sink(), MAX_CONTEXT)?;
     if !context.cwd.is_absolute() {
         return Err(invalid("invalid cwd"));
     }
     if let Some(input) = input
-        && input.text.len() > MAX_INPUT
+        && (input.text.len() > MAX_INPUT
+            || input.expanded_abbreviations.len() > crate::abbreviations::MAX_REPLACEMENTS
+            || input
+                .expanded_abbreviations
+                .iter()
+                .any(|range| input.text.get(range.clone()).is_none()))
     {
-        return Err(invalid("input limit"));
+        return Err(invalid("input limit or invalid abbreviation range"));
     }
     if let Request::Lookup { input, queries } = request
         && (queries.len() > MAX_QUERIES
@@ -397,6 +421,7 @@ pub(crate) struct Worker {
     pub busy: bool,
     pub stopping: bool,
     kind: Kind,
+    first_request: bool,
     #[cfg(test)]
     hold_reaping: bool,
 }
@@ -741,6 +766,7 @@ impl Worker {
             busy: false,
             stopping: false,
             kind,
+            first_request: true,
             #[cfg(test)]
             hold_reaping: false,
         })
@@ -772,6 +798,8 @@ impl Worker {
             return Err(error);
         }
         self.timeout = match request {
+            Request::Abbreviations(_) if self.first_request => INDEX_TIMEOUT * 2,
+            Request::Abbreviations(_) => INDEX_TIMEOUT,
             Request::Complete { context, .. } if context.requires_execution => INDEX_TIMEOUT,
             Request::Complete { .. } => LOOKUP_TIMEOUT,
             Request::Analyze(_) => SYNTAX_TIMEOUT,
@@ -782,6 +810,7 @@ impl Worker {
         self.written = 0;
         self.incoming.clear();
         self.started = Instant::now();
+        self.first_request = false;
         self.busy = true;
         Ok(())
     }
@@ -796,7 +825,9 @@ impl Worker {
         if self.started.elapsed() >= self.timeout {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                if self.kind.completion() {
+                if matches!(self.kind, Kind::Abbreviations) {
+                    "abbreviation deadline exceeded"
+                } else if self.kind.completion() {
                     "completion deadline exceeded"
                 } else {
                     "diagnostic deadline exceeded"
