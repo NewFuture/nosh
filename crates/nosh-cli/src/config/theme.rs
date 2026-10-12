@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(test)]
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -289,152 +290,34 @@ pub fn read_text(path: &Path) -> Result<String, String> {
     Ok(text)
 }
 
-#[derive(PartialEq, Eq)]
-struct Source {
-    text: String,
-    identity: Option<(u64, u64, u32, u32)>,
-}
-
-fn source(path: &Path) -> Result<Source, String> {
-    use std::io::Read;
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // A dangling symlink is not an absent configuration.
-            if fs::symlink_metadata(path).is_ok() {
-                return Err("theme configuration is a symlink; edit its target explicitly".into());
-            }
-            return Ok(Source {
-                text: String::new(),
-                identity: None,
-            });
-        }
-        Err(e) => {
-            return Err(format!(
-                "cannot open theme configuration {}: {e}",
-                path.display()
-            ));
-        }
-    };
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() {
-        return Err("theme configuration must be a regular file".into());
-    }
-    // Replacing a shared/foreign file would change ownership or hard-link semantics.
-    if metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err("theme configuration must be an owned file with one hard link".into());
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text).map_err(|e| e.to_string())?;
-    Ok(Source {
-        text,
-        identity: Some((
-            metadata.dev(),
-            metadata.ino(),
-            metadata.mode(),
-            metadata.gid(),
-        )),
-    })
-}
-
 pub fn save(path: &Path, requested: &str) -> Result<(), String> {
     save_checked(path, requested, || {})
 }
 
 fn save_checked(path: &Path, requested: &str, before_commit: impl FnOnce()) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let parent = path.parent().ok_or("configuration path has no parent")?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)
-        .map_err(|e| e.to_string())?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(parent.join(".theme.lock"))
-        .map_err(|e| format!("cannot open theme lock: {e}"))?;
-    if !lock.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("theme lock must be a regular file".into());
-    }
-    lock.try_lock()
-        .map_err(|e| format!("theme configuration is busy or cannot be locked: {e}"))?;
-    let original = source(path)?;
-    if original
-        .identity
-        .is_some_and(|(_, _, mode, _)| mode & 0o222 == 0)
-    {
-        return Err("theme configuration is read-only; selection was not saved".into());
-    }
-    let table = original
-        .text
-        .parse::<toml::Table>()
-        .map_err(|e| format!("invalid configuration: {e}"))?;
-    resolve_at(&table, Some(requested), path)?;
-    let mut document = original
-        .text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| format!("invalid configuration: {e}"))?;
-    if !document.contains_key("shell") {
-        document["shell"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let shell = document["shell"]
-        .as_table_like_mut()
-        .ok_or("shell must be a table")?;
-    let mut value = toml_edit::Value::from(requested);
-    if let Some(old) = shell.get("theme").and_then(toml_edit::Item::as_value) {
-        *value.decor_mut() = old.decor().clone();
-    }
-    shell.insert("theme", toml_edit::Item::Value(value));
-    let updated = document.to_string();
-    if updated == original.text {
-        return Ok(());
-    }
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    if let Some((_, _, mode, group)) = original.identity {
-        use std::os::fd::AsRawFd;
-        if temporary
-            .as_file()
-            .metadata()
-            .map_err(|e| e.to_string())?
-            .gid()
-            != group
-        {
-            // Preserve the existing group, never broaden access through the new file's group.
-            if unsafe { libc::fchown(temporary.as_file().as_raw_fd(), !0, group) } != 0 {
-                return Err(format!(
-                    "cannot preserve configuration group: {}",
-                    std::io::Error::last_os_error()
-                ));
+    super::document::update_checked(
+        path,
+        |document| {
+            let table = document
+                .to_string()
+                .parse::<toml::Table>()
+                .map_err(|e| format!("invalid configuration: {e}"))?;
+            resolve_at(&table, Some(requested), path)?;
+            if !document.contains_key("shell") {
+                document["shell"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
-        }
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(mode & 0o777))
-            .map_err(|e| e.to_string())?;
-    }
-    temporary
-        .write_all(updated.as_bytes())
-        .map_err(|e| e.to_string())?;
-    temporary.as_file().sync_all().map_err(|e| e.to_string())?;
-    before_commit();
-    if source(path)? != original {
-        return Err(
-            "configuration changed while saving; theme unchanged, retry the command".into(),
-        );
-    }
-    temporary
-        .persist(path)
-        .map_err(|e| format!("theme was not saved: {}", e.error))?;
-    Ok(())
+            let shell = document["shell"]
+                .as_table_like_mut()
+                .ok_or("shell must be a table")?;
+            let mut value = toml_edit::Value::from(requested);
+            if let Some(old) = shell.get("theme").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            shell.insert("theme", toml_edit::Item::Value(value));
+            Ok(())
+        },
+        before_commit,
+    )
 }
 
 #[cfg(test)]

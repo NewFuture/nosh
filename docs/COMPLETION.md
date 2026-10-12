@@ -69,3 +69,5 @@ PATH 名称缓存约 5 秒，其它本地集合约 1 秒，在实际请求时检
 新增命令在 `providers/mod.rs` 添加分派及候选函数，复用匹配、路径回填、集合限额和 `Cache::load`。嵌入宿主通过 `completion::Config.worker` 提供 `WorkerCommand`，内部入口调用 `input_assist::run_worker_from_env()`。
 
 缩写所有者提供 `input_assist::Abbreviations` 的版本、适用名称和定义；`selection_observer` 直接接收 `&AbbreviationSelection`，包含 `name` 和 `revision`。源码准备与补丁维护见[源码维护](REEDLINE-MAINTENANCE.md)。
+
+内置与自定义缩写由 `abbreviations::Session` 统一拥有，使用其当前草稿快照。选择前校验版本、适用性和准确插入值，拒绝过期候选而不修改草稿；接受后通知仍只发送一次。显式选择可以展开受保护的粘贴/历史/AI 草稿，不解除整份草稿保护。规则管理、默认键位及平台支持见[可见缩写](ABBREVIATIONS.md)。

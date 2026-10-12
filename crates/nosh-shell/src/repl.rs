@@ -170,6 +170,10 @@ impl OnFailure {
 
 #[derive(Debug, Clone)]
 pub struct ReplConfig {
+    pub abbreviations: crate::abbreviations::Config,
+    pub abbreviation_loader: Option<crate::abbreviations::Loader>,
+    pub abbreviation_command: Option<crate::abbreviations::Command>,
+    pub abbreviation_worker: Option<input_assist::WorkerCommand>,
     pub terminal_integration: crate::terminal_integration::Mode,
     pub status_bar: crate::status::Config,
     pub theme_loader: Option<ThemeLoader>,
@@ -187,6 +191,10 @@ pub struct ReplConfig {
 impl Default for ReplConfig {
     fn default() -> Self {
         Self {
+            abbreviations: Default::default(),
+            abbreviation_loader: None,
+            abbreviation_command: None,
+            abbreviation_worker: None,
             terminal_integration: Default::default(),
             status_bar: Default::default(),
             theme_loader: None,
@@ -265,6 +273,8 @@ pub struct Pipeline {
     terminal: crate::terminal_integration::Session,
     auto_paused: bool,
     last_failure: Option<UserCommand>,
+    literal_input: bool,
+    abbreviations: Option<crate::abbreviations::Session>,
 }
 
 impl Pipeline {
@@ -278,6 +288,8 @@ impl Pipeline {
             terminal: Default::default(),
             auto_paused: false,
             last_failure: None,
+            literal_input: false,
+            abbreviations: None,
         }
     }
 
@@ -316,7 +328,20 @@ impl Pipeline {
             display.invalidate();
         }
         let tc = self.trigger_cfg();
-        match trigger::classify(line, shell, &tc) {
+        let action = if self.literal_input {
+            match inline_commands::parse(line, &tc.ai_prefix, tc.ai_enabled) {
+                inline_commands::Input::Task(text) => Action::Ai {
+                    trigger: Trigger::Hash,
+                    text: text.into(),
+                },
+                inline_commands::Input::Command(command) => Action::Inline(command),
+                inline_commands::Input::Error(error) => Action::InvalidInline(error),
+                inline_commands::Input::Shell => Action::Execute,
+            }
+        } else {
+            trigger::classify(line, shell, &tc)
+        };
+        match action {
             Action::Empty => LineOutcome::Continue(None),
             Action::Execute => self.execute(shell, ai, ui, line),
             Action::Ai { trigger, text } => ask(&self.terminal, shell, ai, trigger, text, None),
@@ -391,6 +416,24 @@ impl Pipeline {
         command: Command,
     ) -> LineOutcome {
         match command {
+            Command::Abbr(operation) => {
+                let result = match (
+                    &operation,
+                    &self.abbreviations,
+                    &self.cfg.abbreviation_command,
+                ) {
+                    (crate::abbreviations::Operation::List, Some(session), _) => {
+                        Ok(session.registry().display())
+                    }
+                    (_, _, Some(command)) => (command.0)(shell, &operation),
+                    _ => Err("abbreviation management is unavailable in this host".into()),
+                };
+                match result {
+                    Ok(message) => ui.notice(&message),
+                    Err(error) => ui.notice(&format!("nosh: {}", style::visible_text(&error))),
+                }
+                LineOutcome::Continue(None)
+            }
             Command::Help => {
                 ui.notice(&inline_commands::help(&self.cfg.trigger.ai_prefix));
                 LineOutcome::Continue(None)
@@ -446,6 +489,7 @@ impl Pipeline {
         if run.exit_code == 0 {
             self.last_failure = None;
             if self.cfg.command_assist
+                && !self.literal_input
                 && self.cfg.trigger.ai_enabled
                 && !self.auto_paused
                 && let Some(command) = shell.recent_commands().last().cloned()
@@ -460,6 +504,13 @@ impl Pipeline {
         }
         let cmd = shell.recent_commands().last().cloned();
         self.last_failure = cmd.clone();
+        if self.literal_input {
+            ui.notice(&format!(
+                "nosh: exit {}; input was kept literal (no automatic AI)",
+                run.exit_code
+            ));
+            return LineOutcome::Continue(None);
+        }
         let fix_hint = if self.cfg.trigger.ai_prefix.is_empty() {
             String::new()
         } else {
@@ -571,6 +622,7 @@ pub(crate) const INLINE_HISTORY_INDICATOR: &str = "? ";
 
 #[derive(Clone, Default)]
 struct EditorState {
+    abbreviations: Option<crate::abbreviations::Session>,
     completion: Arc<Mutex<Option<crate::status::Completion>>>,
     bindings: crate::status::Bindings,
     editing: Option<Arc<editing::Compiled>>,
@@ -728,6 +780,24 @@ impl Prompt for ReplPrompt {
             .inline_prefix
             .as_ref()
             .is_some_and(|prefix| inline_commands::is_command(context.buffer, prefix, true));
+        let literal = self
+            .editor
+            .abbreviations
+            .as_ref()
+            .is_some_and(|rules| rules.is_literal())
+            && matches!(context.interaction, reedline::PromptInteraction::Editing);
+        let literal_notice = tr!(
+            "已保留原文；Tab 可明确选择展开，F2 可主动请求 AI",
+            "Input kept literal; Tab can explicitly expand, F2 can request AI"
+        );
+        let note = if literal {
+            Some(self.note.as_ref().map_or_else(
+                || literal_notice.into(),
+                |note| format!("{note} | {literal_notice}"),
+            ))
+        } else {
+            self.note.clone()
+        };
         let mut feedback = self
             .input_assist
             .as_ref()
@@ -735,7 +805,7 @@ impl Prompt for ReplPrompt {
         let assistance = self
             .command_assist
             .as_ref()
-            .filter(|_| !command_input)
+            .filter(|_| !command_input && !literal)
             .and_then(|assist| assist.result());
         let bindings = self
             .editor
@@ -782,7 +852,7 @@ impl Prompt for ReplPrompt {
                 last_result: self.last_result,
                 context_usage: self.context_usage,
                 approval: &self.approval,
-                note: self.note.as_deref(),
+                note: note.as_deref(),
                 bindings,
                 color: style::stdout().color,
                 color_depth: crate::status::color_depth(),
@@ -792,7 +862,7 @@ impl Prompt for ReplPrompt {
         };
         let mut layout = compose(feedback.as_ref());
         if let Some(assist) = &self.input_assist {
-            assist.set_correction_enabled(self.status_enabled);
+            assist.set_correction_enabled(self.status_enabled && !literal);
             if !assist.present_correction(&context, layout.correction_included)
                 && layout.correction_included
             {
@@ -814,7 +884,7 @@ impl Prompt for ReplPrompt {
                 if layout.note_included {
                     String::new()
                 } else {
-                    self.note.clone().unwrap_or_default()
+                    note.clone().unwrap_or_default()
                 },
             )
         } else {
@@ -833,7 +903,7 @@ impl Prompt for ReplPrompt {
             if !command_status.is_empty() {
                 left = format!("{}\n{left}", styles.dim(&command_status));
             }
-            let status =
+            let mut status =
                 if let Some(error) = completion.and_then(|snapshot| snapshot.error.as_ref()) {
                     crate::status::plain(error)
                 } else if self.status_feedback {
@@ -847,6 +917,9 @@ impl Prompt for ReplPrompt {
                         .map(|assist| assist.status())
                         .unwrap_or_default()
                 };
+            if literal {
+                status = literal_notice.into();
+            }
             if !status.is_empty() {
                 let status = style::clip_line(
                     &status,
@@ -1084,6 +1157,7 @@ fn build_editor(
     }
     let native_mode = compiled.editor();
     let mut state = EditorState {
+        abbreviations: None,
         completion: Default::default(),
         bindings: compiled
             .hints(
@@ -1127,15 +1201,28 @@ fn build_editor(
             .theme
             .on_repaint(Arc::new(move || repaint.request_repaint())),
     );
+    let signal = editor.repaint_signal();
+    let abbreviations = crate::abbreviations::Session::new(
+        cfg.abbreviation_worker.clone(),
+        Arc::new(move || {
+            signal.request_context_update(crate::abbreviations::service::READY.into())
+        }),
+    );
+    if cfg.abbreviation_worker.is_some() || cfg.input_abbreviations.applicable.is_empty() {
+        editor = editor.with_abbreviation_expander(Box::new(abbreviations.clone()));
+        state.abbreviations = Some(abbreviations.clone());
+    }
     let assist = cfg.input_assist.enabled.then(|| {
         let repaint = editor.repaint_signal();
         let columns = crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
-        input_assist::InputAssist::new(
+        let mut assist = input_assist::InputAssist::new(
             cfg.input_assist.worker.clone(),
             shell.input_index(),
             Arc::new(move || repaint.request_repaint()),
             columns,
-        )
+        );
+        assist.set_abbreviations(abbreviations.clone());
+        assist
     });
     let inner = match &assist {
         Some(assist) => assist.hinter(hinter),
@@ -1148,6 +1235,7 @@ fn build_editor(
     let repaint = editor.repaint_signal();
     let mut completion_config = cfg.completion.clone();
     completion_config.abbreviations = cfg.input_abbreviations.clone();
+    completion_config.owner = state.abbreviations.clone();
     completion_config.inline_prefix = cfg
         .trigger
         .ai_enabled
@@ -1272,7 +1360,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     if let Some(ed) = editor.as_mut() {
         let signal = ed.repaint_signal();
         shell.set_project_env_wakeup(Arc::new(move || {
-            signal.request_host_command(PROJECT_ENV_READY.into());
+            signal.request_context_update(PROJECT_ENV_READY.into());
         }));
     }
     if input_assist.is_none() || (cfg.input_assist.enabled && cfg.input_assist.worker.is_none()) {
@@ -1284,6 +1372,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         ai_enabled: cfg.trigger.ai_enabled,
     };
     let mut pipeline = Pipeline::new(cfg);
+    pipeline.abbreviations = editor_state.abbreviations.clone();
     pipeline.terminal = terminal;
     let status_supported = pipeline.cfg.status_bar.enabled && crate::status::supported();
     let mut ui = TermUi {
@@ -1293,7 +1382,25 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
     let mut theme_error = None;
     let mut environment_error = None;
     let mut current_theme = None;
+    let mut abbreviation_error = None;
     let code = loop {
+        if let Some(loader) = &pipeline.cfg.abbreviation_loader {
+            match (loader.0)() {
+                Ok(config) => {
+                    pipeline.cfg.abbreviations = config;
+                    abbreviation_error = None;
+                }
+                Err(error) => {
+                    if abbreviation_error.as_ref() != Some(&error) {
+                        ui.notice(&format!(
+                            "nosh: abbreviations unchanged: {}",
+                            style::visible_text(&error)
+                        ));
+                    }
+                    abbreviation_error = Some(error);
+                }
+            }
+        }
         if let Some(loader) = &pipeline.cfg.theme_loader {
             match (loader.0)() {
                 Ok(theme) => {
@@ -1311,6 +1418,14 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         }
         shell.pre_prompt();
         shell.begin_project_env();
+        if let Some(abbreviations) = &editor_state.abbreviations {
+            abbreviations.begin_prompt(
+                shell,
+                pipeline.cfg.abbreviations.clone(),
+                &pipeline.trigger_cfg(),
+            );
+            pipeline.cfg.input_abbreviations = abbreviations.approved();
+        }
         pipeline.terminal.cwd(&shell.cwd());
         let badge = ai.badge();
         let mut prompt = ReplPrompt::build(shell, &badge);
@@ -1396,13 +1511,49 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             let Ok(Signal::HostCommand(command)) = &signal else {
                 break signal;
             };
-            if command == PROJECT_ENV_READY {
-                if shell.update_project_env_for_editor() {
+            if command == crate::abbreviations::service::READY || command == PROJECT_ENV_READY {
+                let environment_changed = shell.update_project_env_for_editor();
+                if environment_changed {
                     prompt.refresh_environment(shell, &ai.badge());
                     if !pipeline.cfg.trigger.ai_enabled {
                         prompt.approval.clear();
                         prompt.context_usage = None;
                         prompt.right = prompt.note.clone().unwrap_or_default();
+                    }
+                }
+                let mut changed = environment_changed;
+                let mut withdrawn = false;
+                if let Some(abbreviations) = &editor_state.abbreviations {
+                    if environment_changed {
+                        abbreviations.environment_changed(shell, &pipeline.trigger_cfg());
+                    }
+                    abbreviations.refresh();
+                    let approved = abbreviations.approved();
+                    changed |= approved != pipeline.cfg.input_abbreviations;
+                    withdrawn = !pipeline
+                        .cfg
+                        .input_abbreviations
+                        .applicable
+                        .is_subset(&approved.applicable);
+                    pipeline.cfg.input_abbreviations = approved;
+                    if let Some(error) = abbreviations.take_error() {
+                        if editor.is_some() {
+                            eprintln!();
+                        }
+                        ui.notice(&format!("nosh: {}", style::visible_text(&error)));
+                    }
+                }
+                if changed {
+                    if let Some(editor) = &mut editor {
+                        editor.cancel_completions();
+                        if withdrawn && !editor.current_buffer_contents().is_empty() {
+                            editor.preserve_literal_input();
+                            eprintln!();
+                            ui.notice(tr!(
+                                "nosh: 缩写已失效；保留本条原文",
+                                "nosh: abbreviation became unavailable; draft kept literal"
+                            ));
+                        }
                     }
                     if let Some(completion) = &editor_state.completion_controller {
                         completion.prepare(shell);
@@ -1410,7 +1561,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                     if let Ok(mut state) = editor_state.completion.try_lock() {
                         *state = None;
                     }
-                    if let Some(assist) = &input_assist {
+                    if let Some(assist) = &input_assist
+                        && !shell.project_env_loading()
+                    {
                         assist.prepare(shell.input_context(
                             &pipeline.trigger_cfg(),
                             &pipeline.cfg.input_abbreviations,
@@ -1453,6 +1606,10 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                         continue;
                     }
                     if command == editing::COMPLETION_AI_COMMAND {
+                        if editor.as_ref().is_some_and(|editor| editor.input_intent() == reedline::InputIntent::Literal) {
+                            ui.notice("nosh: input is kept literal; use F2 for an explicit AI suggestion");
+                            continue;
+                        }
                         let snapshot = editor_state.completion.try_lock();
                         let cursor = editor.as_ref().map(|ed| ed.current_completion_point());
                         let result = snapshot.as_ref().ok().and_then(|snapshot| snapshot.as_ref())
@@ -1508,6 +1665,9 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
         }
         match signal {
             Ok(Signal::Success(line)) => {
+                pipeline.literal_input = editor.as_ref().is_some_and(|editor| {
+                    editor.submitted_input_intent() == reedline::InputIntent::Literal
+                });
                 // A failed refresh is reported by the backend, but must not
                 // prevent a human from fixing or leaving the project.
                 let waiting_for_environment = shell.project_env_loading();
@@ -1639,6 +1799,55 @@ fn suggest_draft(
 mod tests {
     use super::*;
     use reedline::{EditCommand, KeyModifiers, ReedlineEvent};
+
+    #[test]
+    fn abbreviation_literal_submission_bypasses_implicit_routes_but_not_explicit_ai() {
+        #[derive(Default)]
+        struct Ai(usize);
+        impl AiHandler for Ai {
+            fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
+                self.0 += 1;
+                AiOutcome::default()
+            }
+            fn command(&mut self, _: &mut EmbeddedShell, _: crate::ManagementCommand) -> AiOutcome {
+                self.0 += 1;
+                AiOutcome::default()
+            }
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+                self.0 += 1;
+                None
+            }
+            fn badge(&self) -> Badge {
+                Badge::default()
+            }
+        }
+        #[derive(Default)]
+        struct Ui(Vec<String>);
+        impl ReplUi for Ui {
+            fn guard(&mut self, _: &str) -> GuardChoice {
+                panic!("literal input must not be rerouted")
+            }
+            fn notice(&mut self, message: &str) {
+                self.0.push(message.into());
+            }
+        }
+        let mut shell = EmbeddedShell::new(crate::ShellOptions::default()).unwrap();
+        shell.run_user_line("PATH=/nonexistent; literal_target() { VALUE=original; }");
+        let mut pipeline = Pipeline::new(ReplConfig {
+            on_failure: OnFailure::Auto,
+            ..Default::default()
+        });
+        pipeline.literal_input = true;
+        let mut ai = Ai::default();
+        let mut ui = Ui::default();
+        pipeline.process(&mut shell, &mut ai, &mut ui, "zzq");
+        assert_eq!(ai.0, 0);
+        assert_eq!(shell.recent_commands().last().unwrap().line, "zzq");
+        pipeline.process(&mut shell, &mut ai, &mut ui, "literal_target");
+        assert_eq!(shell.var("VALUE").as_deref(), Some("original"));
+        pipeline.process(&mut shell, &mut ai, &mut ui, "# explain the command");
+        assert_eq!(ai.0, 1);
+    }
 
     #[test]
     fn rejected_background_candidates_are_invalidated_without_a_model_request() {
@@ -1798,6 +2007,7 @@ mod tests {
             last_result: None,
             context_usage: None,
             editor: EditorState {
+                abbreviations: None,
                 completion: Default::default(),
                 bindings: crate::status::Bindings::from_editor(&keys),
                 editing: None,

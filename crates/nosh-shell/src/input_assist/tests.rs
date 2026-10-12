@@ -44,6 +44,8 @@ impl Fixture {
 
     pub(super) fn input(&self, text: &str) -> Input {
         Input {
+            literal: false,
+            expanded_abbreviations: Vec::new(),
             version: Version {
                 input: 1,
                 session: 1,
@@ -219,6 +221,24 @@ fn ai_is_an_ordinary_shell_command() {
             .iter()
             .any(|observation| observation.role == Some(Role::Ai))
     );
+}
+
+#[test]
+fn abbreviation_feedback_distinguishes_override_expansion_and_literal_input() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input("gst");
+    let context = Arc::make_mut(&mut input.context);
+    context.abbreviations.applicable.insert("gst".into());
+    context.aliases.insert("gst".into());
+    assert_eq!(role_at(&analysis::analyze(&input), 0), Role::Abbreviation);
+    input.expanded_abbreviations.push(0..3);
+    assert_eq!(role_at(&analysis::analyze(&input), 0), Role::Alias);
+    input.expanded_abbreviations.clear();
+    input.literal = true;
+    assert_eq!(role_at(&analysis::analyze(&input), 0), Role::Alias);
+    input.literal = false;
+    input.text = "'gst'".into();
+    assert_ne!(role_at(&analysis::analyze(&input), 1), Role::Abbreviation);
 }
 
 #[test]

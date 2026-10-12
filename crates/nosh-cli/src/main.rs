@@ -2,6 +2,7 @@
 //! execution, one-shot agent tasks (`-a`), suggestions (`-s`) and management
 //! subcommands.
 
+mod abbr_cmd;
 mod agent_cmd;
 mod config;
 mod debug_cmd;
@@ -142,6 +143,11 @@ struct GlobalOpts {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Manage visible command abbreviations (list, set, remove, enable, disable).
+    Abbr {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print shell integration code; does not modify startup files.
     Init {
         #[arg(value_enum)]
@@ -232,6 +238,7 @@ fn main() {
         nosh_hub::net::set_offline(true);
     }
     let code = match cli.cmd.take() {
+        Some(Cmd::Abbr { args }) => abbr_cmd::run(&args),
         Some(Cmd::Init { .. }) => unreachable!("init is dispatched before runtime setup"),
         Some(Cmd::Theme { cmd }) => theme_cmd::run(cmd),
         Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
@@ -359,7 +366,26 @@ fn run_shell(
         cfg.theme.clone(),
     ));
     let theme_reload = theme_loader.clone();
+    let abbreviation_path = cfg
+        .path
+        .clone()
+        .unwrap_or_else(nosh_platform::paths::config_file);
+    let abbreviation_load_path = abbreviation_path.clone();
     let repl_cfg = nosh_shell::ReplConfig {
+        abbreviations: cfg.abbreviations.clone(),
+        abbreviation_loader: Some(nosh_shell::abbreviations::Loader(std::sync::Arc::new(
+            move || config::abbreviations::load(&abbreviation_load_path),
+        ))),
+        abbreviation_command: Some(nosh_shell::abbreviations::Command(std::sync::Arc::new(
+            move |shell, operation| abbr_cmd::execute(&abbreviation_path, shell, operation),
+        ))),
+        abbreviation_worker: match nosh_shell::input_assist::WorkerCommand::nosh() {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                eprintln!("nosh: abbreviation worker unavailable: {error}");
+                None
+            }
+        },
         terminal_integration: cfg.terminal_integration,
         status_bar: nosh_shell::status::Config {
             enabled: cfg.status_bar,
@@ -404,6 +430,7 @@ fn run_shell(
             inline_prefix: None,
             abbreviations: Default::default(),
             selection_observer: None,
+            owner: None,
             worker: if cfg.completion {
                 match nosh_shell::completion::WorkerCommand::nosh() {
                     Ok(worker) => Some(worker),

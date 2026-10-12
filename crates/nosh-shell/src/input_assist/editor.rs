@@ -121,6 +121,8 @@ impl Drop for Lifetime {
 
 #[derive(Clone)]
 pub struct InputAssist {
+    literal_guard: Option<Arc<AtomicBool>>,
+    abbreviations: Option<crate::abbreviations::Session>,
     shared: Arc<Shared>,
     _lifetime: Arc<Lifetime>,
     startup: Option<Arc<SupervisorStartup>>,
@@ -156,6 +158,8 @@ impl InputAssist {
             columns: AtomicUsize::new(columns),
         });
         let this = Self {
+            literal_guard: None,
+            abbreviations: None,
             _lifetime: Arc::new(Lifetime(shared.clone())),
             shared,
             startup: launcher.map(|launcher| {
@@ -171,6 +175,48 @@ impl InputAssist {
                 .publish(|p| p.syntax_error = Some("no input worker entry point".into()));
         }
         this
+    }
+
+    pub(crate) fn set_abbreviations(&mut self, session: crate::abbreviations::Session) {
+        self.literal_guard = Some(session.literal());
+        self.abbreviations = Some(session);
+    }
+
+    fn literal(&self) -> bool {
+        self.literal_guard
+            .as_ref()
+            .is_some_and(|guard| guard.load(Ordering::Acquire))
+    }
+
+    fn expanded_abbreviations(&self) -> Vec<Range<usize>> {
+        self.abbreviations
+            .as_ref()
+            .map_or_else(Vec::new, |session| session.expanded())
+    }
+
+    fn abbreviation_hint(&self, finding: &Finding, input: &Input) -> Option<String> {
+        if !matches!(finding.reason, Reason::Abbreviation) || input.literal {
+            return None;
+        }
+        let name = input.text.get(finding.range.clone())?;
+        if !input.context.abbreviations.applicable.contains(name) {
+            return None;
+        }
+        let expansion = if let Some(owner) = &self.abbreviations {
+            owner.expansion(name, input.context.abbreviations.revision)?
+        } else {
+            input
+                .context
+                .abbreviations
+                .definitions
+                .get(name)?
+                .expansion
+                .clone()
+        };
+        Some(crate::status::plain(&style::visible_text(&format!(
+            "{name} {} {expansion}",
+            style::stdout().glyph("→", "->")
+        ))))
     }
 
     fn start_supervisor(&self) {
@@ -343,6 +389,7 @@ impl InputAssist {
         Box::new(InputEditMode {
             inner,
             shared: self.shared.clone(),
+            literal_guard: self.literal_guard.clone(),
         })
     }
 
@@ -458,6 +505,8 @@ impl InputAssist {
             session: self.shared.session.load(Ordering::Acquire),
         };
         let input = Arc::new(Input {
+            literal: self.literal(),
+            expanded_abbreviations: self.expanded_abbreviations(),
             version,
             text: line.to_owned(),
             context,
@@ -535,6 +584,8 @@ impl Highlighter for InputHighlighter {
         let session = self.assist.shared.session.load(Ordering::Acquire);
         if cache.input.as_ref().is_none_or(|input| {
             input.text != line
+                || input.literal != self.assist.literal()
+                || input.expanded_abbreviations != self.assist.expanded_abbreviations()
                 || input.version.session != session
                 || input.version.input != self.assist.shared.generation.load(Ordering::Acquire)
         }) {
@@ -655,12 +706,23 @@ impl Highlighter for InputHighlighter {
             self.assist
                 .delay_repaint_until(input.version, requested + MISSING_COMMAND_IDLE);
         }
-        self.assist
-            .set_fallback_display(&status_text(&cache.findings, cursor));
+        let feedback = |finding: &Finding| {
+            let abbreviation = self.assist.abbreviation_hint(finding, &input);
+            finding_feedback(
+                finding,
+                &input,
+                cache.correction.as_ref(),
+                abbreviation.as_deref(),
+            )
+        };
+        self.assist.set_fallback_display(
+            &primary_finding(&cache.findings, cursor, false)
+                .map(|finding| feedback(finding).text)
+                .unwrap_or_default(),
+        );
         self.assist.set_feedback(
             cache.input.clone(),
-            primary_finding(&cache.findings, cursor, reveal_missing_commands)
-                .map(|finding| finding_feedback(finding, &input, cache.correction.as_ref())),
+            primary_finding(&cache.findings, cursor, reveal_missing_commands).map(feedback),
         );
         if cache.spans.is_empty() {
             return plain(line, styles);
@@ -691,6 +753,7 @@ impl Highlighter for InputHighlighter {
 struct InputEditMode {
     inner: Box<dyn EditMode>,
     shared: Arc<Shared>,
+    literal_guard: Option<Arc<AtomicBool>>,
 }
 
 impl EditMode for InputEditMode {
@@ -710,7 +773,11 @@ impl EditMode for InputEditMode {
             ReedlineRawEvent::try_from(raw).expect("normalized raw event"),
             context,
         );
-        let correction = if right && right_navigation(&event) {
+        let literal = self
+            .literal_guard
+            .as_ref()
+            .is_some_and(|guard| guard.load(Ordering::Acquire));
+        let correction = if !literal && right && right_navigation(&event) {
             self.shared.correction.try_lock().ok().and_then(|mut view| {
                 view.take()
                     .filter(|snapshot| snapshot.current(&self.shared))
@@ -855,6 +922,7 @@ fn pending() -> Finding {
     }
 }
 
+#[cfg(test)]
 fn status_text(findings: &[Finding], cursor: usize) -> String {
     primary_finding(findings, cursor, false)
         .map(finding_text)
@@ -878,7 +946,12 @@ fn primary_finding(findings: &[Finding], cursor: usize, include_missing: bool) -
         })
 }
 
-fn finding_feedback(finding: &Finding, input: &Input, correction: Option<&Correction>) -> Feedback {
+fn finding_feedback(
+    finding: &Finding,
+    input: &Input,
+    correction: Option<&Correction>,
+    abbreviation: Option<&str>,
+) -> Feedback {
     let correction = correction.filter(|proposal| {
         proposal.matches(input)
             && proposal.range == finding.range
@@ -904,7 +977,9 @@ fn finding_feedback(finding: &Finding, input: &Input, correction: Option<&Correc
             correction: Some(proposal.clone()),
         };
     }
-    let text = if matches!(finding.reason, Reason::MissingCommand) {
+    let text = if let Some(abbreviation) = abbreviation {
+        abbreviation.to_owned()
+    } else if matches!(finding.reason, Reason::MissingCommand) {
         format!(
             "{}: {}",
             tr!("未找到命令", "No executable command"),
@@ -926,7 +1001,10 @@ fn finding_feedback(finding: &Finding, input: &Input, correction: Option<&Correc
         Reason::Dynamic => tr!("需要运行时解析", "Runtime resolution needed").into(),
         Reason::Snapshot => tr!("前序命令可能改变快照", "Snapshot may change").into(),
         Reason::Ai => tr!("AI 输入，尚未执行", "AI input, not executed").into(),
-        Reason::Abbreviation => tr!("可用缩写，尚未展开", "Abbreviation, not expanded").into(),
+        Reason::Abbreviation => abbreviation.map_or_else(
+            || tr!("可用缩写，尚未展开", "Abbreviation, not expanded").into(),
+            |text| style::clip_line(text, 28, 0, "..."),
+        ),
         Reason::Syntax(reason) => style::clip_line(
             &format!("{}: {}", tr!("错误", "Error"), crate::status::plain(reason)),
             28,
@@ -1775,6 +1853,90 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(assist.present_correction(&correction_context("gti status"), true));
+    }
+
+    #[test]
+    fn abbreviation_feedback_shows_exact_expansion_in_full_compact_and_fallback_text() {
+        let (fixture, assist, highlighter) = editor();
+        let mut context = fixture.context();
+        context.abbreviations = Abbreviations {
+            revision: 7,
+            applicable: ["gst".into()].into_iter().collect(),
+            definitions: [(
+                "gst".into(),
+                Abbreviation {
+                    expansion: "git status".into(),
+                    source: "builtin".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assist.prepare(Ok(context));
+        highlighter.highlight("gst", 3);
+        let input = highlighter.cache.borrow().input.clone().unwrap();
+        assist.shared.publish(|publication| {
+            publication.syntax_error = None;
+            publication.analysis = Some(Arc::new(analysis::analyze(&input)));
+        });
+        highlighter.highlight("gst", 3);
+        let feedback = assist.feedback("gst").unwrap();
+        let mapping = format!("gst {} git status", style::stdout().glyph("→", "->"));
+        assert_eq!(feedback.text, mapping);
+        assert_eq!(feedback.compact, mapping);
+        assert_eq!(assist.status(), mapping);
+        assert!(!feedback.text.contains("not expanded"));
+        assert!(feedback.correction.is_none());
+        assert_eq!(input.text, "gst");
+    }
+
+    #[test]
+    fn abbreviation_feedback_escapes_controls_and_only_clips_the_preview() {
+        let (fixture, assist, _) = editor();
+        let mut input = fixture.input("gst");
+        let expansion = format!("printf '\x1b[31m {}'", "中文文件".repeat(20));
+        let context = Arc::make_mut(&mut input.context);
+        context.abbreviations.applicable.insert("gst".into());
+        context.abbreviations.definitions.insert(
+            "gst".into(),
+            Abbreviation {
+                expansion: expansion.clone(),
+                source: "user".into(),
+            },
+        );
+        let finding = Finding {
+            range: 0..3,
+            state: State::Known,
+            reason: Reason::Abbreviation,
+        };
+        let mapping = assist.abbreviation_hint(&finding, &input).unwrap();
+        let feedback = finding_feedback(&finding, &input, None, Some(&mapping));
+        assert!(feedback.text.contains("\\e[31m"));
+        assert!(!feedback.text.contains('\u{1b}'));
+        assert!(feedback.compact.ends_with("..."));
+        assert!(style::width(&feedback.compact) <= 28);
+        assert_eq!(
+            input.context.abbreviations.definitions["gst"].expansion,
+            expansion
+        );
+        input.literal = true;
+        assert!(assist.abbreviation_hint(&finding, &input).is_none());
+    }
+
+    #[test]
+    fn abbreviation_and_command_colors_differ_without_changing_plain_mode() {
+        for preset in crate::theme::Builtin::ALL {
+            let mut styles = crate::theme::FrameTheme::test().styles();
+            styles.theme = preset.palette();
+            let abbreviation = role_style(Role::Abbreviation, styles);
+            let command = role_style(Role::Builtin, styles);
+            let alias = role_style(Role::Alias, styles);
+            assert_ne!(abbreviation.foreground, command.foreground);
+            assert_eq!(abbreviation.foreground, alias.foreground);
+            assert!(alias.is_bold);
+            styles.terminal.color = false;
+            assert_eq!(role_style(Role::Abbreviation, styles), Style::new());
+        }
     }
 
     #[test]

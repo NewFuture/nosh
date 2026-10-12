@@ -349,7 +349,10 @@ impl Completion {
             self.service.prepare(snapshot::capture(
                 shell,
                 self.config.scripts,
-                &self.config.abbreviations,
+                &self.config.owner.as_ref().map_or_else(
+                    || self.config.abbreviations.clone(),
+                    |owner| owner.approved(),
+                ),
             ));
         }
     }
@@ -398,13 +401,38 @@ impl Completion {
 }
 
 impl Completer for Completion {
+    fn completion_allowed(&mut self, suggestion: &Suggestion) -> Result<(), String> {
+        if let Some((_, selection)) = self
+            .selections
+            .iter()
+            .find(|(index, _)| self.values[*index].completion_id == suggestion.completion_id)
+            && let Some(owner) = &self.config.owner
+            && !owner.accepts(&selection.name, selection.revision, &suggestion.value)
+        {
+            return Err("abbreviation is no longer applicable; request completion again".into());
+        }
+        Ok(())
+    }
+
     fn completion_accepted(&mut self, suggestion: &Suggestion) -> CompletionAcceptance {
         let Some((_, selection)) = self
             .selections
             .iter()
             .find(|(index, _)| self.values[*index].completion_id == suggestion.completion_id)
         else {
-            return CompletionAcceptance::Continue;
+            return if self.config.owner.as_ref().map_or_else(
+                || {
+                    self.config
+                        .abbreviations
+                        .applicable
+                        .contains(&suggestion.value)
+                },
+                |owner| owner.contains(&suggestion.value),
+            ) {
+                CompletionAcceptance::SuppressAbbreviationExpansion
+            } else {
+                CompletionAcceptance::Continue
+            };
         };
         if let Some(observer) = &self.config.selection_observer {
             observer(selection);
@@ -792,8 +820,9 @@ mod tests {
             Arc::new(|| {}),
         );
         for (line, expected) in [
-            ("#", 10),
-            ("# ", 10),
+            ("#", 11),
+            ("# ", 11),
+            ("#abbr ", 5),
             ("#th", 2),
             ("#mode ", 3),
             ("#theme ", 2),
@@ -847,7 +876,7 @@ mod tests {
                 else {
                     panic!("inline menu must complete locally");
                 };
-                assert_eq!(suggestions.len(), 10);
+                assert_eq!(suggestions.len(), 11);
                 let entry = &suggestions[0];
                 assert_eq!(entry.display_value(), format!("{prefix} <task>"));
                 assert_eq!(entry.value, " ");

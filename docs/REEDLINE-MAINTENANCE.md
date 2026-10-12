@@ -133,6 +133,18 @@ while a search, selection, menu or pending modal operation owns input.
 The separate `input_changed` notification tracks scope exits after edits or
 cursor moves; it never opens a menu, including after deletion or undo.
 
+The abbreviation policy receives bounded replacement requests, not shell execution
+requests. Draft intent and expanded ranges travel with `LineBuffer` through the
+native undo history. Paste/history/host replacements protect imported text;
+`LiteralSpace` and undoing an expansion preserve literal input. A completer can
+reject a stale selection before insertion with `completion_allowed`. Shell rules,
+configuration and external capability probes remain in nosh.
+
+`RepaintSignal::request_context_update` preserves unrelated completion requests
+while the host consumes a background notification. The host cancels menus only
+when their context actually changed. nosh consumes both pending environment and
+abbreviation state on either notification, since the signal coalesces updates.
+
 Edit nosh normally and the library under `.nosh/reedline`; root Cargo already
 uses this copy. Unexported library edits are allowed for local compilation, but
 `check` and subsequent preparation refuse them until exported.

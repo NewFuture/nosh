@@ -28,6 +28,9 @@ mod command_assist;
 #[path = "terminal/editing.rs"]
 mod editing;
 
+#[path = "terminal/abbreviations.rs"]
+mod abbreviations;
+
 #[path = "terminal/completion.rs"]
 mod completion;
 

@@ -18,6 +18,7 @@
 | [审批模式](APPROVAL-MODES.md) | Confirm / Auto / YOLO、用户规则优先级与安全边界 |
 | [输入编辑](INPUT-EDITING.md) | Emacs / Vi、改键、搜索、取消和建议采用 |
 | [命令与参数补全](COMPLETION.md) | 内置与脚本补全、候选语义、后台执行和资源限制 |
+| [可见命令缩写](ABBREVIATIONS.md) | 平台适配内置、自定义与覆盖、可见展开、来源保护和撤销 |
 | [实时输入辅助](INPUT-ASSIST.md) | 高亮、语法与命令判定、快照、缓存和 worker |
 | [提示符状态行](STATUS-BAR.md) | 布局、主题、终端所有权、兼容性与已知限制 |
 | [Shell 主题](THEMES.md) | 深浅配色、预览、自动保存与原生 Starship 兼容 |

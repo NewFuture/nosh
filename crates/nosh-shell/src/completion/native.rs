@@ -197,6 +197,17 @@ fn known(snapshot: &NativeSnapshot, name: &str) -> Option<&'static str> {
 }
 
 fn abbreviations(answer: &mut Answer, context: &Context, snapshot: &NativeSnapshot) {
+    if !crate::abbreviations::command_ranges(
+        &answer.query.text,
+        snapshot
+            .context
+            .ai_enabled
+            .then_some(snapshot.context.ai_prefix.as_str()),
+    )
+    .is_ok_and(|ranges| ranges.contains(&context.span))
+    {
+        return;
+    }
     let count = answer.candidates.len();
     for name in &snapshot.abbreviations.applicable {
         let Some(definition) = snapshot.abbreviations.definitions.get(name) else {
@@ -255,58 +266,7 @@ pub(super) fn resolve(
     context: &Context,
     name: &str,
 ) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let fixed = if name.contains('/') {
-        Some(Path::new(name))
-    } else if context.path == snapshot.context.path {
-        snapshot
-            .context
-            .hashed_commands
-            .get(name)
-            .map(PathBuf::as_path)
-    } else {
-        None
-    };
-    let paths = fixed
-        .into_iter()
-        .map(|path| snapshot.context.cwd.join(path))
-        .chain(
-            context
-                .path
-                .as_deref()
-                .filter(|_| fixed.is_none() || (snapshot.context.check_hash && !name.contains('/')))
-                .into_iter()
-                .flat_map(|path| path.split(':'))
-                .take(128)
-                .map(|directory| snapshot.context.cwd.join(directory).join(name)),
-        );
-    for path in paths {
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => {
-                let name = std::ffi::CString::new(path.as_os_str().as_bytes())
-                    .map_err(|error| error.to_string())?;
-                // SAFETY: the path is NUL-terminated and access only queries this candidate.
-                if unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0 {
-                    return Ok(Some(path));
-                }
-                let error = std::io::Error::last_os_error();
-                if !matches!(
-                    error.raw_os_error(),
-                    Some(libc::EACCES | libc::ENOENT | libc::ENOTDIR)
-                ) {
-                    return Err(error.to_string());
-                }
-            }
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) => {}
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok(None)
+    crate::command_snapshot::resolve_file(&snapshot.context, context.path.as_deref(), name)
 }
 
 pub(crate) fn commands(
