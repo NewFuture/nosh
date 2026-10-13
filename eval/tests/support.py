@@ -15,9 +15,27 @@ SCENARIOS = {s["id"]: s for s in SUITE["scenarios"]}
 def execution(command, code=0, stdout="", stderr=""):
     return {
         "call": {"name": "exec", "args": {"command": command}},
+        "command": command,
         "state": "executed", "exit_code": code, "timed_out": False, "interrupted": False,
         "result": f"[exit_code={code} duration=0.00s truncated=no]\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     }
+
+def tool_outcome(call, result="", *, status="read", index=0, engine=1, sid=1, turn=1, command=None, code=0):
+    execution = None
+    if status in ("executed", "handoff", "aborted", "execution_error"):
+        actual = command if command is not None else call["args"]["command"]
+        execution = {
+            "command": actual, "cwd": "/work", "edited": actual != call["args"]["command"],
+            "rewritten": False, "exit_code": None if status == "execution_error" else code,
+            "duration_s": None if status == "execution_error" else 0.0,
+            **{field: None if status == "execution_error" else False
+               for field in ("timed_out", "interrupted", "needed_terminal", "truncated")},
+        }
+    return {"ev": "observation", "engine": engine, "sid": sid, "schema_version": 1, "value": {
+        "workflow": "agent", "kind": "tool_result", "version": 1, "turn": turn, "call_index": index,
+        "call": copy.deepcopy(call), "status": status, "execution": execution,
+        "current_cwd": "/work", "result": result,
+    }}
 
 
 def bind_assist_test_context(evidence, scenario, root, result):

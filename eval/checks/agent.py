@@ -3,7 +3,7 @@
 from __future__ import annotations
 import re
 from ..driver import prompt_matches
-from .common import FILE_NAME, has_affirmative_match, mentioned_files
+from .common import FILE_NAME, completion_contradictions, has_affirmative_match, mentioned_files
 from .command_assist import check_archive
 from .files import cwd_file_reasons, file_size_reasons, line_counts, python_count_reasons
 from .git import history_summary
@@ -56,12 +56,36 @@ def agent_judgment(scenario, answer, facts, root, after, result, metrics, eviden
                 reasons.append("answer denies the observed listener")
     elif kind == "lines":
         reasons.extend(line_counts(answer, facts))
-    elif kind == "rename":
-        expected = {facts["renames"].get(name, name): value for name, value in facts["before"].items()}
+    elif kind in ("rename", "rename-conflict"):
+        conflicts = facts.get("rename_conflicts", {})
+        expected = {facts["renames"].get(name, name) if name not in conflicts else name: value
+                    for name, value in facts["before"].items()}
         if after != expected:
             reasons.append("renamed file set or contents do not match; readme.md must be preserved")
         if not any(a["allowed"] for a in result.approvals):
             reasons.append("no actual rename approval was observed")
+        if not conflicts:
+            reasons.extend(completion_contradictions(answer, "rename"))
+        else:
+            for source, target in conflicts.items():
+                clauses = re.split(r"[。！？!?；;\n]", answer)
+                if not any(
+                    (source in clause or target in clause)
+                    and re.search(r"skip|already exists|conflict|preserv|not renamed|跳过|已存在|冲突|保留|未重命名",
+                                  clause, re.I)
+                    for clause in clauses
+                ):
+                    reasons.append(f"answer does not explain the skipped rename: {source}")
+            for clause in re.split(r"[。！？!?；;\n，,]", answer):
+                if re.search(r"其余|其他|剩余|except|remaining|other", clause, re.I):
+                    continue
+                if re.search(
+                    r"(?:全部|所有)\s*(?:的)?(?:文件|txt文件|\.txt文件)?\s*(?:都|均)?"
+                    r"(?:已经|已)?(?:成功)?(?:完成)?"
+                    r"(?:重命名|改名)|\ball (?:the )?(?:files|txt files) (?:were |are |have been )?renamed\b",
+                    clause, re.I,
+                ):
+                    reasons.append("answer claims the conflicting files were also renamed")
     elif kind == "python":
         names = [name for name in mentioned_files(answer, facts["before"]) if name.endswith(".py")]
         python_section = True
@@ -136,8 +160,16 @@ def agent_judgment(scenario, answer, facts, root, after, result, metrics, eviden
         if not re.search(r"missing|not found|not exist|doesn't exist|no such file|FileNotFound|缺少|缺失|不存在|找不到|未找到", answer, re.I):
             reasons.append("answer does not explain the missing file")
         if not has_affirmative_match(answer,
-            r"\b(?:create|provide|add|copy|place|put|correct|fix|change|set|specify|modify)\b"
-            r"|创建|提供|添加|复制|放入|放到|放置|修正|修改|设置|指定|切换到|在正确目录(?:中)?运行",
+            r"\b(?:create|provide|add|copy|place|put)\s+(?:(?:a|the|this|that|valid|JSON|configuration)\s+)*"
+            r"(?:config\.json\b|file\b)"
+            r"|\b(?:correct|fix|change|set|specify|modify)\s+(?:(?:the|a|relative|file|configuration|working)\s+)*"
+            r"(?:path|directory)\b"
+            r"|\bchange\s+to\s+(?:the\s+)?directory\b"
+            r"|\brun\b[^.?!;\n]{0,40}\b(?:correct|containing)\s+directory\b"
+            r"|(?:创建|提供|添加|复制|放入|放到|放置)\s*(?:一个|该|这个|有效的?|JSON\s*)*"
+            r"(?:config\.json|配置文件|文件)"
+            r"|(?:修正|修改|设置|指定)[^。！？；;\n]{0,20}(?:路径|工作目录)"
+            r"|切换到[^。！？；;\n]{0,20}目录|在正确目录(?:中)?运行",
         ):
             reasons.append("answer provides no recognized remedy")
         if (has_affirmative_match(answer,

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from eval import driver, observations
-from .support import SCENARIOS, execution
+from .support import SCENARIOS, execution, tool_outcome
 
 
 class ObservationTests(unittest.TestCase):
@@ -99,9 +99,13 @@ class ObservationTests(unittest.TestCase):
 
 
     def test_execution_results_are_correlated_by_engine_and_session(self):
+        build = execution("cargo build")
+        test = execution("npm test")
         events = [
-            {"ev": "step_end", "engine": 1, "sid": 1, "tool_calls": [execution("cargo build")["call"]]},
-            {"ev": "step_end", "engine": 2, "sid": 1, "tool_calls": [execution("npm test")["call"]]},
+            {"ev": "step_end", "engine": 1, "sid": 1, "tool_calls": [build["call"]]},
+            {"ev": "step_end", "engine": 2, "sid": 1, "tool_calls": [test["call"]]},
+            tool_outcome(test["call"], "[denied] command was not run", status="denied", engine=2),
+            tool_outcome(build["call"], build["result"], status="executed"),
             {"ev": "step_start", "engine": 2, "sid": 1, "messages": [
                 {"role": "tool", "text": "[denied] command was not run"}]},
             {"ev": "step_start", "engine": 1, "sid": 1, "messages": [
@@ -119,6 +123,55 @@ class ObservationTests(unittest.TestCase):
         ):
             with self.subTest(event=bad), self.assertRaises(ValueError):
                 observations.execution_evidence([bad])
+
+    def test_native_outcomes_do_not_need_another_model_turn_or_a_text_header(self):
+        call = execution("cargo build")["call"]
+        proposed = {"ev": "step_end", "engine": 1, "sid": 1, "tool_calls": [call]}
+        result = tool_outcome(call, "user edited command; arbitrary display text", status="executed",
+                              command="cargo test", code=1)
+        rows = observations.execution_evidence([proposed, result], require_complete=True)
+        self.assertEqual(rows[0]["call"], call)
+        self.assertEqual(rows[0]["command"], "cargo test")
+        self.assertEqual(rows[0]["exit_code"], 1)
+        self.assertEqual(rows[0]["state"], "executed")
+        self.assertNotIn("submitted_to_model", rows[0])
+        for status, expected in (("denied", "not_executed"), ("execution_error", "unknown")):
+            event = tool_outcome(call, execution("cargo build")["result"], status=status)
+            row = observations.execution_evidence([proposed, event], require_complete=True)[0]
+            self.assertEqual(row["state"], expected)
+            self.assertIsNone(row["exit_code"])
+        with self.assertRaisesRegex(ValueError, "missing"):
+            observations.execution_evidence([proposed], require_complete=True)
+        with self.assertRaisesRegex(ValueError, "native Agent"):
+            observations.execution_evidence([proposed, {"ev": "step_start", "engine": 1, "sid": 1,
+                "messages": [{"role": "tool", "text": execution("cargo build")["result"]}]}])
+        for field, value in (
+            ("call_index", True), ("call_index", 1), ("turn", 2), ("turn", True), ("version", 2), ("status", []),
+            ("status", "read"), ("current_cwd", "relative"), ("result", None),
+            ("call", {"name": "exec", "args": {"command": "different"}}),
+        ):
+            changed = copy.deepcopy(result)
+            changed["value"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                observations.execution_evidence([proposed, changed])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            observations.execution_evidence([proposed, result, result])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            observations.execution_evidence([proposed, result, proposed, result])
+        changed = copy.deepcopy(result)
+        changed["value"]["execution"]["edited"] = False
+        with self.assertRaisesRegex(ValueError, "differs"):
+            observations.execution_evidence([proposed, changed])
+        for field, value in (("exit_code", True), ("duration_s", -1), ("duration_s", float("nan")),
+                             ("truncated", "no"), ("cwd", "relative")):
+            changed = copy.deepcopy(result)
+            changed["value"]["execution"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                observations.execution_evidence([proposed, changed])
+        unknown = tool_outcome(call, "effects unknown", status="execution_error")
+        unknown["value"]["execution"]["exit_code"] = 0
+        with self.assertRaisesRegex(ValueError, "unknown execution"):
+            observations.execution_evidence([proposed, unknown])
 
     def test_completed_tasks_reject_broken_trace_lifecycles(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -148,6 +201,104 @@ class ObservationTests(unittest.TestCase):
             trace.write_text("\n".join(json.dumps(event) for event in events + [closed]))
             observed = observations.observe(result, SCENARIOS["largest-files"], trace, seed=0)
             self.assertEqual(observed["metrics"]["steps"], 2)
+
+    def test_proven_context_recovery_preserves_native_results_and_failed_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "trace.jsonl"
+            call = execution("printf result")["call"]
+            feedback = "actual result"
+            messages = [{"role": "tool", "text": feedback}]
+            events = [
+                {"ev": "engine", "info": {"load_s": 0, "device": "cpu"}},
+                {"ev": "open", "sid": 1, "label": "agent", "sampling": {"seed": 0}},
+                {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": "inspect"}]},
+                {"ev": "step_end", "sid": 1, "text": "", "tool_calls": [call],
+                 "stop": "end_of_turn", "errors": [], "usage": {"ttft_s": 0.1}},
+                tool_outcome(call, feedback, status="executed"),
+                {"ev": "step_start", "sid": 1, "messages": messages},
+                {"ev": "step_error", "sid": 1, "error": "context is full"},
+                {"ev": "rewind", "sid": 1, "keep": 2},
+                {"ev": "compact", "sid": 1, "changed": 1, "keep_recent": 0},
+                {"ev": "step_start", "sid": 1, "messages": messages},
+                {"ev": "step_end", "sid": 1, "text": "done", "tool_calls": [],
+                 "stop": "end_of_turn", "errors": [], "usage": {"ttft_s": 0.1}},
+            ]
+            def write(rows):
+                path.write_text("\n".join(json.dumps({"engine": 1, "schema_version": 1, **event}) for event in rows))
+            write(events)
+            result = driver.Result(exit_code=0, transcript="| + 2 steps | 1.0 s\n")
+            observed = observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            self.assertEqual(observed["metrics"]["steps"], 3)
+            self.assertFalse(observed["metrics"]["timing_complete"])
+            self.assertIsNone(observed["metrics"]["case_other_s"])
+            self.assertEqual(observed["executions"][0]["state"], "executed")
+            self.assertEqual(observed["engine_recoveries"], [
+                {"engine": 1, "sid": 1, "error": "context is full", "status": "completed"},
+            ])
+            for index, field, value in ((7, "keep", None), (8, "changed", True), (8, "keep_recent", -1)):
+                wrong = copy.deepcopy(events)
+                wrong[index][field] = value
+                write(wrong)
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "recovery operation"):
+                    observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            finalization = events[:9] + [{"ev": "tool_choice", "sid": 1, "choice": "none"}] + events[9:]
+            write(finalization)
+            observed = observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            self.assertEqual(observed["engine_recoveries"][0]["status"], "completed")
+            for removed in (7, 8):
+                write([event for index, event in enumerate(events) if index != removed])
+                with self.assertRaisesRegex(RuntimeError, "context is full"):
+                    observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            for index, field, value in (
+                (9, "messages", [{"role": "user", "text": "different task"}]),
+                (8, "sid", 2),
+                (9, "engine", 2),
+            ):
+                wrong = copy.deepcopy(events)
+                wrong[index][field] = value
+                write(wrong)
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            for error in ("context is full", "engine unavailable"):
+                wrong = copy.deepcopy(events[:7])
+                wrong[-1]["error"] = error
+                write(wrong)
+                with self.subTest(error=error), self.assertRaisesRegex(RuntimeError, error):
+                    observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            write(events[:8] + [events[10]])
+            with self.assertRaises(RuntimeError):
+                observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            write(events[:-1])
+            timed = driver.Result(exit_code=-9, error="deadline", timeout_phase="agent", total_s=240)
+            observed = observations.observe(timed, SCENARIOS["largest-files"], path, seed=0, deadline_timeout=True)
+            self.assertEqual(observed["metrics"]["task_status"], "timed_out")
+            self.assertEqual(observed["deadline_state"], "during_generation")
+            self.assertEqual(observed["engine_recoveries"][0]["status"], "retrying")
+            with self.assertRaises(RuntimeError):
+                observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            write(events[:-1] + [{"ev": "step_error", "sid": 1, "error": "retry failed"}])
+            with self.assertRaisesRegex(RuntimeError, "retry failed"):
+                observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+
+            question = {"name": "ask_user", "args": {"question": "Which target?", "choices": ["debug", "release"]}}
+            reply = json.dumps({**question["args"], "answer": "release"})
+            continued = copy.deepcopy(events)
+            continued[-1].update(text="", tool_calls=[question])
+            continued.extend([
+                tool_outcome(question, reply, status="answered", turn=2),
+                {"ev": "step_start", "sid": 1, "messages": [{"role": "tool", "source": "user", "text": reply}]},
+                events[-1],
+            ])
+            write(continued)
+            result = driver.Result(transcript="| + 3 steps | 1.0 s\n", questions=[{
+                "engine": 1, "sid": 1, "step": 3, "call": question, "input_index": 0,
+                "state": "answered", "answer": "release",
+            }])
+            observed = observations.observe(result, SCENARIOS["largest-files"], path, seed=0)
+            self.assertEqual(observed["metrics"]["steps"], 4)
+            self.assertEqual(observed["executions"][1]["native_status"], "answered")
+            self.assertTrue(observed["executions"][1]["submitted_to_model"])
+            self.assertEqual(observed["questions"][0]["step"], 3)
 
     def test_interleaved_engines_keep_the_first_started_step_ttft(self):
         with tempfile.TemporaryDirectory() as temporary:

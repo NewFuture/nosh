@@ -50,9 +50,7 @@ fn user_output_is_attached_once_per_conversation() {
         );
         assert_eq!(
             request,
-            &format!(
-                "Explain why the command failed and how to fix it.\n\nAdditional context from the user:\n{additional}"
-            )
+            &format!("Help with the failed command.\n\n{additional}")
         );
     }
 }

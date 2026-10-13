@@ -31,7 +31,10 @@ def event(kind, **fields):
     row = dict(schema_version=1, engine=1, sid=1, ev=kind, **fields)
     with open(os.environ["NOSH_EVAL_TRACE"], "a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+turn = 0
 def end(text="", calls=None):
+    global turn
+    turn += 1
     event("step_end", text=text, tool_calls=calls or [], stop="end_of_turn",
           errors=[], usage={"ttft_s":0.01})
 out("__NOSH_EVAL_PROMPT__ ")
@@ -45,12 +48,18 @@ for question in QUESTIONS:
     out("\r\n| " + question["question"] + "\r\nanswer> ")
     answer = line()
     if answer is None:
+        event("observation", value={"workflow":"agent","kind":"tool_result","version":1,"turn":turn,"call_index":0,
+              "call":{"name":"ask_user","args":question},"status":"cancelled","execution":None,
+              "current_cwd":os.getcwd(),"result":"[user input cancelled]"})
         cancelled = True
         break
     if DUPLICATE_PROMPT:
         out("\r\nanswer> ")
         assert not select.select([0], [], [], 0.2)[0], "duplicate answer received"
     reply = json.dumps({"question":question["question"],"choices":question.get("choices",[]),"answer":answer})
+    event("observation", value={"workflow":"agent","kind":"tool_result","version":1,"turn":turn,"call_index":0,
+          "call":{"name":"ask_user","args":question},"status":"answered","execution":None,
+          "current_cwd":os.getcwd(),"result":reply})
     event("step_start", messages=[{"role":"tool","source":"user","text":reply}])
 if not cancelled:
     end(text="好的，已停止处理。")
@@ -164,7 +173,8 @@ class QuestionContractTests(unittest.TestCase):
         result = driver.Result(questions=[question])
         reply = dict(call["args"], answer=question["answer"])
         execution = {"engine": 1, "sid": 1, "step": 1, "call": call,
-                     "state": "returned", "result": json.dumps(reply)}
+                     "state": "returned", "native_status": "answered",
+                     "submitted_to_model": True, "result": json.dumps(reply)}
         self.assertEqual(observations.question_evidence(result, [execution]), [question])
         with self.assertRaisesRegex(ValueError, "invalid user answer context"):
             observations.question_evidence(result, [dict(execution, result=question["answer"])])

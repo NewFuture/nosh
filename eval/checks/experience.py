@@ -79,12 +79,19 @@ def experience(scenario: dict, answer: str, metrics: dict, *, facts: dict | None
         r"|(?:^|[。！？.!?，,；;\n])\s*(?:[-*]\s*|\d+[.)]\s*)?"
         r"(?:要不要|是否(?:需要|要|希望)|需不需要|需要我)"
         r"|(?:请(?:你|您)?|烦请|麻烦(?:你|您)?|还请)\s*(?:先|再)?"
-        r"(?:确认|回复确认|告诉我是否|告知(?:我)?是否)"
+        r"(?:回复确认|告诉我是否|告知(?:我)?是否"
+        r"|确认(?:一下)?(?=\s*(?:[。！？?!；;，,]|$))"
+        r"|确认\s*(?:是否)?(?:允许|可以|同意)?(?:继续|执行|操作|授权|批准|让我)"
+        r"|确认\s*(?:这个|该|此)?(?:方案|计划|请求|提议))"
         r"|(?:^|[。！？.!?，,；;\n])\s*告诉我(?:是否|要不要|需不需要|何时)"
-        r"|等(?:待)?[你您](?:的)?确认|确认后我"
+        r"|等(?:待)?[你您](?:的)?确认|确认后[，,]?\s*我"
         r"|(?:如果|若|如)[你您]?(?:还)?(?:有)?(?:需要?|希望|想)[^。！？!?；;\n]*"
         r"(?:请|可以|随时)[你您]?(?:再|随时)?(?:告诉我|告知我|联系我)"
-        r"|\b(?:would you like|do you want|shall I|should I|please confirm|please let me know"
+        r"|\bplease confirm(?:\s*(?:[.?!,;]|$)"
+        r"|\s+(?:whether\s+)?(?:I|we|you)\b"
+        r"|\s+(?:before\s+(?:I|we)\b|to\s+(?:continue|proceed)\b)"
+        r"|\s+(?:(?:the|this|that)\s+)?(?:plan|proposal|approach|request|changes?|actions?)\b)"
+        r"|\b(?:would you like|do you want|shall I|should I|please let me know"
         r"|let me know (?:if|whether|when|your))\b", closing, re.I,
     ) or clarification_request(closing, archive=True))
     clarification = clarification_request(prose) if scenario["check"] == "clarification" else None

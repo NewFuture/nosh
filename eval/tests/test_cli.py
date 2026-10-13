@@ -32,7 +32,7 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(status, 0, stderr)
             data = json.loads(stdout)
             self.assertEqual((data["trials"], data["seeds"], data["repeat"]), (5, [0], 1))
-            self.assertEqual(data["dataset_revision"], 26)
+            self.assertEqual(data["dataset_revision"], 35)
             self.assertEqual(data["maximum_trial_seconds"], 600)
             self.assertFalse(output.exists())
 
@@ -76,7 +76,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("--model-path is required", stderr)
 
-    def test_public_entry_supports_planning_and_rejects_retired_flags(self):
+    def test_public_entry_supports_planning_and_rejects_unknown_flags(self):
         result = subprocess.run(
             [sys.executable, "-B", "-m", "eval", "--suite", "smoke", "--plan"],
             cwd=runtime.ROOT, capture_output=True, text=True, timeout=10,
@@ -84,12 +84,12 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["trials"], 5)
         rejected = subprocess.run(
-            [sys.executable, "-B", "-m", "eval", "--legacy", "--plan"],
+            [sys.executable, "-B", "-m", "eval", "--unknown-option", "--plan"],
             cwd=runtime.ROOT, capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(rejected.returncode, 2)
         self.assertEqual(rejected.stdout, "")
-        self.assertIn("unrecognized arguments: --legacy", rejected.stderr)
+        self.assertIn("unrecognized arguments: --unknown-option", rejected.stderr)
 
     def test_campaign_exit_codes_preserve_the_plan_and_completed_trials(self):
         save = report.save

@@ -35,13 +35,16 @@ class DiagnosticContractTests(unittest.TestCase):
         )
 
     def test_fixture_distinguishes_ids_codes_and_real_missing_setting(self):
-        self.assertIn("diagnostic_id: CAPTURE-", self.text)
+        self.assertIn("diagnostic_id: DEPLOY-", self.text)
+        self.assertIn("service: atlas-api", self.text)
+        self.assertIn("environment: staging", self.text)
+        self.assertIn("phase: preflight", self.text)
         self.assertIn("error_code: REGION_UNSET", self.text)
         self.assertIn("exit_code: 17", self.text)
         root = self.base / "configured"
         fixtures.create(root, "diagnostic-failure")
         env = dict(fixtures.project_environment(self.base / "home"), REGION="fixture-region")
-        configured = subprocess.run([sys.executable, "once.py"], cwd=root, env=env,
+        configured = subprocess.run([sys.executable, "deploy.py"], cwd=root, env=env,
                                     capture_output=True, text=True, check=False)
         self.assertEqual(configured.returncode, 0)
         self.assertEqual(configured.stderr, "")
@@ -54,7 +57,7 @@ class DiagnosticContractTests(unittest.TestCase):
             ]
         self.assertEqual(ids[0], ids[1])
         self.assertNotEqual(ids[0], ids[2])
-        self.assertRegex(ids[0], r"^CAPTURE-[0-9a-f]{8}$")
+        self.assertRegex(ids[0], r"^DEPLOY-[0-9a-f]{8}$")
 
     def test_repeatability_preserves_raw_evidence_and_only_normalizes_unchanged_scripts(self):
         with fixtures.Workspace(self.base / "repetitions") as workspace:
@@ -63,7 +66,7 @@ class DiagnosticContractTests(unittest.TestCase):
                 for repeat in range(2):
                     root, home, facts = workspace.prepare(scenario, 0, repeat)
                     original = subprocess.run(
-                        [sys.executable, "once.py"], cwd=root, env=fixtures.project_environment(home),
+                        [sys.executable, "deploy.py"], cwd=root, env=fixtures.project_environment(home),
                         capture_output=True, text=True, check=False,
                     )
                     self.assertEqual(original.returncode, 17)
@@ -71,7 +74,8 @@ class DiagnosticContractTests(unittest.TestCase):
                                     retained_bytes=len(original.stderr.encode("utf-8")))
                     result = copy.deepcopy(self.result)
                     result.turns[0]["output"] = original.stderr
-                    answer = f"REGION 未设置，请配置该环境变量。diagnostic_id: {facts['diagnostic_id']}"
+                    answer = (f"{facts['service']} 向 {facts['environment']} 发布前检查失败："
+                              f"REGION 未设置，请配置该环境变量。diagnostic_id: {facts['diagnostic_id']}")
                     evidence = observed_input(original.stderr, metadata,
                                               scenario["inputs"][-1].removeprefix("#fix").strip())
                     after = fixtures.snapshot(root)
@@ -85,7 +89,7 @@ class DiagnosticContractTests(unittest.TestCase):
                         "file_snapshot": after, "grading": verdict.details,
                         "final_state": fixtures.fixture_state(scenario, facts, root, after, result),
                     })
-                self.assertNotEqual(rows[0]["file_snapshot"]["once.py"], rows[1]["file_snapshot"]["once.py"])
+                self.assertNotEqual(rows[0]["file_snapshot"]["deploy.py"], rows[1]["file_snapshot"]["deploy.py"])
                 self.assertTrue(report.repetitions(rows)[0]["consistent"])
                 self.assertTrue(report.repetitions(rows)[0]["inputs_changed"])
                 directory = self.base / ("report-" + scenario["id"])
@@ -93,7 +97,7 @@ class DiagnosticContractTests(unittest.TestCase):
                 data = {
                     "schema_version": 2,
                     "metadata": {"run_id": "capture-repetitions", "scenarios": [scenario],
-                                 "seeds": [0], "repeat": 2, "dataset_revision": 12,
+                                 "seeds": [0], "repeat": 2, "dataset_revision": self.data["dataset_revision"],
                                  "observation": "native-v1", "build": {"binary_sha256": "a" * 64}},
                     "trials": rows,
                 }
@@ -104,15 +108,14 @@ class DiagnosticContractTests(unittest.TestCase):
                 for mutation in ("script", "counter", "deleted"):
                     changed = copy.deepcopy(after)
                     if mutation == "deleted":
-                        del changed["once.py"]
+                        del changed["deploy.py"]
                     else:
-                        changed["once.py" if mutation == "script" else "calls.count"]["sha256"] = "changed"
+                        changed["deploy.py" if mutation == "script" else "calls.count"]["sha256"] = "changed"
                     second = dict(rows[1], final_state=fixtures.fixture_state(scenario, facts, root, changed, result))
                     self.assertFalse(report.repetitions([rows[0], second])[0]["consistent"], mutation)
 
     def test_current_capture_scenarios_require_explicit_prefix_fix(self):
-        for entry in ("# explain the failure", "ai fix explain the failure",
-                      "#fixing explain the failure", "# fix explain the failure"):
+        for entry in ("# explain the failure", "#fixing explain the failure", "# fix explain the failure"):
             with self.subTest(entry=entry):
                 data = copy.deepcopy(self.data)
                 scenario = next(item for item in data["scenarios"]
@@ -133,7 +136,7 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertFalse(parts["citation"]["required"])
 
     def test_required_citation_fails_only_its_own_component(self):
-        verdict = self.grade("REGION 未设置，配置该环境变量即可解决。退出码是 17。",
+        verdict = self.grade("atlas-api 向 staging 发布前检查失败，REGION 未设置。退出码是 17。",
                              scenario=self.scenarios["captured-citation"])
         self.assertFalse(verdict.passed)
         parts = verdict.details["facts"]["components"]
@@ -142,19 +145,37 @@ class DiagnosticContractTests(unittest.TestCase):
         self.assertFalse(parts["citation"]["passed"])
         self.assertTrue(all(reason.startswith("citation:") for reason in verdict.reasons))
         self.assertTrue(self.grade(scenario=self.scenarios["captured-citation"]).passed)
+        code = self.facts["diagnostic_id"]
+        for answer in (
+            self.answer.replace(code, code + "00"),
+            f"REGION 未设置，请配置该环境变量。diagnostic_id 是 REGION_UNSET；error_code 是 {code}。",
+            self.answer.replace("diagnostic_id 是", "diagnostic_id 不是"),
+        ):
+            verdict = self.grade(answer, scenario=self.scenarios["captured-citation"])
+            self.assertFalse(verdict.details["facts"]["components"]["citation"]["passed"], answer)
+
+        incident = f"atlas-api 的 staging 发布因 REGION 未配置而中止，日志关联编号：{code}。"
+        self.assertTrue(self.grade(incident, scenario=self.scenarios["captured-citation"]).passed)
+        natural = incident.replace("因 REGION 未配置", "因未检测到目标环境指定的配置项（REGION 区域）")
+        self.assertTrue(self.grade(natural, scenario=self.scenarios["captured-citation"]).passed)
+        unrelated = incident.replace("REGION 未配置", "REGION 已配置，TOKEN 缺失")
+        self.assertFalse(self.grade(unrelated, scenario=self.scenarios["captured-citation"]).passed)
+        self.assertFalse(self.grade(incident).details["facts"]["components"]["diagnosis"]["passed"])
+        for missing in ("atlas-api", "staging"):
+            verdict = self.grade(incident.replace(missing, ""), scenario=self.scenarios["captured-citation"])
+            self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"])
 
     def test_cause_words_and_negated_repairs_are_not_a_remedy(self):
-        for scenario in self.scenarios.values():
-            for answer in (
-                "REGION 未设置，程序因此退出。",
-                "REGION is unset.",
-                "REGION 未配置。不要设置 REGION，直接反复重试即可。",
-                "REGION is missing. Do not set REGION.",
-            ):
-                text = answer + " diagnostic_id: " + self.facts["diagnostic_id"]
-                with self.subTest(scenario=scenario["id"], answer=answer):
-                    verdict = self.grade(text, scenario=scenario)
-                    self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"])
+        for answer in (
+            "REGION 未设置，程序因此退出。",
+            "REGION is unset.",
+            "REGION 未配置。不要设置 REGION，直接反复重试即可。",
+            "REGION is missing. Do not set REGION.",
+        ):
+            text = answer + " diagnostic_id: " + self.facts["diagnostic_id"]
+            with self.subTest(answer=answer):
+                verdict = self.grade(text)
+                self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"])
         for answer in (
             "REGION 未设置，请配置该环境变量。",
             "REGION 缺失，请设置 REGION=所需值。",
@@ -167,6 +188,7 @@ class DiagnosticContractTests(unittest.TestCase):
             "REGION 未设置。请把 REGION 设置好。",
             "`REGION` 未设置。请设置一下 `REGION` 环境变量。",
             "**REGION** 未配置，把 `REGION` 这个环境变量设置为应用要求的值。",
+            "REGION 未设置，需要先配置目标环境的区域。",
         ):
             self.assertTrue(self.grade(answer).passed, answer)
         for answer in (
@@ -176,6 +198,7 @@ class DiagnosticContractTests(unittest.TestCase):
             "REGION 未设置。不要把 REGION 这个环境变量设置成任意值。",
             "REGION is missing. Do not set up REGION.",
             "`REGION` 未设置。不要设置 `REGION`。",
+            "REGION 未设置。不要配置目标环境的区域。",
         ):
             verdict = self.grade(answer)
             self.assertFalse(verdict.details["facts"]["components"]["diagnosis"]["passed"], answer)
@@ -185,6 +208,26 @@ class DiagnosticContractTests(unittest.TestCase):
             "REGION is missing. Please set up REGION in your environment.",
         ):
             self.assertTrue(self.grade(answer).details["facts"]["components"]["diagnosis"]["passed"], answer)
+
+    def test_missing_region_accepts_natural_names_without_matching_unrelated_settings(self):
+        for answer in (
+            "发布因目标区域未设置而中止。请配置目标环境的区域。",
+            "目标环境的地域未配置，请设置 REGION 环境变量。",
+            "REGION环境变量未设置，请配置目标环境的区域。",
+            "The target region is unset. Configure REGION before deployment.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(self.grade(answer).details["facts"]["components"]["diagnosis"]["passed"])
+        for answer in (
+            "目标文件名未设置，请设置 REGION。",
+            "OTHER_REGION is unset. Configure REGION.",
+            "OTHER_REGION环境变量未设置，请设置 REGION。",
+            "REGION2未设置，请设置 REGION。",
+            "REGION 已配置，TOKEN 未设置。请设置 REGION。",
+            "目标区域已经配置，请设置 REGION。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertFalse(self.grade(answer).details["facts"]["components"]["diagnosis"]["passed"])
 
     def test_capture_failures_do_not_masquerade_as_diagnosis_failures(self):
         verdict = self.grade(evidence={"inputs": []})
@@ -196,9 +239,16 @@ class DiagnosticContractTests(unittest.TestCase):
                 verdict = self.grade(evidence=observed_input(
                     self.text, dict(self.metadata, **change), additional))
                 self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
-        second = subprocess.run([sys.executable, "once.py"], cwd=self.root, capture_output=True,
+        for text in (
+            self.text.replace("Configure REGION for the target environment.", "Configure OTHER_SETTING."),
+            self.text + "invented diagnostic\n",
+        ):
+            metadata = dict(self.metadata, retained_bytes=len(text.encode("utf-8")))
+            verdict = self.grade(evidence=observed_input(text, metadata, additional))
+            self.assertFalse(verdict.details["facts"]["components"]["capture"]["passed"])
+        second = subprocess.run([sys.executable, "deploy.py"], cwd=self.root, capture_output=True,
                                 text=True, check=False)
-        self.assertNotIn("CAPTURE-", second.stderr)
+        self.assertIn("REGION is unset", second.stderr)
         self.assertFalse(self.grade().details["facts"]["components"]["capture"]["passed"])
 
     def test_failed_context_and_fix_diagnosis_request_are_required(self):
@@ -229,12 +279,6 @@ class DiagnosticContractTests(unittest.TestCase):
                 scenario = dict(self.scenario, inputs=[self.scenario["inputs"][0], entry])
                 self.assertTrue(self.grade(scenario=scenario).details["facts"]["components"]["capture"]["passed"])
 
-    def test_merged_user_task_headers_are_not_capture_context(self):
-        additional = self.scenario["inputs"][-1].removeprefix("#fix").strip()
-        text = f"[task trigger=failed exit=17]\n[user_output {json.dumps(self.metadata)}]\n{self.text}\n[/user_output]\n{additional}"
-        evidence = {"inputs": [{"ev": "step_start", "messages": [{"role": "user", "text": text}]}]}
-        self.assertFalse(self.grade(evidence=evidence).details["facts"]["components"]["capture"]["passed"])
-
     def test_system_context_preserves_capture_and_the_separate_request(self):
         additional = self.scenario["inputs"][-1].removeprefix("#fix").strip()
         evidence = observed_input(self.text, self.metadata, additional)
@@ -244,7 +288,7 @@ class DiagnosticContractTests(unittest.TestCase):
             changed["inputs"][0]["messages"][0]["role"] = role
             with self.subTest(role=role):
                 self.assertFalse(self.grade(evidence=changed).details["facts"]["components"]["capture"]["passed"])
-        for before, after in (("exit: 17", "exit: 0"), ("failed_command: python3 once.py", "failed_command: other")):
+        for before, after in (("exit: 17", "exit: 0"), ("failed_command: python3 deploy.py", "failed_command: other")):
             changed = copy.deepcopy(evidence)
             changed["inputs"][0]["messages"][0]["text"] = changed["inputs"][0]["messages"][0]["text"].replace(before, after)
             with self.subTest(after=after):
@@ -283,16 +327,18 @@ class DiagnosticContractTests(unittest.TestCase):
 
     def test_reports_preserve_component_failures_and_unobserved_trials(self):
         citation = self.scenarios["captured-citation"]
-        verdict = self.grade("REGION 未设置，设置该变量即可。", scenario=citation)
+        answer = "atlas-api 向 staging 发布时因 REGION 未设置而中止。"
+        verdict = self.grade(answer, scenario=citation)
         metrics = {name: None for name in report.METRICS}
         metrics.update(self.metrics)
         data = {
             "schema_version": 2,
-            "metadata": {"run_id": "components", "observation": "native-v1", "dataset_revision": 4,
+            "metadata": {"run_id": "components", "observation": "native-v1",
+                         "dataset_revision": self.data["dataset_revision"],
                          "build": {"binary_sha256": "a" * 64}, "scenarios": [citation],
                          "seeds": [0, 1], "repeat": 2},
             "trials": [{"scenario_id": citation["id"], "seed": 0, "repeat": 0,
-                        "status": "fail", "metrics": metrics, "answer": "REGION 未设置，设置该变量即可。",
+                        "status": "fail", "metrics": metrics, "answer": answer,
                         "final_state": {}, "grading": verdict.details}],
         }
         report.validate(data)

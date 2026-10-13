@@ -7,7 +7,7 @@ import json
 import re
 
 from .. import approval
-from .common import has_affirmative_match
+from .common import has_affirmative_match, response_prose
 
 
 def config_claims(answer, facts):
@@ -132,6 +132,82 @@ def config_claims(answer, facts):
     return claims
 
 
+def config_basis_reasons(answer, facts):
+    text = answer.replace("`", "").replace("**", "").replace("\\", "/")
+    profile, store = facts["profile"], facts["store"]
+    claims = []
+    for block in re.findall(r"\{[^{}]*\}", text):
+        try:
+            fields = json.loads(block, object_pairs_hook=list)
+        except json.JSONDecodeError:
+            continue
+        if ("profile", profile) in fields:
+            claims.extend((value, False) for key, value in fields if key in ("store", "storage"))
+    columns = {}
+    for line in text.splitlines():
+        if "|" not in line:
+            columns = {}
+            continue
+        cells = [cell.strip().strip("\"'") for cell in line.strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        headers = {}
+        for index, cell in enumerate(cells):
+            if re.fullmatch(r"(?:active\s+)?profile|环境", cell, re.I):
+                headers["profile"] = index
+            elif re.fullmatch(r"store|storage|存储(?:配置)?", cell, re.I):
+                headers["store"] = index
+        if set(headers) == {"profile", "store"}:
+            columns = headers
+        elif columns and max(columns.values()) < len(cells) and cells[columns["profile"]] == profile:
+            claims.append((cells[columns["store"]], False))
+    negative_relation = r"不是|并非|is\s+not|does(?:\s+not|n't)\s+(?:map|point)\s+to"
+    relation = re.compile(
+        r"(?<![\w.-])" + re.escape(profile) + r"(?![\w.-])"
+        r"\s*(?:的\s*)?(?:(?:存储配置|存储|store|storage)\s*)?"
+        rf"(?P<relation>{negative_relation}|maps?\s+to|points?\s+to|uses?|"
+        r"映射到|对应(?:于|到)?|指向|使用(?:的)?(?:是)?|选择|是|为|->|→|[:：=])"
+        r"\s*(?:(?:the|store|storage|存储配置|名为)\s+)?[\"']?"
+        r"(?P<store>[A-Za-z0-9_.-]+)", re.I,
+    )
+    for match in relation.finditer(text):
+        if match["store"].lower() in ("endpoint", "owner", "team", "http", "https"):
+            continue
+        negative = bool(re.fullmatch(negative_relation, match["relation"], re.I))
+        claims.append((match["store"].rstrip("."), negative))
+    reverse = re.compile(
+        r"(?<![\w.-])([A-Za-z0-9_.-]+)\s*(?:是|为|is)\s*(?:the\s+)?"
+        + re.escape(profile) + r"\s*(?:的|'s)?\s*(?:存储配置|存储|store|storage)\b", re.I,
+    )
+    claims.extend((match[1], False) for match in reverse.finditer(text))
+    references = all(
+        re.search(r"(?<![\w.-])" + re.escape(path.rsplit("/", 1)[-1]) + r"(?![\w.-])", text)
+        for path in (facts["profile_file"], facts["storage_file"])
+    )
+    reasons = []
+    if not references and (store, False) not in claims:
+        reasons.append("answer does not explain the configuration source or profile-to-store mapping")
+    if any((value == store) == negative for value, negative in claims):
+        reasons.append("answer contradicts the selected profile-to-store mapping")
+    return reasons
+
+
+def profile_search_covers(pattern, profile, lines, observed_lines):
+    """Check that a complete search covers fixture-style definitions of this key."""
+    try:
+        regex = re.compile(pattern)
+    except re.error:
+        return False
+    definitions = [profile + "=__unlisted_store__"]
+    for line in lines:
+        key = re.match(r"\s*([^#;=\s]+)\s*=", line)
+        if key:
+            definitions.append(line[:key.start(1)] + profile + line[key.end(1):])
+    if not all(regex.search(line) for line in definitions):
+        return False
+    return all(index in observed_lines for index, line in enumerate(lines, 1) if regex.search(line))
+
+
 def followup_context_judgment(scenario, root, evidence):
     question = scenario["inputs"][-1].removeprefix("#").strip()
     starts = [event for event in (evidence or {}).get("inputs") or []
@@ -163,15 +239,29 @@ def denied_rename_judgment(answer, facts, root, result, evidence):
     ):
         return ["the denied command result was not returned to the model"]
     reasons = []
-    if not re.search(
-        r"denied|declined|refused|cancelled|canceled|not (?:executed|performed|renamed)|did not (?:rename|proceed)"
-        r"|no files (?:were )?renamed|拒绝|取消|未(?:执行|修改|重命名)|没有(?:执行|修改|重命名)",
-        answer, re.I,
-    ):
+    prose = response_prose(answer, keep_inline=True)
+    not_done = (
+        r"\b(?:not(?:\s+yet)?|never)(?:\s+been)?\s+(?:executed|performed|renamed)\b"
+        r"|\b(?:did not|didn't|haven't|hasn't|wasn't|weren't|isn't|aren't)"
+        r"\s+(?:yet\s+)?(?:been\s+)?(?:rename[ds]?|proceed|executed|performed)\b"
+        r"|\bno\s+(?:\.\w+\s+)?files?\s+(?:(?:were|was|are|is|have been|has been)\s+)?renamed\b"
+        r"|(?:未|尚未|并未|没有)(?:成功|实际)?(?:执行|修改|重命名)"
+    )
+    if not (re.search(not_done, prose, re.I) or has_affirmative_match(
+        prose, r"\b(?:denied|declined|refused|cancelled|canceled|blocked)\b|拒绝|取消",
+    )):
         reasons.append("answer does not explain that the rename was not performed")
-    if re.search(
+    completed = (
         r"(?:已经?|成功)(?:完成)?(?:重命名|改名)|重命名(?:已经?|成功)?完成"
-        r"|\b(?:I (?:have )?renamed|successfully renamed|renaming (?:is )?completed)\b", answer, re.I,
+        r"|\b(?:(?:I|we)\s+(?:have\s+)?(?:already\s+)?|(?:have|has)\s+(?:(?:already|all)\s+)?been\s+"
+        r"|(?:was|were|is|are)\s+(?:(?:already|all|now)\s+)?|successfully\s+)renamed\b"
+        r"|\brenaming\s+(?:is\s+)?completed\b"
+    )
+    clauses = re.split(r"[。！？!?；;\n，,]|\bbut\b|但是|但", prose, flags=re.I)
+    if any(
+        not re.search(r"\b(?:if|would|could|should|will)\b|如果|假设", clause, re.I)
+        and has_affirmative_match(re.sub(not_done, "", clause, flags=re.I), completed)
+        for clause in clauses
     ):
         reasons.append("answer claims the declined rename was completed")
     return reasons
@@ -199,7 +289,12 @@ def config_judgment(scenario, answer, facts, root, evidence):
     profile_path = root / facts["profile_file"]
     profile_lines = facts["profile_text"].splitlines()
     profile = facts["profile"]
-    literal_queries = {profile, rf"\b{profile}\b", "^" + profile, profile + r"\s*=", "^" + profile + r"\s*="}
+    profile_coverage = set()
+
+    def observed_profile_lines(lines):
+        return {int(number) for number, text in lines
+                if 1 <= int(number) <= len(profile_lines) and text == profile_lines[int(number) - 1]}
+
     for item in (evidence or {}).get("executions") or []:
         call, text = item["call"], item.get("result")
         if item.get("state") != "returned" or not isinstance(text, str):
@@ -215,11 +310,17 @@ def config_judgment(scenario, answer, facts, root, evidence):
         if call["name"] == "read_file" and header and (root / header[1]).resolve() == path:
             returned.append(text)
             lines = re.findall(r"(?m)^\s*(\d+)  (.*)$", text)
-            if path == profile_path and lines == [(str(i), line) for i, line in enumerate(profile_lines, 1)]:
-                complete_lookup = True
+            if path == profile_path:
+                profile_coverage.update(observed_profile_lines(lines))
         elif call["name"] == "grep" and re.match(r"^\[\d+ matching lines; truncated=(?:yes|no)\]\n", text):
             returned.append(text)
             pattern, glob = args.get("pattern"), args.get("glob")
+            base = path if path.is_dir() else path.parent
+            lines = [(number, content) for name, number, content in
+                     re.findall(r"(?m)^(.+?):(\d+):(.*)$", text)
+                     if (base / name).resolve() == profile_path]
+            observed_lines = observed_profile_lines(lines)
+            profile_coverage.update(observed_lines)
             includes_profile = path == profile_path or path in profile_path.parents
             covers_glob = glob is None or (
                 isinstance(glob, str) and (
@@ -227,15 +328,18 @@ def config_judgment(scenario, answer, facts, root, evidence):
                     or fnmatch.fnmatchcase(facts["profile_file"], glob)
                 )
             )
-            if (includes_profile and covers_glob and isinstance(pattern, str) and pattern in literal_queries
+            if (includes_profile and covers_glob and isinstance(pattern, str)
+                    and profile_search_covers(pattern, profile, profile_lines, observed_lines)
                     and re.match(r"^\[\d+ matching lines; truncated=no\]\n", text)):
                 complete_lookup = True
+    complete_lookup |= bool(profile_lines) and profile_coverage == set(range(1, len(profile_lines) + 1))
     if scenario["check"] == "config-lookup":
         for value in (facts["profile"], facts["store"], facts["endpoint"], facts["owner"]):
             if value not in "\n".join(returned):
                 reasons.append(f"configuration fact was not actually retrieved: {value}")
         if facts["profile"] not in answer:
             reasons.append(f"answer omits the selected profile: {facts['profile']}")
+        reasons.extend(config_basis_reasons(answer, facts))
     else:
         if not complete_lookup:
             reasons.append("no complete lookup of the requested profile was observed")

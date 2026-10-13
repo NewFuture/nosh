@@ -11,13 +11,14 @@ from . import fixtures
 from .contracts import APPROVAL_CHECKS, POLICY_FIXTURES
 from .fixtures import protected_files
 
-PROJECT_POLICIES = APPROVAL_CHECKS.keys() - {"rename", "cwd", "port-failure"}
+PROJECT_POLICIES = APPROVAL_CHECKS.keys() - {"rename", "rename-no-clobber", "cwd", "port-failure"}
 PROJECT_ACTIONS = {
     "rust-build": {"rust-build", "rust-test"},
     "rust-test": {"rust-build", "rust-test"},
     "node-build": {"node-build", "node-test"},
     "node-test": {"node-build", "node-test"},
     "git-commit": {"git-add", "git-commit"},
+    "config-repair": {"config-repair", "python-test"},
 }
 PROJECT_POLICY_FIXTURES = {policy: POLICY_FIXTURES[policy] for policy in PROJECT_POLICIES}
 
@@ -92,6 +93,17 @@ def command_groups(command: str, root: Path, tools: dict | None = None,
 
 
 def project_action(parts: list[str], root: Path) -> str | None:
+    if parts[:1] == ["cp"]:
+        args = parts[1:]
+        while args and args[0] in ("--", "-n", "--no-clobber", "-v"):
+            args = args[1:]
+        if len(args) == 2:
+            source, target = (root / arg for arg in args)
+            if (source.resolve() == root / "config.example.json"
+                    and target.resolve() == root / "config.json"
+                    and source.is_file() and not source.is_symlink()
+                    and not target.is_symlink() and (not target.exists() or target.is_file())):
+                return "config-repair"
     if parts[:1] == ["cargo"] and len(parts) >= 2:
         verb, args = parts[1], parts[2:]
         if "--manifest-path" in args:
@@ -131,9 +143,19 @@ def project_action(parts: list[str], root: Path) -> str | None:
         args = [p for p in parts[1:] if p != "-B"]
         if args[:2] == ["-m", "unittest"]:
             rest = [p for p in args[2:] if p not in ("-v", "-q")]
+            if "-s" in rest:
+                index = rest.index("-s")
+                if index + 1 < len(rest) and (root / rest[index + 1]).resolve() == root / "tests":
+                    rest[index + 1] = "tests"
             if rest in ([], ["discover"], ["discover", "-s", "tests"],
                         ["discover", "-s", "tests", "-p", "test*.py"]):
                 return "python-test"
+            if rest and all(re.fullmatch(r"tests(?:\.[A-Za-z_]\w*)+", name) for name in rest):
+                selected = {root.joinpath(*name.split(".")).with_suffix(".py") for name in rest}
+                available = {path for path in (root / "tests").rglob("test*.py")
+                             if path.is_file() and not path.is_symlink()}
+                if len(selected) == len(rest) and selected == available:
+                    return "python-test"
     if parts[:2] == ["git", "add"] and len(parts) > 2:
         if all(p in (".", "./", "--", "-A", "--all", "-u", "--update", "maths.py", "README.md") for p in parts[2:]):
             return "git-add"
@@ -162,6 +184,24 @@ def project_action(parts: list[str], root: Path) -> str | None:
     return None
 
 
+def verification_command(parts: list[str], cwd: Path, paths: set[Path]) -> bool:
+    if parts[:1] == ["pwd"]:
+        return all(arg in ("-P", "-L", "--") for arg in parts[1:])
+    if parts[:1] != ["ls"]:
+        return False
+    operands = []
+    options = True
+    for arg in parts[1:]:
+        if options and arg == "--":
+            options = False
+        elif options and arg.startswith("-"):
+            if arg not in ("-l", "-a", "-la", "-al", "-lh", "-lah"):
+                return False
+        else:
+            operands.append(arg)
+    return all((cwd / name).resolve() in paths for name in operands or ["."])
+
+
 def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[str]:
     if facts.get("project") not in PROJECT_POLICY_FIXTURES.get(policy, set()):
         return set()
@@ -171,10 +211,15 @@ def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[s
     except ValueError:
         return set()
     actions = set()
+    paths = {root} | {
+        path for name in before if (path := (root / name).resolve()).is_relative_to(root)
+    }
     for parts in groups:
         action = project_action(parts, root)
         if action:
             actions.add(action)
+            if action == "config-repair":
+                paths.add(root / facts["config_target"])
         elif parts[:1] == ["cat"]:
             args = parts[1:]
             while args and args[0] in ("--", "-n", "-b", "-s"):
@@ -182,9 +227,7 @@ def project_actions(policy: str, command: str, root: Path, facts: dict) -> set[s
             sources = {(root / name).resolve() for name in before}
             if not args or any((root / name).resolve() not in sources for name in args):
                 return set()
-        elif parts[:1] == ["pwd"] and all(p in ("-P", "-L", "--") for p in parts[1:]):
-            continue
-        elif parts[:1] == ["ls"] and all(p in (".", "--", "-l", "-a", "-la", "-al", "-lh", "-lah") for p in parts[1:]):
+        elif verification_command(parts, root, paths):
             continue
         elif parts[:2] == ["git", "status"] and all(p in ("--short", "-s", "-sb", "--porcelain", "--porcelain=v1") for p in parts[2:]):
             continue
@@ -253,7 +296,8 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
         return allow_project_approval(policy, command, root, facts)
     if policy == "port-failure":
         return allow_port_failure(command, root, facts)
-    if policy == "rename":
+    if policy in ("rename", "rename-no-clobber"):
+        no_clobber = policy == "rename-no-clobber"
         command = command.strip()
         if command.startswith("cd "):
             prefix, separator, rest = command.partition("&&")
@@ -271,12 +315,12 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
         # Only this bounded loop is allowed; substituted shell expressions or
         # extra commands must not ride along with a fixture approval.
         loop = re.fullmatch(
-            r'for ([a-zA-Z_]\w*) in (?:\./)?\*\.txt;\s*do\s+mv(?: (?:-v|-n|--no-clobber))*(?: --)? '
+            r'for ([a-zA-Z_]\w*) in (?:\./)?\*\.txt;\s*do\s+mv(?P<flags>(?: (?:-v|-n|--no-clobber|--update=none))*)(?: --)? '
             r'"\$\1" "\$\{\1%(?:\.txt|\.\*)\}\.md";?\s*done;?',
             command.strip(),
         )
         if loop:
-            return True
+            return not no_clobber or bool({"-n", "--no-clobber", "--update=none"} & set(loop["flags"].split()))
         try:
             parts = shell_parts(command)
         except ValueError:
@@ -296,13 +340,17 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
             if not group or group[0] != "mv":
                 return False
             args = group[1:]
-            while args and args[0] in ("-v", "-n", "--no-clobber", "--"):
+            flags = []
+            while args and args[0] in ("-v", "-n", "--no-clobber", "--update=none", "--"):
+                flags.append(args[0])
                 args = args[1:]
             if len(args) != 2 or not any(
                 (root / args[0]).resolve() == root / source
                 and (root / args[1]).resolve() == root / destination
                 for source, destination in facts["renames"].items()
             ):
+                return False
+            if no_clobber and (root / args[1]).exists() and not {"-n", "--no-clobber", "--update=none"} & set(flags):
                 return False
         return bool(groups)
     if policy == "cwd":
@@ -321,7 +369,16 @@ def allow_approval(policy: str, command: str, root: Path, facts: dict) -> bool:
             return False
         if not parts:
             return True
-        if len(parts) < 2 or parts[0] not in ("&&", ";") or parts[1] != "ls":
+        if parts[0] not in ("&&", ";"):
             return False
-        return all(arg in (".", "-a", "-l", "-la", "-al", "-lh", "-lah", "--") for arg in parts[2:])
+        directory = root / "data"
+        group = []
+        for word in [*parts[1:], "&&"]:
+            if word in ("&&", ";"):
+                if not verification_command(group, directory, {directory}):
+                    return False
+                group = []
+            else:
+                group.append(word)
+        return True
     return False

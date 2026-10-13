@@ -210,16 +210,16 @@ def validate_suite(suite: dict, *, catalog_root: Path | None = None) -> dict:
                     raise ValueError(f"correction completion does not match inputs: {sid}")
             if corrections is None and completions[-1]["kind"] not in ("agent", "assist"):
                 raise ValueError(f"the final REPL input must ask the agent: {sid}")
-            if (scenario["check"] in {"build-failure", "test-failure", "port-failure", *CAPTURE_CHECKS}
+            if (scenario["check"] in {"build-failure", "test-failure", "port-failure", "config-repair", *CAPTURE_CHECKS}
                     and completions[0]["kind"] != "shell"):
                 raise ValueError(f"failure diagnosis requires an initial failed shell command: {sid}")
-            if (scenario["check"] in CAPTURE_CHECKS
+            if (scenario["check"] in {*CAPTURE_CHECKS, "config-repair"}
                     and not re.fullmatch(r"#fix(?: .+)?", inputs[-1])):
                 raise ValueError(f"captured diagnosis requires an explicit #fix input: {sid}")
         else:
             if any(key in scenario for key in ("inputs", "corrections", "completions")):
                 raise ValueError(f"REPL fields in a CLI scenario: {sid}")
-        if scenario["check"] in STATEFUL_CHECKS | {"typos", "failure", "cwd", "cwd-follow-up", "denied-rename"} and scenario["mode"] != "repl":
+        if scenario["check"] in STATEFUL_CHECKS | {"typos", "failure", "cwd", "cwd-follow-up", "denied-rename", "rename-conflict"} and scenario["mode"] != "repl":
             raise ValueError(f"this check requires a shared interactive session: {sid}")
         if scenario.get("group") not in ("mvp", "expanded", "command-assist"):
             raise ValueError(f"invalid scenario group: {sid}")

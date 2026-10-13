@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nosh_engine::{
     ChatEngine, EngineError, Message, SamplingParams, SessionId, SessionSpec, StepOutcome,
-    StopReason, ToolCall, Usage,
+    StopReason, ToolCall, ToolChoice, Usage,
 };
 use nosh_permissions::{
     ApprovalMode, Context, Decision, PathClass, Risk, RiskReport, SessionAllowList, UserRules,
@@ -139,6 +139,7 @@ pub struct TaskOutcome {
     /// Text of the last model turn.
     pub answer: String,
     pub proposed: Option<String>,
+    /// Commands dispatched to the executor, including unknown-result errors.
     pub commands_run: usize,
     pub denied: usize,
     pub usage: Usage,
@@ -146,14 +147,91 @@ pub struct TaskOutcome {
 }
 
 enum Exec {
-    Result(String),
+    ReadResult(String),
+    Error(String),
+    Correction(String),
     UserAnswer(String),
-    CommandResult(String),
+    CommandResult(String, Box<CommandExecution>),
+    CommandError(String, Box<CommandExecution>),
     Denied(String),
-    Handoff(String, String),
-    Aborted(String),
+    RepeatedDenial(String),
+    Handoff(String, String, Box<CommandExecution>),
+    Aborted(String, Box<CommandExecution>),
     Cancelled(String),
     Failed(String),
+    Skipped(String),
+}
+
+struct CommandExecution {
+    command: String,
+    cwd: PathBuf,
+    edited: bool,
+    rewritten: bool,
+    result: Option<nosh_shell::CommandResult>,
+}
+
+impl Exec {
+    fn status_and_feedback(&self) -> (&'static str, &str) {
+        match self {
+            Self::ReadResult(text) => ("read", text),
+            Self::Error(text) => ("error", text),
+            Self::Correction(text) => ("correction", text),
+            Self::UserAnswer(text) => ("answered", text),
+            Self::CommandResult(text, _) => ("executed", text),
+            Self::CommandError(text, _) => ("execution_error", text),
+            Self::Denied(text) => ("denied", text),
+            Self::RepeatedDenial(text) => ("repeated_denial", text),
+            Self::Handoff(_, text, _) => ("handoff", text),
+            Self::Aborted(text, _) => ("aborted", text),
+            Self::Cancelled(text) => ("cancelled", text),
+            Self::Failed(text) => ("failed", text),
+            Self::Skipped(text) => ("skipped", text),
+        }
+    }
+
+    fn observation(
+        &self,
+        turn: usize,
+        call_index: usize,
+        call: &ToolCall,
+        current_cwd: &Path,
+    ) -> serde_json::Value {
+        let (status, feedback) = self.status_and_feedback();
+        let execution = match self {
+            Self::CommandResult(_, execution)
+            | Self::CommandError(_, execution)
+            | Self::Handoff(_, _, execution)
+            | Self::Aborted(_, execution) => {
+                let result = execution.result.as_ref();
+                Some(serde_json::json!({
+                    "command": execution.command,
+                    "cwd": execution.cwd,
+                    "edited": execution.edited,
+                    "rewritten": execution.rewritten,
+                    "exit_code": result.map(|r| r.exit_code),
+                    "duration_s": result.map(|r| r.duration.as_secs_f64()),
+                    "timed_out": result.map(|r| r.timed_out),
+                    "interrupted": result.map(|r| r.interrupted),
+                    "needed_terminal": result.map(|r| r.needed_terminal),
+                    "truncated": result.map(|r| r.truncated
+                        || r.stdout.chars().count() + r.stderr.chars().count() > tools::OUTPUT_CHARS),
+                }))
+            }
+            _ => None,
+        };
+        serde_json::json!({
+            "workflow": "agent",
+            "kind": "tool_result",
+            "version": 1,
+            "turn": turn,
+            "call_index": call_index,
+            "call": call,
+            "status": status,
+            "execution": execution,
+            "current_cwd": current_cwd,
+            "result": feedback,
+        })
+    }
 }
 
 enum Authorization {
@@ -164,6 +242,13 @@ enum Authorization {
     },
     Edit(String),
     Denied(String),
+    RepeatedDenial(String),
+}
+
+struct DeniedCall {
+    call: ToolCall,
+    report: RiskReport,
+    reason: String,
 }
 
 type CommandRunner = fn(
@@ -179,6 +264,7 @@ pub struct Agent {
     env: Environment,
     tools: ToolSet,
     sid: Option<SessionId>,
+    model_turn: usize,
     last_task: Option<Instant>,
     allow: SessionAllowList,
     /// Tool results owed to the conversation from an interrupted turn.
@@ -193,9 +279,11 @@ pub struct Agent {
     command_runner: CommandRunner,
     user_input: Box<dyn UserInput>,
     can_ask: bool,
+    denied_calls: Vec<DeniedCall>,
 }
 
 const SUMMARIZE: &str = "Step limit reached for the preceding user request only. Finish it without tools, with supported results and the next step in its language. Later user requests may use tools normally.";
+const DENIAL_SUMMARY: &str = "The same operation was already denied. It was not run or submitted for approval again. Finish this task without tools, briefly explaining what was not done and why. Do not offer to retry.";
 
 impl Agent {
     pub fn new(
@@ -210,6 +298,7 @@ impl Agent {
             env,
             tools,
             sid: None,
+            model_turn: 0,
             last_task: None,
             allow: SessionAllowList::default(),
             carry: Vec::new(),
@@ -222,6 +311,7 @@ impl Agent {
             command_runner: EmbeddedShell::run_agent_command,
             user_input: Box::new(NoUserInput),
             can_ask: false,
+            denied_calls: Vec::new(),
         }
     }
 
@@ -249,6 +339,7 @@ impl Agent {
             self.engine.close(sid);
         }
         self.carry.clear();
+        self.model_turn = 0;
         self.user_outputs_seen.clear();
         self.guidance_sent = None;
     }
@@ -258,7 +349,7 @@ impl Agent {
     }
 
     fn spec(&self) -> SessionSpec {
-        let system = prompt::system_prompt(&self.env, self.tools);
+        let system = prompt::system_prompt(&self.env, self.tools, self.can_ask);
         let mut tools = tools::specs(self.tools);
         if self.can_ask {
             tools.push(user_input::spec());
@@ -307,6 +398,7 @@ impl Agent {
         sid: SessionId,
         msgs: Vec<Message>,
         ui: &mut dyn AgentUi,
+        final_response: bool,
     ) -> Result<StepOutcome, EngineError> {
         let mut sink = |ev: nosh_engine::Event| match ev {
             nosh_engine::Event::Text(t) => ui.text(&t),
@@ -314,8 +406,14 @@ impl Agent {
             nosh_engine::Event::Prefill { done, total } => ui.prefill(done, total),
             _ => {}
         };
+        let mut generate = |engine: &mut dyn ChatEngine| {
+            if final_response {
+                engine.set_tool_choice(sid, ToolChoice::None)?;
+            }
+            engine.step(sid, msgs.clone(), &mut sink)
+        };
         let keep = self.engine.message_count(sid);
-        match self.engine.step(sid, msgs.clone(), &mut sink) {
+        match generate(self.engine.as_mut()) {
             Err(EngineError::ContextFull { .. }) => {
                 // Drop the failed append, shorten old tool output and retry once.
                 if let Err(error) = self.engine.rewind(sid, keep) {
@@ -329,7 +427,7 @@ impl Agent {
                     return Err(error);
                 }
                 let retry_keep = self.engine.message_count(sid);
-                match self.engine.step(sid, msgs.clone(), &mut sink) {
+                match generate(self.engine.as_mut()) {
                     Ok(step) => Ok(step),
                     Err(error) => {
                         self.rollback_failed_step(sid, retry_keep, &msgs)?;
@@ -398,6 +496,7 @@ impl Agent {
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> TaskOutcome {
+        self.denied_calls.clear();
         if let Some(error) = &self.cfg.rules_error {
             let error = format!("AI execution blocked by invalid safety configuration: {error}");
             ui.error(&error);
@@ -468,7 +567,8 @@ impl Agent {
             &permission_context,
         ));
         let mut errors: HashMap<String, usize> = HashMap::new();
-        let mut summarizing = false;
+        let mut corrections_without_progress = 0;
+        let mut finish_reason = None;
         loop {
             if cancel.is_cancelled() {
                 out.status = TaskStatus::Cancelled;
@@ -476,12 +576,19 @@ impl Agent {
                 break;
             }
             ui.state(self.cfg.mode, Activity::Thinking);
-            if out.steps >= self.cfg.max_steps && !summarizing {
-                summarizing = true;
-                pending.push(Message::System(SUMMARIZE.into()));
+            if out.steps >= self.cfg.max_steps && finish_reason.is_none() {
+                finish_reason = Some(SUMMARIZE);
+            }
+            if let Some(reason) = finish_reason {
+                pending.push(Message::System(reason.into()));
             }
             out.steps += 1;
-            let step = match self.step(sid, std::mem::take(&mut pending), ui) {
+            let step = match self.step(
+                sid,
+                std::mem::take(&mut pending),
+                ui,
+                finish_reason.is_some(),
+            ) {
                 Ok(s) => {
                     if let Some(command_id) = attached_output.take() {
                         self.user_outputs_seen.insert(command_id);
@@ -496,28 +603,43 @@ impl Agent {
                     break;
                 }
             };
+            self.model_turn += 1;
             if let Some(key) = guidance_key.take() {
                 self.guidance_sent = Some(key);
             }
             add_usage(&mut out.usage, &step.usage);
             out.answer = step.text.trim().to_string();
-            if step.stop == StopReason::Cancelled {
-                self.guidance_sent = None;
-                out.status = TaskStatus::Cancelled;
-                self.carry = step
-                    .tool_calls
-                    .iter()
-                    .map(|_| Message::Tool("[cancelled by the user]".into()))
-                    .collect();
-                break;
-            }
-            if summarizing {
-                self.carry = step
-                    .tool_calls
-                    .iter()
-                    .map(|_| Message::Tool("[skipped: step limit reached]".into()))
-                    .collect();
-                out.status = TaskStatus::Incomplete;
+            if step.stop == StopReason::Cancelled || finish_reason.is_some() {
+                let cancelled = step.stop == StopReason::Cancelled;
+                if cancelled {
+                    self.guidance_sent = None;
+                }
+                out.status = if cancelled {
+                    TaskStatus::Cancelled
+                } else {
+                    TaskStatus::Incomplete
+                };
+                self.carry.clear();
+                for (index, call) in step.tool_calls.iter().enumerate() {
+                    let result = if cancelled {
+                        Exec::Cancelled("[cancelled by the user]".into())
+                    } else {
+                        Exec::Skipped("[skipped: task is finishing without tools]".into())
+                    };
+                    let (_, feedback) = result.status_and_feedback();
+                    if let Err(error) = self.engine.record_observation(
+                        sid,
+                        result.observation(self.model_turn, index, call, &shell.cwd()),
+                    ) {
+                        let error = format!("could not record tool outcome: {error}");
+                        ui.error(&error);
+                        out.error = Some(error);
+                        if !cancelled {
+                            out.status = TaskStatus::Failed;
+                        }
+                    }
+                    self.carry.push(Message::Tool(feedback.to_owned()));
+                }
                 break;
             }
             if step.tool_calls.is_empty() && step.errors.is_empty() {
@@ -528,7 +650,7 @@ impl Agent {
                 };
                 break;
             }
-            let mut denied = false;
+            let mut skip_remaining = false;
             let mut aborted = false;
             let mut handed_off = false;
             let mut fatal = None;
@@ -542,53 +664,86 @@ impl Agent {
                 ui.error("ask_user must be the only tool call in its turn; no tools were executed");
             }
             let calls_cwd = shell.cwd();
-            for call in &step.tool_calls {
-                if mixed_question {
-                    pending.push(Message::Tool("error: ask_user must be the only tool call in its turn; no tools were executed".into()));
-                    continue;
-                }
-                if denied || aborted || handed_off || fatal.is_some() {
-                    pending.push(Message::Tool(
-                        "[skipped] an earlier call was denied, cancelled or handed to the user"
+            for (index, call) in step.tool_calls.iter().enumerate() {
+                let result = if mixed_question {
+                    Exec::Error("error: ask_user must be the only tool call in its turn; no tools were executed".into())
+                } else if skip_remaining || aborted || handed_off || fatal.is_some() {
+                    Exec::Skipped(
+                        "[skipped] an earlier call needs correction, was denied, cancelled or handed to the user"
                             .into(),
-                    ));
-                    continue;
-                }
-                match self.exec_call(shell, call, approval, ui) {
-                    Exec::Result(t) => {
-                        pending.push(Message::Tool(t));
+                    )
+                } else {
+                    self.exec_call(shell, call, approval, ui)
+                };
+                let user_answer = matches!(&result, Exec::UserAnswer(_));
+                let (_, feedback) = result.status_and_feedback();
+                let feedback = feedback.to_owned();
+                let observation_error = self
+                    .engine
+                    .record_observation(
+                        sid,
+                        result.observation(self.model_turn, index, call, &shell.cwd()),
+                    )
+                    .err();
+                match result {
+                    Exec::ReadResult(_) => {
+                        corrections_without_progress = 0;
                     }
-                    Exec::UserAnswer(answer) => {
-                        pending.push(Message::UserAnswer(answer));
+                    Exec::Error(_) | Exec::Skipped(_) => {}
+                    Exec::Correction(_) => {
+                        skip_remaining = true;
+                        corrections_without_progress += 1;
+                        if corrections_without_progress > 2 {
+                            fatal = Some("the model kept adding an unnecessary cd prefix".into());
+                        }
                     }
-                    Exec::CommandResult(t) => {
+                    Exec::UserAnswer(_) => {
+                        self.denied_calls.clear();
+                        corrections_without_progress = 0;
+                    }
+                    Exec::CommandResult(..) => {
+                        corrections_without_progress = 0;
                         out.commands_run += 1;
-                        pending.push(Message::Tool(t));
                     }
-                    Exec::Denied(t) => {
-                        denied = true;
+                    Exec::Denied(_) => {
+                        skip_remaining = true;
                         out.denied += 1;
-                        pending.push(Message::Tool(t));
                     }
-                    Exec::Handoff(cmd, t) => {
+                    Exec::RepeatedDenial(_) => {
+                        skip_remaining = true;
+                        out.denied += 1;
+                        finish_reason = Some(DENIAL_SUMMARY);
+                    }
+                    Exec::Handoff(cmd, _, _) => {
                         handed_off = true;
                         out.commands_run += 1;
                         out.proposed = Some(cmd);
-                        pending.push(Message::Tool(t));
                     }
-                    Exec::Aborted(t) => {
+                    Exec::Aborted(..) => {
                         aborted = true;
                         out.commands_run += 1;
-                        pending.push(Message::Tool(t));
                     }
-                    Exec::Cancelled(t) => {
+                    Exec::Cancelled(_) => {
                         aborted = true;
-                        pending.push(Message::Tool(t));
                     }
-                    Exec::Failed(t) => {
-                        fatal = Some(t.clone());
-                        pending.push(Message::Tool(t));
+                    Exec::CommandError(error, _) => {
+                        out.commands_run += 1;
+                        fatal = Some(error);
                     }
+                    Exec::Failed(error) => {
+                        fatal = Some(error);
+                    }
+                }
+                pending.push(if user_answer {
+                    Message::UserAnswer(feedback)
+                } else {
+                    Message::Tool(feedback)
+                });
+                if let Some(error) = observation_error {
+                    let error = format!("could not record tool outcome: {error}");
+                    ui.error(&error);
+                    out.error = Some(error.clone());
+                    fatal.get_or_insert(error);
                 }
             }
             for e in &step.errors {
@@ -676,13 +831,21 @@ impl Agent {
             context_used: u.context_used,
             context_max: u.context_max,
             note: match out.status {
-                TaskStatus::Incomplete if out.steps > self.cfg.max_steps => {
+                TaskStatus::Incomplete if finish_reason == Some(DENIAL_SUMMARY) => Some(
+                    tr!(
+                        "已停止重复被拒的操作",
+                        "stopped a repeated denied operation"
+                    )
+                    .into(),
+                ),
+                TaskStatus::Incomplete if finish_reason == Some(SUMMARIZE) => {
                     Some(tr!("达到步数上限", "step limit reached").into())
                 }
                 _ => None,
             },
         });
         self.last_task = Some(Instant::now());
+        self.denied_calls.clear();
         out
     }
 
@@ -729,7 +892,7 @@ impl Agent {
                 }
                 Err(error) => {
                     ui.error(&error.to_string());
-                    Exec::Result(format!("error: {error}"))
+                    Exec::Error(format!("error: {error}"))
                 }
             };
         }
@@ -744,7 +907,7 @@ impl Agent {
                 allowed.join(", ")
             );
             ui.error(&error);
-            return Exec::Result(error);
+            return Exec::Error(error);
         };
         match tool {
             BuiltinTool::Exec => self.exec(shell, call, approval, ui),
@@ -756,14 +919,28 @@ impl Agent {
 
     fn authorize(
         &mut self,
-        tool: &str,
+        call: &ToolCall,
         detail: &str,
         cwd: &std::path::Path,
         report: &RiskReport,
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> Authorization {
+        let tool = call.name.as_str();
         let policy = evaluate(report, self.cfg.mode, &self.cfg.rules, &self.allow);
+        if !matches!(policy.decision, Decision::Allow)
+            && let Some(previous) = self
+                .denied_calls
+                .iter()
+                .find(|previous| previous.call == *call && previous.report == *report)
+        {
+            let reason = format!(
+                "[repeated denial] The same call was already denied in this context; no new approval was requested.\n{}",
+                previous.reason
+            );
+            ui.error(&reason);
+            return Authorization::RepeatedDenial(reason);
+        }
         let source = policy.source.label();
         let label = format!("{} · {source}", report.risk());
         let denied = |ui: &mut dyn AgentUi, reason: String| {
@@ -773,7 +950,7 @@ impl Agent {
                 "{reason} Do not retry or bypass this decision; explain it or choose a permitted alternative."
             ))
         };
-        match policy.decision {
+        let authorization = match policy.decision {
             Decision::Deny { reason } => denied(ui, format!("[denied by policy] {reason}")),
             Decision::Allow => Authorization::Allowed {
                 label,
@@ -836,7 +1013,15 @@ Approval request: {}; {}.{}",
                     ),
                 }
             }
+        };
+        if let Authorization::Denied(reason) = &authorization {
+            self.denied_calls.push(DeniedCall {
+                call: call.clone(),
+                report: report.clone(),
+                reason: reason.clone(),
+            });
         }
+        authorization
     }
 
     fn exec(
@@ -852,7 +1037,7 @@ Approval request: {}; {}.{}",
             .filter(|c| !c.is_empty())
         else {
             ui.error("missing required parameter 'command'");
-            return Exec::Result("error: missing required parameter 'command'".into());
+            return Exec::Error("error: missing required parameter 'command'".into());
         };
         let timeout = call
             .int_arg("timeout_sec")
@@ -866,17 +1051,25 @@ Approval request: {}; {}.{}",
             }
             if command.is_empty() || command.contains('\0') {
                 ui.error("invalid empty command or NUL byte");
-                return Exec::Result("error: invalid command".into());
+                return Exec::Error("error: invalid command".into());
             }
             let mut ctx = self.cfg.permission_context(shell);
             ctx.timeout = timeout;
             let report = prepared_command(&command, &ctx, shell);
             if let Some(error) = &report.syntax_error {
                 ui.error(&format!("invalid command syntax: {error}"));
-                return Exec::Result(format!("error: invalid command syntax: {error}"));
+                return Exec::Error(format!("error: invalid command syntax: {error}"));
+            }
+            if !edited && shell.has_redundant_cd_prefix(&command) {
+                let error = format!(
+                    "error: exec already runs in {}. Remove the leading cd to this same directory and submit the remaining command. Nothing was run or sent for approval.",
+                    ctx.cwd.display()
+                );
+                ui.error(&error);
+                return Exec::Correction(error);
             }
             let shown = report.rewritten.as_deref().unwrap_or(&command);
-            let label = match self.authorize("exec", shown, &ctx.cwd, &report, approval, ui) {
+            let label = match self.authorize(call, shown, &ctx.cwd, &report, approval, ui) {
                 Authorization::Allowed {
                     label,
                     manual,
@@ -907,6 +1100,7 @@ Approval request: {}; {}.{}",
                     continue;
                 }
                 Authorization::Denied(reason) => return Exec::Denied(reason),
+                Authorization::RepeatedDenial(reason) => return Exec::RepeatedDenial(reason),
             };
             return self.execute(shell, &command, &report, &label, timeout, edited, ui);
         }
@@ -935,6 +1129,7 @@ Approval request: {}; {}.{}",
             timeout,
             ..AgentExecOpts::default()
         };
+        let cwd = shell.cwd();
         // Ctrl-C interrupts the command; pressing it again during the same
         // command aborts the task.
         let ints_before = shell.interrupts().count();
@@ -942,7 +1137,18 @@ Approval request: {}; {}.{}",
             Ok(r) => r,
             Err(e) => {
                 ui.tool_end(&format!("error: {e}"));
-                return Exec::Result(format!("error: failed to run the command: {e}"));
+                return Exec::CommandError(
+                    format!(
+                        "error: execution returned no result: {e}. Effects may have occurred; do not retry automatically."
+                    ),
+                    Box::new(CommandExecution {
+                        command: to_run,
+                        cwd,
+                        edited,
+                        rewritten: report.rewritten.is_some(),
+                        result: None,
+                    }),
+                );
             }
         };
         let id = self.next_output;
@@ -965,19 +1171,27 @@ Approval request: {}; {}.{}",
         if edited {
             text = format!("[note] the user edited the command to: {to_run}\n{text}");
         }
+        let handoff = needs_handoff(&r, report.rewritten.is_some());
+        let execution = Box::new(CommandExecution {
+            command: to_run,
+            cwd,
+            edited,
+            rewritten: report.rewritten.is_some(),
+            result: Some(r),
+        });
         if shell.interrupts().count() >= ints_before + 2 {
-            return Exec::Aborted(text);
+            return Exec::Aborted(text, execution);
         }
-        if needs_handoff(&r, report.rewritten.is_some()) {
+        if handoff {
             ui.state(self.cfg.mode, Activity::NeedsUser);
             text.push_str("\n[handoff] returned the original command to the user; earlier parts of this shell program may already have run; do not retry it");
             ui.proposed(command, Some(tr!(
                 "命令在等待终端或密码时已停止，但复合命令前面的部分可能已经执行；请检查当前状态和整条命令后再自行运行，不会自动重试。",
                 "Command stopped while waiting for a terminal or password, but earlier parts of this shell program may already have run. Check the current state and the entire command before running it yourself; it will not be retried automatically."
             )));
-            return Exec::Handoff(command.to_string(), text);
+            return Exec::Handoff(command.to_string(), text, execution);
         }
-        Exec::CommandResult(text)
+        Exec::CommandResult(text, execution)
     }
 
     fn refresh_environment(shell: &mut EmbeddedShell, ui: &mut dyn AgentUi) -> Result<(), Exec> {
@@ -1010,7 +1224,7 @@ Approval request: {}; {}.{}",
             Ok(call) => call,
             Err(error) => {
                 ui.error(&error);
-                return Exec::Result(format!("error: {error}"));
+                return Exec::Error(format!("error: {error}"));
             }
         };
         let path = tools::tool_path(&prepared, &ctx.cwd);
@@ -1084,11 +1298,11 @@ Approval request: {}; {}.{}",
         match result {
             Ok(text) => {
                 ui.tool_end(&format!("{} lines", text.lines().count().saturating_sub(1)));
-                Exec::Result(text)
+                Exec::ReadResult(text)
             }
             Err(error) => {
                 ui.tool_end(&format!("error: {error}"));
-                Exec::Result(format!("error: {error}"))
+                Exec::Error(format!("error: {error}"))
             }
         }
     }
@@ -1103,9 +1317,10 @@ Approval request: {}; {}.{}",
     ) -> Result<(Risk, String, bool), Exec> {
         let report = assess_read(&call.name, path, None, ctx);
         let detail = format!("{} {}", call.name, path.display());
-        match self.authorize(&call.name, &detail, &ctx.cwd, &report, approval, ui) {
+        match self.authorize(call, &detail, &ctx.cwd, &report, approval, ui) {
             Authorization::Allowed { label, manual, .. } => Ok((report.risk(), label, manual)),
             Authorization::Denied(reason) => Err(Exec::Denied(reason)),
+            Authorization::RepeatedDenial(reason) => Err(Exec::RepeatedDenial(reason)),
             Authorization::Edit(_) => unreachable!("read approvals cannot edit calls"),
         }
     }

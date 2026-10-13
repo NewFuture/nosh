@@ -563,6 +563,32 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertEqual(len(starts), 3)
             self.assertTrue(all(r["sid"] == 1 for r in starts))
 
+    def test_agent_tool_outcomes_are_recorded_before_the_next_model_request(self):
+        command = "printf observed; false"
+        turns = [{"calls": [{"name": "exec", "args": {"command": command}}]},
+                 {"text": "The command returned a nonzero exit."}]
+        with ScriptedWorker(self.socket, turns) as server:
+            root, _, trace, env, argv = self.case(0, 0)
+            result = driver.run_cli(argv + ["-a", "--json", "inspect the exit status"], root, env, 15)
+            self.assertIsNone(result.error, result.stderr)
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            outcome_index = next(index for index, event in enumerate(events)
+                                 if event["ev"] == "observation" and event["value"].get("workflow") == "agent")
+            next_step = next(index for index, event in enumerate(events)
+                             if index > outcome_index and event["ev"] == "step_start")
+            value = events[outcome_index]["value"]
+            self.assertEqual(value["status"], "executed")
+            self.assertEqual(value["execution"]["command"], command)
+            self.assertEqual(value["execution"]["cwd"], str(root))
+            self.assertEqual(value["execution"]["exit_code"], 1)
+            partial = observations.execution_evidence(events[:outcome_index + 1], require_complete=True)
+            self.assertEqual(partial[0]["state"], "executed")
+            self.assertNotIn("submitted_to_model", partial[0])
+            self.assertEqual(events[next_step]["messages"][0]["text"], value["result"])
+            complete = observations.execution_evidence(events, require_complete=True)
+            self.assertTrue(complete[0]["submitted_to_model"])
+            self.assertEqual(len([request for request in server.requests if request["op"] == "step"]), 2)
+
     def test_native_query_and_direct_final_command_assist_are_preserved(self):
         command = "tar -czf logs.tar.gz logs"
         turns = [{"calls": [{"name": "command_help", "args": {"name": "tar", "query": "gz"}}]},
@@ -939,9 +965,8 @@ class ProductionProxyTests(unittest.TestCase):
                 self.assertEqual([tool["name"] for tool in specs[0]["tools"]],
                                  ["exec", "read_file", "grep", "ask_user"])
                 first = next(request["append"] for request in requests if request["op"] == "step")
-                expected = "Explain why the command failed and how to fix it."
-                if additional:
-                    expected += "\n\nAdditional context from the user:\n" + additional
+                expected = ("Help with the failed command.\n\n" + additional if additional
+                            else "Explain why the command failed and how to fix it.")
                 self.assertEqual([message["User"] for message in first if "User" in message], [expected])
                 context = next(message["System"] for message in first if "System" in message)
                 self.assertIn("\nexit: 7", context)

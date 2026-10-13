@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from eval import campaign, fixtures, report, runtime
+from .support import SUITE
 
 
 class SourceSelectionTests(unittest.TestCase):
@@ -153,13 +154,13 @@ class BuildToolchainTests(unittest.TestCase):
 class CampaignCompletenessTests(unittest.TestCase):
     def data(self):
         declared = {
-            "schema_version": 2, "dataset_revision": 4, "seeds": [0, 1],
+            "schema_version": 2, "dataset_revision": SUITE["dataset_revision"], "seeds": [0, 1],
             "scenarios": [{"id": "example", "check": "largest"}],
         }
         data = {
             "schema_version": 2,
             "metadata": {"scenarios": declared["scenarios"], "seeds": declared["seeds"],
-                         "repeat": 2, "dataset_revision": 4, "observation": "native-v1"},
+                         "repeat": 2, "dataset_revision": SUITE["dataset_revision"], "observation": "native-v1"},
             "trials": [{
                 "scenario_id": "example", "seed": seed, "repeat": repeat, "status": "fail",
                 "metrics": {name: None for name in report.METRICS}, "answer": "", "final_state": {},
@@ -177,7 +178,7 @@ class CampaignCompletenessTests(unittest.TestCase):
         error["trials"][0]["status"] = "error"
         self.assertFalse(campaign.is_complete(error, declared))
         changed = copy.deepcopy(data)
-        changed["metadata"]["dataset_revision"] = 3
+        changed["metadata"]["dataset_revision"] += 1
         self.assertFalse(campaign.is_complete(changed, declared))
         duplicate = copy.deepcopy(data)
         duplicate["trials"].append(duplicate["trials"][0])

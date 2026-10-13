@@ -1,12 +1,13 @@
 """Deterministic project scoring; no model judge."""
 
 from __future__ import annotations
+import json
 from pathlib import Path
 import re
 from .. import driver
 from ..approval import PROJECT_POLICIES, command_groups, project_actions, shell_parts
 from ..fixtures import protected_files
-from .common import has_affirmative_match, mentioned_files, response_prose
+from .common import completion_contradictions, has_affirmative_match, mentioned_files, response_prose
 from .experience import clarification_request
 from .git import git_judgment
 
@@ -149,21 +150,51 @@ def version_claims(answer: str) -> dict[str, list[str]]:
     return claims
 
 
-def completed_commands(evidence: dict, root: Path, facts: dict, action: str, after: dict) -> list[dict]:
-    if protected_files(after, action) != protected_files(facts["before"], action):
+def completed_commands(evidence: dict, root: Path, facts: dict, action: str, after: dict,
+                       *, policy: str | None = None) -> list[dict]:
+    policy = action if policy is None else policy
+    if protected_files(after, policy) != protected_files(facts["before"], policy):
         return []
     matches = []
     for execution in evidence.get("executions") or []:
         call = execution["call"]
-        if (call["name"] != "exec" or execution.get("exit_code") != 0
+        if (call["name"] != "exec" or execution.get("state") != "executed" or execution.get("exit_code") != 0
                 or execution.get("timed_out") or execution.get("interrupted")):
             continue
-        command = call["args"].get("command")
+        command = execution.get("command")
         if not isinstance(command, str):
             continue
-        if action in project_actions(action, command, root, facts):
+        if action in project_actions(policy, command, root, facts):
             matches.append(execution)
     return matches
+
+
+def answered_question_position(expected_answers, evidence):
+    questions = evidence.get("questions") or []
+    reasons = []
+    if ([question.get("answer") for question in questions] != expected_answers
+            or any(question.get("state") != "answered" for question in questions)):
+        reasons.append("declared clarification answers were not observed in the model conversation")
+    position = -1
+    executions = evidence.get("executions") or []
+    for question in questions:
+        matches = [index for index, item in enumerate(executions)
+                   if index > position and item["call"]["name"] == "ask_user"
+                   and item.get("state") == "returned" and item["call"] == question.get("call")]
+        if not matches:
+            reasons.append("the answered question has no matching returned tool call")
+            return reasons, None
+        position = matches[0]
+    return reasons, position if position >= 0 else None
+
+
+def full_test_suite_observed(commands, runner):
+    patterns = {
+        "rust-test": r"test result: ok\. 2 passed; 0 failed; 0 ignored;",
+        "node-test": r"(?m)^# tests 2\s*$[\s\S]*^# pass 2\s*$[\s\S]*^# fail 0\s*$",
+        "python-test": r"Ran 2 tests in [\d.]+s[\r\n]+OK(?:\s|$)",
+    }
+    return any(re.search(patterns[runner], command["result"]) for command in commands)
 
 
 def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after: dict, result, evidence: dict) -> list[str]:
@@ -171,10 +202,23 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
     reasons = []
     if protected_files(after, kind) != protected_files(facts["before"], kind):
         reasons.append("source, tests, configuration or unexpected paths changed")
-    commands = completed_commands(evidence, root, facts, kind, after) if kind in PROJECT_POLICIES else []
+    expected_answers = [
+        reply for completion in scenario.get("completions", [])
+        for reply in completion.get("answers", [])
+    ]
+    action_evidence = evidence
+    if expected_answers:
+        question_errors, position = answered_question_position(expected_answers, evidence)
+        reasons.extend(question_errors)
+        if kind != "clarification":
+            executions = evidence.get("executions") or []
+            action_evidence = dict(evidence, executions=[] if position is None else executions[position + 1:])
+    commands = completed_commands(action_evidence, root, facts, kind, after) if kind in PROJECT_POLICIES else []
     if kind in PROJECT_POLICIES:
         if not commands:
             reasons.append(f"no successfully executed {kind} command was observed")
+    if kind in ("rust-build", "node-build", "rust-test", "node-test", "python-test", "rust-clean"):
+        reasons.extend(completion_contradictions(answer, kind.rsplit("-", 1)[1], facts.get("test_count")))
     if kind == "rust-build":
         binaries = [root / "target" / profile / "eval_math" for profile in ("debug", "release")]
         binaries = [p for p in binaries if p.is_file() and not p.is_symlink()]
@@ -192,13 +236,33 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
             if after.get("dist/" + name) != facts["before"]["src/" + name]:
                 reasons.append(f"incorrect or missing build artifact: dist/{name}")
     elif kind in ("rust-test", "node-test", "python-test"):
-        patterns = {
-            "rust-test": r"test result: ok\. 2 passed; 0 failed; 0 ignored;",
-            "node-test": r"(?m)^# tests 2\s*$[\s\S]*^# pass 2\s*$[\s\S]*^# fail 0\s*$",
-            "python-test": r"Ran 2 tests in [\d.]+s[\r\n]+OK(?:\s|$)",
-        }
-        if not any(re.search(patterns[kind], c["result"]) for c in commands):
+        if not full_test_suite_observed(commands, kind):
             reasons.append("the full two-test suite was not observed passing")
+    elif kind == "config-repair":
+        first = scenario["completions"][0]
+        if (not result.turns or result.turns[0].get("exit_code") != first["exit_code"]
+                or any(fragment not in result.turns[0]["output"] for fragment in first["contains"])):
+            reasons.append("the original missing-configuration failure was not observed")
+        target = root / facts["config_target"]
+        if facts["config_target"] in facts["before"]:
+            raise ValueError("configuration repair fixture already contained its target")
+        if (target.is_symlink() or not target.is_file()
+                or after.get(facts["config_target"], {}).get("bytes", 65537) > 65536):
+            reasons.append("the development configuration was not created as a bounded regular file")
+        else:
+            try:
+                configured = json.loads(target.read_text(encoding="utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                reasons.append("the development configuration is not valid JSON")
+            else:
+                expected = json.loads((root / facts["config_template"]).read_text(encoding="utf-8"))
+                if configured != expected:
+                    reasons.append("the development configuration differs from the documented defaults")
+        verified = completed_commands(action_evidence, root, facts, "python-test", after, policy=kind)
+        if not full_test_suite_observed(verified, "python-test"):
+            reasons.append("the repaired project was not verified by the full two-test suite")
+        reasons.extend(completion_contradictions(answer, "repair"))
+        reasons.extend(completion_contradictions(answer, "test", facts["test_count"]))
     elif kind == "rust-clean":
         if not any(name.startswith("target/") for name in facts["before"]):
             raise ValueError("clean fixture did not contain actual build artifacts")
@@ -210,13 +274,13 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
         queried = set()
         for execution in evidence.get("executions") or []:
             call = execution["call"]
-            if (call["name"] != "exec" or execution.get("exit_code") != 0
+            if (call["name"] != "exec" or execution.get("state") != "executed" or execution.get("exit_code") != 0
                     or execution.get("timed_out") or execution.get("interrupted")
-                    or not isinstance(call["args"].get("command"), str)
+                    or not isinstance(execution.get("command"), str)
                     or not isinstance(execution.get("result"), str)):
                 continue
             try:
-                commands = version_queries(call["args"]["command"], root, facts)
+                commands = version_queries(execution["command"], root, facts)
             except ValueError:
                 continue
             output_lines = {line.strip() for line in execution["result"].splitlines()}
@@ -231,15 +295,8 @@ def project_judgment(scenario: dict, answer: str, facts: dict, root: Path, after
                     f"missing, incorrect or contradictory {name} version: expected {number}, found {claims[name]}"
                 )
     elif kind == "clarification":
-        expected_answers = [
-            reply for completion in scenario.get("completions", [])
-            for reply in completion.get("answers", [])
-        ]
         if expected_answers:
             questions = evidence.get("questions") or []
-            if ([q.get("answer") for q in questions] != expected_answers
-                    or any(q.get("state") != "answered" for q in questions)):
-                reasons.append("declared clarification answers were not observed in the model conversation")
             for question in questions:
                 text = question.get("call", {}).get("args", {}).get("question", "")
                 if not isinstance(text, str) or clarification_request(response_prose(text)) is None:

@@ -17,7 +17,10 @@ def judge(scenario: dict, answer: str, facts: dict, root: Path, after: dict, res
     expected_exit = 1 if scenario.get("assistance", {}).get("result") == "none" and scenario["mode"] == "suggest" else 0
     if result.exit_code != expected_exit:
         reasons.append(f"nosh exit code: {result.exit_code}")
-    if metrics.get("task_status") not in ("completed", "local"):
+    accepted_statuses = {"completed", "local"}
+    if kind == "denied-rename":
+        accepted_statuses.add("incomplete")
+    if metrics.get("task_status") not in accepted_statuses:
         reasons.append(f"task did not complete: {metrics.get('task_status')}")
     if family == "assist":
         context_errors = assist_context.context_reasons(scenario, root, result, evidence)

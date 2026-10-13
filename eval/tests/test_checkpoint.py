@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from eval import checkpoint, report
+from .support import SUITE
 
 
 class CheckpointTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class CheckpointTests(unittest.TestCase):
         self.data = {
             "schema_version": 2,
             "metadata": {"run_id": "checkpoint-test", "observation": "native-v1",
-                         "dataset_revision": 12,
+                         "dataset_revision": SUITE["dataset_revision"],
                          "build": {"binary_sha256": "a" * 64}, "scenarios": [{"id": "example"}],
                          "seeds": [0, 1], "repeat": 1},
             "trials": [{"scenario_id": "example", "seed": 0, "repeat": 0, "status": "fail",

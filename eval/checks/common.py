@@ -34,7 +34,7 @@ def has_affirmative_match(answer: str, pattern: str) -> bool:
             r"(?:不要|不应|不必|无需|不需要|不能|没有|尚未|并非|不是|未|勿)"
             r"\s*(?:再|去|尝试)?\s*$"
             r"|(?:不要|不应|不能|别)(?:将|把)[^。！？!?；;\n，,]{0,30}$"
-            r"|\b(?:not|never|cannot|can't|don't|doesn't|didn't|without)"
+            r"|\b(?:not|never|cannot|can't|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|without)"
             r"\s+(?:have\s+to\s+|need\s+to\s+|try\s+to\s+)?$", prefix, re.I,
         )) or bool(previous_negated and re.fullmatch(
             r"\s*(?:or|and|或|或者|也不要)\s*", answer[previous_end:match.start()], re.I,
@@ -93,6 +93,97 @@ def response_prose(answer: str, keep_inline: bool = False, keep_paths: bool = Fa
         prose = re.sub(r"(?<![\w])(?:[\w.?-]+[/\\])+[\w.?-]*", "", prose)
         prose = re.sub(r"[\w.?-]+\.(?:py|js|rs|md|txt|json|toml|log|bin)(?!\w)", "", prose)
     return prose.strip()
+
+
+def completion_contradictions(answer: str, action: str, test_count: int | None = None) -> list[str]:
+    """Reject explicit contradictions of an observed success, not arbitrary prose."""
+    labels = {
+        "build": r"构建|编译|\bbuild\b|\bcompilation\b",
+        "test": r"测试|用例|\btests?\b|\btest suite\b",
+        "clean": r"清理|\bcleanup\b|\bcleaning\b",
+        "rename": r"重命名|改名|\brenam(?:e|ing)\b",
+        "commit": r"提交|\bcommit\b",
+        "repair": r"修复|配置|\brepair\b|\bconfiguration\b",
+    }[action]
+    reasons = []
+    prose = response_prose(answer)
+    clauses = re.split(r"[。！？!?；;\n，,]|(?<=\.)\s+|\bbut\b|但是|但", prose, flags=re.I)
+    resolved = (
+        rf"(?:{labels})\s*(?:全部|均|都)?(?:现在|目前|现已|已经|已)\s*"
+        r"(?:全部|均|都)?(?:成功)?(?:通过|成功|完成)"
+        rf"|(?:{labels})\s+(?:(?:are|is|have|has)\s+)?now\s+"
+        r"(?:(?:all|successfully)\s+)?(?:pass(?:ed)?|succeed(?:ed)?|complete[ds]?|successful)\b"
+    )
+    uncertain = (
+        r"如果|假如|假设|不确定|未确认|未验证|预计|可能|希望"
+        r"|\b(?:if|hypothetical|may|might|could|would|should|will|expect|hope)\b"
+    )
+    last_resolution = max(
+        (index for index, clause in enumerate(clauses)
+         if not re.search(uncertain, clause, re.I)
+         and has_affirmative_match(clause, resolved)),
+        default=-1,
+    )
+    for index, clause in enumerate(clauses):
+        if re.search(
+            r"之前|此前|原先|原本|上次|最初|第一次|如果|假如|例如|假设"
+            r"|\b(?:previously|earlier|initially|originally|previous|prior|if|example|hypothetical)\b",
+            clause, re.I,
+        ):
+            continue
+        # A causal explanation followed by an explicit resolved state describes
+        # the earlier failure; an assertion that it still fails does not.
+        if (index < last_resolution
+                and re.search(r"原因|导致|造成|引起|\b(?:because|caused?|causing|due to)\b", clause, re.I)
+                and not re.search(r"仍|依然|目前|当前|现在|再次|\b(?:still|currently|now|again)\b", clause, re.I)):
+            continue
+        current = re.sub(
+            r"(?<![\d.])0\s*(?:(?:个|项)?(?:测试|用例)(?:失败|未通过)"
+            r"|(?:tests?\s+)?(?:failed|failures?)\b)"
+            r"|\bno\s+tests?\s+(?:(?:have|has)\s+)?failed\b"
+            r"|(?:没有|无)(?:任何|一个)?(?:测试|用例)(?:失败|未通过)",
+            "", clause, flags=re.I,
+        )
+        failed = re.search(
+            rf"(?:{labels})\s*(?:任务|操作|执行|运行)?\s*(?:全部|均|都)?"
+            r"(?:仍然?|依然|目前|当前|现在|再次)?"
+            r"(?:未通过|未成功|未完成|失败)"
+            rf"|(?:{labels})\s+(?:(?:has|have|is|are|was|were|all|still|currently|now|again)\s+)*"
+            r"(?:failed\b|unsuccessful\b|not (?:run|executed|completed|successful)\b|did not pass\b)",
+            current, re.I,
+        )
+        absent = re.search(
+            rf"(?:未|没有|尚未|并未)\s*(?:执行|运行|进行|完成|开始)?"
+            rf"\s*(?:任何|全部|本次|相关|项目)?\s*(?:{labels})"
+            rf"|\b(?:did not|didn't|have not|haven't|could not|couldn't|cannot|can't)\s+"
+            rf"(?:run|execute|perform|complete|finish|create|make)\s+(?:(?:any|the|a|new)\s+)*(?:{labels})",
+            current, re.I,
+        )
+        if failed or absent:
+            reasons.append(f"answer contradicts the successful {action}: {clause.strip()}")
+        if action == "test" and test_count is not None:
+            totals = re.findall(
+                r"(?:共|总计|一共|运行了?|执行了?)\s*(\d+)\s*(?:个|项)?(?:测试|用例)"
+                r"|\b(?:ran|executed|total)\s+(\d+)\s+(?:tests?|cases?)\b",
+                clause, re.I,
+            )
+            if any(int(left or right) != test_count for left, right in totals):
+                reasons.append(f"answer reports an incorrect test count: {clause.strip()}")
+            if not re.search(r"审批|权限|approval|permission", clause, re.I):
+                counts = [(state.lower(), int(number)) for number, state in re.findall(
+                    r"(?<![\d.])(\d+)\s*(?:(?:tests?|cases?)\s+)?(passed|failed|skipped|ignored)\b",
+                    clause, re.I,
+                )]
+                counts.extend((state, int(number)) for state, number in re.findall(
+                    r"(通过|失败|跳过|忽略)\s*[:：]\s*(\d+)", clause,
+                ))
+                counts.extend((state, int(number)) for number, state in re.findall(
+                    r"(?<![\d.])(\d+)\s*(?:个|项)?(?:测试|用例)\s*(通过|失败|跳过|忽略)", clause,
+                ))
+                if any(number != (test_count if state in ("passed", "通过") else 0)
+                       for state, number in counts):
+                    reasons.append(f"answer reports incorrect test results: {clause.strip()}")
+    return reasons
 
 
 def mentioned_files(answer: str, known: dict | list) -> list[str]:

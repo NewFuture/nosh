@@ -8,13 +8,15 @@ shell 与本地 agent 都代表当前用户操作，不是彼此隔离的权限�
 
 初始 System 与工具 schema 在对话内保持稳定。动态背景使用独立 System 消息；只有角色边界采用特殊 token，正文按普通文本编码，不能注入角色或工具调用 token。消息角色不改变“参考资料不是任务”的规则或执行权限。
 
-普通 Agent 发送 **System 背景 + User 原始请求**；context、最近命令、项目文档、附件和真实失败事实放在背景中，原始请求不改写、不拼接背景。`#fix [补充说明]` 始终是 Agent 诊断上次失败的任务：User 自动包含失败诊断请求，有说明时原样作为 `Additional context from the user` 附加；失败命令、退出码和匹配输出仍由宿主放入 System 背景。内部 `Trigger` 不作为模型可见标签。
+普通 Agent 发送 **System 背景 + User 原始请求**；context、最近命令、项目文档、附件和真实失败事实放在背景中，原始请求不改写、不拼接背景。`#fix` 无正文时使用默认的失败诊断请求；有正文时，以简短的 `Help with the failed command.` 绑定失败对象，随后原样保留用户本次处理要求或补充线索，不再强制附加“解释原因并给修复方法”的目标。失败命令、退出码和匹配输出仍由宿主放入 System 背景。内部 `Trigger` 不作为模型可见标签。
 
 Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
 
 CommandAssist 的协议 User 是 nosh，不是终端用户。Generate/Fix/Next 都把本次任务、原始需求／命令、当前 cwd／可选 venv，以及适用的执行记录和失败证据集中在一个 User 任务包中；元数据使用键值段，原文使用安全文本围栏。System 只保留固定规则，终答反馈也由 nosh 以 User 消息发出，强调纯命令格式但不重复原始任务。不提供终端对话或 `ask_user`。Next 仅在用户命令成功后自动触发，没有手动目标入口；可附最多三条早于当前执行的真实用户命令快照，按旧到新排序，不自动推断 Goal 或绑定 Generate。不自动注入 README／AGENTS／manifest／Git 状态或 Agent 历史；原有查询和路径保护仍生效。详见 [CommandAssist](COMMAND-ASSIST.md)。
 
-用户终端输出仅由失败诊断入口按命令 ID 配对；普通请求不自动携带。Agent 继续使用 `[user_output]` 和同一对话去重，Fix 使用 User 包中的 `Terminal output (stdout/stderr not separated):`；二者保留相同的内部归属、完整性和 4,096 字节正文预算。模型视图省略计时、字节计数和冗余身份字段，但不省略异常质量或缺失状态。详见[输出采集设计](OUTPUT-CAPTURE.md)。
+用户终端输出仅由失败诊断入口按命令 ID 配对；普通请求不自动携带。Agent 继续使用 `[user_output]` 和同一对话去重，Fix 使用 User 包中的 `Terminal output (stdout/stderr not separated):`；二者保留相同的内部归属、完整性和 4,096 字节正文预算。Agent 模型视图省略耗时、原始字节计数和无异常标记，保留命令身份、执行 cwd、退出码、来源、状态及正文界定长度；Fix 在已有执行段之外仅补充必要的采集质量与正文。两者都不隐藏异常质量或缺失状态，宿主完整元数据不变。详见[输出采集设计](OUTPUT-CAPTURE.md)。
+
+动态背景先放本次附件或失败证据，再放可选项目参考；保留原有审计元数据和输出质量标记，不为缩短提示隐藏缺失、截断或混流状态。已有证据用于诊断，不为找回报错而重跑；用户要求的修复或验证可按正常权限流程执行。
 
 会话支持追加 System，不修改或重复初始规则。追加的 System 参与消息计数、回退及缓存前缀复用；步数上限的 System 收尾要求只作用于前一条用户请求，不限制后续任务。真实工具结果继续使用原有工具协议。
 
