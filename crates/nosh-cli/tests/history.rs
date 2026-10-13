@@ -65,7 +65,7 @@ fn launch_with_columns(home: &Path, cwd: &Path, columns: u16) -> Terminal {
     let mut command = shell_command(home, cwd);
     command.arg("--norc");
     let mut terminal = Terminal::new(command, 24, columns);
-    terminal.wait_for("history-test> ");
+    wait_empty_prompt(&mut terminal, 0, "history-test> ");
     terminal
 }
 
@@ -73,16 +73,16 @@ fn submit(terminal: &mut Terminal, input: &str, output: &str) {
     let start = terminal.output.len();
     terminal.send(format!("{input}\r").as_bytes());
     terminal.wait_for(output);
-    wait_empty_prompt(terminal, start);
+    wait_empty_prompt(terminal, start, "history-test> ");
 }
 
 fn submit_to_prompt(terminal: &mut Terminal, input: &str) {
     let start = terminal.output.len();
     terminal.send(format!("{input}\r").as_bytes());
-    wait_empty_prompt(terminal, start);
+    wait_empty_prompt(terminal, start, "history-test> ");
 }
 
-fn wait_empty_prompt(terminal: &mut Terminal, start: usize) {
+fn wait_empty_prompt(terminal: &mut Terminal, start: usize, prompt: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let output = String::from_utf8_lossy(&terminal.output[start..]);
@@ -93,10 +93,10 @@ fn wait_empty_prompt(terminal: &mut Terminal, start: usize) {
         if frame.is_some_and(|frame| {
             let before = frame.rsplit_once("\x1b7").expect("saved input cursor").0;
             let empty = before.rsplit_once("\x1b8").map_or_else(
-                || nosh_shell::style::strip_ansi(before).ends_with("history-test> "),
+                || nosh_shell::style::strip_ansi(before).ends_with(prompt),
                 |(_, input)| nosh_shell::style::strip_ansi(input).is_empty(),
             );
-            frame.contains("history-test> ") && !frame.contains("History [") && empty
+            frame.contains(prompt) && !frame.contains("History [") && empty
         }) {
             return;
         }
@@ -116,8 +116,9 @@ fn finish(terminal: &mut Terminal) {
 }
 
 fn finish_with_prompt(terminal: &mut Terminal, prompt: &str) {
+    let start = terminal.output.len();
     terminal.send(b"\x03");
-    terminal.wait_for(prompt);
+    wait_empty_prompt(terminal, start, prompt);
     terminal.send(b"exit 0\r");
     let until = Instant::now() + Duration::from_secs(15);
     loop {
@@ -287,7 +288,7 @@ fn selected_history_is_a_styled_inline_preview_until_explicitly_adopted() {
         .env_remove("NO_COLOR")
         .env("COLORTERM", "truecolor");
     let mut terminal = Terminal::new(command, 24, 100);
-    terminal.wait_for("history-test> ");
+    wait_empty_prompt(&mut terminal, 0, "history-test> ");
     submit(&mut terminal, "printf 'GHOST_OLD\\n'", "\nGHOST_OLD");
     submit(&mut terminal, "printf 'GHOST_NEW\\n'", "\nGHOST_NEW");
     wait_outcome(&home, "printf 'GHOST_OLD\\n'", 0);
@@ -409,8 +410,7 @@ fn repeated_commands_are_folded_for_navigation_but_not_for_recording_or_export()
         5,
         "folding and adoption must not alter or execute the raw history",
     );
-    terminal.send(b"\x15history -w \"$HISTFILE.export\"\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "\x15history -w \"$HISTFILE.export\"");
     let exported = std::fs::read_to_string(home.join("history.export")).unwrap();
     assert_eq!(exported.lines().filter(|line| *line == REPEATED).count(), 5);
     finish(&mut terminal);
@@ -777,7 +777,7 @@ fn default_shell_keeps_its_environment_bar_and_restores_input_feedback_after_his
             .unwrap(),
         0,
     );
-    finish_with_prompt(&mut terminal, "Ctrl+R history");
+    finish_with_prompt(&mut terminal, "❯ ");
 }
 
 fn git(directory: &Path, args: &[&str]) {
@@ -909,9 +909,12 @@ fn questions_are_recallable_without_a_model_but_not_exported_or_restored() {
         "not installed",
     );
     terminal.send(b"\x1b[A");
-    terminal.wait_for("question: memory");
+    wait_frame(&mut terminal, |frame| {
+        frame.contains("History [all]") && frame.contains("question: memory")
+    });
+    let start = terminal.output.len();
     terminal.send(b"\x1b");
-    terminal.wait_for("history-test> ");
+    wait_empty_prompt(&mut terminal, start, "history-test> ");
     submit(
         &mut terminal,
         "history -w \"$HISTFILE.export\"; printf 'EXPORT_DONE\\n'",
@@ -947,13 +950,19 @@ fn questions_are_recallable_without_a_model_but_not_exported_or_restored() {
     }
     let mut next = launch(&home, root.path());
     next.send(format!("\x12{QUESTION}").as_bytes());
-    next.wait_for("No matches");
+    wait_frame(&mut next, |frame| {
+        frame.contains("No matches") && frame.contains(QUESTION)
+    });
+    let start = next.output.len();
     next.send(b"\x1b");
-    next.wait_for("history-test> ");
+    wait_empty_prompt(&mut next, start, "history-test> ");
     next.send(b"\x12PERSISTED");
-    next.wait_for("PERSISTED");
+    wait_frame(&mut next, |frame| {
+        frame.contains("History [all]") && frame.contains("PERSISTED")
+    });
+    let start = next.output.len();
     next.send(b"\x1b");
-    next.wait_for("history-test> ");
+    wait_empty_prompt(&mut next, start, "history-test> ");
     finish(&mut next);
 }
 
