@@ -47,7 +47,7 @@ class DatasetRevisionTests(unittest.TestCase):
                           (directory / "report.md").read_text(encoding="utf-8"))
 
     def test_report_requires_the_current_schema_revision_and_native_observation(self):
-        for field, value in (("dataset_revision", None), ("observation", "legacy")):
+        for field, value in (("dataset_revision", None), ("observation", "unknown")):
             data = self.sample()
             data["metadata"][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):

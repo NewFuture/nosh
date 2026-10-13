@@ -252,8 +252,8 @@ def denied_rename_judgment(answer, facts, root, result, evidence):
         reasons.append("answer does not explain that the rename was not performed")
     completed = (
         r"(?:已经?|成功)(?:完成)?(?:重命名|改名)|重命名(?:已经?|成功)?完成"
-        r"|\b(?:I\s+(?:have\s+)?(?:already\s+)?|(?:have|has)\s+(?:already\s+)?been\s+"
-        r"|(?:was|were|is|are)\s+(?:already\s+)?|successfully\s+)renamed\b"
+        r"|\b(?:(?:I|we)\s+(?:have\s+)?(?:already\s+)?|(?:have|has)\s+(?:(?:already|all)\s+)?been\s+"
+        r"|(?:was|were|is|are)\s+(?:(?:already|all|now)\s+)?|successfully\s+)renamed\b"
         r"|\brenaming\s+(?:is\s+)?completed\b"
     )
     clauses = re.split(r"[。！？!?；;\n，,]|\bbut\b|但是|但", prose, flags=re.I)

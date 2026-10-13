@@ -593,7 +593,8 @@ def run_repl(argv: list[str], cwd: Path, env: dict, timeout: float, scenario: di
                     return len(trace.assistance) > assist_before and prompt()
                 if correction:
                     return "press Enter to run" in text and child.screen.line().startswith(PROMPT + correction)
-                returned = idle_prompt() and "\n" + PROMPT.rstrip() in text
+                echoed = any(prompt_matches(rendered, line) for rendered in text.splitlines())
+                returned = echoed and idle_prompt() and "\n" + PROMPT.rstrip() in text
                 agent_done = bool(SUMMARY.search(text)) and bool(STATS.search(text)) and idle_prompt()
                 return returned or agent_done or ("press Enter to run" in text and prompt())
 

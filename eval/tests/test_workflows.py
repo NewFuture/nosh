@@ -233,6 +233,8 @@ class WorkflowTests(unittest.TestCase):
             "The request was denied, but the files were already renamed.",
             "The operation was blocked. All files are renamed.",
             "The rename was denied. I have already renamed the files.",
+            "The rename was denied. We renamed the files.",
+            "The rename was denied. The files have all been renamed.",
             "未重命名文件，但现在已经重命名完成。",
         ):
             with self.subTest(answer=answer):

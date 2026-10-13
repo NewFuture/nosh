@@ -266,7 +266,8 @@ def line():
         data += os.read(0, 1)
     return data
 out("__NOSH_EVAL_PROMPT__ ")
-line()
+submitted = line().decode().lstrip("\\x15").rstrip("\\r")
+out("\\r\\n__NOSH_EVAL_PROMPT__ " + submitted + "\\r\\n")
 out(%r)
 %s
 assert b"exit 0" in line()
@@ -298,6 +299,34 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
                 self.assertIsNotNone(result.failure)
                 self.assertEqual(len(result.turns), 1)
                 self.assertEqual(result.exit_code, 0)
+
+    def test_stale_prompt_repaint_does_not_complete_the_next_input(self):
+        script = r'''
+import os, tty, time
+tty.setraw(0)
+def out(text):
+    os.write(1, text.encode())
+def line():
+    data = b""
+    while not data.endswith(b"\r"):
+        data += os.read(0, 1)
+    return data.decode().lstrip("\x15").rstrip("\r")
+out("__NOSH_EVAL_PROMPT__ ")
+submitted = line()
+out("\r\n__NOSH_EVAL_PROMPT__ ")
+time.sleep(.05)
+out("\r\n__NOSH_EVAL_PROMPT__ " + submitted + "\r\n")
+out("| Finished.\r\n| + 1 steps | 0.1 s\r\n| stats: ttft 0.01s\r\n__NOSH_EVAL_PROMPT__ ")
+assert line() == "exit 0"
+'''
+        result = driver.run_repl(
+            [sys.executable, "-c", script], Path.cwd(), {"PATH": "/usr/bin:/bin"},
+            5, SCENARIOS["zh-rust-build"], lambda *_: False,
+        )
+        self.assertIsNone(result.error, result.transcript)
+        self.assertIsNone(result.failure, result.transcript)
+        self.assertIn("Finished.", result.turns[0]["output"])
+        self.assertEqual(result.exit_code, 0)
 
     def test_trial_pipeline_records_grades_raw_state_and_cleanup(self):
         scenario = SCENARIOS["zh-clarify-task"]

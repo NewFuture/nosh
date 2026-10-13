@@ -170,41 +170,22 @@ struct CommandExecution {
 }
 
 impl Exec {
-    fn status(&self) -> &'static str {
+    fn status_and_feedback(&self) -> (&'static str, &str) {
         match self {
-            Self::ReadResult(_) => "read",
-            Self::Error(_) => "error",
-            Self::Correction(_) => "correction",
-            Self::UserAnswer(_) => "answered",
-            Self::CommandResult(..) => "executed",
-            Self::CommandError(..) => "execution_error",
-            Self::Denied(_) => "denied",
-            Self::RepeatedDenial(_) => "repeated_denial",
-            Self::Handoff(..) => "handoff",
-            Self::Aborted(..) => "aborted",
-            Self::Cancelled(_) => "cancelled",
-            Self::Failed(_) => "failed",
-            Self::Skipped(_) => "skipped",
+            Self::ReadResult(text) => ("read", text),
+            Self::Error(text) => ("error", text),
+            Self::Correction(text) => ("correction", text),
+            Self::UserAnswer(text) => ("answered", text),
+            Self::CommandResult(text, _) => ("executed", text),
+            Self::CommandError(text, _) => ("execution_error", text),
+            Self::Denied(text) => ("denied", text),
+            Self::RepeatedDenial(text) => ("repeated_denial", text),
+            Self::Handoff(_, text, _) => ("handoff", text),
+            Self::Aborted(text, _) => ("aborted", text),
+            Self::Cancelled(text) => ("cancelled", text),
+            Self::Failed(text) => ("failed", text),
+            Self::Skipped(text) => ("skipped", text),
         }
-    }
-
-    fn feedback(&self) -> String {
-        let text = match self {
-            Self::ReadResult(text)
-            | Self::Error(text)
-            | Self::Correction(text)
-            | Self::UserAnswer(text)
-            | Self::CommandResult(text, _)
-            | Self::CommandError(text, _)
-            | Self::Denied(text)
-            | Self::RepeatedDenial(text)
-            | Self::Handoff(_, text, _)
-            | Self::Aborted(text, _)
-            | Self::Cancelled(text)
-            | Self::Failed(text)
-            | Self::Skipped(text) => text,
-        };
-        text.clone()
     }
 
     fn observation(
@@ -213,8 +194,8 @@ impl Exec {
         call_index: usize,
         call: &ToolCall,
         current_cwd: &Path,
-        feedback: &str,
     ) -> serde_json::Value {
+        let (status, feedback) = self.status_and_feedback();
         let execution = match self {
             Self::CommandResult(_, execution)
             | Self::CommandError(_, execution)
@@ -244,7 +225,7 @@ impl Exec {
             "turn": turn,
             "call_index": call_index,
             "call": call,
-            "status": self.status(),
+            "status": status,
             "execution": execution,
             "current_cwd": current_cwd,
             "result": feedback,
@@ -644,10 +625,10 @@ impl Agent {
                     } else {
                         Exec::Skipped("[skipped: task is finishing without tools]".into())
                     };
-                    let feedback = result.feedback();
+                    let (_, feedback) = result.status_and_feedback();
                     if let Err(error) = self.engine.record_observation(
                         sid,
-                        result.observation(self.model_turn, index, call, &shell.cwd(), &feedback),
+                        result.observation(self.model_turn, index, call, &shell.cwd()),
                     ) {
                         let error = format!("could not record tool outcome: {error}");
                         ui.error(&error);
@@ -656,7 +637,7 @@ impl Agent {
                             out.status = TaskStatus::Failed;
                         }
                     }
-                    self.carry.push(Message::Tool(feedback));
+                    self.carry.push(Message::Tool(feedback.to_owned()));
                 }
                 break;
             }
@@ -694,12 +675,13 @@ impl Agent {
                     self.exec_call(shell, call, approval, ui)
                 };
                 let user_answer = matches!(&result, Exec::UserAnswer(_));
-                let feedback = result.feedback();
+                let (_, feedback) = result.status_and_feedback();
+                let feedback = feedback.to_owned();
                 let observation_error = self
                     .engine
                     .record_observation(
                         sid,
-                        result.observation(self.model_turn, index, call, &shell.cwd(), &feedback),
+                        result.observation(self.model_turn, index, call, &shell.cwd()),
                     )
                     .err();
                 match result {
