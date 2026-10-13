@@ -10,6 +10,7 @@ nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）
 - **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
 - **上下文历史**：上下键或 Ctrl+R 唤出历史候选，在原输入框筛选，↑/↓ 选择、Enter 回填、Esc 恢复草稿；搜索中 Ctrl+R 切全部／同工作树。命令保存到本地 SQLite，AI 提问仅留本次内存；范围、忽略规则和 history/fc 语义见[历史说明](docs/HISTORY.md)。
 - **上下文补全**：命令与路径默认 smart-case 模糊；内置 Git `switch`、GNU Make 静态目标及 `npm run`／Yarn 项目脚本补全，保留已加载定义的语义。共用一个有界、可取消的补全进程；覆盖和限制见[补全说明](docs/COMPLETION.md)。
+- **可见缩写**：适用的内置与自定义规则在空格时展开供编辑，Enter 展开后正常提交；Tab 可发现和选择，Ctrl+Space 保留原文，撤销不反弹。`#abbr` / `nosh abbr` 管理规则，粘贴、历史及 AI 回填不自动改写；详见[缩写说明](docs/ABBREVIATIONS.md)。
 - **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。每次任务附上当前项目类型、manifest 基本信息及 Git 状态；切换项目或进入普通目录后重新判断，不沿用上一项目的描述。
 - **本地推理**：基于 candle + GGUF。首次使用时按下载策略准备模型，之后可以完全离线；设备选择与运行限制见[推理说明](docs/INFERENCE.md)。
 - **安全**：agent 发起的命令要经过风险分级和审批。

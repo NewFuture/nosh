@@ -167,8 +167,14 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
     let path =
         std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&original_path)))
             .unwrap();
-    let mut shell = Shell::with_path(home.path(), Some(&path));
-    shell.wait(0, "ENV_SENTINEL");
+    let mut launch = command(home.path());
+    launch.arg("--safe").env("PATH", &path).env(
+        "PROMPT_COMMAND",
+        "NOSH_THEME_PROMPTS=$(( ${NOSH_THEME_PROMPTS:-0} + 1 )); printf 'THEME_PROMPT_READY:%s\\n' \"$NOSH_THEME_PROMPTS\"",
+    );
+    let mut shell = Shell::start(home.path(), launch);
+    let ready = shell.wait(0, "THEME_PROMPT_READY:1\r\n");
+    shell.wait(ready, "ENV_SENTINEL");
     let calls = || fs::read_to_string(&counter).unwrap().lines().count();
     let initial = calls();
     assert_eq!(
@@ -183,7 +189,8 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
     assert_eq!(calls(), initial, "editing re-ran Starship");
     let start = shell.bytes.len();
     shell.send(b"\x03");
-    shell.wait(start, "ENV_SENTINEL");
+    let ready = shell.wait(start, "THEME_PROMPT_READY:2\r\n");
+    shell.wait(ready, "ENV_SENTINEL");
     assert_eq!(calls(), initial + 1, "unchanged config recompiled styles");
 
     let initial = calls();
@@ -195,7 +202,8 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
     .unwrap();
     let start = shell.bytes.len();
     shell.send(b"\x03");
-    shell.wait(start, "ENV_SENTINEL");
+    let ready = shell.wait(start, "THEME_PROMPT_READY:3\r\n");
+    shell.wait(ready, "ENV_SENTINEL");
     assert_eq!(
         calls(),
         initial + 1,
@@ -210,8 +218,9 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
     fs::write(&native, toml::to_string(&table).unwrap()).unwrap();
     let start = shell.bytes.len();
     shell.send(b"\x03");
-    shell.wait(start, "\x1b[38;2;76;79;105m");
-    shell.wait(start, "ENV_SENTINEL");
+    let ready = shell.wait(start, "THEME_PROMPT_READY:4\r\n");
+    shell.wait(ready, "\x1b[38;2;76;79;105m");
+    shell.wait(ready, "ENV_SENTINEL");
     assert_eq!(
         calls(),
         initial + 2,

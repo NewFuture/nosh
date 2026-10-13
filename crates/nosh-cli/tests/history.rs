@@ -70,9 +70,38 @@ fn launch_with_columns(home: &Path, cwd: &Path, columns: u16) -> Terminal {
 }
 
 fn submit(terminal: &mut Terminal, input: &str, output: &str) {
+    let start = terminal.output.len();
     terminal.send(format!("{input}\r").as_bytes());
     terminal.wait_for(output);
-    terminal.wait_for("history-test> ");
+    wait_empty_prompt(terminal, start);
+}
+
+fn submit_to_prompt(terminal: &mut Terminal, input: &str) {
+    let start = terminal.output.len();
+    terminal.send(format!("{input}\r").as_bytes());
+    wait_empty_prompt(terminal, start);
+}
+
+fn wait_empty_prompt(terminal: &mut Terminal, start: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let output = String::from_utf8_lossy(&terminal.output[start..]);
+        let frame = output
+            .split("\x1b[?25l")
+            .filter_map(|frame| frame.split_once("\x1b[?25h").map(|(frame, _)| frame))
+            .last();
+        if frame.is_some_and(|frame| before_cursor(frame).ends_with("history-test> ")) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waiting for an empty prompt: {output:?}"
+        );
+        assert!(
+            terminal.poll().is_none(),
+            "terminal exited before its next prompt"
+        );
+    }
 }
 
 fn finish(terminal: &mut Terminal) {
@@ -385,16 +414,13 @@ fn execution_outcomes_persist_and_mixed_repeats_show_honest_counts() {
     setup(&home);
     let flag = root.path().join("outcome-flag");
     let mut terminal = launch(&home, root.path());
-    terminal.send(format!("{COMMAND}\r").as_bytes());
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, COMMAND);
     wait_outcome(&home, COMMAND, 1);
     std::fs::write(&flag, "").unwrap();
-    terminal.send(format!("{COMMAND}\r").as_bytes());
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, COMMAND);
     wait_outcome(&home, COMMAND, 0);
     std::fs::remove_file(&flag).unwrap();
-    terminal.send(format!("{COMMAND}\r").as_bytes());
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, COMMAND);
     wait_outcome(&home, COMMAND, 1);
     terminal.send(b"\x12outcome-flag");
     let frame = wait_frame(&mut terminal, |frame| {
@@ -422,8 +448,7 @@ fn execution_outcomes_persist_and_mixed_repeats_show_honest_counts() {
             .unwrap(),
         3
     );
-    terminal.send(b"\x15history -s 'echo OUTCOME_MANUAL'\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "\x15history -s 'echo OUTCOME_MANUAL'");
     wait_outcome(&home, "history -s 'echo OUTCOME_MANUAL'", 0);
     assert_eq!(
         sql(&home)
@@ -452,11 +477,9 @@ fn fc_replays_get_their_own_outcome_and_ignored_or_cleared_inputs_do_not_relabel
     let home = root.path().join("home");
     setup(&home);
     let mut terminal = launch(&home, root.path());
-    terminal.send(b"false\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "false");
     wait_outcome(&home, "false", 1);
-    terminal.send(b"fc -s false=true\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "fc -s false=true");
     wait_outcome(&home, "true", 0);
     assert_eq!(
         sql(&home)
@@ -468,11 +491,9 @@ fn fc_replays_get_their_own_outcome_and_ignored_or_cleared_inputs_do_not_relabel
             .unwrap(),
         0
     );
-    terminal.send(b"HISTCONTROL=ignorespace\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "HISTCONTROL=ignorespace");
     wait_outcome(&home, "HISTCONTROL=ignorespace", 0);
-    terminal.send(b" false\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, " false");
     assert_eq!(
         sql(&home)
             .query_row(
@@ -484,8 +505,7 @@ fn fc_replays_get_their_own_outcome_and_ignored_or_cleared_inputs_do_not_relabel
         0
     );
     wait_outcome(&home, "HISTCONTROL=ignorespace", 0);
-    terminal.send(b"history -c\r");
-    terminal.wait_for("history-test> ");
+    submit_to_prompt(&mut terminal, "history -c");
     assert_eq!(
         sql(&home)
             .query_row("SELECT count(*) FROM commands", [], |row| row

@@ -24,6 +24,7 @@
 | F2，`#` 内置命令草稿 | 提示使用 Tab 或回车，不请求模型或采用后台候选 |
 | Tab，`#` 内置命令草稿 | 本地补全子命令及 `mode`／`think`／`auto` 固定值；无结果不兜底 AI |
 | Ctrl+Z、Ctrl+_ | 撤销输入编辑，不是再次执行命令 |
+| Ctrl+Space，普通 Emacs／Vi 插入编辑 | 插入空格并保留本条原文；不自动展开缩写或因未展开而自动纠错/转交 AI |
 | Ctrl+Y、Alt+/ | 重做输入编辑；不重新调用 AI |
 | Vi `p/P` | 保留内部剪切缓冲的粘回；Emacs 粘回无默认键，可配置现有动作 |
 | Enter，补全菜单 | 只接受候选，不提交草稿；空菜单／临时候选关闭时也不提交 |
@@ -87,6 +88,7 @@ history_search = ["Ctrl+R"]
 | `cancel` | 当前辅助交互取消；搜索中恢复原状态 |
 | `insert_newline` | 插入换行 |
 | `undo`、`redo` | 原生编辑历史 |
+| `literal_space` | 插入空格并保留原文；菜单/搜索不支持，Vi 普通/选区态不执行 |
 | `cut_to_start`、`cut_word_left`、`kill_line`、`delete_word_left` | 对应真实原生编辑原语，不另改词／多行边界 |
 | `paste_before`、`paste_after` | 已有内部剪切缓冲，不是系统剪贴板 |
 

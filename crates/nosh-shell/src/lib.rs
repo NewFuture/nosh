@@ -1,6 +1,7 @@
 //! nosh shell core: an embedded brush shell shared by the user and the agent,
 //! the interactive REPL, and the AI trigger pipeline (design §4).
 
+pub mod abbreviations;
 mod assist_display;
 pub mod backend;
 mod command_context;

@@ -24,6 +24,9 @@ impl Correction {
         observations: &[Observation],
         index: &Index,
     ) -> Option<Self> {
+        if input.literal {
+            return None;
+        }
         if !index.complete || index.cwd != input.context.cwd || index.path != input.context.path {
             return None;
         }

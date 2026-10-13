@@ -4,6 +4,56 @@ use std::path::{Path, PathBuf};
 
 use crate::{EmbeddedShell, Resolution, backend, input_assist, suggestion};
 
+pub(crate) fn resolve_file(
+    context: &input_assist::Context,
+    path: Option<&str>,
+    name: &str,
+) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let fixed = if name.contains('/') {
+        Some(Path::new(name))
+    } else if path == context.path.as_deref() {
+        context.hashed_commands.get(name).map(PathBuf::as_path)
+    } else {
+        None
+    };
+    let search = path.filter(|_| fixed.is_none() || (context.check_hash && !name.contains('/')));
+    let paths = fixed.into_iter().map(|p| context.cwd.join(p)).chain(
+        search
+            .into_iter()
+            .flat_map(|value| value.split(':'))
+            .take(129)
+            .map(|directory| context.cwd.join(directory).join(name)),
+    );
+    let mut failure = None;
+    for (index, path) in paths.enumerate() {
+        if index >= 128 + usize::from(fixed.is_some()) {
+            return Err("command lookup directory limit".into());
+        }
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                let encoded = std::ffi::CString::new(path.as_os_str().as_bytes())
+                    .map_err(|e| e.to_string())?;
+                // SAFETY: access only inspects the NUL-terminated candidate path.
+                if unsafe { libc::access(encoded.as_ptr(), libc::X_OK) } == 0 {
+                    return Ok(Some(path));
+                }
+                let error = std::io::Error::last_os_error();
+                if !matches!(
+                    error.raw_os_error(),
+                    Some(libc::EACCES | libc::ENOENT | libc::ENOTDIR)
+                ) {
+                    failure = Some(format!("{}: {error}", path.display()));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failure = Some(format!("{}: {error}", path.display())),
+        }
+    }
+    failure.map_or(Ok(None), Err)
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandSnapshot(input_assist::Context);
 

@@ -258,6 +258,7 @@ CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，
 | `#help` | 显示帮助，不请求模型 |
 | `#mode [confirm\|auto\|yolo]` | 查看或切换审批模式 |
 | `#theme [名称或路径]` | 查看当前主题，或校验并自动保存主题选择；无需重启 |
+| `#abbr [list\|set\|remove\|enable\|disable] ...` | 查看或管理可见缩写，持久化规则；不调用模型，详见[缩写说明](ABBREVIATIONS.md) |
 | `#think [on\|off]` | 查看或开关思考；改变设置时重置对话 |
 | `#auto [on\|off]` | 查看或暂停自动错误路由及自动 Next/Fix |
 | `#fix [补充说明]` | 始终由 Agent 诊断上次失败，自动附带失败命令、退出码及匹配输出；说明可省略，工具调用按 Agent 审批规则执行 |
@@ -329,6 +330,16 @@ edit_mode = "auto"            # auto | emacs | vi
 ai_suggest = ["F2"]
 undo = ["Ctrl+Z", "Ctrl+_"]
 redo = ["Ctrl+Y", "Alt+/"]
+literal_space = ["Ctrl+Space"]
+
+[shell.abbreviations]
+enabled = true
+builtins = true
+probe_commands = false       # 仅可信 PATH 显式开启外部 Git / ls 能力探测
+disabled = []
+
+[shell.abbreviations.rules]
+gmain = { expansion = "git switch main" }
 
 [agent]
 approval = "auto"             # confirm | auto | yolo

@@ -38,6 +38,7 @@ impl Coordinates {
 }
 
 struct Analyzer<'a> {
+    abbreviation_positions: std::collections::BTreeSet<usize>,
     input: &'a Input,
     options: brush_parser::ParserOptions,
     result: Analysis,
@@ -48,6 +49,27 @@ struct Analyzer<'a> {
 
 pub(super) fn analyze(input: &Input) -> Analysis {
     let mut a = Analyzer {
+        abbreviation_positions: if input.literal {
+            Default::default()
+        } else {
+            crate::abbreviations::command_ranges(
+                &input.text,
+                input
+                    .context
+                    .ai_enabled
+                    .then_some(input.context.ai_prefix.as_str()),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|range| {
+                !input
+                    .expanded_abbreviations
+                    .iter()
+                    .any(|span| span.start < range.end && range.start < span.end)
+            })
+            .map(|range| range.start)
+            .collect()
+        },
         input,
         options: input.context.options(),
         result: Analysis::new(input.version),
@@ -89,7 +111,7 @@ pub(super) fn analyze(input: &Input) -> Analysis {
             a.find(0..input.text.len(), State::Known, Reason::Ai);
         }
         crate::inline_commands::Input::Shell
-            if ctx.ai_enabled && trigger::apostrophe_prose(input.text.trim()) =>
+            if !input.literal && ctx.ai_enabled && trigger::apostrophe_prose(input.text.trim()) =>
         {
             a.paint(0..input.text.len(), Role::Ai);
             a.find(0..input.text.len(), State::Known, Reason::Ai);
@@ -445,18 +467,18 @@ impl Analyzer<'_> {
         })
     }
 
-    fn command_kind(&self, name: &str, scope: &Scope) -> Option<Role> {
+    fn command_kind(&self, name: &str, scope: &Scope, abbreviation: bool) -> Option<Role> {
         let context = &self.input.context;
         if scope.dynamic {
             None
+        } else if abbreviation && context.abbreviations.applicable.contains(name) {
+            Some(Role::Abbreviation)
         } else if context.aliases.contains(name) {
             Some(Role::Alias)
         } else if scope.functions.contains(name) || context.functions.contains(name) {
             Some(Role::Function)
         } else if context.builtins.contains(name) {
             Some(Role::Builtin)
-        } else if context.abbreviations.applicable.contains(name) {
-            Some(Role::Abbreviation)
         } else {
             None
         }
@@ -603,11 +625,23 @@ impl Analyzer<'_> {
             .as_ref()
             .and_then(|w| self.literal(w, &local));
         let context = &self.input.context;
-        let role = name
-            .as_deref()
-            .and_then(|name| self.command_kind(name, scope));
-        let check_prose =
-            role.is_none() && !local.dynamic && context.ai_enabled && context.trigger_on_error;
+        let role = name.as_deref().and_then(|name| {
+            self.command_kind(
+                name,
+                scope,
+                simple.word_or_name.as_ref().is_some_and(|word| {
+                    word.value == name
+                        && self
+                            .abbreviation_positions
+                            .contains(&self.word_range(word, coords).start)
+                }),
+            )
+        });
+        let check_prose = !self.input.literal
+            && role.is_none()
+            && !local.dynamic
+            && context.ai_enabled
+            && context.trigger_on_error;
         let mut argv: Vec<String> = name.iter().filter(|_| check_prose).cloned().collect();
         let mut printf_sets_variable = false;
         for item in items {

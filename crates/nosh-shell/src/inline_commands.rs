@@ -45,6 +45,7 @@ pub enum ManagementCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
+    Abbr(crate::abbreviations::Operation),
     Theme(Option<String>),
     Auto(Option<bool>),
     Fix(String),
@@ -103,6 +104,7 @@ impl Error {
 #[derive(Clone, Copy)]
 enum Kind {
     Help,
+    Abbr,
     Theme,
     Mode,
     Think,
@@ -122,6 +124,13 @@ struct Definition {
 }
 
 const COMMANDS: &[Definition] = &[
+    Definition {
+        name: "abbr",
+        syntax: "abbr [list|set|remove|enable|disable] ...",
+        zh: "查看和管理可见命令缩写",
+        en: "inspect and manage visible command abbreviations",
+        kind: Kind::Abbr,
+    },
     Definition {
         name: "help",
         syntax: "help",
@@ -194,6 +203,10 @@ impl Definition {
 
     fn values(&self) -> Vec<(&'static str, Option<&'static str>)> {
         match self.kind {
+            Kind::Abbr => ["list", "set", "remove", "enable", "disable"]
+                .into_iter()
+                .map(|name| (name, None))
+                .collect(),
             Kind::Theme => crate::theme::Builtin::ALL
                 .into_iter()
                 .map(|theme| {
@@ -224,6 +237,21 @@ impl Definition {
     }
 
     fn parse(&self, args: &str) -> Option<Command> {
+        if matches!(self.kind, Kind::Abbr) {
+            let tokens = brush_parser::tokenize_str(args).ok()?;
+            let words = tokens
+                .iter()
+                .map(|token| {
+                    let brush_parser::Token::Word(value, _) = token else {
+                        return None;
+                    };
+                    crate::trigger::static_word(&brush_parser::ast::Word::new(value))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            return crate::abbreviations::Operation::parse(&words)
+                .ok()
+                .map(Command::Abbr);
+        }
         if matches!(self.kind, Kind::Fix) {
             return Some(Command::Fix(args.to_owned()));
         }
@@ -271,7 +299,7 @@ impl Definition {
             Kind::Clear => Some(Command::Manage(ManagementCommand::Clear)),
             Kind::Ctx => Some(Command::Manage(ManagementCommand::Ctx)),
             Kind::Status => Some(Command::Manage(ManagementCommand::Status)),
-            Kind::Fix | Kind::Theme => unreachable!(),
+            Kind::Fix | Kind::Theme | Kind::Abbr => unreachable!(),
         }
     }
 }
@@ -461,17 +489,20 @@ mod tests {
 
     #[test]
     fn catalog_and_fixed_parameters_share_the_contract() {
-        assert_eq!(COMMANDS.len(), 9);
+        assert_eq!(COMMANDS.len(), 10);
         for definition in COMMANDS {
             assert!(matches!(
                 parse(&format!("#{}", definition.name), "#", true),
                 Input::Command(_)
             ));
             for (value, _) in definition.values() {
-                assert!(matches!(
-                    parse(&format!("#{} {value}", definition.name), "#", true),
-                    Input::Command(_)
-                ));
+                let line = format!("#{} {value}", definition.name);
+                let input = parse(&line, "#", true);
+                if matches!(definition.kind, Kind::Abbr) && value != "list" {
+                    assert!(matches!(input, Input::Error(_)));
+                } else {
+                    assert!(matches!(input, Input::Command(_)));
+                }
             }
         }
         assert_eq!(
@@ -565,7 +596,7 @@ mod tests {
             let mut result = line.to_owned();
             result.replace_range(scope.span, "help");
             assert_eq!(result, if prefix == "#" { "#help" } else { "  问help" });
-            assert_eq!(scope.values.len(), 9);
+            assert_eq!(scope.values.len(), 10);
         }
         let line = "#mode au";
         let scope = completion_scope(line, line.len(), "#").unwrap();

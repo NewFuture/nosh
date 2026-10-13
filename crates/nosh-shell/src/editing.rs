@@ -195,6 +195,7 @@ enum Action {
     DeleteWordLeft,
     PasteBefore,
     PasteAfter,
+    LiteralSpace,
 }
 
 impl Action {
@@ -216,6 +217,7 @@ impl Action {
             "delete_word_left" => Some(Self::DeleteWordLeft),
             "paste_before" => Some(Self::PasteBefore),
             "paste_after" => Some(Self::PasteAfter),
+            "literal_space" => Some(Self::LiteralSpace),
             _ => None,
         }
     }
@@ -238,15 +240,18 @@ impl Action {
             Self::DeleteWordLeft => "delete_word_left",
             Self::PasteBefore => "paste_before",
             Self::PasteAfter => "paste_after",
+            Self::LiteralSpace => "literal_space",
         }
     }
 
     fn supported(self, context: Context) -> bool {
         match context {
-            Context::HistorySearch => {
-                !matches!(self, Self::CompleteOrAi | Self::Complete | Self::AiSuggest)
-            }
-            Context::Editing | Context::Menu => self != Self::AcceptSearch,
+            Context::HistorySearch => !matches!(
+                self,
+                Self::CompleteOrAi | Self::Complete | Self::AiSuggest | Self::LiteralSpace
+            ),
+            Context::Editing => self != Self::AcceptSearch,
+            Context::Menu => !matches!(self, Self::AcceptSearch | Self::LiteralSpace),
         }
     }
 
@@ -319,6 +324,10 @@ impl Action {
             Self::DeleteWordLeft => R::Edit(vec![EditCommand::BackspaceWord]),
             Self::PasteBefore => R::Edit(vec![EditCommand::PasteCutBufferBefore]),
             Self::PasteAfter => R::Edit(vec![EditCommand::PasteCutBufferAfter]),
+            Self::LiteralSpace if matches!(mode, EditorMode::ViNormal | EditorMode::ViVisual) => {
+                R::None
+            }
+            Self::LiteralSpace => R::LiteralSpace,
         }
     }
 }
@@ -483,6 +492,7 @@ fn action_of(event: &ReedlineEvent) -> Option<Action> {
         ReedlineEvent::SearchHistory => Some(Action::HistorySearch),
         ReedlineEvent::AcceptHistorySearch => Some(Action::AcceptSearch),
         ReedlineEvent::CancelHistorySearch => Some(Action::Cancel),
+        ReedlineEvent::LiteralSpace => Some(Action::LiteralSpace),
         ReedlineEvent::CompleteOrHostCommand { .. } => Some(Action::CompleteOrAi),
         ReedlineEvent::ExecuteHostCommand(name) if name == crate::repl::SUGGEST_COMMAND => {
             Some(Action::AiSuggest)
@@ -616,6 +626,13 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
             );
         }
     } else {
+        if context == Context::Editing && matches!(mode, EditorMode::Emacs | EditorMode::ViInsert) {
+            bind(
+                Key::new(KeyModifiers::CONTROL, KeyCode::Char(' ')),
+                Action::LiteralSpace,
+                false,
+            );
+        }
         bind(
             Key::new(KeyModifiers::NONE, KeyCode::Tab),
             Action::CompleteOrAi,
@@ -834,6 +851,15 @@ impl Config {
                         if !action.supported(context) {
                             if specific {
                                 errors.push(format!("{path}: action unavailable in this context"));
+                            }
+                            continue;
+                        }
+                        if action == Action::LiteralSpace
+                            && matches!(mode, EditorMode::ViNormal | EditorMode::ViVisual)
+                        {
+                            if explicit_mode {
+                                errors
+                                    .push(format!("{path}: literal_space requires insertion mode"));
                             }
                             continue;
                         }

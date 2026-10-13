@@ -26,6 +26,7 @@ pub struct Config {
     pub worker: Option<WorkerCommand>,
     pub abbreviations: crate::input_assist::Abbreviations,
     pub selection_observer: Option<SelectionObserver>,
+    pub owner: Option<crate::abbreviations::Session>,
 }
 
 impl std::fmt::Debug for Config {
@@ -38,6 +39,7 @@ impl std::fmt::Debug for Config {
             .field("worker", &self.worker)
             .field("abbreviations", &self.abbreviations)
             .field("selection_observer", &self.selection_observer.is_some())
+            .field("owner", &self.owner)
             .finish()
     }
 }
@@ -51,6 +53,7 @@ impl Default for Config {
             worker: None,
             abbreviations: Default::default(),
             selection_observer: None,
+            owner: None,
         }
     }
 }
