@@ -119,12 +119,17 @@ pub fn samples(
         ),
         (
             "history",
-            "git status --short",
+            "git",
             None,
             "",
             PromptInteraction::HistorySearch {
                 term: "git",
                 has_match: true,
+                status: Some(reedline::HistorySearchStatus {
+                    title: tr!("历史 [全部]", "History [all]"),
+                    description: Some(tr!("输入目录: 项目根目录", "Input directory: project root")),
+                    ..Default::default()
+                }),
             },
         ),
     ] {
@@ -177,7 +182,10 @@ pub fn samples(
         });
         let indicator = styles.paint(
             Role::Positive,
-            if matches!(interaction, PromptInteraction::HistorySearch { .. }) {
+            if matches!(
+                interaction,
+                PromptInteraction::HistorySearch { status: None, .. }
+            ) {
                 crate::repl::INLINE_HISTORY_INDICATOR
             } else {
                 terminal.glyph("❯ ", "> ")
@@ -185,7 +193,9 @@ pub fn samples(
         );
         let mut input = indicator;
         for (index, word) in buffer.split_inclusive(' ').enumerate() {
-            let role = if name == "error" {
+            let role = if name == "history" {
+                input_assist::Role::Text
+            } else if name == "error" {
                 input_assist::Role::Error
             } else if index == 0 {
                 input_assist::Role::External
@@ -195,6 +205,13 @@ pub fn samples(
             input.push_str(
                 &input_assist::role_style(role, styles)
                     .paint(word)
+                    .to_string(),
+            );
+        }
+        if name == "history" {
+            input.push_str(
+                &super::editor::hint_style(styles)
+                    .paint(" status")
                     .to_string(),
             );
         }
@@ -232,11 +249,9 @@ mod tests {
         };
         for sample in samples(Theme::default(), terminal, 80, "Auto", true) {
             if sample.name == "history" {
-                assert!(
-                    sample
-                        .input
-                        .starts_with(crate::repl::INLINE_HISTORY_INDICATOR)
-                );
+                assert!(sample.input.starts_with(terminal.glyph("❯ ", "> ")));
+                assert!(sample.input.ends_with("git status"));
+                assert!(sample.status.contains(tr!("历史 [全部]", "History [all]")));
             }
             let expected = match sample.name {
                 "advice" => tr!("建议: git status --short", "Next: git status --short"),

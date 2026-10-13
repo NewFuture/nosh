@@ -13,7 +13,7 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | `nosh-permissions` | AST 风险分析、路径分类、审批策略、会话放行 | 无 |
 | `nosh-hub` | 模型清单、选源、下载、校验、安装与离线导入 | `nosh-platform` |
 | `nosh-llm` | Candle 模型、分词、模板、采样、对话 token 日志、KV、设备选择 | `nosh-engine` |
-| `nosh-shell` | brush 会话、REPL、输入编辑、补全、终端与进程管理 | `nosh-platform` |
+| `nosh-shell` | brush 会话、REPL、输入编辑/历史、补全、终端与进程管理 | `nosh-platform` |
 | `nosh-core` | Agent、CommandAssist、上下文、工具、审批 UI、REPL AI 适配 | `nosh-engine`、`nosh-permissions`、`nosh-platform`、`nosh-shell` |
 | `nosh-cli` | 参数与配置、模型装配、子命令、评测观测包装器 | 上述七个 crate |
 
@@ -50,6 +50,7 @@ Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存�
 | `nosh-core/src/command_assist.rs`、`command_assist/tests.rs` | Generate / Fix / Next 的固定查询集合和直接终态 |
 | `nosh-core/src/command_help/`、`user_input/` | 命令帮助与提问能力的实现辅助及测试 |
 | `nosh-shell/src/completion/`、`input_assist/` | 编辑器适配、后台服务、分析和有界查询 |
+| `nosh-shell/src/history.rs`、`history/` | 历史适配器负责查询与行提示，Store 统一 SQLite、内存提问、brush 视图和结果聚合；Reedline 只负责筛选、选择、预览和回填，真实 CLI 回归在 `nosh-cli/tests/history.rs` |
 | `tests/agent_flow.rs`、`tests/flows/` | 跨 crate 的 Agent、CommandAssist、context、permissions 流程；共用 `support.rs` 的夹具与进程内锁 |
 | `nosh-core/tests/terminal.rs`、`nosh-core/tests/terminal/` | 同一测试目标和三个精确命名的子进程 probe；按显示、审批、输入、命令辅助分文件，共用 PTY 驱动 |
 | `tests/fixtures/model_context.txt` | 推理与 ARM 内存测试共用的固定语料；不是设计文档，不随文档改写 |

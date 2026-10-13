@@ -12,6 +12,7 @@ publish.workspace = true
 brush-builtins.workspace = true
 brush-core = { workspace = true, features = ["serde"] }
 brush-parser.workspace = true
+chrono.workspace = true
 crossterm.workspace = true
 csv.workspace = true
 filedescriptor.workspace = true
@@ -19,6 +20,7 @@ libc.workspace = true
 nosh-platform.workspace = true
 nu-ansi-term.workspace = true
 reedline.workspace = true
+rusqlite.workspace = true
 signal-hook.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
@@ -26,6 +28,7 @@ thiserror.workspace = true
 tokio.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+uuid.workspace = true
 vte.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

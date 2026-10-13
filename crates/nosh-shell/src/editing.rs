@@ -243,10 +243,9 @@ impl Action {
 
     fn supported(self, context: Context) -> bool {
         match context {
-            Context::HistorySearch => matches!(
-                self,
-                Self::HistorySearch | Self::Accept | Self::AcceptSearch | Self::Cancel
-            ),
+            Context::HistorySearch => {
+                !matches!(self, Self::CompleteOrAi | Self::Complete | Self::AiSuggest)
+            }
             Context::Editing | Context::Menu => self != Self::AcceptSearch,
         }
     }
@@ -283,6 +282,7 @@ impl Action {
                 ])
             }
             Self::HistorySearch => R::SearchHistory,
+            Self::Accept if context == Context::HistorySearch => R::AcceptHistorySearch,
             Self::Accept if context == Context::Menu => R::Enter,
             Self::Accept
                 if context == Context::Editing
@@ -503,6 +503,20 @@ fn action_of(event: &ReedlineEvent) -> Option<Action> {
     }
 }
 
+fn history_editing_event(event: ReedlineEvent) -> Option<ReedlineEvent> {
+    use ReedlineEvent as R;
+    let command = match event {
+        event @ R::Edit(_) => return Some(event),
+        R::UntilFound(events) => return events.into_iter().find_map(history_editing_event),
+        R::Left => EditCommand::MoveLeft { select: false },
+        R::Right => EditCommand::MoveRight { select: false },
+        R::ToStart => EditCommand::MoveToStart { select: false },
+        R::ToEnd => EditCommand::MoveToEnd { select: false },
+        _ => return None,
+    };
+    Some(R::Edit(vec![command]))
+}
+
 fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key, Binding> {
     let native = match (mode, context) {
         (_, Context::HistorySearch) => Keybindings::new(),
@@ -526,6 +540,15 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
             )
         })
         .collect();
+    if context == Context::HistorySearch {
+        keys = preset(EditorMode::Emacs, Context::Editing, caps)
+            .into_iter()
+            .filter_map(|(key, mut binding)| {
+                binding.event = history_editing_event(binding.event)?;
+                Some((key, binding))
+            })
+            .collect();
+    }
     let mut bind = |key: Key, action: Action, implicit: bool| {
         let key = key.normalized(caps);
         keys.insert(
@@ -551,7 +574,7 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
         );
         bind(
             Key::new(KeyModifiers::NONE, KeyCode::Esc),
-            Action::AcceptSearch,
+            Action::Cancel,
             false,
         );
         bind(
@@ -566,12 +589,12 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
         );
         for (key, event) in [
             (
-                Key::new(KeyModifiers::NONE, KeyCode::Backspace),
-                ReedlineEvent::Edit(vec![EditCommand::Backspace]),
+                Key::new(KeyModifiers::NONE, KeyCode::Up),
+                ReedlineEvent::MenuPrevious,
             ),
             (
-                Key::new(KeyModifiers::CONTROL, KeyCode::Char('h')),
-                ReedlineEvent::Edit(vec![EditCommand::Backspace]),
+                Key::new(KeyModifiers::NONE, KeyCode::Down),
+                ReedlineEvent::MenuNext,
             ),
             (
                 Key::new(KeyModifiers::CONTROL, KeyCode::Char('d')),
@@ -583,7 +606,7 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
             ),
         ] {
             keys.insert(
-                key,
+                key.normalized(caps),
                 Binding {
                     action: None,
                     event,
@@ -1167,6 +1190,318 @@ mod tests {
     }
 
     #[test]
+    fn history_defaults_separate_scope_selection_and_nonexecuting_adoption() {
+        let config = Config {
+            mode: Mode::Emacs,
+            ..Default::default()
+        };
+        let (compiled, notices) = config.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        assert_eq!(
+            editor.parse_event_with_context(
+                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                EditContext::Editing
+            ),
+            ReedlineEvent::SearchHistory,
+        );
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                ReedlineEvent::SearchHistory,
+            ),
+            (KeyCode::Tab, KeyModifiers::NONE, ReedlineEvent::None),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, ReedlineEvent::None),
+            (KeyCode::Down, KeyModifiers::NONE, ReedlineEvent::MenuNext),
+            (KeyCode::Up, KeyModifiers::NONE, ReedlineEvent::MenuPrevious),
+            (
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                ReedlineEvent::AcceptHistorySearch,
+            ),
+            (
+                KeyCode::Right,
+                KeyModifiers::NONE,
+                ReedlineEvent::Edit(vec![EditCommand::MoveRight { select: false }]),
+            ),
+        ] {
+            assert_eq!(
+                editor.parse_event_with_context(key(code, modifiers), EditContext::HistorySearch),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn history_search_remapping_also_remaps_scope_switching() {
+        let mut config = Config {
+            mode: Mode::Emacs,
+            ..Default::default()
+        };
+        config
+            .keybindings
+            .actions
+            .insert("history_search".into(), vec!["F3".into()]);
+        let (compiled, notices) = config.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        for context in [EditContext::Editing, EditContext::HistorySearch] {
+            assert_eq!(
+                editor.parse_event_with_context(key(KeyCode::F(3), KeyModifiers::NONE), context),
+                ReedlineEvent::SearchHistory,
+            );
+            assert_eq!(
+                editor.parse_event_with_context(
+                    key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                    context,
+                ),
+                ReedlineEvent::None,
+            );
+        }
+    }
+
+    #[test]
+    fn history_tabs_are_inactive_in_every_mode_without_changing_completion_tabs() {
+        for enhanced in [false, true] {
+            for (mode, prompt_mode) in [
+                (Mode::Emacs, PromptEditMode::Emacs),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Insert)),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Normal)),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Visual)),
+            ] {
+                let config = Config {
+                    mode,
+                    ..Default::default()
+                };
+                let (compiled, notices) = config.compile(Capabilities { enhanced }, true);
+                assert!(notices.is_empty(), "{notices:?}");
+                let mut editor = compiled.editor();
+                editor.handle_mode_specific_event(ReedlineEvent::SwitchMode(prompt_mode.clone()));
+                for (code, modifiers) in [
+                    (KeyCode::Tab, KeyModifiers::NONE),
+                    (KeyCode::Tab, KeyModifiers::SHIFT),
+                    (KeyCode::BackTab, KeyModifiers::NONE),
+                    (KeyCode::BackTab, KeyModifiers::SHIFT),
+                    (KeyCode::Char('i'), KeyModifiers::CONTROL),
+                ] {
+                    assert_eq!(
+                        editor.parse_event_with_context(
+                            key(code, modifiers),
+                            EditContext::HistorySearch
+                        ),
+                        ReedlineEvent::None,
+                        "{prompt_mode:?}: {modifiers:?} {code:?}",
+                    );
+                }
+                if matches!(
+                    prompt_mode,
+                    PromptEditMode::Emacs | PromptEditMode::Vi(PromptViMode::Insert)
+                ) {
+                    for context in [EditContext::Editing, EditContext::Menu] {
+                        assert_eq!(
+                            editor.parse_event_with_context(
+                                key(KeyCode::Tab, KeyModifiers::NONE),
+                                context
+                            ),
+                            ReedlineEvent::CompleteOrHostCommand {
+                                menu: "completion_menu".into(),
+                                host_command: COMPLETION_AI_COMMAND.into(),
+                            },
+                        );
+                        assert_eq!(
+                            editor.parse_event_with_context(
+                                key(KeyCode::BackTab, KeyModifiers::SHIFT),
+                                context
+                            ),
+                            ReedlineEvent::MenuPrevious,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_query_keeps_main_input_editing_shortcuts_without_hint_acceptance() {
+        for enhanced in [false, true] {
+            for (mode, prompt_mode) in [
+                (Mode::Emacs, PromptEditMode::Emacs),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Insert)),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Normal)),
+                (Mode::Vi, PromptEditMode::Vi(PromptViMode::Visual)),
+            ] {
+                let (compiled, notices) = Config {
+                    mode,
+                    ..Default::default()
+                }
+                .compile(Capabilities { enhanced }, true);
+                assert!(notices.is_empty(), "{notices:?}");
+                let mut editor = compiled.editor();
+                editor.handle_mode_specific_event(ReedlineEvent::SwitchMode(prompt_mode.clone()));
+                for (code, modifiers, command) in [
+                    (
+                        KeyCode::Home,
+                        KeyModifiers::NONE,
+                        EditCommand::MoveToLineStart { select: false },
+                    ),
+                    (
+                        KeyCode::End,
+                        KeyModifiers::NONE,
+                        EditCommand::MoveToLineEnd { select: false },
+                    ),
+                    (
+                        KeyCode::Char('a'),
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveToLineStart { select: false },
+                    ),
+                    (
+                        KeyCode::Char('e'),
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveToLineEnd { select: false },
+                    ),
+                    (
+                        KeyCode::Char('u'),
+                        KeyModifiers::CONTROL,
+                        EditCommand::CutFromStart,
+                    ),
+                    (
+                        KeyCode::Char('k'),
+                        KeyModifiers::CONTROL,
+                        EditCommand::KillLine,
+                    ),
+                    (
+                        KeyCode::Char('w'),
+                        KeyModifiers::CONTROL,
+                        EditCommand::CutWordLeft,
+                    ),
+                    (
+                        KeyCode::Backspace,
+                        KeyModifiers::ALT,
+                        EditCommand::BackspaceWord,
+                    ),
+                    (
+                        KeyCode::Left,
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveWordLeft { select: false },
+                    ),
+                    (
+                        KeyCode::Right,
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveWordRight { select: false },
+                    ),
+                    (
+                        KeyCode::Home,
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveToStart { select: false },
+                    ),
+                    (
+                        KeyCode::End,
+                        KeyModifiers::CONTROL,
+                        EditCommand::MoveToEnd { select: false },
+                    ),
+                    (
+                        KeyCode::Left,
+                        KeyModifiers::SHIFT,
+                        EditCommand::MoveLeft { select: true },
+                    ),
+                    (
+                        KeyCode::Right,
+                        KeyModifiers::SHIFT,
+                        EditCommand::MoveRight { select: true },
+                    ),
+                    (KeyCode::Char('z'), KeyModifiers::CONTROL, EditCommand::Undo),
+                    (KeyCode::Char('_'), KeyModifiers::CONTROL, EditCommand::Undo),
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL, EditCommand::Redo),
+                    (KeyCode::Char('/'), KeyModifiers::ALT, EditCommand::Redo),
+                ] {
+                    assert_eq!(
+                        editor.parse_event_with_context(
+                            key(code, modifiers),
+                            EditContext::HistorySearch
+                        ),
+                        ReedlineEvent::Edit(vec![command]),
+                        "{prompt_mode:?}: {modifiers:?} {code:?}",
+                    );
+                }
+                for ch in ['u', 'p', 'i', '?'] {
+                    assert_eq!(
+                        editor.parse_event_with_context(
+                            key(KeyCode::Char(ch), KeyModifiers::NONE),
+                            EditContext::HistorySearch,
+                        ),
+                        ReedlineEvent::Edit(vec![EditCommand::InsertChar(ch)]),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_query_honors_editing_overrides_and_context_specific_unbinding() {
+        let mut config = Config {
+            mode: Mode::Emacs,
+            ..Default::default()
+        };
+        config
+            .keybindings
+            .actions
+            .insert("undo".into(), vec!["F4".into()]);
+        let (compiled, notices) = config.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        for context in [EditContext::Editing, EditContext::HistorySearch] {
+            assert_eq!(
+                editor.parse_event_with_context(key(KeyCode::F(4), KeyModifiers::NONE), context),
+                ReedlineEvent::Edit(vec![EditCommand::Undo]),
+            );
+            assert_eq!(
+                editor.parse_event_with_context(
+                    key(KeyCode::Char('z'), KeyModifiers::CONTROL),
+                    context
+                ),
+                ReedlineEvent::None,
+            );
+        }
+        config.keybindings.contexts.insert(
+            "history_search".into(),
+            [
+                ("undo".into(), vec!["F5".into()]),
+                ("cut_to_start".into(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (compiled, notices) = config.compile(Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut editor = compiled.editor();
+        assert_eq!(
+            editor.parse_event_with_context(
+                key(KeyCode::F(5), KeyModifiers::NONE),
+                EditContext::HistorySearch,
+            ),
+            ReedlineEvent::Edit(vec![EditCommand::Undo]),
+        );
+        for (code, modifiers) in [
+            (KeyCode::F(4), KeyModifiers::NONE),
+            (KeyCode::Char('z'), KeyModifiers::CONTROL),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                editor.parse_event_with_context(key(code, modifiers), EditContext::HistorySearch),
+                ReedlineEvent::None,
+            );
+        }
+        assert_eq!(
+            editor.parse_event_with_context(
+                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                EditContext::Editing,
+            ),
+            ReedlineEvent::Edit(vec![EditCommand::CutFromStart]),
+        );
+    }
+
+    #[test]
     fn auto_is_startup_selection_not_a_third_keymap() {
         for (visual, editor, expected) in [
             (None, None, Mode::Emacs),
@@ -1589,11 +1924,13 @@ mod tests {
             .insert("wrong".into(), ActionKeys::default());
         assert!(cfg.validate().is_err());
         cfg.keybindings.contexts.clear();
-        cfg.keybindings.contexts.insert(
-            "history_search".into(),
-            BTreeMap::from([("undo".into(), vec!["F4".into()])]),
-        );
-        assert!(cfg.validate().is_err());
+        for action in ["complete", "complete_or_ai", "ai_suggest"] {
+            cfg.keybindings.contexts.insert(
+                "history_search".into(),
+                BTreeMap::from([(action.into(), vec!["F4".into()])]),
+            );
+            assert!(cfg.validate().is_err(), "{action}");
+        }
     }
 
     #[test]

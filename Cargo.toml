@@ -26,6 +26,9 @@ thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 csv = "1.4.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks"] }
+uuid = { version = "1.26.1", features = ["v4"] }
 toml = "1.1.6"
 toml_edit = "0.25.17"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -89,6 +92,7 @@ candle-core = { path = "third_party/candle-core" }
 [patch.crates-io]
 brush-core = { path = ".nosh/brush/brush-core" }
 brush-parser = { path = ".nosh/brush/brush-parser" }
+brush-builtins = { path = ".nosh/brush/brush-builtins" }
 
 # gemm-f16's aarch64 kernels are `#[target_feature(enable = "fp16")]` functions
 # calling `#[inline]` helpers whose asm (`fmla v.8h`) needs fp16. Unoptimized,
