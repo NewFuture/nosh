@@ -158,7 +158,7 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --workspace --locked -- --nocapture
+        run: cargo test --workspace --locked
       - name: cpu features and kernel paths
         if: success() || failure()
         run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1
