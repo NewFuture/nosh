@@ -7,7 +7,7 @@ pub use palette::{ColorPair, InvalidColorIndex, Region, StatusPalette, StatusTon
 pub(crate) use theme::Subscription as ThemeSubscription;
 pub use theme::ThemeHandle;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nosh_platform::tr;
 use reedline::{
@@ -81,6 +81,7 @@ pub(crate) fn plain(text: &str) -> String {
 pub(crate) enum Action {
     Complete,
     History,
+    HistoryScope,
     Suggest,
     Cancel,
     Accept,
@@ -98,6 +99,41 @@ pub(crate) enum Action {
 pub(crate) struct Bindings(BTreeMap<Action, String>);
 
 impl Bindings {
+    pub(crate) fn history_help(
+        &self,
+        has_match: bool,
+        status: reedline::HistorySearchStatus<'_>,
+        included: &BTreeSet<Part>,
+    ) -> String {
+        [
+            (Action::HistoryScope, tr!("范围", "scope")),
+            (
+                Action::AcceptSearch,
+                if status.no_matches {
+                    tr!("退出", "close")
+                } else {
+                    tr!("回填", "edit")
+                },
+            ),
+            (Action::Previous, tr!("更早", "older")),
+            (Action::Next, tr!("更近", "newer")),
+            (Action::RestoreSearch, tr!("取消", "cancel")),
+        ]
+        .into_iter()
+        .filter(|(action, _)| {
+            has_match
+                || (*action == Action::AcceptSearch && status.no_matches)
+                || *action != Action::AcceptSearch
+        })
+        .filter(|(action, _)| {
+            status.can_navigate || !matches!(action, Action::Next | Action::Previous)
+        })
+        .filter(|(action, _)| !included.contains(&Part::Action(*action)))
+        .filter_map(|(action, label)| self.0.get(&action).map(|key| format!("{key} {label}")))
+        .collect::<Vec<_>>()
+        .join("  ")
+    }
+
     pub(crate) fn suggest_key(&self) -> Option<&str> {
         self.0.get(&Action::Suggest).map(String::as_str)
     }
@@ -136,7 +172,12 @@ impl Bindings {
     fn collect(&mut self, event: &ReedlineEvent, key: &str) {
         let action = match event {
             ReedlineEvent::Menu(name) if name == "completion_menu" => Action::Complete,
-            ReedlineEvent::SearchHistory => Action::History,
+            ReedlineEvent::SearchHistory => {
+                self.0
+                    .entry(Action::HistoryScope)
+                    .or_insert_with(|| key.into());
+                Action::History
+            }
             ReedlineEvent::ExecuteHostCommand(name) if name == crate::repl::SUGGEST_COMMAND => {
                 Action::Suggest
             }
@@ -198,6 +239,7 @@ impl Bindings {
             label.clone()
         };
         let mut field = Field::new(2, &label, &compact, &compact, priority, required);
+        field.part = Some(Part::Action(action));
         field.correction = action == Action::Correct;
         if matches!(action, Action::Cancel | Action::RestoreSearch) {
             field.tone = Tone::Secondary;
@@ -218,6 +260,12 @@ fn key_label(modifiers: KeyModifiers, key: KeyCode) -> Option<String> {
         KeyCode::Esc => "Esc".into(),
         KeyCode::F(number) => format!("F{number}"),
         KeyCode::Backspace => "Backspace".into(),
+        KeyCode::Right => "Right".into(),
+        KeyCode::Left => "Left".into(),
+        KeyCode::Up => "Up".into(),
+        KeyCode::Down => "Down".into(),
+        KeyCode::Home => "Home".into(),
+        KeyCode::End => "End".into(),
         _ => return None,
     };
     let mut label = String::new();
@@ -263,11 +311,35 @@ pub(crate) struct Context<'a> {
     pub theme: Theme,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Part {
+    HistoryTitle,
+    HistoryMessage,
+    HistoryDescription,
+    Action(Action),
+}
+
+pub(crate) fn history_message(
+    status: reedline::HistorySearchStatus<'_>,
+    has_match: bool,
+) -> Option<&str> {
+    status.message().or_else(|| {
+        if status.failed {
+            Some(tr!("历史不可用", "History unavailable"))
+        } else if !has_match {
+            Some(tr!("没有匹配", "No matches"))
+        } else {
+            None
+        }
+    })
+}
+
 #[derive(Default)]
 pub(crate) struct Layout {
     pub text: String,
     pub note_included: bool,
     pub correction_included: bool,
+    pub included: BTreeSet<Part>,
 }
 
 struct Field {
@@ -277,6 +349,7 @@ struct Field {
     required: bool,
     note: bool,
     correction: bool,
+    part: Option<Part>,
     tone: Tone,
 }
 
@@ -320,6 +393,7 @@ impl Field {
             required,
             note: false,
             correction: false,
+            part: None,
             tone: match zone {
                 0 => Tone::Environment,
                 2 => Tone::Action,
@@ -431,39 +505,95 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         fields.push(field);
     };
     match editor.interaction {
-        PromptInteraction::HistorySearch { term, has_match } => {
-            let label = if has_match {
-                tr!("历史搜索", "History search")
-            } else {
-                tr!("历史无匹配", "No history match")
-            };
-            state(
-                &mut fields,
-                &format!("{label}: {}", plain(term)),
-                if has_match {
-                    tr!("历史", "History")
-                } else {
-                    tr!("未匹配", "No match")
-                },
-                if has_match {
-                    Tone::Secondary
-                } else {
+        PromptInteraction::HistorySearch {
+            term,
+            has_match,
+            status,
+        } => {
+            if let Some(status) = status {
+                let tone = if status.failed {
+                    Tone::Error
+                } else if status.notice.is_some() {
                     Tone::Notice
-                },
-            );
-            if has_match {
+                } else if status.progress.is_some() {
+                    Tone::Pending
+                } else if !has_match {
+                    Tone::Notice
+                } else {
+                    Tone::Secondary
+                };
+                let mut title = Field::new(1, status.title, status.title, status.title, 101, true);
+                title.part = Some(Part::HistoryTitle);
+                title.tone = tone;
+                fields.push(title);
+                if let Some(message) = history_message(status, has_match) {
+                    let compact = style::clip_line(&plain(message), 32, 0, "...");
+                    let minimum = if status.failed {
+                        tr!("历史不可用", "History unavailable").to_owned()
+                    } else if status.notice.is_none() && status.progress.is_some() {
+                        tr!("查询中", "Searching").to_owned()
+                    } else {
+                        style::clip_line(&plain(message), 20, 0, "...")
+                    };
+                    let mut field = Field::new(1, message, &compact, &minimum, 100, true);
+                    field.part = Some(Part::HistoryMessage);
+                    field.tone = tone;
+                    fields.push(field);
+                }
+                if let Some(description) = status.description {
+                    let mut field = Field::new(1, description, description, description, 60, false);
+                    field.part = Some(Part::HistoryDescription);
+                    fields.push(field);
+                }
+            } else {
+                let label = if has_match {
+                    tr!("历史搜索", "History search")
+                } else {
+                    tr!("历史无匹配", "No history match")
+                };
+                state(
+                    &mut fields,
+                    &format!("{label}: {}", plain(term)),
+                    if has_match {
+                        tr!("历史", "History")
+                    } else {
+                        tr!("未匹配", "No match")
+                    },
+                    if has_match {
+                        Tone::Secondary
+                    } else {
+                        Tone::Notice
+                    },
+                );
+            }
+            if has_match && status.is_none() {
                 add_action(&mut fields, Action::Submit, tr!("提交", "submit"), 98, true);
+            }
+            if status.is_some() {
+                add_action(
+                    &mut fields,
+                    Action::HistoryScope,
+                    tr!("范围", "scope"),
+                    96,
+                    true,
+                );
             }
             if context.bindings.0.contains_key(&Action::AcceptSearch)
                 || context.bindings.0.contains_key(&Action::RestoreSearch)
             {
-                add_action(
-                    &mut fields,
-                    Action::AcceptSearch,
-                    tr!("回填", "edit"),
-                    99,
-                    true,
-                );
+                if has_match || status.is_some_and(|status| status.no_matches) {
+                    add_action(
+                        &mut fields,
+                        Action::AcceptSearch,
+                        if has_match {
+                            tr!("回填", "edit")
+                        } else {
+                            tr!("退出", "close")
+                        },
+                        99,
+                        true,
+                    );
+                }
                 add_action(
                     &mut fields,
                     Action::RestoreSearch,
@@ -474,13 +604,24 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
             } else {
                 add_action(&mut fields, Action::Close, tr!("退出", "exit"), 99, true);
             }
-            add_action(
-                &mut fields,
-                Action::History,
-                tr!("继续搜索", "search again"),
-                85,
-                false,
-            );
+            if status.is_none() {
+                add_action(
+                    &mut fields,
+                    Action::History,
+                    tr!("继续搜索", "search again"),
+                    85,
+                    false,
+                );
+            } else if status.is_some_and(|status| status.can_navigate) {
+                add_action(
+                    &mut fields,
+                    Action::Previous,
+                    tr!("更早", "older"),
+                    85,
+                    false,
+                );
+                add_action(&mut fields, Action::Next, tr!("更近", "newer"), 84, false);
+            }
         }
         PromptInteraction::Menu {
             count, provisional, ..
@@ -785,9 +926,11 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
 }
 
 fn minimum_width(fields: &[Field], number: u8) -> usize {
-    let mut required = fields
-        .iter()
-        .filter(|field| field.zone == number && (field.required || (number == 1 && !field.note)));
+    let mut required = fields.iter().filter(|field| {
+        field.zone == number
+            && (field.required
+                || (number == 1 && !field.note && field.part != Some(Part::HistoryDescription)))
+    });
     if let Some(first) = required.next() {
         return style::width(&first.variants[2])
             + required
@@ -855,6 +998,7 @@ struct Zone {
     note_included: bool,
     correction_included: bool,
     state_complete: bool,
+    included: BTreeSet<Part>,
 }
 
 fn zone(
@@ -924,6 +1068,17 @@ fn zone(
         correction_included: selected
             .iter()
             .any(|(field, text)| field.correction && field.variants.contains(text)),
+        included: selected
+            .iter()
+            .filter_map(|(field, text)| {
+                let part = field.part?;
+                let complete = match part {
+                    Part::Action(_) => field.variants.contains(text),
+                    _ => *text == field.variants[0],
+                };
+                complete.then_some(part)
+            })
+            .collect(),
         text: selected
             .into_iter()
             .map(|(_, text)| text)
@@ -1158,6 +1313,7 @@ fn render(fields: &[Field], context: &Context<'_>) -> Layout {
         text: left,
         note_included: state.note_included,
         correction_included: state.state_complete && actions.correction_included,
+        included: state.included.into_iter().chain(actions.included).collect(),
     }
 }
 
@@ -1581,6 +1737,7 @@ mod tests {
             PromptInteraction::HistorySearch {
                 term: "needle",
                 has_match: false,
+                status: None,
             },
         ] {
             editor.interaction = interaction;
@@ -1607,10 +1764,8 @@ mod tests {
 
     #[test]
     fn contextual_search_hints_remain_independent_when_one_action_is_unbound() {
-        for (action, expected, missing) in [
-            ("accept_search", "Ctrl+G", "Esc"),
-            ("cancel", "Esc", "Ctrl+G"),
-        ] {
+        for (action, expected, missing) in [("accept", "Esc", "Enter"), ("cancel", "Enter", "Esc")]
+        {
             let mut config = crate::editing::Config {
                 mode: crate::editing::Mode::Emacs,
                 ..Default::default()
@@ -1627,13 +1782,19 @@ mod tests {
                 editor.interaction = PromptInteraction::HistorySearch {
                     term: "needle",
                     has_match,
+                    status: None,
                 };
                 let keys = compiled.hints(&editor.edit_mode, editor.interaction);
                 let text = compose(context(&editor, keys)).text;
-                assert!(
-                    text.contains(expected) || (expected == "Ctrl+G" && text.contains("^G cancel")),
-                    "{action}: {text}"
-                );
+                if expected == "Enter" && !has_match {
+                    assert!(!text.contains("Enter"), "{action}: {text}");
+                } else {
+                    assert!(
+                        text.contains(expected)
+                            || (expected == "Ctrl+G" && text.contains("^G cancel")),
+                        "{action}: {text}"
+                    );
+                }
                 assert!(!text.contains(missing), "{action}: {text}");
             }
         }

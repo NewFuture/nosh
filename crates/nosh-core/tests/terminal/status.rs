@@ -63,7 +63,7 @@ fn inline_menu_search_and_acceptance_keep_one_input_owner() {
             ("(main)", b"cat candidate_\t"),
             ("Completion", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
-            ("History search: history_accepted", b"\x1b"),
+            ("history_accepted -> touch history_accepted", b"\r"),
             ("❯ touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
@@ -282,8 +282,8 @@ fn compact_row_keeps_cursor_line_through_async_menu_search_and_resizes() {
                 ("git status", b"\x15cat candidate_\t"),
                 ("Completion", b"\x1b"),
                 ("Tab", b"\x15\x12history_accepted"),
-                ("History search: history_accepted", b"\x1b"),
-                ("Tab", b"\x15echo yz"),
+                ("history_accepted -> touch history_accepted", b"\x1b"),
+                ("Ctrl+R history", b"\x15echo yz"),
                 ("echo yz", b"x"),
                 ("echo yzx", "\x15echo 中e\u{301}".as_bytes()),
                 ("echo 中e\u{301}", b"\x15"),
@@ -427,8 +427,11 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
             ("Completion", b"@theme-switch"),
             ("\x1b[0;38;2;17;17;27;48;2;250;179;135m", b"\x1b"),
             ("Tab", b"\x15\x12history_accepted"),
-            ("History search: history_accepted", b"@theme-switch"),
-            ("\x1b[0;38;2;17;17;27;48;2;254;100;11m", b"\x1b"),
+            (
+                "history_accepted -> touch history_accepted",
+                b"@theme-switch",
+            ),
+            ("\x1b[0;38;2;17;17;27;48;2;254;100;11m", b"\r"),
             ("❯ touch history_accepted", b"\x15exit 0\r"),
         ],
         ..Default::default()
@@ -457,7 +460,7 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
     for (background, draft, state) in [
         ([254, 100, 11], "echo theme_draft", ""),
         ([250, 179, 135], "cat candidate_", "Completion"),
-        ([254, 100, 11], "touch history_accepted", "History search"),
+        ([254, 100, 11], "touch history_accepted", "History [all]"),
     ] {
         let frame = observations
             .frames

@@ -351,7 +351,10 @@ impl Pipeline {
         match action {
             Action::Empty => LineOutcome::Continue(None),
             Action::Execute => self.execute(shell, ai, ui, line),
-            Action::Ai { trigger, text } => ask(&self.terminal, shell, ai, trigger, text, None),
+            Action::Ai { trigger, text } => {
+                shell.record_question(line, false);
+                ask(&self.terminal, shell, ai, trigger, text, None)
+            }
             Action::Correct {
                 corrected,
                 from,
@@ -366,18 +369,26 @@ impl Pipeline {
                 LineOutcome::Continue(Some(corrected))
             }
             Action::Guard => match ui.guard(line) {
-                GuardChoice::Ai => ask(
-                    &self.terminal,
-                    shell,
-                    ai,
-                    Trigger::Hash,
-                    line.trim().to_string(),
-                    None,
-                ),
+                GuardChoice::Ai => {
+                    shell.record_question(line, false);
+                    ask(
+                        &self.terminal,
+                        shell,
+                        ai,
+                        Trigger::Hash,
+                        line.trim().to_string(),
+                        None,
+                    )
+                }
                 GuardChoice::Run => self.execute(shell, ai, ui, line),
                 GuardChoice::Cancel => LineOutcome::Continue(Some(line.trim().to_string())),
             },
-            Action::Inline(command) => self.command(shell, ai, ui, command),
+            Action::Inline(command) => {
+                if matches!(command, Command::Fix(_)) {
+                    shell.record_question(line, false);
+                }
+                self.command(shell, ai, ui, command)
+            }
             Action::InvalidInline(error) => {
                 ui.notice(&format!("nosh: {}", error.message(&tc.ai_prefix)));
                 LineOutcome::Continue(None)
@@ -487,6 +498,7 @@ impl Pipeline {
         line: &str,
     ) -> LineOutcome {
         self.last_failure = None;
+        shell.prepare_history_input(line);
         let region = self.terminal.begin();
         let run = shell.run_user_line(line);
         region.finish(run.exit_code);
@@ -643,6 +655,7 @@ struct RenderedPrompt {
     right: String,
     inline: bool,
     mode: PromptEditMode,
+    included: std::collections::BTreeSet<crate::status::Part>,
 }
 
 struct ReplPrompt {
@@ -910,21 +923,30 @@ impl Prompt for ReplPrompt {
             if !command_status.is_empty() {
                 left = format!("{}\n{left}", styles.dim(&command_status));
             }
-            let mut status =
-                if let Some(error) = completion.and_then(|snapshot| snapshot.error.as_ref()) {
-                    crate::status::plain(error)
-                } else if self.status_feedback {
-                    feedback
-                        .as_ref()
-                        .map(|feedback| feedback.text.clone())
-                        .unwrap_or_default()
-                } else {
-                    self.input_assist
-                        .as_ref()
-                        .map(|assist| assist.status())
-                        .unwrap_or_default()
-                };
-            if literal {
+            let mut status = if matches!(
+                context.interaction,
+                reedline::PromptInteraction::HistorySearch { .. }
+            ) {
+                String::new()
+            } else if let Some(error) = completion.and_then(|snapshot| snapshot.error.as_ref()) {
+                crate::status::plain(error)
+            } else if self.status_feedback {
+                feedback
+                    .as_ref()
+                    .map(|feedback| feedback.text.clone())
+                    .unwrap_or_default()
+            } else {
+                self.input_assist
+                    .as_ref()
+                    .map(|assist| assist.status())
+                    .unwrap_or_default()
+            };
+            if literal
+                && !matches!(
+                    context.interaction,
+                    reedline::PromptInteraction::HistorySearch { .. }
+                )
+            {
                 status = literal_notice.into();
             }
             if !status.is_empty() {
@@ -943,6 +965,7 @@ impl Prompt for ReplPrompt {
             right,
             inline,
             mode: context.edit_mode,
+            included: layout.included,
         });
     }
 
@@ -992,6 +1015,62 @@ impl Prompt for ReplPrompt {
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
         self.continuation.as_str().into()
+    }
+
+    fn render_history_panel_status(
+        &self,
+        status: reedline::HistorySearchStatus<'_>,
+        has_match: bool,
+        prompt_visible: bool,
+    ) -> Vec<String> {
+        use crate::status::Part;
+        let rendered = self.rendered.borrow();
+        let empty = std::collections::BTreeSet::new();
+        let included = rendered
+            .as_ref()
+            .filter(|_| prompt_visible)
+            .map_or(&empty, |rendered| &rendered.included);
+        let mode = rendered
+            .as_ref()
+            .map(|rendered| rendered.mode.clone())
+            .unwrap_or(PromptEditMode::Emacs);
+        let help = self.editor.editing.as_ref().map_or_else(
+            || {
+                self.editor
+                    .bindings
+                    .history_help(has_match, status, included)
+            },
+            |compiled| {
+                compiled
+                    .hints(
+                        &mode,
+                        reedline::PromptInteraction::HistorySearch {
+                            term: "",
+                            has_match,
+                            status: None,
+                        },
+                    )
+                    .history_help(has_match, status, included)
+            },
+        );
+        let message = crate::status::history_message(status, has_match);
+        let mut fields = [
+            (Part::HistoryTitle, Some(status.title)),
+            (Part::HistoryMessage, message),
+            (Part::HistoryDescription, status.description),
+        ];
+        if status.failed {
+            fields.swap(0, 1);
+        }
+        let mut lines = fields
+            .into_iter()
+            .filter(|(part, _)| !included.contains(part))
+            .filter_map(|(_, text)| text.filter(|text| !text.is_empty()).map(str::to_owned))
+            .collect::<Vec<_>>();
+        if !help.is_empty() {
+            lines.push(help);
+        }
+        lines
     }
 
     fn render_prompt_history_search_indicator(&self, hs: PromptHistorySearch) -> Cow<'_, str> {
@@ -1184,7 +1263,6 @@ fn build_editor(
     let mut editor = Reedline::create()
         .with_semantic_markers(semantic_markers.then(reedline::Osc133Markers::boxed))
         .with_ansi_colors(colors)
-        .with_history(Box::new(crate::history::ShellHistory { shell: sh.clone() }))
         .with_quick_completions(true)
         .with_partial_completions(true)
         .with_contextual_input(true)
@@ -1203,6 +1281,17 @@ fn build_editor(
         }))
         .with_highlighter(Box::new(NoHighlight(state.frame_theme.clone())));
     let repaint = editor.repaint_signal();
+    if let Some(history) = shell.history_store() {
+        history.repaint(repaint.clone());
+        editor = editor
+            .with_history(Box::new(crate::history::ShellHistory {
+                store: history.clone(),
+            }))
+            .with_history_panel(
+                Box::new(crate::history::Panel::new(history)),
+                menu("history_menu"),
+            );
+    }
     state._theme_subscription = Some(
         cfg.status_bar
             .theme
@@ -1518,7 +1607,19 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             let Ok(Signal::HostCommand(command)) = &signal else {
                 break signal;
             };
-            if command == crate::abbreviations::service::READY || command == PROJECT_ENV_READY {
+            if command == crate::abbreviations::service::READY
+                || command == PROJECT_ENV_READY
+                || command == crate::history::NOTICE
+            {
+                if let Some(history) = shell.history_store() {
+                    let errors = history.take_errors();
+                    if !errors.is_empty() && editor.is_some() {
+                        eprintln!();
+                    }
+                    for error in errors {
+                        ui.notice(&format!("nosh: {}", style::visible_text(&error)));
+                    }
+                }
                 let environment_changed = shell.update_project_env_for_editor();
                 if environment_changed {
                     prompt.refresh_environment(shell, &ai.badge());
@@ -1685,9 +1786,6 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                     prefill = Some(line);
                     continue;
                 }
-                if !line.trim().is_empty() {
-                    shell.add_history(&line);
-                }
                 match pipeline.process(shell, ai, &mut ui, &line) {
                     LineOutcome::Continue(p) => prefill = p,
                     LineOutcome::Exit(c) => break c,
@@ -1785,6 +1883,7 @@ fn suggest_draft(
     if let Some(display) = ai.assistance() {
         display.invalidate();
     }
+    shell.record_question(draft, true);
     let Some(program) = isolate(|| ai.suggest(shell, request)).flatten() else {
         ui.notice(tr!(
             "nosh: 没有建议；保留原输入",
@@ -2109,6 +2208,7 @@ mod tests {
             reedline::PromptInteraction::HistorySearch {
                 term: "echo",
                 has_match: true,
+                status: None,
             },
         ] {
             themes.replace(crate::status::Theme::default());
@@ -2197,6 +2297,252 @@ mod tests {
             rows,
             edit_mode: PromptEditMode::Emacs,
             interaction: reedline::PromptInteraction::Editing,
+        }
+    }
+
+    fn history_status_prompt() -> ReplPrompt {
+        let mut prompt = status_prompt(true);
+        let config = editing::Config {
+            mode: editing::Mode::Emacs,
+            ..Default::default()
+        };
+        let (compiled, notices) = config.compile(editing::Capabilities { enhanced: false }, true);
+        assert!(notices.is_empty(), "{notices:?}");
+        prompt.editor.editing = Some(compiled);
+        prompt
+    }
+
+    #[test]
+    fn history_status_and_keys_use_the_bar_without_repeating_the_filter_or_menu_header() {
+        let prompt = history_status_prompt();
+        let status = reedline::HistorySearchStatus {
+            title: "History [project]",
+            description: Some("Input directory: sub"),
+            can_navigate: true,
+            ..Default::default()
+        };
+        let mut context = prompt_context(240, 24);
+        context.interaction = reedline::PromptInteraction::HistorySearch {
+            term: "FILTER_ONLY_IN_INPUT",
+            has_match: true,
+            status: Some(status),
+        };
+        prompt.update_context(context);
+        let bar = style::strip_ansi(&prompt.render_prompt_left());
+        for text in [
+            status.title,
+            status.description.unwrap(),
+            "Ctrl+R",
+            "Down",
+            "Up",
+            "Enter",
+            "Esc",
+        ] {
+            assert!(bar.contains(text), "{text}: {bar}");
+        }
+        assert!(
+            !bar.contains("Right") && !bar.contains("submit") && !bar.contains("Tab"),
+            "{bar}"
+        );
+        assert!(!bar.contains("FILTER_ONLY_IN_INPUT"), "{bar}");
+        assert!(
+            prompt
+                .render_history_panel_status(status, true, true)
+                .is_empty()
+        );
+        let fallback = prompt
+            .render_history_panel_status(status, true, false)
+            .join("\n");
+        assert!(
+            fallback.contains(status.title) && fallback.contains("Down") && fallback.contains("Up")
+        );
+        assert!(!fallback.contains("Tab"), "{fallback}");
+    }
+
+    #[test]
+    fn history_status_offers_reselection_keys_when_a_candidate_is_invalidated() {
+        for enabled in [false, true] {
+            for can_navigate in [false, true] {
+                let mut prompt = history_status_prompt();
+                prompt.status_enabled = enabled;
+                let status = reedline::HistorySearchStatus {
+                    title: "History [all]",
+                    notice: Some("History selection unavailable; navigate to select"),
+                    can_navigate,
+                    ..Default::default()
+                };
+                let mut context = prompt_context(240, 24);
+                context.interaction = reedline::PromptInteraction::HistorySearch {
+                    term: "echo",
+                    has_match: false,
+                    status: Some(status),
+                };
+                prompt.update_context(context);
+                let text = format!(
+                    "{}\n{}",
+                    style::strip_ansi(&prompt.render_prompt_left()),
+                    prompt
+                        .render_history_panel_status(status, false, true)
+                        .join("\n"),
+                );
+                assert_eq!(text.contains("Down"), can_navigate, "{text}");
+                assert_eq!(text.contains("Up"), can_navigate, "{text}");
+                assert!(text.contains("Esc"), "{text}");
+                assert!(!text.contains("Enter") && !text.contains("Tab"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn history_fallback_does_not_show_old_completion_errors_for_the_same_input() {
+        let mut prompt = history_status_prompt();
+        *prompt.editor.completion.lock().unwrap() = Some(crate::status::Completion {
+            input: "echo ok".into(),
+            cursor: 7,
+            error: Some("OLD_COMPLETION_ERROR".into()),
+            count: 0,
+            phase: crate::completion::Phase::Unavailable,
+        });
+        for enabled in [false, true] {
+            prompt.status_enabled = enabled;
+            for rows in [2, 24] {
+                let mut context = prompt_context(120, rows);
+                context.interaction = reedline::PromptInteraction::HistorySearch {
+                    term: "echo ok",
+                    has_match: true,
+                    status: Some(reedline::HistorySearchStatus {
+                        title: "History [all]",
+                        ..Default::default()
+                    }),
+                };
+                prompt.update_context(context);
+                assert!(!prompt.render_prompt_left().contains("OLD_COMPLETION_ERROR"));
+            }
+        }
+    }
+
+    #[test]
+    fn history_fallback_keeps_only_information_not_actually_shown_in_the_status_bar() {
+        use crate::status::{Action, Part};
+        let notice = "Database is busy; this history operation has not been confirmed or written";
+        for enabled in [false, true] {
+            let mut prompt = history_status_prompt();
+            prompt.status_enabled = enabled;
+            for width in [12, 17, 24, 40, 60, 80, 160, 240] {
+                for (has_match, status) in [
+                    (
+                        true,
+                        reedline::HistorySearchStatus {
+                            title: "History [project]",
+                            description: Some("Input directory: source-worktree/sub"),
+                            can_navigate: true,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        true,
+                        reedline::HistorySearchStatus {
+                            title: "History [all]",
+                            progress: Some(
+                                "Searching older history; cached matches remain selectable",
+                            ),
+                            can_navigate: true,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        false,
+                        reedline::HistorySearchStatus {
+                            title: "History [all]",
+                            progress: Some("Searching history..."),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        false,
+                        reedline::HistorySearchStatus {
+                            title: "History [all]",
+                            no_matches: true,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        false,
+                        reedline::HistorySearchStatus {
+                            title: "History [all]",
+                            notice: Some(notice),
+                            failed: true,
+                            ..Default::default()
+                        },
+                    ),
+                ] {
+                    let mut context = prompt_context(width, 24);
+                    context.interaction = reedline::PromptInteraction::HistorySearch {
+                        term: "query",
+                        has_match,
+                        status: Some(status),
+                    };
+                    prompt.update_context(context);
+                    let bar = style::strip_ansi(&prompt.render_prompt_left());
+                    let fallback = prompt
+                        .render_history_panel_status(status, has_match, true)
+                        .join("\n");
+                    let rendered = prompt.rendered.borrow();
+                    let included = &rendered.as_ref().unwrap().included;
+                    for (part, value) in [
+                        (Part::HistoryTitle, Some(status.title)),
+                        (
+                            Part::HistoryMessage,
+                            crate::status::history_message(status, has_match),
+                        ),
+                        (Part::HistoryDescription, status.description),
+                    ] {
+                        if let Some(value) = value {
+                            let shown = included.contains(&part);
+                            assert_eq!(
+                                fallback.contains(value),
+                                !shown,
+                                "{width}: {bar:?} / {fallback:?}"
+                            );
+                            if shown {
+                                assert!(bar.contains(value), "{width}: {bar:?}");
+                            }
+                        }
+                    }
+                    for (action, key) in [
+                        (Action::HistoryScope, "Ctrl+R scope"),
+                        (
+                            Action::AcceptSearch,
+                            if status.no_matches {
+                                "Enter close"
+                            } else {
+                                "Enter edit"
+                            },
+                        ),
+                        (Action::Next, "Down newer"),
+                        (Action::Previous, "Up older"),
+                        (Action::RestoreSearch, "Esc cancel"),
+                    ] {
+                        let unavailable = match action {
+                            Action::AcceptSearch => !has_match && !status.no_matches,
+                            Action::Next | Action::Previous => !has_match || !status.can_navigate,
+                            _ => false,
+                        };
+                        if unavailable {
+                            assert!(
+                                !bar.contains(key) && !fallback.contains(key),
+                                "{bar:?} / {fallback:?}"
+                            );
+                        } else {
+                            assert_eq!(
+                                fallback.contains(key),
+                                !included.contains(&Part::Action(action)),
+                                "{width}: {bar:?} / {fallback:?}",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

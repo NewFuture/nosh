@@ -852,6 +852,10 @@ impl Hinter for CorrectionHinter {
         }
     }
 
+    fn hint_style(&self) -> Style {
+        self.inner.hint_style()
+    }
+
     fn complete_hint(&self) -> String {
         if self.hidden {
             String::new()
@@ -1768,6 +1772,7 @@ mod tests {
                     context.interaction = PromptInteraction::HistorySearch {
                         term: "gti",
                         has_match: true,
+                        status: None,
                     }
                 }
                 _ => {}

@@ -35,6 +35,244 @@ index 0000000000000000000000000000000000000000..49b731a6abbcdbd611b6e78dab82160b
 +
 +These APIs do not sandbox arbitrary programmable completion. No changes are
 +made to ordinary user command execution or the maintained parser's grammar.
+diff --git a/brush-builtins/src/fc.rs b/brush-builtins/src/fc.rs
+index 9f4695efddf861678d16c1f3f7c1f356bf3e9178..ea34432dadb53ae252baad1e764ad4a20ca97ee9 100644
+--- a/brush-builtins/src/fc.rs
++++ b/brush-builtins/src/fc.rs
+@@ -96,6 +96,11 @@ impl FcCommand {
+             .history()
+             .ok_or_else(|| brush_core::Error::from(brush_core::ErrorKind::HistoryNotEnabled))?;
+ 
++        if history.is_replaying() {
++            return Err(std::io::Error::other("recursive fc replay is not supported").into());
++        }
++        let recording_suppressed = history.recording_suppressed();
++
+         // Parse the first argument for pattern=replacement
+         let (pattern, replacement) = self
+             .first
+@@ -118,6 +123,9 @@ impl FcCommand {
+         } else {
+             // No spec means use the previous command (excluding the fc command itself)
+             let effective_count = effective_history_count(history);
++            if effective_count == 0 {
++                return Err(error::ErrorKind::HistoryItemNotFound.into());
++            }
+             history
+                 .get(effective_count.saturating_sub(1))
+                 .map(|item| item.command_line.clone())
+@@ -140,20 +148,39 @@ impl FcCommand {
+             .shell
+             .history_mut()
+             .ok_or_else(|| brush_core::Error::from(brush_core::ErrorKind::HistoryNotEnabled))?;
+-        history_mut.remove_nth_item(history_mut.count().saturating_sub(1));
++        if let Some(id) = history_mut.active_input() {
++            if let Err(error) = history_mut.delete_item_by_id(id) {
++                writeln!(context.stderr(), "history not removed: {error}")?;
++            }
++        }
+ 
+         let source_info = brush_core::SourceInfo::from("(history)");
+ 
+-        // Execute the command
++        if let Err(error) = context.shell.add_to_history(&final_cmd) {
++            writeln!(context.stderr(), "history not recorded: {error}")?;
++        }
++        if let Some(history) = context.shell.history_mut() {
++            history.set_replaying(true);
++        }
+         let result = context
+             .shell
+-            .run_string(final_cmd.clone(), &source_info, &context.params)
+-            .await?;
+-
+-        // Add the executed command to history.
+-        context.shell.add_to_history(&final_cmd)?;
+-
+-        Ok(result)
++            .run_string(final_cmd, &source_info, &context.params)
++            .await;
++        let exit_code = result
++            .as_ref()
++            .map_or(1, |result| i32::from(u8::from(result.exit_code)));
++        let mut history_error = None;
++        if let Some(history) = context.shell.history_mut() {
++            history_error = history.finish_input_with_status(exit_code).err();
++            history.set_recording_suppressed(recording_suppressed);
++        }
++        if let Some(error) = history_error {
++            writeln!(
++                context.stderr(),
++                "history execution status not saved: {error}"
++            )?;
++        }
++        result
+     }
+ 
+     fn resolve_range(
+@@ -161,6 +188,9 @@ impl FcCommand {
+         history: &history::History,
+     ) -> Result<(usize, usize, bool), brush_core::Error> {
+         let effective_count = effective_history_count(history);
++        if effective_count == 0 {
++            return Err(error::ErrorKind::HistoryItemNotFound.into());
++        }
+         let max_idx = effective_count.saturating_sub(1);
+ 
+         // Resolve first index
+@@ -220,6 +250,9 @@ impl FcCommand {
+         };
+ 
+         let effective_count = effective_history_count(history);
++        if effective_count == 0 {
++            return Err(error::ErrorKind::HistoryItemNotFound.into());
++        }
+ 
+         #[expect(clippy::cast_sign_loss)]
+         #[expect(clippy::cast_possible_truncation)]
+@@ -240,7 +273,7 @@ impl FcCommand {
+             }
+             std::cmp::Ordering::Less => {
+                 // Negative: offset from end (relative to effective count)
+-                let offset = (-num) as usize;
++                let offset = usize::try_from(num.unsigned_abs()).unwrap_or(usize::MAX);
+                 effective_count.saturating_sub(offset)
+             }
+         };
+@@ -259,6 +292,14 @@ impl FcCommand {
+         history: &history::History,
+         spec: &str,
+     ) -> Result<String, brush_core::Error> {
++        if let Ok(number) = spec.parse::<i64>() {
++            let count = effective_history_count(history);
++            if count == 0
++                || usize::try_from(number.unsigned_abs()).map_or(true, |index| index > count)
++            {
++                return Err(error::ErrorKind::HistoryItemNotFound.into());
++            }
++        }
+         let idx = Self::resolve_position(history, spec)?;
+         history
+             .get(idx)
+@@ -297,5 +338,13 @@ impl FcCommand {
+ 
+ /// Returns the effective history count (excluding the fc command itself).
+ fn effective_history_count(history: &history::History) -> usize {
+-    history.count().saturating_sub(1)
++    let count = history.count();
++    if history
++        .get(count.saturating_sub(1))
++        .is_some_and(|item| Some(item.id) == history.active_input())
++    {
++        count.saturating_sub(1)
++    } else {
++        count
++    }
+ }
+diff --git a/brush-builtins/src/history.rs b/brush-builtins/src/history.rs
+index ce891db08c6922308ca38ac3689dc2811d44b389..3e9c29c91741cb1e1a425eaf29eda05b823f995f 100644
+--- a/brush-builtins/src/history.rs
++++ b/brush-builtins/src/history.rs
+@@ -48,6 +48,9 @@ pub(crate) struct HistoryCommand {
+ struct HistoryConfig {
+     default_history_file_path: Option<PathBuf>,
+     time_format: Option<String>,
++    cwd: PathBuf,
++    size: Option<String>,
++    file_size: Option<String>,
+ }
+ 
+ impl builtins::Command for HistoryCommand {
+@@ -61,6 +64,15 @@ impl builtins::Command for HistoryCommand {
+         let config = HistoryConfig {
+             default_history_file_path: context.shell.history_file_path(),
+             time_format: context.shell.history_time_format(),
++            cwd: context.shell.working_dir().to_path_buf(),
++            size: context
++                .shell
++                .env_str("HISTSIZE")
++                .map(|value| value.into_owned()),
++            file_size: context
++                .shell
++                .env_str("HISTFILESIZE")
++                .map(|value| value.into_owned()),
+         };
+ 
+         let stdout = context.stdout();
+@@ -85,6 +97,11 @@ impl HistoryCommand {
+         stdout: impl Write,
+         mut stderr: impl Write,
+     ) -> Result<ExecutionResult, brush_core::Error> {
++        history.configure_storage(
++            config.default_history_file_path.as_deref(),
++            config.size.as_deref(),
++            config.file_size.as_deref(),
++        )?;
+         if self.clear_history {
+             history.clear()?;
+         }
+@@ -98,7 +115,7 @@ impl HistoryCommand {
+             if offset > 0 {
+                 // Convert to 0-based index.
+                 let index = (offset - 1) as usize;
+-                if !history.remove_nth_item(index) {
++                if !history.remove_nth_item(index)? {
+                     writeln!(stderr, "index past end of history")?;
+                     return Ok(ExecutionExitCode::InvalidUsage.into());
+                 }
+@@ -110,7 +127,7 @@ impl HistoryCommand {
+                     return Ok(ExecutionExitCode::InvalidUsage.into());
+                 }
+ 
+-                let _ = history.remove_nth_item(index as usize);
++                let _ = history.remove_nth_item(index as usize)?;
+             }
+ 
+             return Ok(ExecutionResult::success());
+@@ -121,6 +138,7 @@ impl HistoryCommand {
+                 config.default_history_file_path,
+                 append_option.as_ref(),
+             ) {
++                let file_path = config.cwd.join(file_path);
+                 history.flush(
+                     file_path,
+                     true,                         /* append? */
+@@ -132,12 +150,15 @@ impl HistoryCommand {
+             return Ok(ExecutionResult::success());
+         }
+ 
+-        if self.append_rest_of_file_to_session.is_some() {
+-            return error::unimp("history -n is not yet implemented");
++        if let Some(option) = &self.append_rest_of_file_to_session {
++            if option.is_none() && history.refresh()? {
++                return Ok(ExecutionResult::success());
++            }
++            return error::unimp("history -n for an explicit text file is not implemented");
+         }
+ 
+         if self.append_file_to_session.is_some() {
+-            return error::unimp("history -r is not yet implemented");
++            return error::unimp("history -r is not supported; history uses the nosh database");
+         }
+ 
+         if let Some(write_option) = &self.write_session_to_file {
+@@ -145,6 +166,7 @@ impl HistoryCommand {
+                 config.default_history_file_path,
+                 write_option.as_ref(),
+             ) {
++                let file_path = config.cwd.join(file_path);
+                 history.flush(
+                     file_path,
+                     false,                        /* append? */
+@@ -185,7 +207,7 @@ fn display_history(
+     _stderr: impl Write,
+ ) -> Result<(), brush_core::Error> {
+     let item_count = history.count();
+-    let skip_count = item_count - max_entries.unwrap_or(item_count);
++    let skip_count = item_count.saturating_sub(max_entries.unwrap_or(item_count));
+ 
+     for (i, item) in history.iter().skip(skip_count).enumerate() {
+         let mut formatted_timestamp = String::new();
 diff --git a/brush-core/src/commands.rs b/brush-core/src/commands.rs
 index 077c4ac2c2a71670495192afa4892e682945bb82..f21d0fe6bf3ee29590b954dbfa7858fad3d409e6 100644
 --- a/brush-core/src/commands.rs
@@ -560,6 +798,468 @@ index 9884a8c7b88a022a60c8e44c96b4a99e57e1b233..9b39a3d78d1ecedde694ade068fd8a30
                  },
              ]
          );
+diff --git a/brush-core/src/history.rs b/brush-core/src/history.rs
+index f5a6215f60ec5f0782efdd974eebf42e11d4485c..6d43023a498c22e5a7cc83e0260595d9dd2361e0 100644
+--- a/brush-core/src/history.rs
++++ b/brush-core/src/history.rs
+@@ -3,7 +3,8 @@
+ use chrono::Utc;
+ use std::{
+     io::{BufRead, Read, Write},
+-    path::Path,
++    path::{Path, PathBuf},
++    sync::Arc,
+ };
+ 
+ use crate::error;
+@@ -11,17 +12,206 @@ use crate::error;
+ /// Represents a unique identifier for a history item.
+ type ItemId = i64;
+ 
++/// Completes one observed execution without looking up a newer history record.
++pub type CompletionCallback = Box<dyn FnOnce(i32) -> std::io::Result<()> + Send + Sync>;
++
+ /// Interface for querying and manipulating the shell's recorded history of commands.
+ // TODO(history): support maximum item count
+-#[derive(Clone, Default)]
++#[derive(Default)]
+ #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub struct History {
+     items: rpds::VectorSync<ItemId>,
+     id_map: rpds::HashTrieMapSync<ItemId, Item>,
+     next_id: ItemId,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    observer: Option<Arc<dyn Observer>>,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    protected_file: Option<PathBuf>,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    managed: bool,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    active_input: Option<i64>,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    active_completion: Option<CompletionCallback>,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    replaying: bool,
++    #[cfg_attr(feature = "serde", serde(skip))]
++    recording_suppressed: bool,
++}
++
++/// Keeps an embedding host's history in step with builtin mutations.
++pub trait Observer: Send + Sync {
++    /// Captures the identity of an input about to execute.
++    fn execution_started(&self, _id: i64) -> std::io::Result<Option<CompletionCallback>> {
++        Ok(None)
++    }
++
++    /// Applies the shell's current HISTFILE before builtin mutations.
++    fn configure(
++        &self,
++        file: Option<&Path>,
++        size: Option<&str>,
++        file_size: Option<&str>,
++    ) -> std::io::Result<()>;
++    /// Refreshes a command view from its authority.
++    fn refreshed(&self) -> std::io::Result<(Vec<Item>, i64)>;
++    /// Rejects unsafe text export destinations.
++    fn validate_export(&self, path: &Path) -> std::io::Result<()>;
++    /// Marks a successfully appended set as exported.
++    fn exported(&self, ids: &[i64]);
++    /// Records a command and replaces the supplied duplicates atomically.
++    fn added(
++        &self,
++        item: &mut Item,
++        directory: Option<&Path>,
++        replace: &[ItemId],
++    ) -> std::io::Result<()>;
++    /// Updates an existing command without recreating deleted records.
++    fn updated(&self, item: &Item) -> std::io::Result<()>;
++    /// Removes the identified command.
++    fn removed(&self, id: i64) -> std::io::Result<()>;
++    /// Clears the host's visible command history.
++    fn cleared(&self) -> std::io::Result<()>;
++}
++
++impl Clone for History {
++    fn clone(&self) -> Self {
++        Self {
++            items: self.items.clone(),
++            id_map: self.id_map.clone(),
++            next_id: self.next_id,
++            // A subshell has its own history list, not a second writer to the host.
++            observer: None,
++            protected_file: self.protected_file.clone(),
++            managed: self.managed,
++            active_input: self.active_input,
++            active_completion: None,
++            replaying: self.replaying,
++            recording_suppressed: self.recording_suppressed,
++        }
++    }
++}
++
++/// Identifies a managed database or its journal files, including path aliases.
++pub fn protected_export_target(database: &Path, target: &Path) -> bool {
++    let normalize = |path: &Path| {
++        path.canonicalize()
++            .ok()
++            .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
++    };
++    ["", "-wal", "-shm", "-journal"].into_iter().any(|suffix| {
++        let mut name = database.as_os_str().to_owned();
++        name.push(suffix);
++        let protected = PathBuf::from(name);
++        protected == target
++            || normalize(&protected)
++                .zip(normalize(target))
++                .is_some_and(|(left, right)| left == right)
++    })
+ }
+ 
+ impl History {
++    /// Identifies the history record for the currently executing input.
++    pub fn active_input(&self) -> Option<i64> {
++        self.active_input
++    }
++
++    /// Sets the current input without guessing from its text.
++    pub fn set_active_input(&mut self, id: Option<i64>) {
++        self.active_input = id;
++        self.active_completion = None;
++    }
++
++    /// Starts execution tracking without changing the command history itself.
++    pub fn start_input(&mut self, id: Option<i64>) -> Result<(), error::Error> {
++        self.set_active_input(id);
++        if let (Some(id), Some(observer)) = (id, self.observer.as_ref()) {
++            self.active_completion = observer.execution_started(id)?;
++        }
++        Ok(())
++    }
++
++    /// Marks entry to or exit from an explicit fc replay.
++    pub fn set_replaying(&mut self, replaying: bool) {
++        self.replaying = replaying;
++    }
++
++    /// Whether execution is already inside an fc replay.
++    pub fn is_replaying(&self) -> bool {
++        self.replaying
++    }
++
++    /// Carries the host's ignore decision through implicit replay recording.
++    pub fn set_recording_suppressed(&mut self, suppressed: bool) {
++        self.recording_suppressed = suppressed;
++    }
++
++    /// Whether the active input must not create implicit history records.
++    pub fn recording_suppressed(&self) -> bool {
++        self.recording_suppressed
++    }
++
++    /// Clears execution-only history state, including after interruption.
++    pub fn finish_input(&mut self) {
++        self.active_input = None;
++        self.active_completion = None;
++        self.replaying = false;
++        self.recording_suppressed = false;
++    }
++
++    /// Reports the actual shell exit code, then releases execution-only state.
++    pub fn finish_input_with_status(&mut self, exit_code: i32) -> Result<(), error::Error> {
++        let completion = self.active_completion.take();
++        self.finish_input();
++        if let Some(completion) = completion {
++            completion(exit_code)?;
++        }
++        Ok(())
++    }
++
++    /// Applies current shell storage configuration to an embedding host.
++    pub fn configure_storage(
++        &self,
++        file: Option<&Path>,
++        size: Option<&str>,
++        file_size: Option<&str>,
++    ) -> Result<(), error::Error> {
++        if let Some(observer) = &self.observer {
++            observer.configure(file, size, file_size)?;
++        }
++        Ok(())
++    }
++
++    /// Refreshes an externally managed view without re-importing its records.
++    pub fn refresh(&mut self) -> Result<bool, error::Error> {
++        let Some(observer) = self.observer.clone() else {
++            return Ok(false);
++        };
++        let (items, next_id) = observer.refreshed()?;
++        self.replace_view(items, next_id, observer, self.protected_file.clone());
++        Ok(true)
++    }
++
++    /// Replaces a derived command view without replaying mutations to its host.
++    pub fn replace_view(
++        &mut self,
++        items: impl IntoIterator<Item = Item>,
++        next_id: i64,
++        observer: Arc<dyn Observer>,
++        protected_file: Option<PathBuf>,
++    ) {
++        self.items = rpds::VectorSync::new_sync();
++        self.id_map = rpds::HashTrieMapSync::new_sync();
++        for item in items {
++            self.items.push_back_mut(item.id);
++            self.id_map.insert_mut(item.id, item);
++        }
++        self.next_id = next_id;
++        self.observer = Some(observer);
++        self.protected_file = protected_file;
++        self.managed = true;
++    }
++
+     /// Constructs a new `History` instance, with its contents initialized from the given readable
+     /// stream. If errors are encountered reading lines from the stream, unreadable lines will
+     /// be skipped but the call will still return successfully, with a warning logged. An error
+@@ -95,6 +285,12 @@ impl History {
+     /// * `id` - The unique identifier of the history item to update.
+     /// * `item` - The new history item to replace the old one.
+     pub fn update_by_id(&mut self, id: ItemId, item: Item) -> Result<(), error::Error> {
++        if !self.id_map.contains_key(&id) {
++            return Err(error::ErrorKind::HistoryItemNotFound.into());
++        }
++        if let Some(observer) = &self.observer {
++            observer.updated(&item)?;
++        }
+         let existing_item = self
+             .id_map
+             .get_mut(&id)
+@@ -105,8 +301,11 @@ impl History {
+ 
+     /// Removes the nth item from the history. Returns the removed item, or `None` if no such item
+     /// exists (i.e., because it was out of range).
+-    pub fn remove_nth_item(&mut self, n: usize) -> bool {
++    pub fn remove_nth_item(&mut self, n: usize) -> Result<bool, error::Error> {
+         if let Some(id) = self.items.get(n).copied() {
++            if let Some(observer) = &self.observer {
++                observer.removed(id)?;
++            }
+             self.items = self
+                 .items
+                 .into_iter()
+@@ -117,9 +316,9 @@ impl History {
+ 
+             self.id_map.remove_mut(&id);
+ 
+-            true
++            Ok(true)
+         } else {
+-            false
++            Ok(false)
+         }
+     }
+ 
+@@ -129,13 +328,45 @@ impl History {
+     ///
+     /// * `item` - The history item to add.
+     pub fn add(&mut self, mut item: Item) -> Result<ItemId, error::Error> {
+-        let id = self.next_id;
++        self.add_at(&mut item, None, &[])
++    }
++
++    /// Adds a known shell input with its actual input directory.
++    pub fn add_in_directory(
++        &mut self,
++        mut item: Item,
++        directory: &Path,
++        replace: &[ItemId],
++    ) -> Result<ItemId, error::Error> {
++        self.add_at(&mut item, Some(directory), replace)
++    }
+ 
+-        item.id = id;
+-        self.next_id += 1;
++    fn add_at(
++        &mut self,
++        item: &mut Item,
++        directory: Option<&Path>,
++        replace: &[ItemId],
++    ) -> Result<ItemId, error::Error> {
++        item.id = self.next_id;
++        if let Some(observer) = &self.observer {
++            observer.added(item, directory, replace)?;
++        }
++        for id in replace {
++            self.id_map.remove_mut(id);
++        }
++        if !replace.is_empty() {
++            self.items = self
++                .items
++                .into_iter()
++                .filter(|id| !replace.contains(id))
++                .copied()
++                .collect();
++        }
++        let id = item.id;
++        self.next_id = self.next_id.max(id.saturating_add(1));
+ 
+         self.items.push_back_mut(item.id);
+-        self.id_map.insert_mut(item.id, item);
++        self.id_map.insert_mut(item.id, item.clone());
+ 
+         Ok(id)
+     }
+@@ -147,6 +378,11 @@ impl History {
+     ///
+     /// * `id` - The unique identifier of the history item to delete.
+     pub fn delete_item_by_id(&mut self, id: ItemId) -> Result<(), error::Error> {
++        if self.id_map.contains_key(&id) {
++            if let Some(observer) = &self.observer {
++                observer.removed(id)?;
++            }
++        }
+         self.id_map.remove_mut(&id);
+         self.items = self
+             .items
+@@ -160,6 +396,9 @@ impl History {
+ 
+     /// Clears all history items.
+     pub fn clear(&mut self) -> Result<(), error::Error> {
++        if let Some(observer) = &self.observer {
++            observer.cleared()?;
++        }
+         self.id_map = rpds::HashTrieMapSync::new_sync();
+         self.items = rpds::VectorSync::new_sync();
+         Ok(())
+@@ -181,8 +420,37 @@ impl History {
+         unsaved_items_only: bool,
+         write_timestamps: bool,
+     ) -> Result<(), error::Error> {
++        if let Some(observer) = &self.observer {
++            observer.validate_export(history_file_path.as_ref())?;
++        }
++        if self
++            .protected_file
++            .as_ref()
++            .is_some_and(|protected| protected_export_target(protected, history_file_path.as_ref()))
++        {
++            return Err(std::io::Error::other(
++                "cannot overwrite the managed history database with a text export",
++            )
++            .into());
++        }
++        if std::fs::metadata(history_file_path.as_ref()).is_ok_and(|metadata| metadata.is_file()) {
++            let mut signature = [0u8; 16];
++            let mut existing = std::fs::File::open(history_file_path.as_ref())?;
++            let bytes = existing.read(&mut signature)?;
++            if bytes == signature.len() && &signature == b"SQLite format 3\0" {
++                return Err(std::io::Error::other(
++                    "cannot replace a SQLite database with text history",
++                )
++                .into());
++            }
++        }
+         // Open the file
+         let mut file_options = std::fs::File::options();
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            file_options.mode(0o600);
++        }
+ 
+         if append {
+             file_options.append(true);
+@@ -192,25 +460,38 @@ impl History {
+ 
+         let mut file = file_options.create(true).open(history_file_path.as_ref())?;
+ 
++        let mut exported = Vec::new();
+         for item_id in &self.items {
+             if let Some(item) = self.id_map.get_mut(item_id) {
+                 if unsaved_items_only && !item.dirty {
+                     continue;
+                 }
+ 
+-                if write_timestamps && let Some(timestamp) = item.timestamp {
+-                    writeln!(file, "#{}", timestamp.timestamp())?;
++                if write_timestamps || self.managed {
++                    writeln!(
++                        file,
++                        "#{}",
++                        item.timestamp.map_or(0, |timestamp| timestamp.timestamp())
++                    )?;
+                 }
+ 
+                 writeln!(file, "{}", item.command_line)?;
+ 
+                 if unsaved_items_only {
+-                    item.dirty = false;
++                    exported.push(*item_id);
+                 }
+             }
+         }
+ 
+         file.flush()?;
++        for id in &exported {
++            if let Some(item) = self.id_map.get_mut(id) {
++                item.dirty = false;
++            }
++        }
++        if let Some(observer) = &self.observer {
++            observer.exported(&exported);
++        }
+ 
+         Ok(())
+     }
+@@ -497,3 +778,49 @@ impl<'a> Iterator for Search<'a> {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod execution_tests {
++    use super::*;
++    use std::sync::atomic::{AtomicI32, Ordering};
++
++    #[test]
++    fn cloned_history_cannot_finish_its_parents_execution() {
++        let result = Arc::new(AtomicI32::new(-1));
++        let recorded = result.clone();
++        let mut history = History {
++            active_input: Some(7),
++            active_completion: Some(Box::new(move |code| {
++                recorded.store(code, Ordering::SeqCst);
++                Ok(())
++            })),
++            replaying: true,
++            recording_suppressed: true,
++            ..Default::default()
++        };
++        history.clone().finish_input_with_status(1).unwrap();
++        assert_eq!(result.load(Ordering::SeqCst), -1);
++        history.finish_input_with_status(0).unwrap();
++        assert_eq!(result.load(Ordering::SeqCst), 0);
++        assert!(history.active_input().is_none());
++        assert!(!history.is_replaying() && !history.recording_suppressed());
++        history.finish_input_with_status(9).unwrap();
++        assert_eq!(result.load(Ordering::SeqCst), 0);
++    }
++
++    #[test]
++    fn a_failed_completion_callback_still_releases_execution_state() {
++        let mut history = History {
++            active_input: Some(7),
++            active_completion: Some(Box::new(|_| {
++                Err(std::io::Error::other("outcome unavailable"))
++            })),
++            replaying: true,
++            ..Default::default()
++        };
++        assert!(history.finish_input_with_status(1).is_err());
++        assert!(history.active_input().is_none());
++        assert!(!history.is_replaying());
++        history.finish_input_with_status(0).unwrap();
++    }
++}
 diff --git a/brush-core/src/lib.rs b/brush-core/src/lib.rs
 index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..7c386580971a44c8f4383bb4f8be6ec5309ca40b 100644
 --- a/brush-core/src/lib.rs
@@ -574,7 +1274,7 @@ index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..7c386580971a44c8f4383bb4f8be6ec5
  pub mod sys;
  pub mod terminal;
 diff --git a/brush-core/src/shell.rs b/brush-core/src/shell.rs
-index 82dbca4601fd33e2d1b29de735be17b345ae08a6..5e365fbe0fd1b17958cdc783e26dbb003a50e2bc 100644
+index 82dbca4601fd33e2d1b29de735be17b345ae08a6..8801078e450cff24dbffc88376671d3e44f2e5bc 100644
 --- a/brush-core/src/shell.rs
 +++ b/brush-core/src/shell.rs
 @@ -45,6 +45,8 @@ mod state;
@@ -586,6 +1286,47 @@ index 82dbca4601fd33e2d1b29de735be17b345ae08a6..5e365fbe0fd1b17958cdc783e26dbb00
  pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
  pub use state::ShellState;
  
+@@ -208,6 +210,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
+     pub(crate) fn new(options: CreateOptions<SE>) -> Result<Self, error::Error> {
+         // Compute runtime options before moving fields out of `options`.
+         let runtime_options = RuntimeOptions::defaults_from(&options);
++        let external_history = options.external_history;
+ 
+         // Instantiate the shell with some defaults.
+         let mut shell = Self {
+@@ -249,10 +252,14 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
+ 
+         // Set up history, if relevant. Do NOT fail if we can't load history.
+         if shell.options.enable_command_history {
+-            shell.history = shell
+-                .load_history()
+-                .unwrap_or_default()
+-                .or_else(|| Some(crate::history::History::default()));
++            shell.history = if external_history {
++                Some(crate::history::History::default())
++            } else {
++                shell
++                    .load_history()
++                    .unwrap_or_default()
++                    .or_else(|| Some(crate::history::History::default()))
++            };
+         }
+ 
+         Ok(shell)
+diff --git a/brush-core/src/shell/builder.rs b/brush-core/src/shell/builder.rs
+index 3f99a9249646ab03586ab73c631a0e4583b8c814..1a355834bd7bc7c52b64deff7bff0a96864eb55e 100644
+--- a/brush-core/src/shell/builder.rs
++++ b/brush-core/src/shell/builder.rs
+@@ -164,6 +164,9 @@ pub struct CreateOptions<SE: extensions::ShellExtensions = extensions::DefaultSh
+     /// Whether to skip using a readline-like interface for input.
+     #[builder(default)]
+     pub no_editing: bool,
++    /// Let an embedding host load history instead of reading HISTFILE.
++    #[builder(default)]
++    pub external_history: bool,
+     /// System profile loading behavior.
+     #[builder(default)]
+     pub profile: ProfileLoadBehavior,
 diff --git a/brush-core/src/shell/completion.rs b/brush-core/src/shell/completion.rs
 index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd58081068290 100644
 --- a/brush-core/src/shell/completion.rs
@@ -712,6 +1453,149 @@ index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd580
      /// Generates command completions for the shell.
      ///
      /// # Arguments
+diff --git a/brush-core/src/shell/history.rs b/brush-core/src/shell/history.rs
+index 54be623bffac00010d9ea3b2b08306181dfc1743..4a0133bc63ec1c44e98c5b572fb2920b9dff1d58 100644
+--- a/brush-core/src/shell/history.rs
++++ b/brush-core/src/shell/history.rs
+@@ -42,7 +42,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
+     /// Returns the path to the history file used by the shell, if one is set.
+     pub fn history_file_path(&self) -> Option<PathBuf> {
+         self.env_str("HISTFILE")
+-            .map(|s| PathBuf::from(s.into_owned()))
++            .filter(|value| !value.is_empty())
++            .map(|s| {
++                let path = PathBuf::from(s.into_owned());
++                if path.is_absolute() {
++                    path
++                } else {
++                    self.working_dir().join(path)
++                }
++            })
+     }
+ 
+     /// Returns the path to the history file used by the shell, if one is set.
+@@ -74,23 +82,108 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
+     /// Adds a command to history.
+     pub fn add_to_history(&mut self, command: &str) -> Result<(), error::Error> {
+         if let Some(history) = &mut self.history {
+-            // Trim.
+-            let command = command.trim();
+-
+-            // For now, discard empty commands.
+-            if command.is_empty() {
+-                return Ok(());
+-            }
++            history.set_active_input(None);
++        }
++        if !self.history_should_record(command)? {
++            return Ok(());
++        }
++        let replace = self.history_duplicate_ids(command);
++        let file = self.history_file_path();
++        let size = self.env_str("HISTSIZE").map(|value| value.into_owned());
++        let file_size = self.env_str("HISTFILESIZE").map(|value| value.into_owned());
++        let directory = self.working_dir().to_path_buf();
++        if let Some(history) = &mut self.history {
++            history.configure_storage(file.as_deref(), size.as_deref(), file_size.as_deref())?;
+ 
+             // Add it to history.
+-            history.add(crate::history::Item {
+-                id: 0,
+-                command_line: command.to_owned(),
+-                timestamp: Some(chrono::Utc::now()),
+-                dirty: true,
+-            })?;
++            let id = history.add_in_directory(
++                crate::history::Item {
++                    id: 0,
++                    command_line: command.to_owned(),
++                    timestamp: Some(chrono::Utc::now()),
++                    dirty: true,
++                },
++                &directory,
++                &replace,
++            )?;
++            history.start_input(Some(id))?;
+         }
+ 
+         Ok(())
+     }
++
++    /// Tests history admission against the original input, before trimming.
++    pub fn history_should_record(&self, command: &str) -> Result<bool, error::Error> {
++        if !self.options.enable_command_history
++            || self
++                .history
++                .as_ref()
++                .is_some_and(|history| history.recording_suppressed())
++            || command.trim().is_empty()
++            || self
++                .env_str("HISTSIZE")
++                .is_some_and(|value| value.trim() == "0")
++        {
++            return Ok(false);
++        }
++        let control = self.env_str("HISTCONTROL").unwrap_or_default();
++        let controls = control.split(':').collect::<Vec<_>>();
++        if command.starts_with(' ')
++            && (controls.contains(&"ignorespace") || controls.contains(&"ignoreboth"))
++        {
++            return Ok(false);
++        }
++        let previous = self
++            .history
++            .as_ref()
++            .and_then(|history| history.get(history.count().checked_sub(1)?))
++            .map(|item| item.command_line.as_str());
++        if previous == Some(command)
++            && (controls.contains(&"ignoredups") || controls.contains(&"ignoreboth"))
++        {
++            return Ok(false);
++        }
++        if let Some(ignore) = self.env_str("HISTIGNORE") {
++            let mut pattern = String::new();
++            let mut escaped = false;
++            let matches = |pattern: &str| -> Result<bool, error::Error> {
++                if pattern == "&" {
++                    Ok(previous == Some(command))
++                } else if pattern.is_empty() {
++                    Ok(false)
++                } else {
++                    crate::patterns::Pattern::from(pattern).exactly_matches(command)
++                }
++            };
++            for ch in ignore.chars().chain(std::iter::once(':')) {
++                if ch == ':' && !escaped {
++                    if matches(&pattern)? {
++                        return Ok(false);
++                    }
++                    pattern.clear();
++                } else {
++                    pattern.push(ch);
++                }
++                escaped = ch == '\\' && !escaped;
++            }
++        }
++        Ok(true)
++    }
++
++    /// Selects the current-view records replaced by the explicit erasedups rule.
++    pub fn history_duplicate_ids(&self, command: &str) -> Vec<i64> {
++        if self
++            .env_str("HISTCONTROL")
++            .is_some_and(|value| value.split(':').any(|part| part == "erasedups"))
++            && let Some(history) = &self.history
++        {
++            history
++                .iter()
++                .filter(|item| item.command_line == command)
++                .map(|item| item.id)
++                .collect()
++        } else {
++            Vec::new()
++        }
++    }
+ }
 diff --git a/brush-core/src/sys/stubs/async_pipe.rs b/brush-core/src/sys/stubs/async_pipe.rs
 index 6b6ca14c464ab0077bf22b6196bfb1e14408b28c..41cde833136ed6307b710fbc54d3f20d5d7a3458 100644
 --- a/brush-core/src/sys/stubs/async_pipe.rs

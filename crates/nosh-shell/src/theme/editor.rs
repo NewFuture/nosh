@@ -65,6 +65,16 @@ pub(crate) struct ThemedHinter {
     pub frame: FrameTheme,
 }
 
+pub(super) fn hint_style(styles: Styles) -> nu_ansi_term::Style {
+    let style = styles.style(Role::Muted);
+    // No attributes in NO_COLOR/plain mode, even for the history preview.
+    if style.foreground.is_some() {
+        style.italic()
+    } else {
+        style
+    }
+}
+
 impl Hinter for ThemedHinter {
     fn handle(
         &mut self,
@@ -76,18 +86,14 @@ impl Hinter for ThemedHinter {
     ) -> String {
         let hint = self.inner.handle(line, pos, history, false, cwd);
         if color {
-            let styles = self.frame.styles();
-            let style = styles.style(Role::Muted);
-            // No attributes in NO_COLOR/plain mode, even for the history hint.
-            let style = if style.foreground.is_some() {
-                style.italic()
-            } else {
-                style
-            };
-            style.paint(hint).to_string()
+            self.hint_style().paint(hint).to_string()
         } else {
             hint
         }
+    }
+
+    fn hint_style(&self) -> nu_ansi_term::Style {
+        hint_style(self.frame.styles())
     }
 
     fn complete_hint(&self) -> String {
@@ -95,5 +101,31 @@ impl Hinter for ThemedHinter {
     }
     fn next_hint_token(&self) -> String {
         self.inner.next_hint_token()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_previews_share_the_normal_hint_style_and_follow_theme_changes() {
+        let frame = FrameTheme::test();
+        let hinter = ThemedHinter {
+            inner: Box::new(reedline::DefaultHinter::default()),
+            frame: frame.clone(),
+        };
+        for builtin in super::super::Builtin::ALL {
+            frame.latch(builtin.palette());
+            let style = hinter.hint_style();
+            assert_eq!(
+                style.foreground,
+                frame.styles().style(Role::Muted).foreground
+            );
+            assert!(style.is_italic);
+        }
+        let mut plain = frame.styles();
+        plain.terminal.color = false;
+        assert_eq!(hint_style(plain), nu_ansi_term::Style::default());
     }
 }

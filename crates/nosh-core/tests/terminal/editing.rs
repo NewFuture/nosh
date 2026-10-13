@@ -44,8 +44,16 @@ pub(super) fn probe(mode: &str) {
         .tempdir_in(".")
         .unwrap();
     let directory_path = directory.path().canonicalize().unwrap();
+    let history_rc = directory_path.join("history.rc");
+    std::fs::write(
+        &history_rc,
+        format!("HISTFILE='{}'\n", directory_path.join("history").display()),
+    )
+    .unwrap();
     let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions {
         interactive: true,
+        load_rc: true,
+        rc_file: Some(history_rc),
         working_dir: Some(directory_path),
         ..Default::default()
     })
@@ -459,27 +467,27 @@ fn tab_only_requests_ai_when_completion_is_definitively_exhausted() {
 }
 
 #[test]
-fn history_enter_submits_but_escape_and_cancel_do_not() {
+fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
     let result = run(
         "repl-editing",
         "xterm-256color",
         &[
             ("editing> ", b"\x12history_executed"),
             ("touch history_executed", b"\r"),
-            ("editing> ", b"exit 0\r"),
+            ("editing> ", b"\x15exit 0\r"),
         ],
     );
-    assert_eq!(result["history_executed"], true);
+    assert_eq!(result["history_executed"], false);
     assert_eq!(result["requests"], 0);
     let result = run(
         "repl-editing",
         "xterm-256color",
         &[
             ("editing> ", b"printf original"),
-            ("original", b"\x12history_executed"),
+            ("original", b"\x12\x15history_executed"),
             ("touch history_executed", F2),
             ("exit or cancel", b"\x1b"),
-            ("touch history_executed", b"\x15exit 0\r"),
+            ("original", b"\x15exit 0\r"),
         ],
     );
     assert_eq!(result["history_executed"], false);
@@ -490,10 +498,9 @@ fn history_enter_submits_but_escape_and_cancel_do_not() {
         "xterm-256color",
         &[
             ("editing> ", b"printf original"),
-            ("original", b"\x12no_history_match_fixture"),
-            ("failing reverse-i-search", b"\r"),
-            ("failing reverse-i-search", b"\x07"),
-            ("original", b"\x15exit 0\r"),
+            ("original", b"\x12\x15no_history_match_fixture"),
+            ("No matches", b"\r"),
+            ("editing> ", b"\x15exit 0\r"),
         ],
     );
     assert_eq!(result["history_executed"], false);
@@ -595,7 +602,7 @@ fn vi_insert_normal_search_and_ai_resumption_keep_the_real_mode() {
             ("vi_a", b"\x1b"),
             ("[N]", b"x"),
             ("[N]", b"u"),
-            ("[N]", b"\x12history_executed"),
+            ("[N]", b"\x12\x05\x15history_executed"),
             ("touch history_executed", b"\x07"),
             ("[N]", F2),
             ("touch generate", b"\x1a"),

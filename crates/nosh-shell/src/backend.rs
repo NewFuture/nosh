@@ -321,6 +321,7 @@ pub struct EmbeddedShell {
     workspace: PathBuf,
     interrupts: Arc<Interrupts>,
     recent: Vec<UserCommand>,
+    history: Option<crate::history::Store>,
     next_command_id: u64,
     capture_mode: CaptureOutput,
     capture_control: Option<pty::Control>,
@@ -352,6 +353,7 @@ impl EmbeddedShell {
                 .interactive(opts.interactive)
                 .login(opts.login)
                 .no_editing(true)
+                .external_history(opts.interactive)
                 .command_string_mode(opts.command_string_mode)
                 .profile(brush_core::ProfileLoadBehavior::Skip)
                 .rc(brush_core::RcLoadBehavior::Skip)
@@ -364,7 +366,7 @@ impl EmbeddedShell {
                 .print_commands_and_arguments(opts.xtrace)
                 .treat_unset_variables_as_error(opts.nounset)
                 .builtins(builtins);
-            if let Some(h) = histfile {
+            if let Some(h) = &histfile {
                 if let Some(parent) = h.parent() {
                     let _ = nosh_platform::paths::ensure_private_dir(parent);
                 }
@@ -380,6 +382,7 @@ impl EmbeddedShell {
             workspace,
             interrupts: Arc::new(Interrupts::default()),
             recent: Vec::new(),
+            history: None,
             next_command_id: 1,
             capture_mode: CaptureOutput::Off,
             capture_control: None,
@@ -409,6 +412,20 @@ impl EmbeddedShell {
         if opts.interactive || opts.catch_sigint {
             me.install_signal_handlers(opts.interactive);
         }
+        if opts.interactive {
+            let file = me.lock().history_file_path();
+            let history = crate::history::Store::new(
+                file.as_deref(),
+                me.var("HISTSIZE").as_deref(),
+                me.var("HISTFILESIZE").as_deref(),
+            );
+            history.context(&me.cwd(), me.lock().options().enable_command_history);
+            if let Err(error) = history.sync() {
+                eprintln!("nosh: history not ready: {error}");
+            }
+            me.history = Some(history);
+            me.refresh_history();
+        }
         Ok(me)
     }
 
@@ -423,6 +440,80 @@ impl EmbeddedShell {
 
     pub fn is_interactive(&self) -> bool {
         self.interactive
+    }
+
+    pub(crate) fn history_store(&self) -> Option<crate::history::Store> {
+        self.history.clone()
+    }
+
+    pub(crate) fn refresh_history(&mut self) {
+        let Some(history) = self.history.clone() else {
+            return;
+        };
+        let file = self.lock().history_file_path();
+        if let Err(error) = history.configure(
+            file.as_deref(),
+            self.var("HISTSIZE").as_deref(),
+            self.var("HISTFILESIZE").as_deref(),
+        ) {
+            eprintln!("nosh: history configuration unavailable: {error}");
+        }
+        history.context(&self.cwd(), self.lock().options().enable_command_history);
+        history.report_errors();
+        if let Some(view) = self.lock().history_mut() {
+            history.brush_view(view);
+        }
+    }
+
+    pub(crate) fn record_question(&mut self, text: &str, suggestion: bool) {
+        let _ = self.record_input(
+            text,
+            if suggestion {
+                crate::history::Kind::SuggestionRequest
+            } else {
+                crate::history::Kind::Question
+            },
+        );
+    }
+
+    fn record_input(&mut self, text: &str, kind: crate::history::Kind) -> Option<i64> {
+        let history = self.history.clone()?;
+        if !self.history_accepts(text) {
+            return None;
+        }
+        let file = self.lock().history_file_path();
+        if let Err(error) = history.configure(
+            file.as_deref(),
+            self.var("HISTSIZE").as_deref(),
+            self.var("HISTFILESIZE").as_deref(),
+        ) {
+            eprintln!("nosh: input history not recorded: {error}");
+            return None;
+        }
+        let replace = if kind.is_question() {
+            Vec::new()
+        } else {
+            self.lock().history_duplicate_ids(text)
+        };
+        history.context(&self.cwd(), self.lock().options().enable_command_history);
+        let id = history.record_replacing(text, kind, &replace);
+        if !kind.is_question()
+            && let Some(view) = self.lock().history_mut()
+        {
+            history.brush_view(view);
+        }
+        history.report_errors();
+        id
+    }
+
+    fn history_accepts(&self, text: &str) -> bool {
+        match self.lock().history_should_record(text) {
+            Ok(accept) => accept,
+            Err(error) => {
+                eprintln!("nosh: invalid history ignore rule; input not recorded: {error}");
+                false
+            }
+        }
     }
 
     pub fn configure_project_env(
@@ -871,14 +962,21 @@ impl EmbeddedShell {
 
     pub fn end_interactive(&mut self) {
         let rt = self.rt.clone();
-        let mut sh = self.lock();
-        let _ = sh.end_interactive_session();
-        let _ = sh.save_history();
-        let _ = rt.block_on(sh.on_exit());
+        {
+            let mut sh = self.lock();
+            let _ = sh.end_interactive_session();
+            let _ = rt.block_on(sh.on_exit());
+        }
+        if let Some(history) = &self.history {
+            if let Err(error) = history.sync() {
+                eprintln!("nosh: history not saved: {error}");
+            }
+            history.report_errors();
+        }
     }
 
     pub fn add_history(&mut self, line: &str) {
-        let _ = self.lock().add_to_history(line);
+        let _ = self.record_input(line, crate::history::Kind::Command);
     }
 
     pub(crate) fn has_running_jobs(&self) -> bool {
@@ -892,6 +990,16 @@ impl EmbeddedShell {
     /// Runs a user command in the foreground (terminal handed to it).
     pub fn run_user_line(&mut self, line: &str) -> UserRun {
         self.run_line(line, None)
+    }
+
+    pub(crate) fn prepare_history_input(&mut self, line: &str) {
+        let id = self.record_input(line, crate::history::Kind::Command);
+        if let Some(history) = self.lock().history_mut() {
+            if let Err(error) = history.start_input(id) {
+                eprintln!("nosh: history execution tracking unavailable: {error}");
+            }
+            history.set_recording_suppressed(id.is_none());
+        }
     }
 
     fn run_line(&mut self, line: &str, stdin: Option<OpenFile>) -> UserRun {
@@ -1008,6 +1116,11 @@ impl EmbeddedShell {
                 });
             (code, exit_shell, start.elapsed(), mixed, stopped)
         };
+        let history_error = self
+            .lock()
+            .history_mut()
+            .and_then(|history| history.finish_input_with_status(code).err())
+            .map(|error| format!("history execution status not saved: {error}"));
         let command = UserCommand {
             id,
             line: line.trim().to_string(),
@@ -1042,6 +1155,13 @@ impl EmbeddedShell {
         };
         output.mixed = mixed;
         self.last_output = Some(output);
+        if let Some(error) = history_error {
+            if let Some(history) = &self.history {
+                history.report(error);
+            } else {
+                eprintln!("nosh: {error}");
+            }
+        }
         self.recent.push(command);
         if self.recent.len() > 5 {
             self.recent.remove(0);
@@ -1482,6 +1602,8 @@ impl EmbeddedShell {
             let _ = rt.block_on(sh.run_string(cmd, &SourceInfo::from("PROMPT_COMMAND"), &params));
             sh.set_last_exit_status(prev);
         }
+        drop(sh);
+        self.refresh_history();
     }
 
     /// Runs an agent command in the shared session: stdin is `/dev/null`,

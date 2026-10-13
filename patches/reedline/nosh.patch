@@ -1416,7 +1416,7 @@ index 79dd9beb22d76020b8e5bd2e9b2762ca4303d6bb..f8c7006a2aa2308b9b9fc4cca5895331
  }
  
 diff --git a/src/engine.rs b/src/engine.rs
-index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367a9277b13 100644
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099cef601e6 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -37,7 +37,8 @@ use {
@@ -1438,12 +1438,13 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          },
          time::Duration,
          time::SystemTime,
-@@ -146,10 +147,15 @@ pub struct Reedline {
+@@ -146,10 +147,16 @@ pub struct Reedline {
      /// Last failed `history.save`, until [`Reedline::take_history_save_error`].
      history_save_error: Option<ReedlineError>,
      input_mode: InputMode,
 +    contextual_input: bool,
 +    history_search_origin: Option<(LineBuffer, PromptEditMode)>,
++    history_panel: Option<crate::history_panel::Panel>,
 +    pending_input: std::collections::VecDeque<Event>,
 +    buffered_input: bool,
  
@@ -1454,7 +1455,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      last_render_snapshot: Option<RenderSnapshot>,
  
      // Validator
-@@ -169,6 +175,7 @@ pub struct Reedline {
+@@ -169,6 +176,7 @@ pub struct Reedline {
      // Provides the tab completions
      completer: Box<dyn Completer + Send>,
      quick_completions: bool,
@@ -1462,7 +1463,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      partial_completions: bool,
      persistent_menus: bool,
      // Completions owed to a menu activation the completer could not answer in time
-@@ -204,6 +211,10 @@ pub struct Reedline {
+@@ -186,6 +194,7 @@ pub struct Reedline {
+     // Showcase hints based on various strategies (history, language-completion, spellcheck, etc)
+     hinter: Option<Box<dyn Hinter>>,
+     hide_hints: bool,
++    hint_origin: Option<(u64, usize)>,
+ 
+     // Use ansi coloring or not
+     use_ansi_coloring: bool,
+@@ -204,6 +213,10 @@ pub struct Reedline {
      menus: Vec<ReedlineMenu>,
  
      abbreviations: HashMap<String, String>,
@@ -1473,7 +1482,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
  
      // Text editor used to open the line buffer for editing
      buffer_editor: Option<BufferEditor>,
-@@ -260,20 +271,29 @@ struct DeferredMenuCompletion {
+@@ -260,20 +273,29 @@ struct DeferredMenuCompletion {
      menu: String,
      /// The line this was armed on, stamped as a completer stamps its own results.
      origin: CompletionOrigin,
@@ -1505,7 +1514,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              && self
                  .origin
                  .matches(editor.get_buffer(), editor.insertion_point())
-@@ -286,9 +306,24 @@ impl DeferredMenuCompletion {
+@@ -286,9 +308,24 @@ impl DeferredMenuCompletion {
  #[derive(Clone, Debug, Default)]
  pub struct RepaintSignal {
      flag: Arc<AtomicBool>,
@@ -1530,7 +1539,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// Request that the prompt is re-evaluated and repainted in place.
      pub fn request_repaint(&self) {
          self.flag.store(true, Ordering::Relaxed);
-@@ -302,6 +337,9 @@ impl RepaintSignal {
+@@ -302,6 +339,9 @@ impl RepaintSignal {
  
  impl Drop for Reedline {
      fn drop(&mut self) {
@@ -1540,12 +1549,13 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          if self.cursor_shapes.is_some() {
              let _ignore = terminal::enable_raw_mode();
              let mut stdout = std::io::stdout();
-@@ -366,7 +404,12 @@ impl Reedline {
+@@ -366,7 +406,13 @@ impl Reedline {
              history_cursor_on_excluded: false,
              history_save_error: None,
              input_mode: InputMode::Regular,
 +            contextual_input: false,
 +            history_search_origin: None,
++            history_panel: None,
 +            pending_input: std::collections::VecDeque::new(),
 +            buffered_input: false,
              suspended_state: None,
@@ -1553,7 +1563,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              last_render_snapshot: None,
              painter,
              transient_prompt: None,
-@@ -374,6 +417,7 @@ impl Reedline {
+@@ -374,6 +420,7 @@ impl Reedline {
              standby_edit_modes: Vec::new(),
              completer,
              quick_completions: false,
@@ -1561,7 +1571,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              partial_completions: false,
              persistent_menus: false,
              deferred_menu_completion: None,
-@@ -389,6 +433,10 @@ impl Reedline {
+@@ -382,6 +429,7 @@ impl Reedline {
+             visual_selection_cursor_style: None,
+             hinter,
+             hide_hints: false,
++            hint_origin: None,
+             validator,
+             use_ansi_coloring: true,
+             auto_pairs: None,
+@@ -389,6 +437,10 @@ impl Reedline {
              cwd: None,
              menus: Vec::new(),
              abbreviations: HashMap::new(),
@@ -1572,7 +1590,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              buffer_editor: None,
              cursor_shapes: None,
              bracketed_paste: BracketedPasteGuard::default(),
-@@ -513,6 +561,22 @@ impl Reedline {
+@@ -472,6 +524,7 @@ impl Reedline {
+     #[must_use]
+     pub fn with_hinter(mut self, hinter: Box<dyn Hinter>) -> Self {
+         self.hinter = Some(hinter);
++        self.hint_origin = None;
+         self
+     }
+ 
+@@ -513,6 +566,22 @@ impl Reedline {
          self
      }
  
@@ -1595,7 +1621,26 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// Control whether the cursor crosses line boundaries on left/right motions
      /// in a block caret (vi normal/visual mode). When `true` (the default), `l`
      /// at the end of a line moves to the next line's first character and `h` at
-@@ -845,6 +909,128 @@ impl Reedline {
+@@ -693,6 +762,18 @@ impl Reedline {
+         self
+     }
+ 
++    /// Display the host's contextual history with the shared completion menu.
++    #[must_use]
++    pub fn with_history_panel(
++        mut self,
++        provider: Box<dyn crate::HistoryPanelProvider>,
++        menu: crate::ColumnarMenu,
++    ) -> Self {
++        self.contextual_input = true;
++        self.history_panel = Some(crate::history_panel::Panel::new(provider, menu));
++        self
++    }
++
+     /// A builder which configures history exclusion for your instance of the Reedline engine
+     /// # Example
+     /// ```rust,no_run
+@@ -845,6 +926,128 @@ impl Reedline {
          self
      }
  
@@ -1724,7 +1769,26 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// A builder that adds the history item id
      #[must_use]
      pub fn with_history_session_id(mut self, session: Option<HistorySessionId>) -> Self {
-@@ -990,16 +1176,48 @@ impl Reedline {
+@@ -892,6 +1095,18 @@ impl Reedline {
+         self.edit_mode.edit_mode()
+     }
+ 
++    fn buffer_edit_mode(&self) -> PromptEditMode {
++        if self
++            .history_panel
++            .as_ref()
++            .is_some_and(|panel| panel.is_active())
++        {
++            PromptEditMode::Emacs
++        } else {
++            self.edit_mode.edit_mode()
++        }
++    }
++
+     /// Output the complete [`History`] chronologically with numbering to the terminal
+     pub fn print_history(&mut self) -> Result<()> {
+         let history: Vec<_> = self
+@@ -990,16 +1205,48 @@ impl Reedline {
      /// Returns a [`std::io::Result`] in which the `Err` type is [`std::io::Result`]
      /// and the `Ok` variant wraps a [`Signal`] which handles user inputs.
      pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
@@ -1780,7 +1844,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      }
  
      /// Returns the current insertion point of the input buffer.
-@@ -1007,6 +1225,11 @@ impl Reedline {
+@@ -1007,6 +1254,11 @@ impl Reedline {
          self.editor.insertion_point()
      }
  
@@ -1792,7 +1856,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// Returns the current contents of the input buffer.
      pub fn current_buffer_contents(&self) -> &str {
          self.editor.get_buffer()
-@@ -1017,6 +1240,17 @@ impl Reedline {
+@@ -1017,6 +1269,17 @@ impl Reedline {
          self.editor.get_selection()
      }
  
@@ -1810,7 +1874,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// Writes `msg` to the terminal with a following carriage return and newline
      fn print_line(&mut self, msg: &str) -> Result<()> {
          self.painter.paint_line(msg)
-@@ -1045,6 +1279,23 @@ impl Reedline {
+@@ -1045,6 +1308,23 @@ impl Reedline {
              .is_some_and(RepaintSignal::take)
      }
  
@@ -1834,7 +1898,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// Whether the input loop must poll with a timeout instead of blocking
      /// indefinitely, so external triggers (break signal, repaint signal,
      /// external printer, idle callback) are noticed while waiting for input.
-@@ -1086,6 +1337,9 @@ impl Reedline {
+@@ -1086,6 +1366,9 @@ impl Reedline {
  
          loop {
              // Call idle callback if set (for processing external events like GUI updates)
@@ -1844,7 +1908,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              if let Some(ref mut callback) = self.idle_callback {
                  callback();
                  // The callback owns stdout while it runs and may have
-@@ -1097,6 +1351,7 @@ impl Reedline {
+@@ -1097,6 +1380,7 @@ impl Reedline {
              if let Some(ref signal) = self.break_signal {
                  if signal.swap(false, std::sync::atomic::Ordering::Relaxed) {
                      let buffer = self.editor.get_buffer().to_string();
@@ -1852,7 +1916,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                      self.input_mode = InputMode::Regular;
                      self.last_render_snapshot = None;
                      self.suspended_state = Some(self.painter.state_before_suspension());
-@@ -1154,7 +1409,10 @@ impl Reedline {
+@@ -1154,7 +1438,10 @@ impl Reedline {
  
              let mut events: Vec<Event> = vec![];
  
@@ -1864,7 +1928,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  if self.input_needs_polling() || completer_pending {
                      if event::poll(self.poll_interval)? {
                          events.push(crossterm::event::read()?);
-@@ -1166,7 +1424,10 @@ impl Reedline {
+@@ -1166,7 +1453,10 @@ impl Reedline {
  
                  // Receive all events in the queue without blocking. Will stop when
                  // a line of input is completed.
@@ -1876,7 +1940,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                      events.push(crossterm::event::read()?);
                  }
  
-@@ -1175,7 +1436,10 @@ impl Reedline {
+@@ -1175,7 +1465,10 @@ impl Reedline {
                  if events.len() > EVENTS_THRESHOLD
                      || events.iter().any(|e| matches!(e, Event::Resize(_, _)))
                  {
@@ -1888,7 +1952,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                          events.push(crossterm::event::read()?);
                      }
                  }
-@@ -1222,7 +1486,10 @@ impl Reedline {
+@@ -1222,7 +1515,10 @@ impl Reedline {
          let owed = self
              .deferred_menu_completion
              .as_ref()
@@ -1900,7 +1964,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
  
          // Values were just refreshed above, so the menu must not re-fetch them.
          let accept_lone_value =
-@@ -1256,7 +1523,10 @@ impl Reedline {
+@@ -1256,7 +1552,10 @@ impl Reedline {
      fn decide_menu_completion(&mut self, menu_index: usize, values_updated: bool) -> bool {
          let menu = &mut self.menus[menu_index];
  
@@ -1912,7 +1976,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              if !values_updated {
                  menu.update_values(
                      &mut self.editor,
-@@ -1267,12 +1537,17 @@ impl Reedline {
+@@ -1267,12 +1566,17 @@ impl Reedline {
              // Accepting a lone *stale* value is refused downstream, since its span
              // belongs to another line, so the menu would close over a completion that
              // never happened.
@@ -1932,7 +1996,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              menu.can_partially_complete(
                  values_updated || self.quick_completions,
                  &mut self.editor,
-@@ -1289,6 +1564,9 @@ impl Reedline {
+@@ -1289,6 +1593,9 @@ impl Reedline {
          prompt: &dyn Prompt,
          events: Vec<Event>,
      ) -> Result<ControlFlow<Signal>> {
@@ -1942,7 +2006,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          // Convert `Event` into `ReedlineEvent`. Also, fuse consecutive
          // `ReedlineEvent::EditCommand` into one. Also, if there're multiple
          // `ReedlineEvent::Resize`, only keep the last one.
-@@ -1297,7 +1575,16 @@ impl Reedline {
+@@ -1297,7 +1604,16 @@ impl Reedline {
          let mut resize = None;
          for event in events {
              if let Ok(event) = ReedlineRawEvent::try_from(event) {
@@ -1960,7 +2024,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                      ReedlineEvent::Edit(edit) => edits.extend(edit),
                      ReedlineEvent::Resize(x, y) => resize = Some((x, y)),
                      event => {
-@@ -1369,7 +1656,128 @@ impl Reedline {
+@@ -1369,19 +1685,304 @@ impl Reedline {
          Ok(ControlFlow::Continue(()))
      }
  
@@ -1982,8 +2046,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +        let mut events = events.into_iter();
 +        let mut repaint = false;
 +        while let Some(raw) = events.next() {
-+            let imported =
-+                matches!(&raw, Event::Paste(_)) && self.input_mode != InputMode::HistorySearch;
++            let imported = matches!(&raw, Event::Paste(_));
 +            let literal = self.input_intent() == crate::InputIntent::Literal;
 +            if imported {
 +                self.import_abbreviation_input();
@@ -2011,7 +2074,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +            if self.input_mode != InputMode::HistorySearch && starts_search(&event) {
 +                self.history_search_origin = Some((self.editor.line_buffer().clone(), before));
 +            }
-+            self.editor.sync_edit_mode(self.edit_mode.edit_mode());
++            self.editor.sync_edit_mode(self.buffer_edit_mode());
 +            let status = self.handle_event(prompt, event)?;
 +            if imported {
 +                self.editor.import_draft(literal);
@@ -2046,7 +2109,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +            }
 +        }
 +        if repaint || self.editor.policy_unsettled() {
-+            self.editor.set_edit_mode(self.edit_mode.edit_mode());
++            self.editor.set_edit_mode(self.buffer_edit_mode());
 +            self.repaint(prompt)?;
 +        }
 +        Ok(ControlFlow::Continue(()))
@@ -2079,7 +2142,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +                }
 +                other => {
 +                    return if self.input_mode == InputMode::HistorySearch {
-+                        self.handle_history_search_event(other)
++                        self.handle_history_search_event(prompt, other)
 +                    } else {
 +                        self.handle_editor_event(prompt, other)
 +                    };
@@ -2087,12 +2150,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +            }
 +        }
          if self.input_mode == InputMode::HistorySearch {
-             self.handle_history_search_event(event)
+-            self.handle_history_search_event(event)
++            self.handle_history_search_event(prompt, event)
          } else {
-@@ -1377,6 +1785,43 @@ impl Reedline {
+             self.handle_editor_event(prompt, event)
          }
      }
  
+-    fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
 +    fn finish_history_search(
 +        &mut self,
 +        prompt: &dyn Prompt,
@@ -2102,11 +2167,58 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +        if self.input_mode != InputMode::HistorySearch {
 +            return Ok(EventStatus::Inapplicable);
 +        }
-+        let value = self.history_cursor.string_at_cursor();
++        let submit = submit
++            && !self
++                .history_panel
++                .as_ref()
++                .is_some_and(|panel| panel.is_active());
++        let value = if let Some(panel) = self
++            .history_panel
++            .as_mut()
++            .filter(|panel| panel.is_active())
++        {
++            if cancel {
++                None
++            } else {
++                let before = panel.selected().cloned();
++                let was_empty = panel.no_matches();
++                panel.refresh_for_acceptance(&self.editor, self.painter.screen_width());
++                let selected = panel.selected().cloned();
++                if selected.as_ref().map(|entry| (&entry.anchor, &entry.text))
++                    != before.as_ref().map(|entry| (&entry.anchor, &entry.text))
++                {
++                    if !panel.page.pending {
++                        panel.acceptance_notice =
++                            Some("History selection changed; review it before accepting".into());
++                    }
++                    return Ok(EventStatus::Handled);
++                }
++                if selected.is_none() {
++                    if was_empty && panel.no_matches() {
++                        let input = self.editor.line_buffer().clone();
++                        panel.close(&mut self.editor);
++                        self.input_mode = InputMode::Regular;
++                        self.history_search_origin = None;
++                        self.accepted_abbreviation = None;
++                        self.editor.sync_edit_mode(self.edit_mode.edit_mode());
++                        *self.editor.line_buffer_mut() = input;
++                        self.editor.commit_cursor();
++                        self.editor.update_undo_state(UndoBehavior::CreateUndoPoint);
++                    }
++                    return Ok(EventStatus::Handled);
++                }
++                selected.map(|entry| entry.text)
++            }
++        } else {
++            self.history_cursor.string_at_cursor()
++        };
 +        if !cancel && submit && value.is_none() {
 +            return Ok(EventStatus::Handled);
 +        }
 +        self.input_mode = InputMode::Regular;
++        if let Some(panel) = &mut self.history_panel {
++            panel.close(&mut self.editor);
++        }
 +        if cancel || value.is_none() {
 +            if let Some((original, mode)) = self.history_search_origin.take() {
 +                self.edit_mode
@@ -2130,10 +2242,97 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +        }
 +    }
 +
-     fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
++    fn handle_history_search_event(
++        &mut self,
++        prompt: &dyn Prompt,
++        event: ReedlineEvent,
++    ) -> io::Result<EventStatus> {
++        if self
++            .history_panel
++            .as_ref()
++            .is_some_and(|panel| panel.is_active())
++        {
++            let columns = self.painter.screen_width();
++            match &event {
++                ReedlineEvent::SearchHistory => {
++                    self.history_panel
++                        .as_mut()
++                        .unwrap()
++                        .switch_scope(&self.editor, columns);
++                    return Ok(EventStatus::Handled);
++                }
++                ReedlineEvent::PreviousHistory
++                | ReedlineEvent::Up
++                | ReedlineEvent::NextHistory
++                | ReedlineEvent::Down
++                | ReedlineEvent::MenuUp
++                | ReedlineEvent::MenuDown
++                | ReedlineEvent::MenuNext
++                | ReedlineEvent::MenuPrevious => {
++                    let older = matches!(
++                        &event,
++                        ReedlineEvent::PreviousHistory
++                            | ReedlineEvent::Up
++                            | ReedlineEvent::MenuUp
++                            | ReedlineEvent::MenuPrevious
++                    );
++                    self.history_panel
++                        .as_mut()
++                        .unwrap()
++                        .navigate(older, &self.editor, columns);
++                    return Ok(EventStatus::Handled);
++                }
++                ReedlineEvent::Edit(commands) => {
++                    self.history_panel
++                        .as_mut()
++                        .unwrap()
++                        .edit(&mut self.editor, commands, columns);
++                    return Ok(EventStatus::Handled);
++                }
++                ReedlineEvent::CtrlD if self.editor.is_empty() => {
++                    return self.finish_history_search(prompt, false, true);
++                }
++                ReedlineEvent::Right
++                | ReedlineEvent::Left
++                | ReedlineEvent::ToStart
++                | ReedlineEvent::ToEnd
++                | ReedlineEvent::CtrlD => {
++                    let command = match &event {
++                        ReedlineEvent::Right => EditCommand::MoveRight { select: false },
++                        ReedlineEvent::Left => EditCommand::MoveLeft { select: false },
++                        ReedlineEvent::ToStart => EditCommand::MoveToStart { select: false },
++                        ReedlineEvent::ToEnd => EditCommand::MoveToEnd { select: false },
++                        ReedlineEvent::CtrlD => EditCommand::Delete,
++                        _ => unreachable!(),
++                    };
++                    self.history_panel.as_mut().unwrap().edit(
++                        &mut self.editor,
++                        &[command],
++                        columns,
++                    );
++                    return Ok(EventStatus::Handled);
++                }
++                ReedlineEvent::Esc => {
++                    return self.finish_history_search(prompt, false, true);
++                }
++                ReedlineEvent::HistoryHintComplete => {
++                    return self.finish_history_search(prompt, false, false);
++                }
++                ReedlineEvent::CtrlC => {
++                    self.history_panel.as_mut().unwrap().close(&mut self.editor);
++                }
++                _ => {}
++            }
++        }
          match event {
              ReedlineEvent::UntilFound(events) => {
-@@ -1406,6 +1851,11 @@ impl Reedline {
+                 for event in events {
+-                    match self.handle_history_search_event(event)? {
++                    match self.handle_history_search_event(prompt, event)? {
+                         EventStatus::Inapplicable => {
+                             // Try again with the next event handler
+                         }
+@@ -1406,6 +2007,11 @@ impl Reedline {
              }
              ReedlineEvent::CtrlC => {
                  self.input_mode = InputMode::Regular;
@@ -2145,7 +2344,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  Ok(EventStatus::Exits(Signal::CtrlC))
              }
              ReedlineEvent::ClearScreen => {
-@@ -1429,6 +1879,7 @@ impl Reedline {
+@@ -1429,6 +2035,7 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -2153,7 +2352,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.last_render_snapshot = None;
                  self.suspended_state = Some(self.painter.state_before_suspension());
                  Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
-@@ -1492,6 +1943,10 @@ impl Reedline {
+@@ -1492,6 +2099,10 @@ impl Reedline {
              | ReedlineEvent::MenuPageNext
              | ReedlineEvent::MenuPagePrevious
              | ReedlineEvent::SwitchMode(_) => Ok(EventStatus::Inapplicable),
@@ -2164,7 +2363,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          }
      }
  
-@@ -1501,34 +1956,81 @@ impl Reedline {
+@@ -1501,34 +2112,81 @@ impl Reedline {
          event: ReedlineEvent,
      ) -> io::Result<EventStatus> {
          match event {
@@ -2270,7 +2469,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              }
              ReedlineEvent::MenuAccept => {
                  // Where a menu's claim on a keypress is decided, for the submit
-@@ -1541,16 +2043,32 @@ impl Reedline {
+@@ -1541,16 +2199,32 @@ impl Reedline {
                  // leaves the key to reach the line instead of appearing dead.
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu)
@@ -2306,7 +2505,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  if let Some(menu) = self.menus.iter_mut().find(|menu| menu.is_active()) {
                      // The second route to the lone-value accept, so it carries the same
                      // provisional guard as `decide_menu_completion`: accepting a lone
-@@ -1560,10 +2078,13 @@ impl Reedline {
+@@ -1560,10 +2234,13 @@ impl Reedline {
                      if menu.get_values().len() == 1
                          && menu.can_quick_complete()
                          && !menu.results_are_provisional()
@@ -2321,7 +2520,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                              menu.can_partially_complete(
                                  self.quick_completions,
                                  &mut self.editor,
-@@ -1580,6 +2101,7 @@ impl Reedline {
+@@ -1580,6 +2257,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPrevious => {
@@ -2329,7 +2528,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::PreviousElement);
-@@ -1587,6 +2109,7 @@ impl Reedline {
+@@ -1587,6 +2265,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuUp => {
@@ -2337,7 +2536,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveUp);
-@@ -1594,6 +2117,7 @@ impl Reedline {
+@@ -1594,6 +2273,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuDown => {
@@ -2345,7 +2544,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveDown);
-@@ -1601,6 +2125,7 @@ impl Reedline {
+@@ -1601,6 +2281,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuLeft => {
@@ -2353,7 +2552,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveLeft);
-@@ -1608,6 +2133,7 @@ impl Reedline {
+@@ -1608,6 +2289,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuRight => {
@@ -2361,7 +2560,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveRight);
-@@ -1617,6 +2143,7 @@ impl Reedline {
+@@ -1617,6 +2299,7 @@ impl Reedline {
              // These two spell out `active_menu()`, since that borrows all of `self` and
              // the painter has to stay reachable alongside the menu.
              ReedlineEvent::MenuPageNext => {
@@ -2369,7 +2568,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::NextPage);
-@@ -1627,6 +2154,7 @@ impl Reedline {
+@@ -1627,6 +2310,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPagePrevious => {
@@ -2377,7 +2576,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::PreviousPage);
-@@ -1645,12 +2173,16 @@ impl Reedline {
+@@ -1645,12 +2329,16 @@ impl Reedline {
                  Ok(self.accept_history_hint(hint))
              }
              ReedlineEvent::Esc => {
@@ -2395,7 +2594,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                      self.editor.reset_undo_stack();
                      Ok(EventStatus::Exits(Signal::CtrlD))
                  } else {
-@@ -1675,9 +2207,16 @@ impl Reedline {
+@@ -1675,9 +2363,16 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::Enter => {
@@ -2412,7 +2611,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1697,9 +2236,16 @@ impl Reedline {
+@@ -1697,9 +2392,16 @@ impl Reedline {
                  }
              }
              ReedlineEvent::Submit => {
@@ -2429,7 +2628,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1711,9 +2257,16 @@ impl Reedline {
+@@ -1711,9 +2413,16 @@ impl Reedline {
                  Ok(self.submit_buffer(prompt)?)
              }
              ReedlineEvent::SubmitOrNewline => {
@@ -2446,7 +2645,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1738,19 +2291,30 @@ impl Reedline {
+@@ -1738,19 +2447,30 @@ impl Reedline {
                  }
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -2479,7 +2678,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
  
                  // Check if a space was just inserted and try to expand abbreviations
                  if status == EditCommandStatus::Applied
-@@ -1766,6 +2330,7 @@ impl Reedline {
+@@ -1766,6 +2486,7 @@ impl Reedline {
                      // Dismissing a menu handles the event even when the cursor didn't move.
                      if quick_complete
                          && !self.persistent_menus
@@ -2487,7 +2686,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                          && matches!(
                              commands.first(),
                              Some(EditCommand::Backspace)
-@@ -1773,12 +2338,16 @@ impl Reedline {
+@@ -1773,12 +2494,16 @@ impl Reedline {
                                  | Some(EditCommand::MoveToLineStart { select: false })
                          )
                      {
@@ -2505,7 +2704,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                      if quick_complete {
                          menu.menu_event(MenuEvent::Edit(self.quick_completions));
                          invalidate_anchor_if_host_completer_runs(menu, &mut self.painter);
-@@ -1788,9 +2357,14 @@ impl Reedline {
+@@ -1788,9 +2513,14 @@ impl Reedline {
                              self.history.as_ref(),
                          );
                          if let Some(&EditCommand::Complete) = commands.first() {
@@ -2521,7 +2720,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                                  && menu.can_partially_complete(
                                      self.quick_completions,
                                      &mut self.editor,
-@@ -1803,15 +2377,29 @@ impl Reedline {
+@@ -1803,15 +2533,29 @@ impl Reedline {
                          }
                      }
                      if !self.persistent_menus && self.editor.line_buffer().get_buffer().is_empty() {
@@ -2553,7 +2752,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              ReedlineEvent::Resize(width, height) => {
                  self.last_render_snapshot = None;
                  self.painter.handle_resize(width, height);
-@@ -1837,7 +2425,7 @@ impl Reedline {
+@@ -1837,7 +2581,7 @@ impl Reedline {
                  } else {
                      EditCommand::MoveRight { select: false }
                  };
@@ -2562,7 +2761,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              }
              ReedlineEvent::ToStart | ReedlineEvent::ToEnd => {
                  let initial_cursor = self.editor.line_buffer().cursor();
-@@ -1851,6 +2439,9 @@ impl Reedline {
+@@ -1851,6 +2595,9 @@ impl Reedline {
                  // Compare after settling under the rest policy, including vi's
                  // block caret resting on the last grapheme rather than past it.
                  self.editor.commit_cursor();
@@ -2572,7 +2771,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  Ok(if self.editor.line_buffer().cursor() == initial_cursor {
                      EventStatus::Inapplicable
                  } else {
-@@ -1957,6 +2548,9 @@ impl Reedline {
+@@ -1957,6 +2704,9 @@ impl Reedline {
          }
  
          let after = self.edit_mode.edit_mode();
@@ -2582,7 +2781,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          if matches!(status, EventStatus::Handled) && !after.rest_policy().is_block() {
              // Collapse first, while the editor still holds the mode being left
              // and so knows where its caret shows. Adopting the new policy
-@@ -1992,15 +2586,108 @@ impl Reedline {
+@@ -1992,15 +2742,116 @@ impl Reedline {
          self.menus.iter_mut().find(|menu| menu.is_active())
      }
  
@@ -2673,6 +2872,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +    }
 +
 +    fn deactivate_menus(&mut self) {
++        self.hint_origin = None;
 +        self.cancel_completion_request();
          self.menus
              .iter_mut()
@@ -2689,19 +2889,47 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +    }
 +
      fn previous_history(&mut self) -> io::Result<()> {
++        if self.contextual_input && !self.can_navigate_history() {
++            return Ok(());
++        }
++        if self.history_panel.is_some() {
++            self.enter_history_search();
++            return Ok(());
++        }
 +        self.deactivate_menus();
          self.history_cursor_on_excluded = false;
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
-@@ -2030,6 +2717,7 @@ impl Reedline {
+@@ -2030,6 +2881,14 @@ impl Reedline {
      }
  
      fn next_history(&mut self) -> io::Result<()> {
++        if self.contextual_input && !self.can_navigate_history() {
++            return Ok(());
++        }
++        if self.history_panel.is_some() {
++            self.enter_history_search();
++            return Ok(());
++        }
 +        self.deactivate_menus();
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
              self.history_cursor = HistoryCursor::new(
-@@ -2089,6 +2777,13 @@ impl Reedline {
+@@ -2064,6 +2923,13 @@ impl Reedline {
+         Ok(())
+     }
+ 
++    fn can_navigate_history(&self) -> bool {
++        !self.menus.iter().any(|menu| menu.is_active())
++            && !self.edit_mode.has_pending_input()
++            && !self.edit_mode.edit_mode().is_selection_mode()
++            && self.editor.get_selection().is_none()
++    }
++
+     /// Enable the search and navigation through the history from the line buffer prompt
+     ///
+     /// Enables either prefix search with output in the line buffer or simple traversal
+@@ -2089,11 +2955,21 @@ impl Reedline {
      ///
      /// This mode uses a separate prompt and handles keybindings slightly differently!
      fn enter_history_search(&mut self) {
@@ -2715,7 +2943,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          self.history_cursor = HistoryCursor::new(
              HistoryNavigationQuery::SubstringSearch("".to_string()),
              self.get_history_session_id(),
-@@ -2102,6 +2797,19 @@ impl Reedline {
+         );
+         self.input_mode = InputMode::HistorySearch;
++        if let Some(panel) = &mut self.history_panel {
++            panel.open(&mut self.editor, self.painter.screen_width());
++        }
+     }
+ 
+     /// Dispatches the applicable [`EditCommand`] actions for editing the history search string.
+@@ -2102,6 +2978,19 @@ impl Reedline {
      fn run_history_commands(&mut self, commands: &[EditCommand]) -> io::Result<()> {
          for command in commands {
              match command {
@@ -2735,7 +2971,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
                  EditCommand::InsertChar(c) => {
                      let navigation = self.history_cursor.get_navigation();
                      if let HistoryNavigationQuery::SubstringSearch(mut substring) = navigation {
-@@ -2174,7 +2882,12 @@ impl Reedline {
+@@ -2174,7 +3063,12 @@ impl Reedline {
  
      /// Executes [`EditCommand`] actions by modifying the internal state appropriately. Does not output itself.
      pub fn run_edit_commands(&mut self, commands: &[EditCommand]) {
@@ -2749,7 +2985,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      }
  
      fn run_edit_commands_with_status(&mut self, commands: &[EditCommand]) -> EditCommandStatus {
-@@ -2202,6 +2915,14 @@ impl Reedline {
+@@ -2202,6 +3096,14 @@ impl Reedline {
          let mut status = EditCommandStatus::Inapplicable;
  
          for command in commands {
@@ -2764,7 +3000,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              if let Some(command) = self.auto_pair_command(command) {
                  if self.editor.run_edit_command(&command) == EditCommandStatus::Applied {
                      status = EditCommandStatus::Applied;
-@@ -2214,6 +2935,15 @@ impl Reedline {
+@@ -2214,6 +3116,15 @@ impl Reedline {
              }
          }
  
@@ -2780,7 +3016,26 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          status
      }
  
-@@ -2357,6 +3087,7 @@ impl Reedline {
+@@ -2329,6 +3240,13 @@ impl Reedline {
+         let text_before = self.editor.get_buffer().to_string();
+         let cursor_before = self.editor.insertion_point();
+         walk(self)?;
++        if self
++            .history_panel
++            .as_ref()
++            .is_some_and(|panel| panel.is_active())
++        {
++            return Ok(EventStatus::Handled);
++        }
+         let unmoved = self.editor.get_buffer() == text_before
+             && self.editor.insertion_point() == cursor_before;
+         Ok(if unmoved {
+@@ -2353,10 +3271,12 @@ impl Reedline {
+             return EventStatus::Inapplicable;
+         };
+         if self.hints_active()
++            && self.hint_origin == Some((self.editor.revision(), self.editor.insertion_point()))
+             && self.editor.is_cursor_at_buffer_end()
              && !hint.is_empty()
              && self.active_menu().is_none()
          {
@@ -2788,18 +3043,29 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              self.editor.prepare_append_at_buffer_end();
              self.run_edit_commands(&[EditCommand::InsertString(hint)]);
              EventStatus::Handled
-@@ -2375,11 +3106,46 @@ impl Reedline {
+@@ -2375,11 +3295,57 @@ impl Reedline {
          }
      }
  
 +    fn update_prompt_context(&self, prompt: &dyn Prompt) {
 +        let navigation = (self.input_mode == InputMode::HistorySearch)
 +            .then(|| self.history_cursor.get_navigation());
-+        let interaction = if let Some(navigation) = &navigation {
++        let interaction = if let Some(panel) = self
++            .history_panel
++            .as_ref()
++            .filter(|panel| panel.is_active())
++        {
++            PromptInteraction::HistorySearch {
++                term: &panel.request.text,
++                has_match: panel.selected().is_some(),
++                status: Some(panel.status()),
++            }
++        } else if let Some(navigation) = &navigation {
 +            match navigation {
 +                HistoryNavigationQuery::SubstringSearch(term) => PromptInteraction::HistorySearch {
 +                    term,
 +                    has_match: self.history_cursor.string_at_cursor().is_some(),
++                    status: None,
 +                },
 +                _ => PromptInteraction::Editing,
 +            }
@@ -2835,7 +3101,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          let buffer = self.editor.get_buffer();
          let cursor_position_in_buffer = self.editor.insertion_point();
          if cursor_position_in_buffer == 0 {
-@@ -2421,6 +3187,15 @@ impl Reedline {
+@@ -2421,6 +3387,15 @@ impl Reedline {
              return None;
          }
  
@@ -2851,24 +3117,57 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          if !self.highlighter.should_expand_abbr(
              buffer,
              word_start,
-@@ -2658,6 +3433,8 @@ impl Reedline {
+@@ -2658,6 +3633,15 @@ impl Reedline {
      /// Overwrites the prompt indicator and highlights the search string
      /// separately from the result buffer.
      fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
++        if self
++            .history_panel
++            .as_ref()
++            .is_some_and(|panel| panel.is_active())
++        {
++            return self.buffer_paint(prompt);
++        }
 +        prompt.begin_paint();
 +        self.update_prompt_context(prompt);
          let use_ansi_coloring = self.effective_ansi_coloring();
          let navigation = self.history_cursor.get_navigation();
  
-@@ -2708,6 +3485,7 @@ impl Reedline {
+@@ -2708,13 +3692,30 @@ impl Reedline {
      ///
      /// Includes the highlighting and hinting calls.
      fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
++        let history_active = self
++            .history_panel
++            .as_ref()
++            .is_some_and(|panel| panel.is_active());
++        if let Some(panel) = self
++            .history_panel
++            .as_mut()
++            .filter(|panel| panel.is_active())
++        {
++            panel.poll(&self.editor, self.painter.screen_width());
++        }
 +        prompt.begin_paint();
          let use_ansi_coloring = self.effective_ansi_coloring();
          let cursor_position_in_buffer = self.editor.insertion_point();
          let buffer_to_paint = self.editor.get_buffer();
-@@ -2735,6 +3513,7 @@ impl Reedline {
+ 
+-        let mut styled_text = self
+-            .highlighter
+-            .highlight(buffer_to_paint, cursor_position_in_buffer);
++        let mut styled_text = if history_active {
++            let mut text = crate::StyledText::new();
++            text.push((Style::default(), buffer_to_paint.to_owned()));
++            text
++        } else {
++            self.highlighter
++                .highlight(buffer_to_paint, cursor_position_in_buffer)
++        };
+         if let Some((from, to)) = self.editor.get_selection() {
+             // With a cursor-cell style configured, the head cell gets it and
+             // the selection style covers the rest of the range.
+@@ -2735,6 +3736,7 @@ impl Reedline {
              }
          }
  
@@ -2876,10 +3175,20 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
              cursor_position_in_buffer,
              prompt,
-@@ -2804,6 +3583,23 @@ impl Reedline {
+@@ -2742,6 +3744,8 @@ impl Reedline {
+             self.painter.semantic_markers(),
+         );
+ 
++        self.hint_origin = None;
++        let hint_origin = (self.editor.revision(), cursor_position_in_buffer);
+         let hint: String = if self.hints_active() {
+             self.hinter.as_mut().map_or_else(String::new, |hinter| {
+                 hinter.handle(
+@@ -2804,7 +3808,87 @@ impl Reedline {
              }
          }
  
+-        let menu = self.menus.iter().find(|menu| menu.is_visible());
 +        // A synchronous provider can change menu facts during working-detail
 +        // updates. Compose all prompt components from those final facts.
 +        self.update_prompt_context(prompt);
@@ -2897,10 +3206,74 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +            }
 +            menu.set_cursor_pos(lines.cursor_pos(self.painter.screen_width()));
 +        }
-         let menu = self.menus.iter().find(|menu| menu.is_visible());
++        if self.hints_active()
++            && self.hinter.is_some()
++            && !self.menus.iter().any(|menu| menu.is_active())
++        {
++            self.hint_origin = Some(hint_origin);
++        }
++        if history_active && !self.hide_hints {
++            let hint = self.history_panel.as_ref().unwrap().inline_hint(
++                self.editor.get_buffer(),
++                lines.inline_hint_columns(self.painter.screen_width()),
++            );
++            lines.hint = if use_ansi_coloring && !hint.is_empty() {
++                self.hinter
++                    .as_ref()
++                    .map_or_else(
++                        || Style::new().fg(nu_ansi_term::Color::LightGray),
++                        |hinter| hinter.hint_style(),
++                    )
++                    .paint(hint)
++                    .to_string()
++            } else {
++                hint
++            }
++            .into();
++        }
++        if let Some(panel) = self
++            .history_panel
++            .as_mut()
++            .filter(|panel| panel.is_active())
++        {
++            let columns = self.painter.screen_width();
++            panel.update_message(prompt, columns, true);
++            let expanded = lines.expanded_tabs(columns);
++            let distance = expanded
++                .as_ref()
++                .unwrap_or(&lines)
++                .distance_from_prompt(columns);
++            if distance
++                >= self
++                    .painter
++                    .screen_height()
++                    .saturating_sub(panel.menu.min_rows())
++                    .max(1)
++            {
++                panel.update_message(prompt, columns, false);
++            }
++            let rows = self
++                .painter
++                .screen_height()
++                .saturating_sub(distance.saturating_add(1))
++                .max(panel.menu.min_rows());
++            panel.menu.layout_for_preview(columns, rows);
++        }
++        let menu: Option<&dyn Menu> = self
++            .history_panel
++            .as_ref()
++            .filter(|panel| panel.is_active())
++            .map(|panel| &panel.menu as &dyn Menu)
++            .or_else(|| {
++                self.menus
++                    .iter()
++                    .find(|menu| menu.is_visible())
++                    .map(|menu| menu as &dyn Menu)
++            });
  
          self.painter.repaint_buffer(
-@@ -2819,10 +3615,14 @@ impl Reedline {
+             prompt,
+@@ -2819,10 +3903,14 @@ impl Reedline {
              if let Some(layout) = &self.painter.last_layout {
                  let buffer = self.editor.get_buffer();
                  let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
@@ -2919,7 +3292,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
              }
          } else {
              self.last_render_snapshot = None;
-@@ -2917,10 +3717,15 @@ impl Reedline {
+@@ -2917,10 +4005,15 @@ impl Reedline {
      /// Offer an open menu first refusal on a keypress that would otherwise
      /// submit, and report whether it took it.
      fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
@@ -2937,7 +3310,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      }
  
      /// Close an active menu when a typed character ends the word it was opened
-@@ -2945,7 +3750,7 @@ impl Reedline {
+@@ -2945,7 +4038,7 @@ impl Reedline {
              _ => false,
          });
          if word_ended {
@@ -2946,7 +3319,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          }
      }
  
-@@ -2953,7 +3758,9 @@ impl Reedline {
+@@ -2953,7 +4046,9 @@ impl Reedline {
          // A menu that let the submit through (no suggestions to accept) must
          // not stay active into the next line's editing.
          self.deactivate_menus();
@@ -2956,7 +3329,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          self.hide_hints = true;
          // Additional repaint to show the content without hints etc.
          if let Some(transient_prompt) = self.transient_prompt.take() {
-@@ -3004,6 +3811,14 @@ impl Reedline {
+@@ -3004,6 +4099,17 @@ impl Reedline {
      }
  }
  
@@ -2965,13 +3338,30 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +mod input_tests;
 +
 +#[cfg(test)]
++mod panel_tests;
++
++#[cfg(test)]
 +#[path = "engine_abbreviation_tests.rs"]
 +mod abbreviation_tests;
 +
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -4310,6 +5125,8 @@ mod tests {
+@@ -3795,8 +4901,11 @@ mod tests {
+         let mut rl = auto_pair_engine(&[('(', ')')]);
+         rl.enter_history_search();
+ 
+-        rl.handle_history_search_event(ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]))
+-            .expect("history search event handled");
++        rl.handle_history_search_event(
++            &DefaultPrompt::default(),
++            ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]),
++        )
++        .expect("history search event handled");
+ 
+         assert_eq!(rl.input_mode, InputMode::HistorySearch);
+         assert_eq!(rl.editor.get_buffer(), "");
+@@ -4310,6 +5419,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -2980,7 +3370,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
          });
  
          let result = reedline.handle_event(
-@@ -5437,6 +6254,22 @@ mod tests {
+@@ -5437,6 +6548,22 @@ mod tests {
          assert!(!reedline.take_repaint_request());
      }
  
@@ -3003,7 +3393,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      #[test]
      fn repaint_signal_switches_input_loop_to_polling() {
          let mut reedline = Reedline::create();
-@@ -6176,6 +7009,470 @@ mod tests {
+@@ -6176,6 +7303,470 @@ mod tests {
              .unwrap();
      }
  
@@ -3474,7 +3864,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// The regression: a lone suggestion that arrives after the menu opened must still be
      /// accepted, exactly as a synchronous completer's would have been.
      #[test]
-@@ -6467,6 +7764,118 @@ mod tests {
+@@ -6467,6 +8058,120 @@ mod tests {
          );
      }
  
@@ -3534,7 +3924,9 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
 +                        provisional,
 +                    } => format!("{name}:{count}:{provisional}"),
 +                    PromptInteraction::Editing => "editing".into(),
-+                    PromptInteraction::HistorySearch { term, has_match } => {
++                    PromptInteraction::HistorySearch {
++                        term, has_match, ..
++                    } => {
 +                        format!("search:{term}:{has_match}")
 +                    }
 +                };
@@ -3593,6 +3985,1462 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..c36ea2683a4282e11234338e008fa367
      /// A menu whose filtered suggestions are empty has nothing to accept:
      /// Enter must close it and submit the line, not be swallowed.
      #[test]
+diff --git a/src/engine/panel_tests.rs b/src/engine/panel_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2632e27dc58776bb28e079026bb6208cb01db51
+--- /dev/null
++++ b/src/engine/panel_tests.rs
+@@ -0,0 +1,1450 @@
++use super::*;
++use crate::{
++    ColumnarMenu, DefaultPrompt, HistoryPanelAnchor, HistoryPanelEntry, HistoryPanelPage,
++    HistoryPanelProvider, HistoryPanelQuery,
++};
++
++struct Source;
++
++impl HistoryPanelProvider for Source {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        let entries = [("old", "echo older", true), ("new", "echo newest", false)]
++            .into_iter()
++            .enumerate()
++            .filter(|(_, (_, text, project))| {
++                text.contains(&query.text) && (!query.project || *project)
++            })
++            .map(|(index, (id, text, _))| HistoryPanelEntry {
++                anchor: HistoryPanelAnchor {
++                    order: index as i64,
++                    id: id.into(),
++                },
++                text: text.into(),
++                label: "command".into(),
++                source: "project".into(),
++                description: None,
++            })
++            .collect();
++        HistoryPanelPage {
++            entries,
++            title: "History".into(),
++            ..Default::default()
++        }
++    }
++}
++
++fn editor(text: &str) -> Reedline {
++    let mut editor =
++        Reedline::create().with_history_panel(Box::new(Source), ColumnarMenu::default());
++    editor.painter.force_prompt_anchored_for_test(0);
++    editor
++        .editor
++        .set_buffer(text.into(), UndoBehavior::CreateUndoPoint);
++    editor.editor.move_to_end(false);
++    editor
++}
++
++fn event(editor: &mut Reedline, event: ReedlineEvent) -> EventStatus {
++    editor
++        .handle_event(&DefaultPrompt::default(), event)
++        .unwrap()
++}
++
++#[test]
++fn arrows_open_the_history_menu_without_replacing_the_draft() {
++    for opening in [ReedlineEvent::Up, ReedlineEvent::Down] {
++        let mut editor = editor("e");
++        assert!(matches!(event(&mut editor, opening), EventStatus::Handled));
++        assert_eq!(editor.current_buffer_contents(), "e");
++        assert_eq!(editor.input_mode, InputMode::HistorySearch);
++        assert_eq!(
++            editor
++                .history_panel
++                .as_ref()
++                .unwrap()
++                .selected()
++                .unwrap()
++                .text,
++            "echo newest"
++        );
++        event(&mut editor, ReedlineEvent::Up);
++        assert_eq!(
++            editor
++                .history_panel
++                .as_ref()
++                .unwrap()
++                .selected()
++                .unwrap()
++                .text,
++            "echo older"
++        );
++        event(&mut editor, ReedlineEvent::Down);
++        assert_eq!(
++            editor
++                .history_panel
++                .as_ref()
++                .unwrap()
++                .selected()
++                .unwrap()
++                .text,
++            "echo newest"
++        );
++        event(
++            &mut editor,
++            ReedlineEvent::Edit(vec![EditCommand::InsertChar('c')]),
++        );
++        assert_eq!(editor.current_buffer_contents(), "ec");
++        assert_eq!(editor.history_panel.as_ref().unwrap().request.text, "ec");
++        event(&mut editor, ReedlineEvent::CancelHistorySearch);
++        assert_eq!(editor.current_buffer_contents(), "e");
++        assert_eq!(editor.current_insertion_point(), 1);
++    }
++}
++
++#[test]
++fn arrows_without_a_contextual_history_provider_retain_native_recall() {
++    let mut history = FileBackedHistory::default();
++    history
++        .save(HistoryItem::from_command_line("echo older"))
++        .unwrap();
++    history
++        .save(HistoryItem::from_command_line("echo newer"))
++        .unwrap();
++    let mut editor = Reedline::create()
++        .with_contextual_input(true)
++        .with_history(Box::new(history));
++    editor.painter.force_prompt_anchored_for_test(0);
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(editor.current_buffer_contents(), "echo newer");
++    assert!(editor.history_panel.is_none());
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(editor.current_buffer_contents(), "echo older");
++    event(&mut editor, ReedlineEvent::Down);
++    assert_eq!(editor.current_buffer_contents(), "echo newer");
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertString(" edited".into())]),
++    );
++    assert_eq!(editor.current_buffer_contents(), "echo newer edited");
++    assert!(matches!(event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(Signal::Success(text)) if text == "echo newer edited"));
++}
++
++#[test]
++fn history_uses_the_normal_prompt_and_the_shared_menu_below_it() {
++    let prompt = DefaultPrompt::new(
++        crate::DefaultPromptSegment::Basic("shell".into()),
++        crate::DefaultPromptSegment::Empty,
++    );
++    for query in ["e", "absent"] {
++        let mut editor = editor(query).with_mouse_click(MouseClickMode::Enabled);
++        editor.painter.handle_resize(80, 24);
++        editor.painter.force_prompt_anchored_for_test(0);
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        editor.repaint(&prompt).unwrap();
++        let layout = editor.last_render_snapshot.as_ref().unwrap();
++        assert_eq!(layout.prompt_str_left, "shell");
++        assert_eq!(layout.menu_start_row, Some(1));
++        assert_eq!(layout.first_buffer_col, 7);
++        assert_eq!(editor.current_buffer_contents(), query);
++        event(&mut editor, ReedlineEvent::CancelHistorySearch);
++        editor.repaint(&prompt).unwrap();
++        assert_eq!(
++            editor.last_render_snapshot.as_ref().unwrap().menu_start_row,
++            None
++        );
++    }
++}
++
++#[test]
++fn selected_history_is_a_preview_not_an_edit_or_a_native_hint() {
++    for (query, expected) in [
++        ("", "echo newest"),
++        ("ec", "ho newest"),
++        ("new", " -> echo newest"),
++    ] {
++        let mut editor = editor(query)
++            .with_hinter(Box::new(crate::DefaultHinter::default()))
++            .with_mouse_click(MouseClickMode::Enabled);
++        editor.painter.handle_resize(80, 24);
++        editor.painter.force_prompt_anchored_for_test(0);
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        editor.repaint(&DefaultPrompt::default()).unwrap();
++        assert_eq!(
++            editor
++                .history_panel
++                .as_ref()
++                .unwrap()
++                .inline_hint(query, 80),
++            expected
++        );
++        assert_eq!(editor.current_buffer_contents(), query);
++        assert_eq!(editor.current_insertion_point(), query.len());
++        assert_eq!(
++            editor.last_render_snapshot.as_ref().unwrap().before_cursor,
++            query
++        );
++        assert!(editor.hinter.as_ref().unwrap().complete_hint().is_empty());
++        assert!(editor.hint_origin.is_none());
++        event(&mut editor, ReedlineEvent::CancelHistorySearch);
++        assert_eq!(editor.current_buffer_contents(), query);
++    }
++}
++
++#[test]
++fn navigating_updates_the_preview_without_changing_the_query_or_cursor() {
++    let mut editor = editor("echo");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::Left);
++    event(&mut editor, ReedlineEvent::Up);
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert_eq!(panel.inline_hint("echo", 80), " older");
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    assert_eq!(editor.current_insertion_point(), 3);
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo older");
++    event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Undo]));
++    assert_eq!(editor.current_buffer_contents(), "echo");
++}
++
++#[test]
++fn history_adoption_cannot_append_a_native_hint_from_the_previous_draft() {
++    let mut editor = editor("e").with_hinter(Box::new(crate::DefaultHinter::default()));
++    editor
++        .history
++        .save(HistoryItem::from_command_line("echo native hint"))
++        .unwrap();
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    assert!(!editor.hinter.as_ref().unwrap().complete_hint().is_empty());
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo newest");
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::HistoryHintComplete),
++        EventStatus::Inapplicable,
++    ));
++    assert_eq!(editor.current_buffer_contents(), "echo newest");
++}
++
++#[test]
++fn history_viewport_starts_at_the_newest_record_and_backfills_after_filtering() {
++    let entries = (0..24)
++        .map(|index| HistoryPanelEntry {
++            anchor: HistoryPanelAnchor {
++                order: index,
++                id: format!("id-{index:02}"),
++            },
++            text: format!("echo record-{index:02}"),
++            label: "command".into(),
++            source: "project".into(),
++            description: None,
++        })
++        .collect();
++    let source = Arc::new(Mutex::new(HistoryPanelPage {
++        entries,
++        ..Default::default()
++    }));
++    let mut editor = editor("").with_history_panel(
++        Box::new(EmptySource(source.clone())),
++        ColumnarMenu::default(),
++    );
++    editor.painter.handle_resize(80, 24);
++    editor.painter.force_prompt_anchored_for_test(23);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    let panel = editor.history_panel.as_ref().unwrap();
++    let text = panel.menu.menu_string(24, false);
++    assert_eq!(panel.selected().unwrap().anchor.id, "id-23");
++    assert_eq!(text.matches("echo record-").count(), 8, "{text}");
++    assert!(
++        text.contains("record-16") && text.contains("record-23"),
++        "{text}"
++    );
++    assert!(!text.contains("record-15"), "{text}");
++    assert!(
++        text.rfind("record-23").unwrap() > text.find("record-16").unwrap(),
++        "{text}"
++    );
++    source
++        .lock()
++        .unwrap()
++        .entries
++        .retain(|entry| entry.anchor.order >= 22);
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    let panel = editor.history_panel.as_ref().unwrap();
++    let text = panel.menu.menu_string(24, false);
++    assert_eq!(text.matches("echo record-").count(), 2, "{text}");
++    assert!(
++        text.contains("record-22") && text.contains("record-23"),
++        "{text}"
++    );
++    assert_eq!(panel.selected().unwrap().anchor.id, "id-23");
++}
++
++struct PagedSource;
++
++struct StatusPrompt(DefaultPrompt);
++
++impl Prompt for StatusPrompt {
++    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
++        "STATUS\nshell".into()
++    }
++    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
++        "".into()
++    }
++    fn render_prompt_indicator(&self, mode: PromptEditMode) -> std::borrow::Cow<'_, str> {
++        self.0.render_prompt_indicator(mode)
++    }
++    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
++        self.0.render_prompt_multiline_indicator()
++    }
++    fn render_prompt_history_search_indicator(
++        &self,
++        search: PromptHistorySearch,
++    ) -> std::borrow::Cow<'_, str> {
++        self.0.render_prompt_history_search_indicator(search)
++    }
++    fn render_history_panel_status(
++        &self,
++        status: crate::HistorySearchStatus<'_>,
++        has_match: bool,
++        prompt_visible: bool,
++    ) -> Vec<String> {
++        if prompt_visible {
++            Vec::new()
++        } else {
++            self.0.render_history_panel_status(status, has_match, false)
++        }
++    }
++}
++
++#[test]
++fn history_status_falls_back_when_its_prompt_scrolls_out_of_view() {
++    for (query, visible) in [("e".to_owned(), true), ("line\n".repeat(32), false)] {
++        let mut editor = editor(&query).with_mouse_click(MouseClickMode::Enabled);
++        editor.painter.handle_resize(80, 24);
++        editor.painter.force_prompt_anchored_for_test(0);
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        editor
++            .repaint(&StatusPrompt(DefaultPrompt::default()))
++            .unwrap();
++        let text = editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .menu
++            .menu_string(24, false);
++        assert_eq!(text.contains("History"), !visible, "{text:?}");
++        if !visible {
++            assert!(editor
++                .last_render_snapshot
++                .as_ref()
++                .unwrap()
++                .viewport_start_row
++                .is_some_and(|row| row > 0));
++        }
++        event(&mut editor, ReedlineEvent::CancelHistorySearch);
++        assert_eq!(editor.current_buffer_contents(), query);
++    }
++}
++
++impl HistoryPanelProvider for PagedSource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        let mut entries = (0..10)
++            .filter(|index| !query.project || index % 2 == 0)
++            .filter(|index| {
++                query.anchor.as_ref().is_none_or(|anchor| {
++                    if query.older {
++                        *index < anchor.order || (query.include_anchor && *index == anchor.order)
++                    } else {
++                        *index > anchor.order || (query.include_anchor && *index == anchor.order)
++                    }
++                })
++            })
++            .collect::<Vec<_>>();
++        if query.older {
++            entries.reverse();
++        }
++        entries.truncate(3);
++        entries.sort();
++        let older = entries.first().is_some_and(|index| *index > 0);
++        let newer = entries.last().is_some_and(|index| *index < 9);
++        HistoryPanelPage {
++            entries: entries
++                .into_iter()
++                .map(|index| HistoryPanelEntry {
++                    anchor: HistoryPanelAnchor {
++                        order: index,
++                        id: format!("id-{index}"),
++                    },
++                    text: "echo duplicate".into(),
++                    label: "command".into(),
++                    source: format!("project-{index}"),
++                    description: None,
++                })
++                .collect(),
++            older,
++            newer,
++            title: "History".into(),
++            ..Default::default()
++        }
++    }
++}
++
++#[test]
++fn shared_menu_keeps_record_ids_and_crosses_history_pages_without_wrapping() {
++    let mut editor = editor("").with_history_panel(Box::new(PagedSource), ColumnarMenu::default());
++    let selected = |editor: &Reedline| {
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .anchor
++            .id
++            .clone()
++    };
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(selected(&editor), "id-9");
++    for expected in ["id-8", "id-7", "id-6"] {
++        event(&mut editor, ReedlineEvent::MenuPrevious);
++        assert_eq!(selected(&editor), expected);
++    }
++    for expected in ["id-7", "id-8", "id-9", "id-9"] {
++        event(&mut editor, ReedlineEvent::MenuNext);
++        assert_eq!(selected(&editor), expected);
++    }
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(selected(&editor), "id-8");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(selected(&editor), "id-8");
++}
++
++#[test]
++fn scope_switch_keeps_an_older_matching_selection_across_pages() {
++    let mut editor = editor("").with_history_panel(Box::new(PagedSource), ColumnarMenu::default());
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    for _ in 0..7 {
++        event(&mut editor, ReedlineEvent::MenuPrevious);
++    }
++    for _ in 0..2 {
++        assert_eq!(
++            editor
++                .history_panel
++                .as_ref()
++                .unwrap()
++                .selected()
++                .unwrap()
++                .anchor
++                .id,
++            "id-2",
++        );
++        event(&mut editor, ReedlineEvent::SearchHistory);
++    }
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .anchor
++            .id,
++        "id-2",
++    );
++    event(&mut editor, ReedlineEvent::MenuNext);
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .anchor
++            .id,
++        "id-3",
++    );
++}
++
++struct NewerProjectSource;
++
++impl HistoryPanelProvider for NewerProjectSource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        let mut unscoped = query.clone();
++        unscoped.project = false;
++        let mut page = PagedSource.query(&unscoped);
++        if query.project {
++            page.entries.retain(|entry| entry.anchor.order >= 8);
++            page.older = false;
++        }
++        page
++    }
++}
++
++#[test]
++fn switching_scope_does_not_report_no_matches_when_only_newer_matches_exist() {
++    let mut editor =
++        editor("").with_history_panel(Box::new(NewerProjectSource), ColumnarMenu::default());
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    for _ in 0..8 {
++        event(&mut editor, ReedlineEvent::MenuPrevious);
++    }
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(!panel.no_matches());
++    assert_eq!(panel.selected().unwrap().anchor.id, "id-9");
++}
++
++struct PendingSource(Arc<AtomicBool>);
++
++impl HistoryPanelProvider for PendingSource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        if self.0.load(Ordering::SeqCst) {
++            Source.query(query)
++        } else {
++            HistoryPanelPage {
++                pending: true,
++                title: "History".into(),
++                progress: Some("Loading history".into()),
++                ..Default::default()
++            }
++        }
++    }
++}
++
++#[test]
++fn shared_menu_shows_pending_history_without_accepting_an_unseen_result() {
++    let ready = Arc::new(AtomicBool::new(false));
++    let mut editor = editor("e").with_history_panel(
++        Box::new(PendingSource(ready.clone())),
++        ColumnarMenu::default(),
++    );
++    editor.painter.handle_resize(80, 24);
++    editor.painter.force_prompt_anchored_for_test(0);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(panel.menu.is_visible());
++    let message = panel.menu.menu_string(20, false);
++    assert!(message.contains("Loading history"), "{message:?}");
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    ready.store(true, Ordering::SeqCst);
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Handled
++    ));
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert_eq!(editor.current_buffer_contents(), "echo newest");
++}
++
++#[test]
++fn search_opens_without_replacing_input_and_typing_filters_from_the_command_editor() {
++    let mut editor = editor("e");
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::SearchHistory),
++        EventStatus::Handled
++    ));
++    assert_eq!(editor.editor.get_buffer(), "e");
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar('c')]),
++    );
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert_eq!(panel.request.text, "ec");
++    assert_eq!(panel.selected().unwrap().text, "echo newest");
++    assert_eq!(editor.editor.get_buffer(), "ec");
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert_eq!(editor.editor.get_buffer(), "e");
++    assert_eq!(editor.editor.insertion_point(), 1);
++}
++
++#[test]
++fn history_filtering_keeps_the_current_input_cursor_and_restores_it_on_cancel() {
++    let mut editor = editor("eho");
++    editor
++        .editor
++        .run_edit_command(&EditCommand::MoveToPosition {
++            position: 1,
++            select: false,
++        });
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(editor.current_insertion_point(), 1);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar('c')]),
++    );
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    assert_eq!(editor.current_insertion_point(), 2);
++    assert_eq!(editor.history_panel.as_ref().unwrap().request.text, "echo");
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "eho");
++    assert_eq!(editor.current_insertion_point(), 1);
++}
++
++#[test]
++fn cancelling_shared_input_filtering_preserves_the_original_redo_stack() {
++    let mut editor = editor("e");
++    editor
++        .editor
++        .set_buffer("echo".into(), UndoBehavior::CreateUndoPoint);
++    editor.editor.run_edit_command(&EditCommand::Undo);
++    assert_eq!(editor.current_buffer_contents(), "e");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar('c')]),
++    );
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Redo]));
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Undo]));
++    assert_eq!(editor.current_buffer_contents(), "e");
++}
++
++#[test]
++fn filling_from_shared_input_is_one_undo_step_back_to_the_original_draft() {
++    let mut editor = editor("e");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar('c')]),
++    );
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo newest");
++    event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Undo]));
++    assert_eq!(editor.current_buffer_contents(), "e");
++}
++
++#[test]
++fn right_only_moves_the_query_cursor_and_never_adopts_the_preview() {
++    let mut editor = editor("echo");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::Left);
++    event(&mut editor, ReedlineEvent::Right);
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    event(&mut editor, ReedlineEvent::Right);
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    assert_eq!(editor.current_insertion_point(), 4);
++}
++
++#[test]
++fn scope_switch_preserves_query_and_uses_only_matching_results() {
++    let mut editor = editor("echo");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(panel.request.project);
++    assert_eq!(panel.request.text, "echo");
++    assert_eq!(panel.selected().unwrap().text, "echo older");
++    event(&mut editor, ReedlineEvent::Esc);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert!(!editor.history_panel.as_ref().unwrap().request.project);
++}
++
++#[test]
++fn no_match_right_keeps_search_open_and_enter_returns_to_editing() {
++    let mut editor = editor("absent");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::Right);
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert!(editor.history_panel.as_ref().unwrap().status().no_matches);
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert!(!editor.history_panel.as_ref().unwrap().is_active());
++    assert_eq!(editor.editor.get_buffer(), "absent");
++}
++
++#[test]
++fn accepting_no_matches_keeps_the_current_input_cursor_and_one_undo_step() {
++    for accept in [
++        ReedlineEvent::AcceptHistorySearch,
++        ReedlineEvent::Enter,
++        ReedlineEvent::Submit,
++        ReedlineEvent::SubmitOrNewline,
++    ] {
++        let mut editor = editor("original");
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        event(
++            &mut editor,
++            ReedlineEvent::Edit(vec![
++                EditCommand::Clear,
++                EditCommand::InsertString("printf 'unmatched'\nprintf again".into()),
++                EditCommand::MoveToPosition {
++                    position: 7,
++                    select: false,
++                },
++            ]),
++        );
++        assert!(matches!(event(&mut editor, accept), EventStatus::Handled));
++        assert_eq!(editor.input_mode, InputMode::Regular);
++        assert_eq!(
++            editor.current_buffer_contents(),
++            "printf 'unmatched'\nprintf again"
++        );
++        assert_eq!(editor.current_insertion_point(), 7);
++        assert!(editor.history_search_origin.is_none());
++        event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Undo]));
++        assert_eq!(editor.current_buffer_contents(), "original");
++    }
++}
++
++struct EmptySource(Arc<Mutex<HistoryPanelPage>>);
++
++impl HistoryPanelProvider for EmptySource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, _: &HistoryPanelQuery) -> HistoryPanelPage {
++        self.0.lock().unwrap().clone()
++    }
++}
++
++#[test]
++fn display_metadata_is_not_adopted_text_or_selection_identity() {
++    let source = Arc::new(Mutex::new(HistoryPanelPage {
++        entries: vec![HistoryPanelEntry {
++            anchor: HistoryPanelAnchor {
++                order: 1,
++                id: "repeat".into(),
++            },
++            text: "echo repeated".into(),
++            label: "x4 fail:1 ok:3".into(),
++            source: String::new(),
++            description: None,
++        }],
++        ..Default::default()
++    }));
++    let mut editor = editor("echo").with_history_panel(
++        Box::new(EmptySource(source.clone())),
++        ColumnarMenu::default(),
++    );
++    editor.painter.handle_resize(80, 24);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert_eq!(
++        panel.menu.get_values()[0].description.as_deref(),
++        Some("x4 fail:1 ok:3")
++    );
++    assert_eq!(panel.inline_hint("echo", 80), " repeated");
++    {
++        let mut page = source.lock().unwrap();
++        page.entries[0].label = "x5 fail:1 ok:4".into();
++        page.entries[0].source = "updated source".into();
++        page.entries[0].description = Some("updated display detail".into());
++    }
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::AcceptHistorySearch),
++        EventStatus::Handled,
++    ));
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert_eq!(editor.current_buffer_contents(), "echo repeated");
++    event(&mut editor, ReedlineEvent::Edit(vec![EditCommand::Undo]));
++    assert_eq!(editor.current_buffer_contents(), "echo");
++}
++
++#[test]
++fn optional_history_annotations_do_not_leave_padding_or_empty_descriptions() {
++    for (label, source, expected) in [
++        ("", "", None),
++        ("import", "", Some("import")),
++        ("", "other:project", Some("other:project")),
++        ("import", "other:project", Some("import other:project")),
++    ] {
++        let page = HistoryPanelPage {
++            entries: vec![HistoryPanelEntry {
++                anchor: HistoryPanelAnchor {
++                    order: 1,
++                    id: "compact".into(),
++                },
++                text: "echo compact".into(),
++                label: label.into(),
++                source: source.into(),
++                description: None,
++            }],
++            ..Default::default()
++        };
++        let mut editor = editor("").with_history_panel(
++            Box::new(EmptySource(Arc::new(Mutex::new(page)))),
++            ColumnarMenu::default(),
++        );
++        editor.painter.handle_resize(80, 24);
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        let panel = editor.history_panel.as_ref().unwrap();
++        assert_eq!(panel.menu.get_values()[0].description.as_deref(), expected);
++        assert_eq!(panel.inline_hint("", 80), "echo compact");
++    }
++}
++
++#[test]
++fn long_history_candidates_show_the_matching_text_and_adopt_the_complete_input() {
++    let text = format!(
++        "printf '{} TARGET_MATCH suffix'",
++        "long-shared-prefix ".repeat(12)
++    );
++    let page = HistoryPanelPage {
++        entries: vec![HistoryPanelEntry {
++            anchor: HistoryPanelAnchor {
++                order: 1,
++                id: "long".into(),
++            },
++            text: text.clone(),
++            label: "command".into(),
++            source: "project".into(),
++            description: None,
++        }],
++        ..Default::default()
++    };
++    let mut editor = editor("TARGET_MATCH").with_history_panel(
++        Box::new(EmptySource(Arc::new(Mutex::new(page)))),
++        ColumnarMenu::default(),
++    );
++    editor.painter.handle_resize(80, 24);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    let panel = editor.history_panel.as_ref().unwrap();
++    let displayed = panel.menu.get_values()[0]
++        .display_override
++        .as_ref()
++        .unwrap();
++    assert!(displayed.contains("TARGET_MATCH"), "{displayed}");
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::AcceptHistorySearch),
++        EventStatus::Handled,
++    ));
++    assert_eq!(editor.current_buffer_contents(), text);
++}
++
++#[test]
++fn no_match_exit_requires_an_already_completed_successful_query() {
++    for initial in [
++        HistoryPanelPage {
++            pending: true,
++            ..Default::default()
++        },
++        HistoryPanelPage {
++            failed: true,
++            ..Default::default()
++        },
++        HistoryPanelPage {
++            progress: Some("Loading".into()),
++            ..Default::default()
++        },
++    ] {
++        let source = Arc::new(Mutex::new(initial));
++        let mut editor = editor("").with_history_panel(
++            Box::new(EmptySource(source.clone())),
++            ColumnarMenu::default(),
++        );
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        assert!(!editor.history_panel.as_ref().unwrap().status().no_matches);
++        event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++        assert_eq!(editor.input_mode, InputMode::HistorySearch);
++        *source.lock().unwrap() = HistoryPanelPage::default();
++        event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++        assert_eq!(editor.input_mode, InputMode::HistorySearch);
++        event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++        assert_eq!(editor.input_mode, InputMode::Regular);
++        assert!(editor.current_buffer_contents().is_empty());
++    }
++}
++
++#[test]
++fn every_history_acceptance_event_only_adopts_before_a_separate_submission() {
++    for accept in [
++        ReedlineEvent::AcceptHistorySearch,
++        ReedlineEvent::Enter,
++        ReedlineEvent::Submit,
++        ReedlineEvent::SubmitOrNewline,
++        ReedlineEvent::HistoryHintComplete,
++    ] {
++        let mut editor = editor("");
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        assert!(matches!(event(&mut editor, accept), EventStatus::Handled));
++        assert_eq!(editor.input_mode, InputMode::Regular);
++        assert_eq!(editor.current_buffer_contents(), "echo newest");
++        assert!(matches!(
++            event(&mut editor, ReedlineEvent::Enter),
++            EventStatus::Exits(Signal::Success(text)) if text == "echo newest"
++        ));
++    }
++}
++
++fn abbreviation_editor(page: HistoryPanelPage) -> Reedline {
++    struct Policy;
++    impl crate::AbbreviationExpander for Policy {
++        fn expand(
++            &mut self,
++            text: &str,
++            cursor: usize,
++            submitted: bool,
++            _: &[std::ops::Range<usize>],
++        ) -> std::result::Result<Vec<crate::AbbreviationEdit>, String> {
++            Ok(if text == "gst" && (submitted || cursor == 3) {
++                vec![crate::AbbreviationEdit {
++                    range: 0..3,
++                    replacement: "git status".into(),
++                }]
++            } else {
++                Vec::new()
++            })
++        }
++    }
++    let mut editor = Reedline::create()
++        .with_edit_mode(Box::<crate::Emacs>::default())
++        .with_abbreviation_expander(Box::new(Policy))
++        .with_history_panel(
++            Box::new(EmptySource(Arc::new(Mutex::new(page)))),
++            ColumnarMenu::default(),
++        );
++    editor.painter.force_prompt_anchored_for_test(0);
++    editor
++}
++
++#[test]
++fn recalled_history_is_not_automatically_expanded_as_a_typed_abbreviation() {
++    let mut page = Source.query(&HistoryPanelQuery {
++        text: String::new(),
++        project: false,
++        anchor: None,
++        include_anchor: false,
++        older: true,
++    });
++    page.entries.last_mut().unwrap().text = "gst".into();
++    let mut editor = abbreviation_editor(page);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(editor.input_intent(), crate::InputIntent::Imported);
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(Signal::Success(text)) if text == "gst"
++    ));
++}
++
++#[test]
++fn cancelling_history_restores_typed_abbreviation_intent_and_undo_state() {
++    let mut editor = abbreviation_editor(HistoryPanelPage::default());
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertString("gst".into())]),
++    );
++    assert_eq!(editor.input_intent(), crate::InputIntent::Typed);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar('x')]),
++    );
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(editor.input_intent(), crate::InputIntent::Typed);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertChar(' ')]),
++    );
++    assert_eq!(editor.current_buffer_contents(), "git status ");
++}
++
++#[test]
++fn pasted_no_match_query_remains_imported_after_returning_to_ordinary_editing() {
++    let mut editor = abbreviation_editor(HistoryPanelPage::default());
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    let outcome = editor
++        .process_input_batch(
++            &DefaultPrompt::default(),
++            vec![
++                Event::Paste("gst".into()),
++                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
++            ],
++        )
++        .unwrap();
++    assert!(matches!(outcome, ControlFlow::Continue(())));
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert_eq!(editor.current_buffer_contents(), "gst");
++    assert_eq!(editor.input_intent(), crate::InputIntent::Imported);
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(Signal::Success(text)) if text == "gst"
++    ));
++}
++
++#[test]
++fn up_moves_to_older_and_down_to_newer_with_the_newest_at_the_bottom() {
++    let mut editor = editor("");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(
++        editor.history_panel.as_ref().unwrap().menu.get_values()[0].value,
++        "echo older"
++    );
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .text,
++        "echo older"
++    );
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .text,
++        "echo older"
++    );
++    event(&mut editor, ReedlineEvent::Down);
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .text,
++        "echo newest"
++    );
++}
++
++#[test]
++fn up_in_the_middle_of_multiline_input_keeps_ordinary_cursor_navigation() {
++    let mut editor = editor("first\nsecond\nthird");
++    editor
++        .editor
++        .run_edit_command(&EditCommand::MoveToPosition {
++            position: 8,
++            select: false,
++        });
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert!(!editor.history_panel.as_ref().unwrap().is_active());
++    assert_eq!(editor.editor.get_buffer(), "first\nsecond\nthird");
++}
++
++#[test]
++fn arrow_history_does_not_take_over_a_selection() {
++    let mut editor = editor("echo");
++    editor
++        .editor
++        .run_edit_command(&EditCommand::MoveToStart { select: true });
++    event(&mut editor, ReedlineEvent::Up);
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert!(editor.editor.get_selection().is_some());
++}
++
++#[test]
++fn oversized_query_is_rejected_without_submitting_an_old_match() {
++    let mut editor = editor("echo");
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::InsertString("x".repeat(256 * 1024 + 1))]),
++    );
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(panel.page.failed);
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::Backspace]),
++    );
++    assert!(!editor.history_panel.as_ref().unwrap().page.failed);
++}
++
++#[test]
++fn an_oversized_original_input_stays_editable_and_is_restored_on_cancel() {
++    let original = "x".repeat(256 * 1024 + 1);
++    let mut editor = editor(&original);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert_eq!(editor.current_buffer_contents(), original);
++    assert!(editor.history_panel.as_ref().unwrap().page.failed);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![EditCommand::Backspace]),
++    );
++    assert_eq!(editor.current_buffer_contents().len(), 256 * 1024);
++    assert!(!editor.history_panel.as_ref().unwrap().page.failed);
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    assert!(
++        editor.current_buffer_contents() == original,
++        "the original draft must be restored"
++    );
++}
++
++#[test]
++fn replacing_a_large_history_query_selection_uses_the_resulting_size() {
++    let original = "x".repeat(256 * 1024);
++    let mut editor = editor(&original);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(
++        &mut editor,
++        ReedlineEvent::Edit(vec![
++            EditCommand::MoveToStart { select: true },
++            EditCommand::InsertString("echo".into()),
++        ]),
++    );
++    assert_eq!(editor.current_buffer_contents().len(), 4);
++    assert_eq!(editor.current_buffer_contents(), "echo");
++    assert!(!editor.history_panel.as_ref().unwrap().page.failed);
++    event(&mut editor, ReedlineEvent::CancelHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), original);
++}
++
++struct ChangingSource {
++    calls: usize,
++    empty_after_anchor: bool,
++}
++
++struct ChangedTextSource(usize);
++
++impl HistoryPanelProvider for ChangedTextSource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, _: &HistoryPanelQuery) -> HistoryPanelPage {
++        self.0 += 1;
++        HistoryPanelPage {
++            entries: vec![HistoryPanelEntry {
++                anchor: HistoryPanelAnchor {
++                    id: "same-id".into(),
++                    order: 1,
++                },
++                text: if self.0 == 1 {
++                    "echo old"
++                } else {
++                    "echo changed"
++                }
++                .into(),
++                label: "command".into(),
++                source: "project".into(),
++                description: None,
++            }],
++            title: "History".into(),
++            ..Default::default()
++        }
++    }
++}
++
++#[test]
++fn adoption_checks_changed_command_text_even_when_the_record_id_is_unchanged() {
++    let mut editor =
++        editor("e").with_history_panel(Box::new(ChangedTextSource(0)), ColumnarMenu::default());
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "e");
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo changed");
++    assert_eq!(editor.input_mode, InputMode::Regular);
++}
++
++struct MemorySource;
++
++impl HistoryPanelProvider for MemorySource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        HistoryPanelPage {
++            failed: true,
++            notice: Some("database unavailable; memory matches are selectable".into()),
++            ..Source.query(query)
++        }
++    }
++}
++
++#[test]
++fn a_storage_failure_does_not_disable_valid_memory_candidates() {
++    let mut editor =
++        editor("e").with_history_panel(Box::new(MemorySource), ColumnarMenu::default());
++    editor.painter.handle_resize(80, 24);
++    editor.painter.force_prompt_anchored_for_test(0);
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    editor.repaint(&DefaultPrompt::default()).unwrap();
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(panel.page.failed);
++    assert!(panel.menu.results_can_be_accepted());
++    assert!(panel
++        .menu
++        .menu_string(20, false)
++        .contains("database unavailable"));
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "echo newest");
++}
++
++impl HistoryPanelProvider for ChangingSource {
++    fn begin(&mut self) {
++        self.calls = 0;
++    }
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        self.calls += 1;
++        if self.empty_after_anchor && query.anchor.is_some() {
++            return HistoryPanelPage::default();
++        }
++        let id = if self.calls == 1 || self.empty_after_anchor {
++            "old"
++        } else {
++            "new"
++        };
++        HistoryPanelPage {
++            entries: vec![HistoryPanelEntry {
++                anchor: HistoryPanelAnchor {
++                    id: id.into(),
++                    order: 1,
++                },
++                text: format!("echo {id}"),
++                label: "command".into(),
++                source: "project".into(),
++                description: None,
++            }],
++            newer: self.empty_after_anchor,
++            progress: self.empty_after_anchor.then(|| "loading".into()),
++            ..Default::default()
++        }
++    }
++}
++
++#[test]
++fn accepting_does_not_submit_a_selection_replaced_by_a_late_result() {
++    let mut editor = editor("e").with_history_panel(
++        Box::new(ChangingSource {
++            calls: 0,
++            empty_after_anchor: false,
++        }),
++        ColumnarMenu::default(),
++    );
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert!(editor.history_panel.as_ref().unwrap().status().can_navigate);
++    assert!(!matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Exits(_)
++    ));
++    event(&mut editor, ReedlineEvent::Up);
++    assert!(matches!(
++        event(&mut editor, ReedlineEvent::Enter),
++        EventStatus::Handled
++    ));
++    assert_eq!(editor.input_mode, InputMode::Regular);
++    assert_eq!(editor.current_buffer_contents(), "echo new");
++}
++
++#[test]
++fn reaching_a_paging_boundary_keeps_the_previous_selection() {
++    let mut editor = editor("").with_history_panel(
++        Box::new(ChangingSource {
++            calls: 0,
++            empty_after_anchor: true,
++        }),
++        ColumnarMenu::default(),
++    );
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::Down);
++    event(&mut editor, ReedlineEvent::Down);
++    assert_eq!(
++        editor
++            .history_panel
++            .as_ref()
++            .unwrap()
++            .selected()
++            .unwrap()
++            .text,
++        "echo old"
++    );
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert!(editor
++        .history_panel
++        .as_ref()
++        .unwrap()
++        .page
++        .progress
++        .is_none());
++}
++
++struct BoundarySource(Arc<Mutex<HistoryPanelPage>>);
++
++impl HistoryPanelProvider for BoundarySource {
++    fn begin(&mut self) {}
++    fn cancel(&mut self) {}
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage {
++        if query.anchor.is_some() {
++            HistoryPanelPage::default()
++        } else {
++            self.0.lock().unwrap().clone()
++        }
++    }
++}
++
++#[test]
++fn boundary_navigation_does_not_allow_accepting_a_stale_candidate() {
++    let source = Arc::new(Mutex::new(HistoryPanelPage {
++        entries: vec![HistoryPanelEntry {
++            anchor: HistoryPanelAnchor {
++                order: 1,
++                id: "stable".into(),
++            },
++            text: "echo original".into(),
++            label: "command".into(),
++            source: "project".into(),
++            description: None,
++        }],
++        newer: true,
++        ..Default::default()
++    }));
++    let mut editor = editor("e").with_history_panel(
++        Box::new(BoundarySource(source.clone())),
++        ColumnarMenu::default(),
++    );
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::MenuNext);
++    event(&mut editor, ReedlineEvent::MenuNext);
++    source.lock().unwrap().entries[0].text = "echo changed".into();
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "e");
++    assert!(editor
++        .history_panel
++        .as_ref()
++        .unwrap()
++        .acceptance_notice
++        .is_some());
++}
++
++#[test]
++fn pending_boundary_revalidation_does_not_claim_the_selection_changed() {
++    let source = Arc::new(Mutex::new(HistoryPanelPage {
++        entries: vec![HistoryPanelEntry {
++            anchor: HistoryPanelAnchor {
++                order: 1,
++                id: "stable".into(),
++            },
++            text: "echo original".into(),
++            label: "command".into(),
++            source: "project".into(),
++            description: None,
++        }],
++        newer: true,
++        ..Default::default()
++    }));
++    let mut editor = editor("e").with_history_panel(
++        Box::new(BoundarySource(source.clone())),
++        ColumnarMenu::default(),
++    );
++    event(&mut editor, ReedlineEvent::SearchHistory);
++    event(&mut editor, ReedlineEvent::MenuNext);
++    source.lock().unwrap().pending = true;
++    event(&mut editor, ReedlineEvent::AcceptHistorySearch);
++    let panel = editor.history_panel.as_ref().unwrap();
++    assert!(panel.page.pending);
++    assert!(panel.acceptance_notice.is_none());
++    assert_eq!(editor.input_mode, InputMode::HistorySearch);
++    assert_eq!(editor.current_buffer_contents(), "e");
++}
++
++#[test]
++fn history_previews_escape_controls_and_preserve_graphemes() {
++    for (text, query, expected) in [
++        (
++            "echo \u{1b}[31m\nnext\tend",
++            "echo",
++            " \\u{1b}[31m \\n next\\tend",
++        ),
++        ("e\u{301}cho", "e", " -> e\u{301}cho"),
++        ("中\nnext", "", "中 \\n next"),
++        ("echo exact", "echo exact", ""),
++    ] {
++        let page = HistoryPanelPage {
++            entries: vec![HistoryPanelEntry {
++                anchor: HistoryPanelAnchor {
++                    order: 1,
++                    id: "preview".into(),
++                },
++                text: text.into(),
++                label: "command".into(),
++                source: "project".into(),
++                description: None,
++            }],
++            ..Default::default()
++        };
++        let mut editor = editor(query).with_history_panel(
++            Box::new(EmptySource(Arc::new(Mutex::new(page)))),
++            ColumnarMenu::default(),
++        );
++        event(&mut editor, ReedlineEvent::SearchHistory);
++        let panel = editor.history_panel.as_ref().unwrap();
++        assert_eq!(panel.inline_hint(query, 100), expected);
++        for columns in 0..40 {
++            let hint = panel.inline_hint(query, columns);
++            assert!(unicode_width::UnicodeWidthStr::width(hint.as_str()) <= columns);
++            assert!(!hint.contains(['\u{1b}', '\n', '\r', '\t']), "{hint:?}");
++        }
++    }
++}
++
++#[test]
++fn previews_escape_terminal_controls_and_keep_source_tails_within_width() {
++    use crate::history_panel::{preview, preview_tail};
++    use unicode_width::UnicodeWidthStr;
++    let source = "a/very/long/path/project-b";
++    for columns in 0..40 {
++        assert!(preview_tail(source, columns).width() <= columns);
++        assert!(preview("a\n\x1b[31m中", columns).width() <= columns);
++    }
++    assert!(preview_tail(source, 12).ends_with("project-b"));
++    assert!(!preview("\x1b[31m", 40).contains('\x1b'));
++}
++
++#[test]
++fn history_previews_use_available_width_and_keep_visible_matches() {
++    use crate::history_panel::{preview, preview_match};
++    use unicode_width::UnicodeWidthStr;
++    assert_eq!(preview("echo", 4), "echo");
++    assert_eq!(preview("中", 2), "中");
++    for (text, query) in [
++        ("prefix-NEEDLE-tail", "NEEDLE"),
++        ("a long shared prefix before 中\u{301} suffix", "\u{301}"),
++        ("a long shared prefix\nbefore 状态 marker", "状态"),
++        ("a long shared prefix before \x1b[31mneedle", "needle"),
++    ] {
++        for columns in 0..80 {
++            let rendered = preview_match(text, query, columns);
++            assert!(rendered.width() <= columns, "{columns}: {rendered:?}");
++            assert!(!rendered.contains('\x1b'), "{rendered:?}");
++            assert!(!rendered.starts_with('\u{301}'), "{rendered:?}");
++            if columns >= 13 {
++                assert!(rendered.contains(query), "{columns}: {rendered:?}");
++            }
++        }
++    }
++}
 diff --git a/src/engine_abbreviation_tests.rs b/src/engine_abbreviation_tests.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..f777c898075af0385c6c755a64d2a438127bbe51
@@ -4452,11 +6300,699 @@ index 084936a9214ce8ab071f77c0aa144002d3c6be71..330d551d717df51ff1d5a521a1db8efc
      Exits(Signal),
  }
  
+diff --git a/src/hinter/cwd_aware.rs b/src/hinter/cwd_aware.rs
+index 39605ad62300c3b6e684f1f36486e09b298d9df2..c8eecf49e65d045fc0d560292e532c0b46008995 100644
+--- a/src/hinter/cwd_aware.rs
++++ b/src/hinter/cwd_aware.rs
+@@ -75,6 +75,10 @@ impl Hinter for CwdAwareHinter {
+         }
+     }
+ 
++    fn hint_style(&self) -> Style {
++        self.style
++    }
++
+     fn complete_hint(&self) -> String {
+         self.current_hint.clone()
+     }
+diff --git a/src/hinter/default.rs b/src/hinter/default.rs
+index da90c5d94cc6aabc03393c590ac78aa51e518a16..d3cd7af79887783538126d15b425262098927ec9 100644
+--- a/src/hinter/default.rs
++++ b/src/hinter/default.rs
+@@ -43,6 +43,10 @@ impl Hinter for DefaultHinter {
+         }
+     }
+ 
++    fn hint_style(&self) -> Style {
++        self.style
++    }
++
+     fn complete_hint(&self) -> String {
+         self.current_hint.clone()
+     }
+diff --git a/src/hinter/mod.rs b/src/hinter/mod.rs
+index fcd29b67908be42defe48e987fc9b330fef25915..eda6e79b3b45f1abd2a0197224cfa9cc4a74ef9a 100644
+--- a/src/hinter/mod.rs
++++ b/src/hinter/mod.rs
+@@ -43,6 +43,11 @@ pub trait Hinter: Send {
+         cwd: &str,
+     ) -> String;
+ 
++    /// Style for an unaccepted preview, without querying or changing the current hint.
++    fn hint_style(&self) -> nu_ansi_term::Style {
++        nu_ansi_term::Style::new().fg(nu_ansi_term::Color::LightGray)
++    }
++
+     /// Return the current hint unformatted to perform the completion of the full hint
+     fn complete_hint(&self) -> String;
+ 
+diff --git a/src/history/base.rs b/src/history/base.rs
+index 9a27ad34454d06d57290b4538739ffca6f591b15..5c089d33494f77ddc90f3ce2e9410dce97d94c45 100644
+--- a/src/history/base.rs
++++ b/src/history/base.rs
+@@ -89,6 +89,19 @@ pub struct SearchFilter {
+ }
+ 
+ impl SearchFilter {
++    /// Match command text, including the cursor's consecutive-duplicate exclusion.
++    pub fn matches_command_line(&self, line: &str) -> bool {
++        self.not_command_line.as_deref() != Some(line)
++            && self
++                .command_line
++                .as_ref()
++                .is_none_or(|filter| match filter {
++                    CommandLineSearch::Exact(text) => line == text.as_str(),
++                    CommandLineSearch::Prefix(text) => line.starts_with(text.as_str()),
++                    CommandLineSearch::Substring(text) => line.contains(text.as_str()),
++                })
++    }
++
+     /// Create a search filter with a [`CommandLineSearch`]
+     pub fn from_text_search(
+         cmd: CommandLineSearch,
+@@ -244,6 +257,18 @@ pub trait History: Send {
+ 
+ #[cfg(test)]
+ mod test {
++    #[test]
++    fn text_matching_keeps_cursor_duplicate_exclusion_for_external_backends() {
++        let mut filter = super::SearchFilter::from_text_search(
++            super::CommandLineSearch::Prefix("echo".into()),
++            None,
++        );
++        filter.not_command_line = Some("echo repeated".into());
++        assert!(!filter.matches_command_line("echo repeated"));
++        assert!(filter.matches_command_line("echo different"));
++        assert!(!filter.matches_command_line("printf different"));
++    }
++
+     #[cfg(feature = "_sqlite")]
+     const IS_FILE_BASED: bool = false;
+     #[cfg(not(feature = "_sqlite"))]
+diff --git a/src/history_panel.rs b/src/history_panel.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a92e91feb465bb53ca00c50396b933217a661177
+--- /dev/null
++++ b/src/history_panel.rs
+@@ -0,0 +1,593 @@
++use crate::{
++    core_editor::Editor, ColumnarMenu, CompletionResult, EditCommand, HistorySearchStatus, Menu,
++    MenuEvent, Prompt, Span, Suggestion,
++};
++
++const MAX_QUERY_BYTES: usize = 256 * 1024;
++
++/// Stable keyset boundary for a page of contextual history.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct HistoryPanelAnchor {
++    /// Stable ordering value, independent of display text.
++    pub order: i64,
++    /// Stable identity used to break ordering ties.
++    pub id: String,
++}
++
++/// One request to a non-blocking contextual history provider.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct HistoryPanelQuery {
++    /// Literal text to find.
++    pub text: String,
++    /// Whether to limit results to the current project.
++    pub project: bool,
++    /// Optional keyset boundary.
++    pub anchor: Option<HistoryPanelAnchor>,
++    /// Include the boundary record when retaining a selection across scope changes.
++    pub include_anchor: bool,
++    /// Request older rather than newer entries.
++    pub older: bool,
++}
++
++/// One complete, unmodified input and its display metadata.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct HistoryPanelEntry {
++    /// Stable record identity and ordering.
++    pub anchor: HistoryPanelAnchor,
++    /// Text to adopt, never a shortened preview.
++    pub text: String,
++    /// Host-formatted display metadata; never part of the adopted input or its identity.
++    pub label: String,
++    /// Optional plain text location label, truncated from the left when necessary.
++    pub source: String,
++    /// Optional source detail shown for the selected input.
++    pub description: Option<String>,
++}
++
++/// The current response for exactly one query.
++#[derive(Clone, Debug, Default)]
++pub struct HistoryPanelPage {
++    /// Entries ordered oldest to newest.
++    pub entries: Vec<HistoryPanelEntry>,
++    /// Whether another older page exists.
++    pub older: bool,
++    /// Whether another newer page exists.
++    pub newer: bool,
++    /// The provider is still working; entries must not be submitted.
++    pub pending: bool,
++    /// The provider could not complete the query.
++    pub failed: bool,
++    /// Visible scope label.
++    pub title: String,
++    /// Visible error, unavailability or progress information.
++    pub notice: Option<String>,
++    /// Transient query progress, distinct from persistent warnings.
++    pub progress: Option<String>,
++    /// Preferred initial record (for example, the current session's last input).
++    pub preferred: Option<String>,
++}
++
++/// A host-owned history query source. Calls on the editor thread must not block.
++pub trait HistoryPanelProvider: Send {
++    /// Begin a new browsing snapshot.
++    fn begin(&mut self);
++    /// Start or poll the exact request. Completion should signal a repaint.
++    fn query(&mut self, query: &HistoryPanelQuery) -> HistoryPanelPage;
++    /// Cancel any outstanding query without waiting for storage.
++    fn cancel(&mut self);
++}
++
++pub(crate) struct Panel {
++    provider: Box<dyn HistoryPanelProvider>,
++    original: Option<Editor>,
++    pub menu: ColumnarMenu,
++    pub request: HistoryPanelQuery,
++    pub page: HistoryPanelPage,
++    edge: Option<bool>,
++    fallback: Option<(HistoryPanelQuery, HistoryPanelPage)>,
++    exhausted_request: Option<HistoryPanelQuery>,
++    reset_selection: bool,
++    query_error: bool,
++    pub acceptance_notice: Option<String>,
++}
++
++impl Panel {
++    pub fn new(provider: Box<dyn HistoryPanelProvider>, menu: ColumnarMenu) -> Self {
++        Self {
++            provider,
++            original: None,
++            menu: menu
++                .with_columns(1)
++                .with_preserve_case(true)
++                .with_inline_hint()
++                .with_max_rows(std::num::NonZero::new(8).expect("nonzero history viewport")),
++            request: HistoryPanelQuery {
++                text: String::new(),
++                project: false,
++                anchor: None,
++                include_anchor: false,
++                older: true,
++            },
++            page: HistoryPanelPage::default(),
++            edge: None,
++            fallback: None,
++            exhausted_request: None,
++            reset_selection: true,
++            query_error: false,
++            acceptance_notice: None,
++        }
++    }
++
++    pub fn is_active(&self) -> bool {
++        self.menu.is_active()
++    }
++
++    pub fn open(&mut self, editor: &mut Editor, columns: u16) {
++        self.provider.begin();
++        self.menu.handle_menu_event(&MenuEvent::Activate(true));
++        let original = std::mem::take(editor);
++        editor.abbreviation_tracking = original.abbreviation_tracking;
++        editor.set_line_buffer(
++            original.line_buffer().clone(),
++            crate::UndoBehavior::CreateUndoPoint,
++        );
++        editor.clear_selection();
++        self.original = Some(original);
++        let text = editor.get_buffer().to_owned();
++        self.query_error = text.len() > MAX_QUERY_BYTES;
++        let text = if self.query_error {
++            String::new()
++        } else {
++            text
++        };
++        self.request = HistoryPanelQuery {
++            text,
++            project: false,
++            anchor: None,
++            include_anchor: false,
++            older: true,
++        };
++        self.page = HistoryPanelPage::default();
++        self.restart();
++        self.poll(editor, columns);
++    }
++
++    pub fn close(&mut self, editor: &mut Editor) {
++        self.provider.cancel();
++        if let Some(original) = self.original.take() {
++            *editor = original;
++        }
++        self.menu.handle_menu_event(&MenuEvent::Deactivate);
++        self.page = HistoryPanelPage::default();
++        self.query_error = false;
++        self.restart();
++    }
++
++    fn restart(&mut self) {
++        self.request.anchor = None;
++        self.request.include_anchor = false;
++        self.request.older = true;
++        self.edge = None;
++        self.fallback = None;
++        self.exhausted_request = None;
++        self.reset_selection = true;
++        self.acceptance_notice = None;
++    }
++
++    pub fn poll(&mut self, editor: &Editor, columns: u16) {
++        let mut page = if self.query_error {
++            HistoryPanelPage {
++                title: "History (query unavailable)".into(),
++                notice: Some("History query exceeds 256 KiB; edit it or cancel".into()),
++                failed: true,
++                ..Default::default()
++            }
++        } else if self.exhausted_request.is_some() {
++            self.page.clone()
++        } else {
++            self.provider.query(&self.request)
++        };
++        if !page.pending && !page.failed && page.progress.is_none() && page.entries.is_empty() {
++            if let (Some(older), Some((request, mut fallback))) =
++                (self.edge.take(), self.fallback.take())
++            {
++                if older {
++                    fallback.older = false;
++                } else {
++                    fallback.newer = false;
++                }
++                fallback.progress = None;
++                page = fallback;
++                self.exhausted_request = Some(request);
++            } else if self.request.include_anchor {
++                self.request.anchor = None;
++                self.request.include_anchor = false;
++                page = self.provider.query(&self.request);
++            }
++        }
++        let retained = self.menu.selection_id();
++        let initial =
++            (self.reset_selection && !page.pending && (!page.failed || !page.entries.is_empty()))
++                .then(|| match self.edge.take() {
++                    Some(false) => page.entries.first(),
++                    Some(true) => page.entries.last(),
++                    None => retained
++                        .as_ref()
++                        .and_then(|id| page.entries.iter().find(|entry| &entry.anchor.id == id))
++                        .or_else(|| {
++                            page.preferred.as_ref().and_then(|id| {
++                                page.entries.iter().find(|entry| &entry.anchor.id == id)
++                            })
++                        })
++                        .or_else(|| page.entries.last()),
++                })
++                .flatten()
++                .map(|entry| entry.anchor.id.clone());
++        let retained = retained.filter(|id| {
++            !self.reset_selection
++                || page.pending
++                || page.entries.iter().any(|entry| &entry.anchor.id == id)
++        });
++        let result = if page.pending {
++            CompletionResult::Pending
++        } else if page.failed && page.entries.is_empty() {
++            CompletionResult::Unavailable {
++                message: page
++                    .notice
++                    .clone()
++                    .unwrap_or_else(|| "History unavailable".into()),
++            }
++        } else {
++            let width = usize::from(columns);
++            let suggestions = page
++                .entries
++                .iter()
++                .map(|entry| {
++                    let label = preview(&entry.label, width / 3);
++                    let source = preview_tail(
++                        &entry.source,
++                        (width / 2).saturating_sub(
++                            unicode_width::UnicodeWidthStr::width(label.as_str())
++                                + usize::from(!label.is_empty()),
++                        ),
++                    );
++                    let description = match (label.is_empty(), source.is_empty()) {
++                        (true, true) => None,
++                        (false, true) => Some(label),
++                        (true, false) => Some(source),
++                        (false, false) => Some(format!("{label} {source}")),
++                    };
++                    Suggestion {
++                        completion_id: Some(entry.anchor.id.clone()),
++                        value: entry.text.clone(),
++                        display_override: Some(preview_match(
++                            &entry.text,
++                            &self.request.text,
++                            (width / 2).saturating_sub(3),
++                        )),
++                        description,
++                        span: Span::new(0, editor.get_buffer().len()),
++                        ..Default::default()
++                    }
++                })
++                .collect::<Vec<_>>();
++            let message = if page.failed {
++                Some(
++                    page.notice
++                        .as_deref()
++                        .unwrap_or("History unavailable; memory matches are selectable"),
++                )
++            } else {
++                page.progress.as_deref()
++            };
++            match message {
++                Some(message) => CompletionResult::Limited {
++                    suggestions: suggestions.into(),
++                    message: message.to_owned(),
++                },
++                None => CompletionResult::fresh(suggestions),
++            }
++        };
++        let range = 0..editor.get_buffer().len();
++        self.menu
++            .update_result(editor, result, std::slice::from_ref(&range), retained);
++        if let Some(id) = initial {
++            self.menu.select(&id);
++        }
++        if !page.pending && (!page.failed || !page.entries.is_empty()) {
++            self.reset_selection = false;
++            self.fallback = None;
++        }
++        self.page = page;
++    }
++
++    pub fn selected(&self) -> Option<&HistoryPanelEntry> {
++        if !self.menu.results_can_be_accepted() {
++            return None;
++        }
++        let id = self.menu.selected_value()?.completion_id.as_ref()?;
++        self.page
++            .entries
++            .iter()
++            .find(|entry| &entry.anchor.id == id)
++    }
++
++    pub fn inline_hint(&self, query: &str, columns: usize) -> String {
++        let Some(entry) = self.selected() else {
++            return String::new();
++        };
++        if let Some(suffix) = entry.text.strip_prefix(query) {
++            if crate::core_editor::ensure_grapheme_boundary_prev(&entry.text, query.len())
++                == query.len()
++            {
++                return preview(suffix, columns);
++            }
++        }
++        const REPLACEMENT: &str = " -> ";
++        if columns <= REPLACEMENT.len() {
++            return String::new();
++        }
++        format!(
++            "{REPLACEMENT}{}",
++            preview_match(&entry.text, query, columns - REPLACEMENT.len())
++        )
++    }
++
++    pub fn no_matches(&self) -> bool {
++        !self.page.pending
++            && !self.page.failed
++            && self.page.progress.is_none()
++            && self.page.entries.is_empty()
++    }
++
++    pub fn refresh_for_acceptance(&mut self, editor: &Editor, columns: u16) {
++        if let Some(request) = self.exhausted_request.take() {
++            self.request = request;
++        }
++        self.poll(editor, columns);
++    }
++
++    pub fn navigate(&mut self, older: bool, editor: &Editor, columns: u16) {
++        self.acceptance_notice = None;
++        self.poll(editor, columns);
++        if self.page.pending {
++            return;
++        }
++        if self.selected().is_none() {
++            if let Some(entry) = self.page.entries.last() {
++                self.menu.select(&entry.anchor.id);
++            }
++            return;
++        }
++        if self.menu.move_selection_bounded(older) {
++            return;
++        }
++        if (older && self.page.older) || (!older && self.page.newer) {
++            let entry = if older {
++                self.page.entries.first()
++            } else {
++                self.page.entries.last()
++            };
++            if let Some(entry) = entry {
++                let request = self
++                    .exhausted_request
++                    .take()
++                    .unwrap_or_else(|| self.request.clone());
++                self.fallback = Some((request, self.page.clone()));
++                self.request.anchor = Some(entry.anchor.clone());
++                self.request.include_anchor = false;
++                self.request.older = older;
++                self.edge = Some(older);
++                self.reset_selection = true;
++                self.poll(editor, columns);
++            }
++        }
++    }
++
++    pub fn switch_scope(&mut self, editor: &Editor, columns: u16) {
++        let selected = self.selected().map(|entry| entry.anchor.clone());
++        self.request.project = !self.request.project;
++        self.restart();
++        self.request.include_anchor = selected.is_some();
++        self.request.anchor = selected;
++        self.poll(editor, columns);
++    }
++
++    pub fn edit(&mut self, editor: &mut Editor, commands: &[EditCommand], columns: u16) {
++        self.acceptance_notice = None;
++        let recovering = self.query_error;
++        self.query_error = false;
++        for command in commands {
++            let added = match command {
++                EditCommand::InsertString(text) => text.len(),
++                EditCommand::InsertChar(ch) => ch.len_utf8(),
++                EditCommand::InsertNewline => 1,
++                _ => 0,
++            };
++            let replaced = editor.get_selection().map_or(0, |(start, end)| end - start);
++            if added > 0
++                && editor
++                    .get_buffer()
++                    .len()
++                    .saturating_sub(replaced)
++                    .saturating_add(added)
++                    > MAX_QUERY_BYTES
++            {
++                self.query_error = true;
++                self.poll(editor, columns);
++                return;
++            }
++            editor.run_edit_command(command);
++        }
++        if editor.get_buffer().len() > MAX_QUERY_BYTES {
++            self.query_error = true;
++            self.poll(editor, columns);
++            return;
++        }
++        let text = editor.get_buffer().to_owned();
++        if text != self.request.text || recovering {
++            self.request.text = text;
++            self.restart();
++            self.poll(editor, columns);
++        }
++    }
++
++    pub fn status(&self) -> HistorySearchStatus<'_> {
++        let notice = if self.page.failed {
++            self.page.notice.as_deref().or(Some("History unavailable"))
++        } else {
++            self.acceptance_notice
++                .as_deref()
++                .or_else(|| {
++                    (!self.page.pending
++                        && !self.page.entries.is_empty()
++                        && self.selected().is_none())
++                    .then_some("History selection unavailable; navigate to select")
++                })
++                .or(self.page.notice.as_deref())
++        };
++        HistorySearchStatus {
++            title: &self.page.title,
++            notice,
++            progress: self
++                .page
++                .progress
++                .as_deref()
++                .or_else(|| self.page.pending.then_some("Searching history...")),
++            description: self
++                .selected()
++                .and_then(|entry| entry.description.as_deref()),
++            failed: self.page.failed,
++            no_matches: self.no_matches(),
++            can_navigate: !self.page.pending
++                && !self.page.entries.is_empty()
++                && (self.selected().is_none()
++                    || self.page.entries.len() > 1
++                    || self.page.older
++                    || self.page.newer),
++        }
++    }
++
++    pub fn update_message(&mut self, prompt: &dyn Prompt, columns: u16, prompt_visible: bool) {
++        let status = self.status();
++        let description = status
++            .description
++            .map(|text| preview_tail(text, usize::from(columns.min(240))));
++        let lines = prompt.render_history_panel_status(
++            HistorySearchStatus {
++                description: description.as_deref(),
++                ..status
++            },
++            self.selected().is_some(),
++            prompt_visible,
++        );
++        self.menu
++            .set_message(&lines.iter().map(String::as_str).collect::<Vec<_>>());
++    }
++}
++
++pub(crate) fn preview(text: &str, columns: usize) -> String {
++    preview_limited(text, columns).0
++}
++
++fn preview_limited(text: &str, columns: usize) -> (String, bool) {
++    use unicode_segmentation::UnicodeSegmentation;
++    use unicode_width::UnicodeWidthStr;
++    if columns == 0 {
++        return (String::new(), !text.is_empty());
++    }
++    let mut safe = String::new();
++    let mut truncated = false;
++    for ch in text.chars() {
++        match ch {
++            '\n' => safe.push_str(" \\n "),
++            '\r' => safe.push_str("\\r"),
++            '\t' => safe.push_str("\\t"),
++            ch if ch.is_control()
++                || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
++            {
++                safe.push_str(&format!("\\u{{{:x}}}", ch as u32));
++            }
++            ch => safe.push(ch),
++        }
++        if safe.len() > columns.saturating_mul(8).max(256) {
++            truncated = true;
++            break;
++        }
++    }
++    truncated |= safe.width() > columns;
++    let limit = columns.saturating_sub(usize::from(truncated));
++    let mut result = String::new();
++    let mut width = 0;
++    for grapheme in safe.graphemes(true) {
++        let next = grapheme.width();
++        if width + next > limit {
++            break;
++        }
++        result.push_str(grapheme);
++        width += next;
++    }
++    if truncated {
++        result.push('~');
++    }
++    (result, truncated)
++}
++
++pub(crate) fn preview_match(text: &str, query: &str, columns: usize) -> String {
++    use unicode_segmentation::UnicodeSegmentation;
++    use unicode_width::UnicodeWidthStr;
++
++    let (initial, truncated) = preview_limited(text, columns);
++    if !truncated || query.is_empty() || columns < 4 {
++        return initial;
++    }
++    let Some(found) = text.find(query) else {
++        return initial;
++    };
++    if !preview_limited(&text[..found + query.len()], columns - 1).1 {
++        return initial;
++    }
++    let matched = text
++        .grapheme_indices(true)
++        .take_while(|(index, _)| *index <= found)
++        .last()
++        .map_or(0, |(index, _)| index);
++    let context = (columns / 3).min(columns.saturating_sub(preview(query, columns).width() + 2));
++    let mut start = matched;
++    let mut width = 0;
++    for (index, grapheme) in text[..matched].grapheme_indices(true).rev() {
++        let next = preview(grapheme, usize::MAX).width();
++        if width + next > context {
++            break;
++        }
++        width += next;
++        start = index;
++    }
++    if start == 0 {
++        initial
++    } else {
++        format!("~{}", preview(&text[start..], columns - 1))
++    }
++}
++
++pub(crate) fn preview_tail(text: &str, columns: usize) -> String {
++    use unicode_segmentation::UnicodeSegmentation;
++    use unicode_width::UnicodeWidthStr;
++    if columns == 0 {
++        return String::new();
++    }
++    let text = preview(text, text.len().saturating_mul(8).saturating_add(1));
++    if text.width() <= columns {
++        return text;
++    }
++    let mut width = 1;
++    let mut tail = Vec::new();
++    for grapheme in text.graphemes(true).rev() {
++        width += grapheme.width();
++        if width > columns {
++            break;
++        }
++        tail.push(grapheme);
++    }
++    format!("~{}", tail.into_iter().rev().collect::<String>())
++}
 diff --git a/src/lib.rs b/src/lib.rs
-index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646b089d5a7 100644
+index 2cb3662efdf8a8a764d0213a664db8120469e339..c94e84a4a07587ea60b91a66cc6de013129298ca 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -280,14 +280,16 @@ pub use auto_pairs::{AutoPairAction, AutoPairContext, AutoPairs};
+@@ -280,21 +280,24 @@ pub use auto_pairs::{AutoPairAction, AutoPairContext, AutoPairs};
  
  mod enums;
  pub use enums::{
@@ -4474,9 +7010,26 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646
 +mod abbreviations;
 +pub use abbreviations::{AbbreviationEdit, AbbreviationExpander, InputIntent};
  mod engine;
- pub use engine::{MouseClickMode, Reedline};
+-pub use engine::{MouseClickMode, Reedline};
++pub use engine::{MouseClickMode, Reedline, RepaintSignal};
  
-@@ -306,17 +308,18 @@ pub use history::{
+ mod result;
+ pub use result::{ReedlineError, ReedlineErrorVariants, Result};
+ 
+ mod history;
++mod history_panel;
+ #[cfg(feature = "_sqlite")]
+ pub use history::SqliteBackedHistory;
+ pub use history::{
+@@ -302,21 +305,26 @@ pub use history::{
+     HistoryItemId, HistoryNavigationQuery, HistorySessionId, IgnoreAllExtraInfo, JsonFilterValue,
+     SearchDirection, SearchFilter, SearchQuery, HISTORY_SIZE,
+ };
++pub use history_panel::{
++    HistoryPanelAnchor, HistoryPanelEntry, HistoryPanelPage, HistoryPanelProvider,
++    HistoryPanelQuery,
++};
+ 
  mod prompt;
  pub use prompt::PromptHelixMode;
  pub use prompt::{
@@ -4485,9 +7038,9 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646
 -    DEFAULT_INSERT_PROMPT_INDICATOR, DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR,
 -    DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_INDICATOR, DEFAULT_PROMPT_MULTILINE_COLOR,
 -    DEFAULT_PROMPT_RIGHT_COLOR, DEFAULT_SELECT_PROMPT_INDICATOR,
-+    DefaultPrompt, DefaultPromptSegment, Prompt, PromptContext, PromptEditMode,
-+    PromptEditModeDiscriminants, PromptHistorySearch, PromptHistorySearchStatus, PromptInteraction,
-+    PromptViMode, DEFAULT_INDICATOR_COLOR, DEFAULT_INSERT_PROMPT_INDICATOR,
++    DefaultPrompt, DefaultPromptSegment, HistorySearchStatus, Prompt, PromptContext,
++    PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch, PromptHistorySearchStatus,
++    PromptInteraction, PromptViMode, DEFAULT_INDICATOR_COLOR, DEFAULT_INSERT_PROMPT_INDICATOR,
 +    DEFAULT_MULTILINE_INDICATOR, DEFAULT_NORMAL_PROMPT_INDICATOR, DEFAULT_PROMPT_COLOR,
 +    DEFAULT_PROMPT_INDICATOR, DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
 +    DEFAULT_SELECT_PROMPT_INDICATOR,
@@ -4501,7 +7054,7 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646
  };
  pub use edit_mode::{
      default_helix_insert_keybindings, default_helix_normal_keybindings,
-@@ -328,8 +331,8 @@ pub use highlighter::{AbbrExpandContext, ExampleHighlighter, Highlighter, Simple
+@@ -328,8 +336,8 @@ pub use highlighter::{AbbrExpandContext, ExampleHighlighter, Highlighter, Simple
  
  mod completion;
  pub use completion::{
@@ -4513,23 +7066,35 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..52636d99fe5236f0a34275239c36d646
  
  mod hinter;
 diff --git a/src/menu/columnar_menu.rs b/src/menu/columnar_menu.rs
-index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e5d9af594 100644
+index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd27d159738 100644
 --- a/src/menu/columnar_menu.rs
 +++ b/src/menu/columnar_menu.rs
-@@ -10,6 +10,8 @@ use crate::{
+@@ -10,6 +10,9 @@ use crate::{
  };
  use nu_ansi_term::ansi::RESET;
  use std::num::{NonZero, NonZeroUsize};
++use std::ops::Range;
 +use unicode_segmentation::UnicodeSegmentation;
 +use unicode_width::UnicodeWidthStr;
  
  /// The traversal direction of the menu
  #[derive(Debug, PartialEq, Eq)]
-@@ -87,6 +89,12 @@ pub struct ColumnarMenu {
+@@ -68,6 +71,8 @@ pub struct ColumnarMenu {
+     /// Number of minimum rows that are displayed when
+     /// the required lines is larger than the available lines
+     min_rows: u16,
++    max_rows: Option<NonZero<u16>>,
++    inline_hint: bool,
+     /// Working column details keep changing based on the collected values
+     working_details: ColumnDetails,
+     /// Suggestions currently displayed and their derived display metrics
+@@ -87,6 +92,14 @@ pub struct ColumnarMenu {
      event: Option<MenuEvent>,
      /// String collected after the menu is activated
      input: Option<String>,
 +    message: Option<String>,
++    /// Complete host status area; an empty override suppresses automatic notices.
++    message_override: Option<String>,
 +    missing_selection: Option<String>,
 +    /// Editor revision and cursor for distinguishing edits from background refreshes.
 +    input_version: Option<(u64, usize)>,
@@ -4538,11 +7103,21 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
  }
  
  impl Default for ColumnarMenu {
-@@ -104,6 +112,11 @@ impl Default for ColumnarMenu {
+@@ -96,6 +109,8 @@ impl Default for ColumnarMenu {
+             active: false,
+             default_details: DefaultColumnDetails::default(),
+             min_rows: 3,
++            max_rows: None,
++            inline_hint: false,
+             working_details: ColumnDetails::default(),
+             completions: CompletionDisplay::default(),
+             phase: CompletionPhase::Unasked,
+@@ -104,6 +119,12 @@ impl Default for ColumnarMenu {
              skip_rows: 0,
              event: None,
              input: None,
 +            message: None,
++            message_override: None,
 +            missing_selection: None,
 +            input_version: None,
 +            preserve_case: false,
@@ -4550,10 +7125,20 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
          }
      }
  }
-@@ -117,6 +130,23 @@ impl MenuBuilder for ColumnarMenu {
+@@ -117,6 +138,33 @@ impl MenuBuilder for ColumnarMenu {
  
  // Menu specific configuration functions
  impl ColumnarMenu {
++    pub(crate) fn with_max_rows(mut self, rows: NonZero<u16>) -> Self {
++        self.max_rows = Some(rows);
++        self
++    }
++
++    pub(crate) fn with_inline_hint(mut self) -> Self {
++        self.inline_hint = true;
++        self
++    }
++
 +    /// Resolve styles at paint time without replacing the menu or its selection.
 +    #[must_use]
 +    pub fn with_style_provider(
@@ -4574,7 +7159,116 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
      /// Menu builder with new columns value
      #[must_use]
      pub fn with_columns(mut self, columns: u16) -> Self {
-@@ -352,7 +382,13 @@ impl ColumnarMenu {
+@@ -148,6 +196,92 @@ impl ColumnarMenu {
+ 
+ // Menu functionality
+ impl ColumnarMenu {
++    pub(crate) fn selection_id(&self) -> Option<String> {
++        self.missing_selection
++            .clone()
++            .or_else(|| self.get_values().get(self.index()).map(suggestion_identity))
++    }
++
++    pub(crate) fn selected_value(&self) -> Option<&Suggestion> {
++        self.get_values()
++            .get(self.index())
++            .filter(|_| self.missing_selection.is_none())
++    }
++
++    pub(crate) fn select(&mut self, id: &str) {
++        if let Some(index) = self
++            .get_values()
++            .iter()
++            .position(|value| suggestion_identity(value) == id)
++        {
++            (self.row_pos, self.col_pos) = self.position_from_index(index);
++            self.missing_selection = None;
++        }
++    }
++
++    pub(crate) fn move_selection_bounded(&mut self, backwards: bool) -> bool {
++        if self.get_values().is_empty()
++            || (self.missing_selection.is_none()
++                && if backwards {
++                    self.index() == 0
++                } else {
++                    self.index() + 1 == self.get_values().len()
++                })
++        {
++            return false;
++        }
++        self.move_selection(if backwards {
++            MenuEvent::PreviousElement
++        } else {
++            MenuEvent::NextElement
++        });
++        true
++    }
++
++    pub(crate) fn set_message(&mut self, lines: &[&str]) {
++        let message = lines
++            .iter()
++            .filter(|line| !line.is_empty())
++            .map(|line| bounded_message(line))
++            .collect::<Vec<_>>()
++            .join("\r\n");
++        self.message_override = Some(message);
++    }
++
++    pub(crate) fn update_result(
++        &mut self,
++        editor: &Editor,
++        result: crate::CompletionResult,
++        base_ranges: &[Range<usize>],
++        selected: Option<String>,
++    ) {
++        self.message_override = None;
++        self.message = match &result {
++            crate::CompletionResult::Limited { message, .. }
++            | crate::CompletionResult::Unavailable { message } => Some(bounded_message(message)),
++            _ => None,
++        };
++        self.phase.note(&result);
++        if let Some(completions) = CompletionDisplay::from_result(result, base_ranges, editor) {
++            self.completions = completions;
++            if let Some(selected) = selected.filter(|_| self.phase.acceptable()) {
++                if let Some(index) = self
++                    .get_values()
++                    .iter()
++                    .position(|suggestion| suggestion_identity(suggestion) == selected)
++                {
++                    (self.row_pos, self.col_pos) = self.position_from_index(index);
++                } else {
++                    self.missing_selection = Some(selected);
++                    self.reset_position();
++                }
++            } else {
++                self.reset_position();
++                self.missing_selection = None;
++            }
++        }
++    }
++
+     /// Move menu cursor to the next element
+     fn move_next(&mut self) {
+         let new_index = self.index() + 1;
+@@ -308,9 +442,12 @@ impl ColumnarMenu {
+     /// The *layout* answer, so it may be 0 while a completion is still in
+     /// flight; grid arithmetic asks [`grid_rows`](Self::grid_rows) instead.
+     fn get_rows(&self) -> u16 {
+-        if self.get_values().is_empty() && self.phase.awaiting_results() {
+-            // No reason to save space if we're waiting for results.
+-            0
++        if self.get_values().is_empty() {
++            if self.message.is_some() || self.message_override.is_some() {
++                self.message_rows()
++            } else {
++                u16::from(!self.phase.awaiting_results())
++            }
+         } else {
+             self.grid_rows().get()
+         }
+@@ -352,7 +489,13 @@ impl ColumnarMenu {
          if use_ansi_coloring {
              format!(
                  "{}{}{}",
@@ -4589,7 +7283,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
                  msg,
                  RESET
              )
-@@ -405,37 +441,24 @@ impl ColumnarMenu {
+@@ -405,37 +548,24 @@ impl ColumnarMenu {
  
      /// Handles plain-text formatting.
      fn format_plain(&self, suggestion: &Suggestion, index: usize) -> String {
@@ -4640,7 +7334,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
              // Modifies in-place. Prevents unicode edge cases as well.
              formatted_line.make_ascii_uppercase();
          }
-@@ -445,11 +468,12 @@ impl ColumnarMenu {
+@@ -445,11 +575,12 @@ impl ColumnarMenu {
  
      /// Handles ANSI-colored formatting.
      fn format_ansi(&self, suggestion: &Suggestion, index: usize) -> String {
@@ -4655,7 +7349,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
  
          // TODO(ysthakur): let the user strip quotes, rather than doing it here
          // Natively trim standard quote characters using a character array match.
-@@ -464,10 +488,18 @@ impl ColumnarMenu {
+@@ -464,10 +595,18 @@ impl ColumnarMenu {
          let (left_text_size, description_size) = self.column_split(terminal_width);
  
          // Resolve ANSI styles based on selection state.
@@ -4678,7 +7372,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
          let match_style = if is_selected {
              &color_settings.selected_match_style
          } else {
-@@ -535,9 +567,19 @@ impl ColumnarMenu {
+@@ -535,9 +674,19 @@ impl ColumnarMenu {
              MenuEvent::Activate(updated) | MenuEvent::Edit(updated) => {
                  self.reload(updated, editor, completer)
              }
@@ -4699,7 +7393,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
              MenuEvent::NextElement => self.move_next(),
              MenuEvent::PreviousElement => self.move_previous(),
              MenuEvent::MoveUp => self.move_up(),
-@@ -553,7 +595,25 @@ impl ColumnarMenu {
+@@ -553,7 +702,32 @@ impl ColumnarMenu {
      /// Recompute the completion box geometry from the current suggestions,
      /// selection, and terminal size. Runs on every repaint.
      pub fn recompute_layout(&mut self, painter: &Painter) {
@@ -4707,17 +7401,24 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
 +        self.recompute_columns(painter.screen_width());
 +        let available =
 +            available_lines(painter, self.min_rows(), u16::MAX).saturating_sub(self.header_rows());
-+        self.skip_rows = scroll_offset(self.row_pos, self.skip_rows, available);
++        self.update_scroll(available);
 +    }
 +
-+    /// Lay out cached values for a non-interactive preview, without terminal I/O.
++    /// Lay out cached values in a known display area, without terminal I/O.
 +    pub fn layout_for_preview(&mut self, columns: u16, rows: u16) {
 +        self.recompute_columns(columns);
-+        self.skip_rows = scroll_offset(
-+            self.row_pos,
-+            self.skip_rows,
-+            rows.saturating_sub(self.header_rows()),
-+        );
++        self.update_scroll(rows.saturating_sub(self.header_rows()));
++    }
++
++    fn update_scroll(&mut self, rows: u16) {
++        let visible = self.limit_rows(rows);
++        self.skip_rows = scroll_offset(self.row_pos, self.skip_rows, visible)
++            .min(self.get_rows().saturating_sub(visible));
++    }
++
++    fn limit_rows(&self, rows: u16) -> u16 {
++        self.max_rows
++            .map_or(rows, |maximum| rows.min(maximum.get()))
 +    }
 +
 +    fn recompute_columns(&mut self, columns: u16) {
@@ -4726,7 +7427,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
  
          // If there is at least one suggestion that contains a description, then the layout
          // is changed to one column to fit the description
-@@ -591,8 +651,34 @@ impl ColumnarMenu {
+@@ -591,8 +765,48 @@ impl ColumnarMenu {
                  possible_columns.min(self.default_details.columns).max(1);
          }
  
@@ -4737,33 +7438,47 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
 +    }
 +
 +    fn header_rows(&self) -> u16 {
-+        u16::from(
-+            !self.get_values().is_empty()
-+                && (self.message.is_some() || self.missing_selection.is_some()),
-+        )
++        if self.get_values().is_empty() {
++            0
++        } else {
++            self.message_rows()
++        }
++    }
++
++    fn message_rows(&self) -> u16 {
++        self.message_text()
++            .map_or(0, |text| text.lines().count().min(u16::MAX as usize) as u16)
++    }
++
++    fn message_text(&self) -> Option<String> {
++        if let Some(message) = &self.message_override {
++            return (!message.is_empty()).then(|| message.clone());
++        }
++        if self.missing_selection.is_none() {
++            self.message.clone()
++        } else {
++            Some(match &self.message {
++                Some(message) => format!("{message}; selection unavailable: navigate to select"),
++                None => "Selection unavailable: navigate to select".into(),
++            })
++        }
 +    }
 +
 +    fn message_string(&self) -> Option<String> {
-+        let message = if self.missing_selection.is_none() {
-+            self.message.clone()?
-+        } else {
-+            match &self.message {
-+                Some(message) => format!("{message}; selection unavailable: navigate to select"),
-+                None => "Selection unavailable: navigate to select".into(),
-+            }
-+        };
++        let width = self
++            .get_width()
++            .saturating_mul(usize::from(self.get_cols()));
 +        Some(
-+            truncate_with_ansi(
-+                &message,
-+                self.get_width()
-+                    .saturating_mul(usize::from(self.get_cols())),
-+            )
-+            .into_owned(),
++            self.message_text()?
++                .lines()
++                .map(|line| truncate_with_ansi(line, width).into_owned())
++                .collect::<Vec<_>>()
++                .join("\r\n"),
 +        )
      }
  }
  
-@@ -627,7 +713,10 @@ impl Menu for ColumnarMenu {
+@@ -627,7 +841,10 @@ impl Menu for ColumnarMenu {
          }
  
          // Stale results can't splice wrong span
@@ -4775,11 +7490,12 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
              // Recalculate spans after replacement
              self.update_values(editor, completer);
  
-@@ -649,12 +738,22 @@ impl Menu for ColumnarMenu {
+@@ -649,12 +866,23 @@ impl Menu for ColumnarMenu {
          // Reset completions on activation
          self.completions = CompletionDisplay::default();
          self.phase.on_activate();
 +        self.message = None;
++        self.message_override = None;
 +        self.missing_selection = None;
 +        self.input_version = None;
      }
@@ -4799,10 +7515,14 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
      }
  
      /// Updates menu values
-@@ -667,10 +766,48 @@ impl Menu for ColumnarMenu {
+@@ -667,10 +895,25 @@ impl Menu for ColumnarMenu {
          let (input, pos) = resolve_completer_input(editor, &mut self.input, &self.settings);
  
          let (result, base_ranges) = completer.complete_with_base_ranges(&input, pos);
+-        self.phase.note(&result);
+-        if let Some(completions) = CompletionDisplay::from_result(result, &base_ranges, editor) {
+-            self.completions = completions;
+-            self.reset_position();
 +        let input_version = (editor.revision(), editor.insertion_point());
 +        let selected = if self.input_version.replace(input_version) != Some(input_version) {
 +            self.missing_selection = None;
@@ -4816,31 +7536,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
 +                    .map(suggestion_identity)
 +            })
 +        };
-+        self.message = match &result {
-+            crate::CompletionResult::Limited { message, .. }
-+            | crate::CompletionResult::Unavailable { message } => Some(bounded_message(message)),
-+            _ => None,
-+        };
-         self.phase.note(&result);
-         if let Some(completions) = CompletionDisplay::from_result(result, &base_ranges, editor) {
-             self.completions = completions;
--            self.reset_position();
-+            if let Some(selected) = selected.filter(|_| self.phase.acceptable()) {
-+                if let Some(index) = self
-+                    .get_values()
-+                    .iter()
-+                    .position(|suggestion| suggestion_identity(suggestion) == selected)
-+                {
-+                    (self.row_pos, self.col_pos) = self.position_from_index(index);
-+                } else {
-+                    self.missing_selection = Some(selected);
-+                    self.reset_position();
-+                }
-+            } else {
-+                self.reset_position();
-+                self.missing_selection = None;
-+            }
-+        }
++        self.update_result(editor, result, &base_ranges, selected);
 +    }
 +
 +    fn reload(&mut self, updated: bool, editor: &mut Editor, completer: &mut dyn Completer) {
@@ -4849,7 +7545,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
          }
      }
  
-@@ -691,13 +828,25 @@ impl Menu for ColumnarMenu {
+@@ -691,13 +934,29 @@ impl Menu for ColumnarMenu {
  
      /// Replace buffer at span via completion display
      fn replace_in_buffer(&self, editor: &mut Editor) {
@@ -4874,11 +7570,15 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
      /// Minimum rows that should be displayed by the menu
      fn min_rows(&self) -> u16 {
 -        self.get_rows().min(self.min_rows)
-+        self.get_rows().min(self.min_rows) + self.header_rows()
++        self.limit_rows(self.get_rows().min(self.min_rows)) + self.header_rows()
++    }
++
++    fn allows_inline_hint(&self) -> bool {
++        self.inline_hint
      }
  
      /// Gets values from filler that will be displayed in the menu
-@@ -709,28 +858,40 @@ impl Menu for ColumnarMenu {
+@@ -709,17 +968,33 @@ impl Menu for ColumnarMenu {
          self.phase.provisional()
      }
  
@@ -4888,11 +7588,13 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
 +
      fn is_awaiting_first_answer(&self) -> bool {
          self.phase.awaiting_first_answer()
++            && self.message.is_none()
++            && self.message_override.is_none()
      }
  
      fn menu_required_lines(&self, _terminal_columns: u16) -> u16 {
 -        self.get_rows()
-+        self.get_rows() + self.header_rows()
++        self.limit_rows(self.get_rows()) + self.header_rows()
      }
  
      fn menu_string(&self, available_lines: u16, use_ansi_coloring: bool) -> String {
@@ -4900,20 +7602,31 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
 +            return String::new();
 +        }
          if self.get_values().is_empty() {
-             if self.phase.awaiting_results() {
+-            if self.phase.awaiting_results() {
++            if self.message.is_some() || self.message_override.is_some() {
++                self.message_string()
++                    .unwrap_or_default()
++                    .lines()
++                    .take(usize::from(available_lines))
++                    .collect::<Vec<_>>()
++                    .join("\r\n")
++            } else if self.phase.awaiting_results() {
                  // A background completion is still running; draw nothing rather
                  // than flashing "NO RECORDS FOUND" before the results land.
                  String::new()
-             } else {
--                self.no_records_msg(use_ansi_coloring)
-+                self.message
-+                    .as_ref()
-+                    .and_then(|_| self.message_string())
-+                    .unwrap_or_else(|| self.no_records_msg(use_ansi_coloring))
+@@ -727,10 +1002,19 @@ impl Menu for ColumnarMenu {
+                 self.no_records_msg(use_ansi_coloring)
              }
          } else {
-+            let header = self.message_string();
-+            let available_lines = available_lines.saturating_sub(self.header_rows());
++            let header = self.message_string().map(|message| {
++                message
++                    .lines()
++                    .take(usize::from(available_lines))
++                    .collect::<Vec<_>>()
++                    .join("\r\n")
++            });
++            let available_lines =
++                self.limit_rows(available_lines.saturating_sub(self.header_rows()));
              // It seems that crossterm prefers to have a complete string ready to be printed
              // rather than looping through the values and printing multiple things
              // This reduces the flickering when printing the menu
@@ -4922,7 +7635,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
                  TraversalDirection::Vertical => {
                      // `grid_rows`, since `step_by(0)` panics: the type proves
                      // what the enclosing non-empty branch implies.
-@@ -786,11 +947,43 @@ impl Menu for ColumnarMenu {
+@@ -786,11 +1070,43 @@ impl Menu for ColumnarMenu {
                          })
                          .collect()
                  }
@@ -4966,7 +7679,107 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
  #[cfg(test)]
  mod tests {
      use crate::painting::W;
-@@ -974,6 +1167,252 @@ mod tests {
+@@ -799,6 +1115,99 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[test]
++    fn empty_host_status_override_suppresses_notices_without_enabling_acceptance() {
++        let editor = Editor::default();
++        let mut menu = ColumnarMenu::default().with_columns(1);
++        menu.handle_menu_event(&MenuEvent::Activate(true));
++        for result in [
++            crate::CompletionResult::Pending,
++            crate::CompletionResult::Unavailable {
++                message: "failure shown in the prompt".into(),
++            },
++        ] {
++            menu.update_result(&editor, result, &[], None);
++            menu.set_message(&[]);
++            menu.layout_for_preview(80, 24);
++            assert_eq!(menu.menu_required_lines(80), 0);
++            assert!(menu.menu_string(24, false).is_empty());
++            assert!(!menu.results_can_be_accepted());
++        }
++        menu.update_result(
++            &editor,
++            crate::CompletionResult::fresh(vec![fake_suggestion("old", 0)]),
++            &[],
++            None,
++        );
++        let selected = menu.selection_id();
++        menu.update_result(
++            &editor,
++            crate::CompletionResult::fresh(vec![fake_suggestion("new", 0)]),
++            &[],
++            selected,
++        );
++        menu.set_message(&[]);
++        menu.layout_for_preview(80, 24);
++        let text = menu.menu_string(24, false);
++        assert!(text.contains("new"));
++        assert!(!text.contains("Selection unavailable"));
++        assert!(!menu.results_can_be_accepted());
++    }
++
++    #[test]
++    fn multiline_status_messages_reserve_rows_and_stay_inside_the_available_height() {
++        let editor = Editor::default();
++        let mut menu = ColumnarMenu::default().with_columns(1);
++        menu.handle_menu_event(&MenuEvent::Activate(true));
++        menu.update_result(&editor, crate::CompletionResult::Pending, &[], None);
++        menu.set_message(&["History [all]", "Loading", "Esc cancels"]);
++        menu.layout_for_preview(20, 10);
++        assert!(menu.is_visible());
++        assert!(!menu.results_can_be_accepted());
++        assert_eq!(menu.menu_required_lines(20), 3);
++        assert_eq!(menu.menu_string(2, false), "History [all]\r\nLoading");
++
++        menu.update_result(
++            &editor,
++            crate::CompletionResult::fresh(vec![fake_suggestion("echo ready", 0)]),
++            &[],
++            None,
++        );
++        menu.set_message(&["History [all]", "One result", "Esc cancels"]);
++        menu.layout_for_preview(20, 10);
++        assert_eq!(menu.menu_required_lines(20), 4);
++        assert_eq!(menu.menu_string(2, false).lines().count(), 2);
++        assert!(!menu.menu_string(2, false).contains("echo ready"));
++    }
++
++    #[test]
++    fn bounded_selection_does_not_change_the_regular_menu_wrapping_behavior() {
++        let editor = Editor::default();
++        let mut menu = ColumnarMenu::default().with_columns(1);
++        menu.update_result(
++            &editor,
++            crate::CompletionResult::fresh(
++                ["first", "second"]
++                    .into_iter()
++                    .map(|id| Suggestion {
++                        completion_id: Some(id.into()),
++                        value: "duplicate".into(),
++                        ..Default::default()
++                    })
++                    .collect::<Vec<_>>(),
++            ),
++            &[],
++            None,
++        );
++        assert!(!menu.move_selection_bounded(true));
++        assert_eq!(menu.selection_id().as_deref(), Some("first"));
++        assert!(menu.move_selection_bounded(false));
++        assert!(!menu.move_selection_bounded(false));
++        assert_eq!(menu.selection_id().as_deref(), Some("second"));
++        menu.menu_event(MenuEvent::NextElement);
++        assert_eq!(menu.selection_id().as_deref(), Some("first"));
++    }
++
+     macro_rules! partial_completion_tests {
+         (name: $test_group_name:ident, completions: $completions:expr, test_cases: $($name:ident: $value:expr,)*) => {
+             mod $test_group_name {
+@@ -974,6 +1383,252 @@ mod tests {
          );
      }
  
@@ -5219,7 +8032,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..4eab87b23030d919f8405c7cab9af32e
      #[test]
      fn test_menu_replace_backtick() {
          // https://github.com/nushell/nushell/issues/7885
-@@ -1340,6 +1779,20 @@ mod tests {
+@@ -1340,6 +1995,20 @@ mod tests {
          );
      }
  
@@ -5391,7 +8204,7 @@ index 091f8cd196266c507f016e78cbbd756c04122b54..e993d9bfd83b7fb070881805445e7fd6
  
  #[derive(Debug, PartialEq)]
 diff --git a/src/menu/mod.rs b/src/menu/mod.rs
-index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee8070ea8355 100644
+index 55069ba475e473074532bcfb6859388932570aa7..3f42a660d873506a074ae8e739c95df12cb683ca 100644
 --- a/src/menu/mod.rs
 +++ b/src/menu/mod.rs
 @@ -172,6 +172,18 @@ pub trait Menu: Send {
@@ -5413,7 +8226,19 @@ index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee80
      /// Calculates the real required lines for the menu considering how many lines
      /// wrap the terminal or if entries have multiple lines
      fn menu_required_lines(&self, terminal_columns: u16) -> u16;
-@@ -196,6 +208,11 @@ pub trait Menu: Send {
+@@ -182,6 +194,11 @@ pub trait Menu: Send {
+     /// Minimum rows that should be displayed by the menu
+     fn min_rows(&self) -> u16;
+ 
++    /// Whether a bounded, read-only inline hint may be painted above this menu.
++    fn allows_inline_hint(&self) -> bool {
++        false
++    }
++
+     /// Gets cached values from menu that will be displayed
+     fn get_values(&self) -> &[Suggestion];
+ 
+@@ -196,6 +213,11 @@ pub trait Menu: Send {
          false
      }
  
@@ -5425,7 +8250,7 @@ index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee80
      /// Whether the menu is activated but not yet drawn, having heard no answer
      /// about the line on screen. It claims no prompt indicator and reserves no
      /// rows, so a menu about to be closed by a lone suggestion never appears.
-@@ -465,6 +482,32 @@ pub enum ReedlineMenu {
+@@ -465,6 +487,32 @@ pub enum ReedlineMenu {
  }
  
  impl ReedlineMenu {
@@ -5458,7 +8283,7 @@ index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee80
      fn as_ref(&self) -> &dyn Menu {
          match self {
              Self::EngineCompleter(menu)
-@@ -653,6 +696,10 @@ impl Menu for ReedlineMenu {
+@@ -653,6 +701,10 @@ impl Menu for ReedlineMenu {
          self.as_ref().replace_in_buffer(editor);
      }
  
@@ -5469,7 +8294,18 @@ index 55069ba475e473074532bcfb6859388932570aa7..cf24624fcfebf7aca88ef5966dacee80
      fn menu_required_lines(&self, terminal_columns: u16) -> u16 {
          self.as_ref().menu_required_lines(terminal_columns)
      }
-@@ -674,6 +721,10 @@ impl Menu for ReedlineMenu {
+@@ -666,6 +718,10 @@ impl Menu for ReedlineMenu {
+         self.as_ref().min_rows()
+     }
+ 
++    fn allows_inline_hint(&self) -> bool {
++        self.as_ref().allows_inline_hint()
++    }
++
+     fn get_values(&self) -> &[Suggestion] {
+         self.as_ref().get_values()
+     }
+@@ -674,6 +730,10 @@ impl Menu for ReedlineMenu {
          self.as_ref().results_are_provisional()
      }
  
@@ -5875,10 +8711,10 @@ index 18f5d97769db082bdee6083c761e6483f30785f0..a29dadeed55a91dc12e5fa03874aeaae
  mod prompt_lines;
  mod styled_text;
 diff --git a/src/painting/painter.rs b/src/painting/painter.rs
-index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878e76d562f 100644
+index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..e8595db1c756686f0848a2284261a41c98ae5f36 100644
 --- a/src/painting/painter.rs
 +++ b/src/painting/painter.rs
-@@ -1,9 +1,10 @@
+@@ -1,12 +1,13 @@
 +use super::display::{clip_display_rows, PhysicalRow, RenderedInput};
  use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
  use crate::{CursorConfig, PromptEditMode};
@@ -5889,7 +8725,11 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 +        coerce_crlf, deferred_wrap_row, line_width, resolve_wrap, walk_grapheme, wrap_position,
      },
      crate::{
-         menu::{Menu, ReedlineMenu},
+-        menu::{Menu, ReedlineMenu},
++        menu::Menu,
+         painting::PromptLines,
+         utils::environment::{term_is_dumb, var_os},
+         Prompt,
 @@ -26,6 +27,7 @@ use {crate::LineBuffer, crossterm::cursor::MoveUp};
  
  // Returns a string that skips N number of lines with the next offset of lines
@@ -5927,7 +8767,14 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          }
      }
  
-@@ -466,13 +476,16 @@ impl Painter {
+@@ -460,19 +470,22 @@ impl Painter {
+     }
+ 
+     /// Computes layout values shared between rendering and snapshot creation.
+-    fn compute_layout(&self, lines: &PromptLines, menu: Option<&ReedlineMenu>) -> PromptLayout {
++    fn compute_layout(&self, lines: &PromptLines, menu: Option<&dyn Menu>) -> PromptLayout {
+         let screen_width = self.screen_width();
+         let screen_height = self.screen_height();
  
          // Large buffer extra rows computation
          let (extra_rows, extra_rows_after_prompt) = if self.large_buffer {
@@ -5980,7 +8827,12 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
      }
  
      /// Main painter for the prompt and buffer
-@@ -715,6 +734,8 @@ impl Painter {
+@@ -711,10 +730,12 @@ impl Painter {
+         prompt: &dyn Prompt,
+         lines: &PromptLines,
+         prompt_mode: PromptEditMode,
+-        menu: Option<&ReedlineMenu>,
++        menu: Option<&dyn Menu>,
          use_ansi_coloring: bool,
          cursor_config: &Option<CursorConfig>,
      ) -> Result<()> {
@@ -6057,7 +8909,12 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
  
          self.last_layout = Some(layout);
  
-@@ -848,6 +912,7 @@ impl Painter {
+@@ -844,10 +908,11 @@ impl Painter {
+     pub(crate) fn render_snapshot(
+         &self,
+         lines: &PromptLines,
+-        menu: Option<&ReedlineMenu>,
++        menu: Option<&dyn Menu>,
          raw_before: &str,
          raw_after: &str,
          layout: &PromptLayout,
@@ -6174,8 +9031,24 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
              }
  
              None
-@@ -1206,6 +1334,32 @@ impl Painter {
-             self.stdout.queue(Print(&lines.hint))?;
+@@ -1139,7 +1267,7 @@ impl Painter {
+         &mut self,
+         prompt: &dyn Prompt,
+         lines: &PromptLines,
+-        menu: Option<&ReedlineMenu>,
++        menu: Option<&dyn Menu>,
+         use_ansi_coloring: bool,
+         layout: &PromptLayout,
+     ) -> Result<Option<u16>> {
+@@ -1200,12 +1328,33 @@ impl Painter {
+             &lines.before_cursor,
+         ]);
+ 
++        self.stdout.queue(Print(lines.visible_hint(menu)))?;
+         if let Some(menu) = menu {
+             self.print_menu(menu, use_ansi_coloring, layout)?;
+-        } else {
+-            self.stdout.queue(Print(&lines.hint))?;
          }
  
 +        let text = format!(
@@ -6184,11 +9057,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 +            lines.prompt_indicator,
 +            lines.before_cursor,
 +            lines.after_cursor,
-+            if menu.is_none() {
-+                lines.hint.as_ref()
-+            } else {
-+                ""
-+            }
++            lines.visible_hint(menu)
 +        );
 +        let cursor = wrap_position(
 +            [
@@ -6207,7 +9076,14 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          Ok(cursor_row)
      }
  
-@@ -1219,11 +1373,42 @@ impl Painter {
+@@ -1213,17 +1362,53 @@ impl Painter {
+         &mut self,
+         prompt: &dyn Prompt,
+         lines: &PromptLines,
+-        menu: Option<&ReedlineMenu>,
++        menu: Option<&dyn Menu>,
+         use_ansi_coloring: bool,
+         layout: &PromptLayout,
      ) -> Result<Option<u16>> {
          let screen_width = self.screen_width();
          let screen_height = self.screen_height();
@@ -6250,7 +9126,12 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 +            screen_width,
 +            top..after_bottom,
 +        );
-+        let hint_skipped = clip_display_rows(&lines.hint, &mut position, screen_width, top..bottom);
++        let hint_skipped = clip_display_rows(
++            lines.visible_hint(menu),
++            &mut position,
++            screen_width,
++            top..after_bottom,
++        );
  
          // Emit prompt start marker (OSC 133;A;k=i for primary prompt) only if prompt is visible
          if extra_rows == 0 {
@@ -6290,7 +9171,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
  
          // Emit command input start marker (OSC 133;B) after prompt indicator
          if let Some(markers) = &self.semantic_markers {
-@@ -1276,45 +1451,37 @@ impl Painter {
+@@ -1276,45 +1451,35 @@ impl Painter {
              self.stdout.queue(ResetColor)?;
          }
  
@@ -6316,6 +9197,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 +        ]);
  
 +        self.stdout.queue(Print(&after_cursor_skipped))?;
++        self.stdout.queue(Print(&hint_skipped))?;
          if let Some(menu) = menu {
 -            // TODO: Also solve the difficult problem of displaying (parts of)
 -            // the content after the cursor with the completion menu
@@ -6326,7 +9208,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 -                self.stdout.queue(Print(&lines.after_cursor))?;
 -            }
              self.print_menu(menu, use_ansi_coloring, layout)?;
-         } else {
+-        } else {
 -            // Selecting lines for the hint
 -            // The -1 subtraction is done because the remaining lines consider the line where the
 -            // cursor is located as a remaining line. That has to be removed to get the correct offset
@@ -6338,12 +9220,10 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
 -            // Hint lines
 -            let hint_skipped = skip_buffer_lines(&lines.hint, 0, Some(offset));
 -            self.stdout.queue(Print(hint_skipped))?;
-+            self.stdout.queue(Print(&hint_skipped))?;
          }
  
 +        let text = format!(
-+            "{prompt_skipped}{indicator_skipped}{before_cursor_skipped}{after_cursor_skipped}{}",
-+            if menu.is_none() { &hint_skipped } else { "" }
++            "{prompt_skipped}{indicator_skipped}{before_cursor_skipped}{after_cursor_skipped}{hint_skipped}"
 +        );
 +        self.rendered_input = Some(
 +            RenderedInput::new(
@@ -6356,7 +9236,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          Ok(cursor_row)
      }
  
-@@ -1324,7 +1491,7 @@ impl Painter {
+@@ -1324,7 +1489,7 @@ impl Painter {
          let term = var_os("TERM");
          self.term_is_dumb = term_is_dumb(term.as_deref());
  
@@ -6365,7 +9245,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
  
          // `cursor::position()` is blocking and can time out, but a
          // resize happens infrequently enough that we accept the cost.
-@@ -1339,8 +1506,20 @@ impl Painter {
+@@ -1339,8 +1504,20 @@ impl Painter {
          // paint takes this row as verified and never asks again, which leaves
          // this read as the only proof of the height until the next reported
          // size.
@@ -6388,7 +9268,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          }
      }
  
-@@ -1391,6 +1570,22 @@ impl Painter {
+@@ -1391,6 +1568,22 @@ impl Painter {
      /// cursor survives, leaving a rejected command on screen as the record of
      /// what was aborted (#1143).
      pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
@@ -6411,7 +9291,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          self.stdout.queue(Clear(ClearType::FromCursorDown))?;
          if let Some(after_cursor) = &self.after_cursor_lines {
              self.stdout.queue(Print(after_cursor))?;
-@@ -2138,6 +2333,8 @@ mod tests {
+@@ -2138,6 +2331,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -6420,7 +9300,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
          }
      }
  
-@@ -2151,6 +2348,105 @@ mod tests {
+@@ -2151,6 +2346,105 @@ mod tests {
          assert_eq!(painter.screen_to_buffer_offset(&snapshot, 3, 0), Some(1));
      }
  
@@ -6526,7 +9406,7 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
      #[test]
      fn test_clicks_past_eol_clamps() {
          let mut snapshot = base_snapshot();
-@@ -2160,6 +2456,131 @@ mod tests {
+@@ -2160,6 +2454,131 @@ mod tests {
          assert_eq!(painter.screen_to_buffer_offset(&snapshot, 10, 0), Some(2));
      }
  
@@ -6658,7 +9538,82 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
      #[test]
      fn test_wrapped_line_mapping() {
          let mut snapshot = base_snapshot();
-@@ -3005,19 +3426,13 @@ mod tests {
+@@ -2867,7 +3286,7 @@ mod tests {
+ 
+     /// Paint, then leave through the exit path, replaying the whole stream.
+     /// Same setup as `capture_repaint`, so the two stay comparable.
+-    fn capture_repaint_then_exit(lines: &PromptLines, menu: Option<&ReedlineMenu>) -> Replayed {
++    fn capture_repaint_then_exit(lines: &PromptLines, menu: Option<&dyn Menu>) -> Replayed {
+         let mut p = Painter::new(W::capture());
+         p.term_is_dumb = false;
+         p.terminal_size = (20, 10);
+@@ -2910,12 +3329,13 @@ mod tests {
+         #[case] after: &str,
+         #[case] hint: &str,
+     ) {
+-        let menu =
+-            menu_rows.map(|rows| ReedlineMenu::EngineCompleter(Box::new(TestMenu::new(rows))));
++        let menu = menu_rows
++            .map(|rows| crate::ReedlineMenu::EngineCompleter(Box::new(TestMenu::new(rows))));
+         let mut lines = make_lines(TEST_PROMPT, "", "", before, after);
+         lines.hint = Cow::Borrowed(hint);
+ 
+-        let replayed = capture_repaint_then_exit(&lines, menu.as_ref());
++        let replayed =
++            capture_repaint_then_exit(&lines, menu.as_ref().map(|menu| menu as &dyn Menu));
+ 
+         assert_eq!(
+             replayed.screen, "> pwd",
+@@ -2930,6 +3350,48 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn history_menu_and_ghost_are_painted_but_not_committed_as_input() {
++        let mut menu = crate::ColumnarMenu::default()
++            .with_columns(1)
++            .with_inline_hint();
++        menu.set_message(&["HISTORY_MENU"]);
++        menu.layout_for_preview(20, 3);
++        for before in ["echo", "long query prefix\nsecond line\necho"] {
++            let mut lines = make_lines(TEST_PROMPT, "", "", before, "");
++            lines.hint = Cow::Borrowed(" GHOST");
++            let mut painter = Painter::new(W::capture());
++            painter.term_is_dumb = false;
++            painter.terminal_size = (20, 4);
++            painter.prompt_start_row.mark_verified(0);
++            painter
++                .repaint_buffer(
++                    &TestPrompt,
++                    &lines,
++                    PromptEditMode::Default,
++                    Some(&menu),
++                    false,
++                    &None,
++                )
++                .unwrap();
++            let output = String::from_utf8_lossy(painter.stdout.captured());
++            assert!(output.contains(" GHOST"), "{output:?}");
++            assert!(output.contains("HISTORY_MENU"), "{output:?}");
++            painter.move_cursor_to_end().unwrap();
++            let screen = replay(
++                &String::from_utf8_lossy(painter.stdout.captured()),
++                20,
++                false,
++            )
++            .screen;
++            assert!(
++                !screen.contains("GHOST") && !screen.contains("HISTORY_MENU"),
++                "{screen}"
++            );
++            assert!(screen.contains("echo"), "{screen}");
++        }
++    }
++
+     #[test]
+     fn print_menu_at_row_0_does_not_erase_from_home_cell() {
+         // Same tmux trigger as the prompt path, latent in print_menu via
+@@ -3005,19 +3467,13 @@ mod tests {
  
      #[test]
      fn test_layout_large_buffer_extra_rows() {
@@ -6682,18 +9637,23 @@ index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..0be264175c6d9717086bac00e63a9878
      }
  
 diff --git a/src/painting/prompt_lines.rs b/src/painting/prompt_lines.rs
-index 34cbf1350f680f9137d693acb044deb261b4fef4..a592703c52d4e9638c2eee4ae199a82c66ffe2cf 100644
+index 34cbf1350f680f9137d693acb044deb261b4fef4..df4bd00288af6390cb02563fcda41a87296fbde4 100644
 --- a/src/painting/prompt_lines.rs
 +++ b/src/painting/prompt_lines.rs
-@@ -1,4 +1,6 @@
+@@ -1,9 +1,7 @@
 -use super::utils::{coerce_crlf, estimate_required_lines, line_width, resolve_wrap, wrap_position};
+-use crate::{
+-    menu::{Menu, ReedlineMenu},
+-    prompt::PromptEditMode,
+-    Prompt, PromptHistorySearch,
 +use super::utils::{
 +    coerce_crlf, estimate_required_lines, expand_tabs, line_width, resolve_wrap, wrap_position,
-+};
- use crate::{
-     menu::{Menu, ReedlineMenu},
-     prompt::PromptEditMode,
-@@ -54,6 +56,33 @@ impl<'prompt> PromptLines<'prompt> {
+ };
++use crate::{menu::Menu, prompt::PromptEditMode, Prompt, PromptHistorySearch};
+ use std::borrow::Cow;
+ 
+ /// Aggregate of prompt and input string used by `Painter`
+@@ -54,6 +52,33 @@ impl<'prompt> PromptLines<'prompt> {
          }
      }
  
@@ -6727,10 +9687,108 @@ index 34cbf1350f680f9137d693acb044deb261b4fef4..a592703c52d4e9638c2eee4ae199a82c
      /// Rows to reserve for the prompt and buffer, laid out end to end.
      ///
      /// Floored at [`Self::distance_from_prompt`] plus one: the cursor can rest
-@@ -179,6 +208,34 @@ mod tests {
+@@ -65,16 +90,14 @@ impl<'prompt> PromptLines<'prompt> {
+         &self,
+         terminal_columns: u16,
+         before_cursor: bool,
+-        menu: Option<&ReedlineMenu>,
++        menu: Option<&dyn Menu>,
+     ) -> u16 {
+         let mut input =
+             self.prompt_str_left.to_string() + &self.prompt_indicator + &self.before_cursor;
+ 
+         if !before_cursor {
+             input += &self.after_cursor;
+-            if menu.is_none() {
+-                input += &self.hint;
+-            }
++            input += self.visible_hint(menu);
+         }
+ 
+         let lines = estimate_required_lines(&input, terminal_columns)
+@@ -87,6 +110,34 @@ impl<'prompt> PromptLines<'prompt> {
+         }
+     }
+ 
++    pub(crate) fn visible_hint(&self, menu: Option<&dyn Menu>) -> &str {
++        if menu.is_none_or(|menu| menu.allows_inline_hint()) {
++            &self.hint
++        } else {
++            ""
++        }
++    }
++
++    /// Hint space on the visible query line, without wrapping or covering the menu.
++    pub(crate) fn inline_hint_columns(&self, columns: u16) -> usize {
++        let Some(end) = wrap_position(
++            [
++                &*self.prompt_str_left,
++                &self.prompt_indicator,
++                &self.before_cursor,
++                &self.after_cursor,
++            ],
++            columns,
++        ) else {
++            return 0;
++        };
++        let (column, row) = resolve_wrap(end, columns.max(1));
++        if row != self.distance_from_prompt(columns) {
++            return 0;
++        }
++        usize::from(columns.saturating_sub(column).saturating_sub(1))
++    }
++
+     /// Rows from the prompt's first row to the row the cursor rests on.
+     ///
+     /// Places a cursor, so a filled row resolves to the next one. That row is
+@@ -179,6 +230,78 @@ mod tests {
      use pretty_assertions::assert_eq;
      use rstest::rstest;
  
++    #[test]
++    fn inline_history_hint_space_follows_the_actual_cursor_line() {
++        let prompt = crate::DefaultPrompt::new(
++            crate::DefaultPromptSegment::Empty,
++            crate::DefaultPromptSegment::Empty,
++        );
++        for (before, after) in [
++            ("", ""),
++            ("echo", ""),
++            ("ec", "ho"),
++            ("a\t", "中"),
++            ("x\n", ""),
++        ] {
++            let lines = PromptLines::new(&prompt, PromptEditMode::Emacs, None, before, after, "");
++            for columns in 1..80 {
++                let count = lines.inline_hint_columns(columns);
++                assert!(count < usize::from(columns));
++                let hint = "x".repeat(count);
++                let with_hint =
++                    PromptLines::new(&prompt, PromptEditMode::Emacs, None, before, after, &hint);
++                assert_eq!(
++                    with_hint.required_lines(columns, false, None),
++                    lines.required_lines(columns, false, None),
++                    "{before:?}/{after:?}/{columns}",
++                );
++                let mut menu = crate::ColumnarMenu::default().with_inline_hint();
++                menu.set_message(&["history"]);
++                assert_eq!(with_hint.visible_hint(Some(&menu)), hint);
++                assert!(with_hint
++                    .visible_hint(Some(&crate::ColumnarMenu::default()))
++                    .is_empty());
++            }
++        }
++        let lines = PromptLines::new(
++            &prompt,
++            PromptEditMode::Emacs,
++            None,
++            "first",
++            "\nsecond",
++            "",
++        );
++        assert_eq!(lines.inline_hint_columns(80), 0);
++    }
++
 +    #[test]
 +    fn tab_expansion_shares_the_painted_column_across_the_cursor_and_hint() {
 +        let lines = PromptLines {
@@ -6989,13 +10047,39 @@ index bac952d5152c7cb70c014e427b36bdc3ce949462..dec0ee5a9d3b31782162ab5d5d0f31c4
      #[case("sentence\nsentence", "sentence\r\nsentence")]
      #[case("sentence\r\nsentence", "sentence\r\nsentence")]
 diff --git a/src/prompt/base.rs b/src/prompt/base.rs
-index 7a480103f101f3e06b112f9a51f4690abb8a4dda..540864f1bc06b15718eb0961c08c8990a690811a 100644
+index 7a480103f101f3e06b112f9a51f4690abb8a4dda..3a6f987e523814a966a5b63bf62f77bee3346182 100644
 --- a/src/prompt/base.rs
 +++ b/src/prompt/base.rs
-@@ -261,11 +261,63 @@ impl IntoDiscriminant for PromptEditMode {
+@@ -261,11 +261,91 @@ impl IntoDiscriminant for PromptEditMode {
      }
  }
  
++/// Read-only contextual history status for the prompt and menu.
++#[derive(Debug, Clone, Copy, Default)]
++pub struct HistorySearchStatus<'a> {
++    /// Current history scope label.
++    pub title: &'a str,
++    /// A warning, failure or selection notice.
++    pub notice: Option<&'a str>,
++    /// Outstanding query work, including selectable cached results.
++    pub progress: Option<&'a str>,
++    /// Source detail for the selected history entry.
++    pub description: Option<&'a str>,
++    /// Whether the current query failed.
++    pub failed: bool,
++    /// A completed, successful query found no entries; acceptance may close the menu.
++    pub no_matches: bool,
++    /// Whether other entries or pages can be reached.
++    pub can_navigate: bool,
++}
++
++impl<'a> HistorySearchStatus<'a> {
++    /// The primary notice, or query progress when no notice takes precedence.
++    pub fn message(&self) -> Option<&'a str> {
++        self.notice.or(self.progress)
++    }
++}
++
 +/// Read-only interaction facts for the prompt being painted.
 +#[derive(Debug, Clone, Copy)]
 +pub enum PromptInteraction<'a> {
@@ -7016,6 +10100,8 @@ index 7a480103f101f3e06b112f9a51f4690abb8a4dda..540864f1bc06b15718eb0961c08c8990
 +        term: &'a str,
 +        /// Whether an actual result is available to accept.
 +        has_match: bool,
++        /// Contextual history metadata, absent for legacy reverse search.
++        status: Option<HistorySearchStatus<'a>>,
 +    },
 +}
 +
@@ -7056,20 +10142,52 @@ index 7a480103f101f3e06b112f9a51f4690abb8a4dda..540864f1bc06b15718eb0961c08c8990
      /// Provide content of the left full prompt
      fn render_prompt_left(&self) -> Cow<'_, str>;
      /// Provide content of the right full prompt
+@@ -274,6 +354,30 @@ pub trait Prompt: Send {
+     fn render_prompt_indicator(&self, prompt_mode: PromptEditMode) -> Cow<'_, str>;
+     /// Indicator to show before explicit new lines
+     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str>;
++    /// History information not already shown by the prompt.
++    ///
++    /// `prompt_visible` is false when the prompt's first row will be clipped.
++    /// Hosts may include their actual key hints in these fallback lines.
++    fn render_history_panel_status(
++        &self,
++        status: HistorySearchStatus<'_>,
++        has_match: bool,
++        _prompt_visible: bool,
++    ) -> Vec<String> {
++        let message = status.message().or(if status.failed {
++            Some("History unavailable")
++        } else if !has_match {
++            Some("No matches")
++        } else {
++            None
++        });
++        [Some(status.title), message, status.description]
++            .into_iter()
++            .flatten()
++            .filter(|text| !text.is_empty())
++            .map(str::to_owned)
++            .collect()
++    }
+     /// Render the prompt indicator for `Ctrl-R` history search
+     fn render_prompt_history_search_indicator(
+         &self,
 diff --git a/src/prompt/mod.rs b/src/prompt/mod.rs
-index 8ee197edc984e0e97e52dfd6eb6b063305faa00c..f7ad3fdece9489ad5c669c7f7e79f9ac31c27b6b 100644
+index 8ee197edc984e0e97e52dfd6eb6b063305faa00c..fb72cb1e0cdf1c2523f762c2f867d55db15a8ef6 100644
 --- a/src/prompt/mod.rs
 +++ b/src/prompt/mod.rs
-@@ -3,9 +3,9 @@ mod default;
+@@ -3,9 +3,10 @@ mod default;
  
  pub use base::PromptHelixMode;
  pub use base::{
 -    Prompt, PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch,
 -    PromptHistorySearchStatus, PromptViMode, DEFAULT_INDICATOR_COLOR, DEFAULT_PROMPT_COLOR,
 -    DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
-+    Prompt, PromptContext, PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch,
-+    PromptHistorySearchStatus, PromptInteraction, PromptViMode, DEFAULT_INDICATOR_COLOR,
-+    DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_MULTILINE_COLOR, DEFAULT_PROMPT_RIGHT_COLOR,
++    HistorySearchStatus, Prompt, PromptContext, PromptEditMode, PromptEditModeDiscriminants,
++    PromptHistorySearch, PromptHistorySearchStatus, PromptInteraction, PromptViMode,
++    DEFAULT_INDICATOR_COLOR, DEFAULT_PROMPT_COLOR, DEFAULT_PROMPT_MULTILINE_COLOR,
++    DEFAULT_PROMPT_RIGHT_COLOR,
  };
  
  pub use default::{

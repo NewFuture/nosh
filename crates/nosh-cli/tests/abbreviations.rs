@@ -459,7 +459,12 @@ fn actual_binary_undo_literal_paste_and_history_do_not_execute_expansions() {
     terminal.send(b"\x1b[200~zzq\x1b[201~ \r");
     terminal.wait_for("command not found: zzq");
     terminal.wait_for("abbr-real> ");
-    terminal.send(b"\x1b[A\r");
+    terminal.send(b"\x1b[A");
+    terminal.wait_for("History [all]");
+    terminal.send(b"\r");
+    terminal.wait_for("abbr-real> ");
+    assert!(!home.path().join("must-not-run").exists());
+    terminal.send(b"\r");
     terminal.wait_for("command not found: zzq");
     terminal.wait_for("abbr-real> ");
     assert!(!home.path().join("must-not-run").exists());

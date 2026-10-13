@@ -21,8 +21,8 @@ without submitting or clearing an unfinished draft.
 | `.nosh/reedline/.git/nosh` | Generated input snapshots and provenance, not another maintained source |
 | `.nosh/cache/reedline.git` | Optional official Git object cache when the submodule is absent |
 | `third_party/brush-upstream` | Clean official `reubeno/brush` gitlink at the brush-core 0.5.0 release |
-| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo and the completion-only maintained delta |
-| `.nosh/brush` | Ignored editable monorepo; Cargo overrides core and parser to its matching crate subdirectories |
+| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo; completion and host-managed history delta |
+| `.nosh/brush` | Ignored editable monorepo; Cargo overrides core, parser and builtins to matching crate subdirectories |
 | `.nosh/cache/brush-core.git` | Per-checkout brush object cache |
 
 The exact path-and-version dependency cannot silently fall back to registry
@@ -170,7 +170,97 @@ Review and commit nosh edits and the exported patch in **one PR**. Do not edit t
 patch and the generated source independently; an input change blocks export
 rather than guessing which copy wins. Export before changing branches.
 
-For brush, edit `.nosh/brush/brush-core` and run the completion regressions through
+Contextual history is opt-in through `with_history_panel(provider, menu)`, using
+the same `ColumnarMenu` and below-input painter as command completion. The shared
+menu owns selection, stable candidate identity, scrolling, styling and result
+validity; history supplies scope, keyset pages and display metadata rather than a
+separate list renderer. Filtering uses the main command editor and its normal
+prompt, not a separate search input.
+With the contextual provider installed, ordinary history navigation arrows open
+the same search menu as Ctrl+R without replacing the draft. Multiline movement,
+selections and active completion menus retain their input ownership; hosts without
+the provider retain native command recall. The contextual search menu displays
+oldest to newest, initially selecting the latest match at the bottom of an
+eight-candidate viewport; Up selects older entries and Down selects newer ones.
+nosh maps Enter to adoption,
+Ctrl+R to scope changes and Right to cursor movement. `SearchHistory` opens the
+panel or switches its scope when already open; no host-command bridge is needed.
+All acceptance events in this panel only adopt text, including explicit submit
+events. Execution or an AI request requires a separate action after returning to
+ordinary editing; hosts without this provider retain native search behavior.
+Tab/Shift+Tab are unbound
+in history search without changing ordinary completion menus. Query editing reuses
+the text-editing portions of nosh's input bindings, without completion, hint
+acceptance or AI actions. Scope changes use inclusive keyset anchors to retain
+matching selections across pages; an empty anchored slice retries the newest
+results in that scope. Empty page-boundary probes retain the previous page and
+its request, which must be revalidated before adoption. Long-input previews show
+match context without changing the adopted text or splitting graphemes.
+The nosh provider folds consecutive commands with identical text and execution
+context before filtering, retaining the newest real record identity. Query pages
+count complete groups, while command persistence and builtin views remain raw.
+The provider formats confirmed counts, execution results and exceptional input
+types in `HistoryPanelEntry::label`; Reedline has no command-specific counters,
+outcome maps or per-candidate host actions. Repetition totals derive from the same
+success/failure/unknown aggregation, with one shared status for homogeneous groups.
+Adoption revalidates the stable anchor and complete original text, not display
+metadata. Label, result or source-detail updates do not invalidate an unchanged
+input. Default command/session and current-worktree labels are omitted; empty
+annotations add neither padding nor a blank description. Selected input directories
+still use the shared status/fallback path.
+Database records and memory-only inputs are merged in Rust; question text is not
+placed in SQLite temporary tables for grouping.
+The selected record also uses the existing read-only hint channel: prefix matches
+show a suffix, while substring matches show a separated replacement preview.
+`Hinter::hint_style` shares the actual theme without querying or changing the
+ordinary hint. Only menus opting into `allows_inline_hint` can paint that preview
+beside their candidates; ordinary completion menus remain unchanged. Previews are
+escaped and bounded to free space on the current input line, excluded from cursor
+mapping and submitted text. Ordinary hint acceptance is tied to the editor state
+that produced it, so leaving search cannot append a stale pre-search hint.
+The cache adapter resolves
+navigation boundaries by record order, not by the magnitude of stable view IDs,
+and uses `SearchFilter::matches_command_line` to honor duplicate exclusion.
+`PromptInteraction::HistorySearch` carries the current history status snapshot.
+Its `no_matches` flag distinguishes a completed empty result from pending, failed
+or invalidated selection states. Accepting an already confirmed empty result
+closes search without submitting, retaining the query and cursor as an undoable
+draft change; cancellation still restores the original draft.
+The host returns only uncovered information through `render_history_panel_status`;
+nosh tracks fields and actions actually painted in its existing status bar.
+An explicit empty menu status override suppresses duplicate automatic notices
+without changing selection validity. If the prompt's status row is clipped, the
+engine requests the fallback again instead of hiding information off screen.
+The original draft editor is saved while filtering so cancellation restores its
+cursor, selection and undo/redo state, and adoption is one ordinary undoable edit.
+Source labels and the non-blocking provider remain history-specific. The brush
+history observer keeps builtin mutations in step with
+nosh's command store; cloned shells detach the observer so a subshell's local
+history edits do not silently mutate its parent's storage.
+`Observer::added` carries current-view duplicate IDs with the new entry.
+`erasedups` is one queued transaction, not a loop of synchronous removals; insertion
+failure rolls back its deletions while the newly submitted input remains in RAM.
+Opening and refreshing use one command-cache merge, and both brush view paths use
+the same item conversion, preserving local IDs and export state. Initial navigation
+retains only the last session anchor, not another copy of the command text.
+SQL only loads bounded recent raw commands, resolves exact anchors and streams
+ordered records; the single Rust grouping path applies text and worktree filters.
+Scans have fixed row, byte and time budgets. Exhaustion explicitly marks the result
+incomplete, never as no matches, and does not publish an unfinished repeat group.
+Existing cancellation remains independent of these budgets.
+The host reuses brush's `HISTFILE` path resolution for both recording and refresh.
+The brush observer can capture a one-shot execution completion callback.
+`start_input` binds it before execution and `finish_input_with_status` completes
+the same recorded input; cloned histories detach callbacks, and fc replay owns
+its own completion. The host updates nullable exit codes by stable identity,
+original text and history epoch, without resurrecting deleted or changed inputs.
+The first-release SQLite schema (version 1) includes nullable outcomes and manual
+entries. It is created atomically, with no text import or development-schema
+migration. Existing `HISTFILE` text is never read; explicit exports do not carry
+outcome metadata. Destination and retention changes are applied together.
+
+For brush, edit `.nosh/brush/brush-core` and, for history/fc behavior,
+`.nosh/brush/brush-builtins`. Run the owning completion/history regressions through
 the root workspace in Linux/macOS/WSL. Export with the checkout's native Git:
 
 ```powershell
