@@ -44,6 +44,206 @@ fn executed(store: &Store, text: &str, exit_code: i32) -> i64 {
 }
 
 #[test]
+fn erasedups_queues_one_atomic_replacement_and_retains_the_new_input_after_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("history");
+    let store = shell(&file, root.path());
+    for index in 0..HOT_ITEMS {
+        store.record("same command", Kind::Command);
+        if index % 32 == 31 {
+            store.sync().unwrap();
+        }
+    }
+    store.sync().unwrap();
+    let old = store.cached();
+    let replace = old.iter().map(|entry| entry.legacy_id).collect::<Vec<_>>();
+    let (release, wait) = mpsc::channel();
+    store.0.tx.send(Job::Wait(wait)).unwrap();
+    let new = store
+        .record_replacing("same command", Kind::Command, &replace)
+        .unwrap();
+    assert_eq!(store.cached().len(), 1);
+    assert_eq!(store.cached()[0].legacy_id, new);
+    assert!(!old.iter().any(|entry| entry.key == store.cached()[0].key));
+    assert!(store.sync().is_err());
+    let connection = Connection::open(database_path(&file)).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM commands", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        HOT_ITEMS as i64,
+        "old records must remain until deletion and insertion can commit together"
+    );
+    release.send(()).unwrap();
+    store.sync().unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM commands", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        query(&store, "", None).entries[0].key,
+        store.cached()[0].key
+    );
+}
+
+#[test]
+fn failed_erasedups_insertion_rolls_back_deletions_and_keeps_the_new_input_in_memory() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("history");
+    let store = shell(&file, root.path());
+    let old = executed(&store, "same command", 0);
+    let connection = Connection::open(database_path(&file)).unwrap();
+    let old_key: String = connection
+        .query_row("SELECT id FROM commands", [], |row| row.get(0))
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_insert BEFORE INSERT ON commands
+             BEGIN SELECT RAISE(FAIL, 'test insertion failure'); END;",
+        )
+        .unwrap();
+    let new = store
+        .record_replacing("same command", Kind::Command, &[old])
+        .unwrap();
+    assert!(store.sync().is_err());
+    assert_eq!(store.cached().len(), 1);
+    assert_eq!(store.cached()[0].legacy_id, new);
+    assert_eq!(
+        connection
+            .query_row("SELECT id FROM commands", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        old_key
+    );
+}
+
+#[test]
+fn brush_replay_replaces_duplicates_without_per_item_observer_deletions() {
+    let root = tempfile::tempdir().unwrap();
+    let store = shell(&root.path().join("history"), root.path());
+    let old = executed(&store, "same command", 0);
+    let mut view = brush_core::history::History::default();
+    store.brush_view(&mut view);
+    let new = view
+        .add_in_directory(
+            brush_core::history::Item::new("same command"),
+            root.path(),
+            &[old],
+        )
+        .unwrap();
+    assert_eq!(view.count(), 1);
+    assert_eq!(view.get(0).unwrap().id, new);
+    store.sync().unwrap();
+    let entries = query(&store, "", None).entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, store.cached()[0].key);
+    assert_eq!(entries[0].exit_code, None);
+    assert_ne!(store.cached()[0].legacy_id, old);
+}
+
+#[test]
+fn a_no_match_scan_is_bounded_and_releases_the_worker_for_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("history");
+    let connection = open_database(&database_path(&file)).unwrap();
+    connection
+        .execute(
+            "WITH RECURSIVE records(n) AS (
+            SELECT 1 UNION ALL SELECT n+1 FROM records WHERE n<?1
+         )
+         INSERT INTO commands(id,ordinal,command,source)
+         SELECT CAST(n AS TEXT),n,'irrelevant input','command' FROM records",
+            [SCAN_ITEMS as i64 + 1],
+        )
+        .unwrap();
+    let store = shell(&file, root.path());
+    let generation = store.query(Query {
+        text: "unmatched needle".into(),
+        worktree: None,
+        before: None,
+        include_anchor: false,
+        older: true,
+        snapshot: None,
+    });
+    store.record("after bounded scan", Kind::Command);
+    let (reply, acknowledged) = mpsc::channel();
+    store.0.tx.send(Job::Sync(reply)).unwrap();
+    acknowledged.recv_timeout(OPERATION_WAIT).unwrap().unwrap();
+    let page = store.poll(generation).unwrap();
+    assert!(page.failed);
+    assert!(page.entries.is_empty());
+    assert!(page.notice.unwrap().contains(SCAN_NOTICE));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM commands WHERE command='after bounded scan'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn a_byte_limited_scan_does_not_publish_a_partially_counted_repeat_group() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("history");
+    let mut connection = open_database(&database_path(&file)).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let text = format!("needle{}", "x".repeat(INPUT_BYTES - "needle".len()));
+    for ordinal in 0..(SCAN_BYTES / INPUT_BYTES + 1) {
+        transaction
+            .execute(
+                "INSERT INTO commands(id,ordinal,command,source) VALUES (?1,?2,?3,'command')",
+                params![ordinal.to_string(), ordinal as i64, text],
+            )
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "INSERT INTO commands(id,ordinal,command,source)
+         VALUES ('newest',1000,'needle newest','command')",
+            [],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    let page = select_repeated(
+        &connection,
+        &Query {
+            text: "needle".into(),
+            worktree: None,
+            before: None,
+            include_anchor: false,
+            older: true,
+            snapshot: None,
+        },
+        Vec::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(page.failed);
+    assert!(page.notice.unwrap().contains(SCAN_NOTICE));
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].text, "needle newest");
+    assert_eq!(page.entries[0].repeat_count(), 1);
+    let store = shell(&file, root.path());
+    let cached = query(&store, "needlex", None);
+    assert!(cached.failed);
+    assert!(cached.notice.unwrap().contains(SCAN_NOTICE));
+    assert_eq!(cached.entries.len(), 1);
+    assert_eq!(cached.entries[0].text, text);
+    assert_eq!(
+        cached.entries[0].repeat_count(),
+        1,
+        "an incomplete cached run must not be advertised as a confirmed xN group"
+    );
+}
+
+#[test]
 fn exit_codes_persist_and_mixed_results_remain_one_repeat_group() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("history");
@@ -115,7 +315,8 @@ fn panel_rows_only_annotate_exceptional_kinds_and_locations() {
 
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join(".git")).unwrap();
-    let store = shell(&root.path().join("history"), root.path());
+    let cwd = root.path().canonicalize().unwrap();
+    let store = shell(&root.path().join("history"), &cwd);
     executed(&store, "echo compact", 0);
     let entry = query(&store, "", None).entries.remove(0);
     let worktree = store.scope().unwrap();
@@ -1193,6 +1394,7 @@ fn text_exports_preserve_full_inputs_and_unknown_time_markers() {
                 dirty: true,
             },
             None,
+            &[],
         )
         .unwrap();
     store.sync().unwrap();

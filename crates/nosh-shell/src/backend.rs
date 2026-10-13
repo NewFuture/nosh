@@ -490,14 +490,13 @@ impl EmbeddedShell {
             eprintln!("nosh: input history not recorded: {error}");
             return None;
         }
-        if !kind.is_question()
-            && let Err(error) = self.lock().discard_duplicate_history(text)
-        {
-            eprintln!("nosh: input history not recorded: {error}");
-            return None;
-        }
+        let replace = if kind.is_question() {
+            Vec::new()
+        } else {
+            self.lock().history_duplicate_ids(text)
+        };
         history.context(&self.cwd(), self.lock().options().enable_command_history);
-        let id = history.record(text, kind);
+        let id = history.record_replacing(text, kind, &replace);
         if !kind.is_question()
             && let Some(view) = self.lock().history_mut()
         {

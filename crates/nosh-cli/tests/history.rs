@@ -482,6 +482,42 @@ fn execution_outcomes_persist_and_mixed_repeats_show_honest_counts() {
 }
 
 #[test]
+fn erasedups_keeps_one_record_for_normal_execution_and_fc_replay() {
+    const COMMAND: &str = "printf 'ERASEDUPS_ATOMIC\\n'";
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    setup(&home);
+    let mut terminal = launch(&home, root.path());
+    submit_to_prompt(&mut terminal, "HISTCONTROL=erasedups");
+    for _ in 0..3 {
+        submit(&mut terminal, COMMAND, "\nERASEDUPS_ATOMIC");
+    }
+    submit(&mut terminal, "fc -s", "\nERASEDUPS_ATOMIC");
+    wait_outcome(&home, COMMAND, 0);
+    assert_eq!(
+        sql(&home)
+            .query_row(
+                "SELECT count(*) FROM commands WHERE command=?1",
+                [COMMAND],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sql(&home)
+            .query_row(
+                "SELECT count(*) FROM commands WHERE command='fc -s'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    finish(&mut terminal);
+}
+
+#[test]
 fn fc_replays_get_their_own_outcome_and_ignored_or_cleared_inputs_do_not_relabel_history() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");

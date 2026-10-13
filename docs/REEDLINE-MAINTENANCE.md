@@ -237,11 +237,17 @@ Source labels and the non-blocking provider remain history-specific. The brush
 history observer keeps builtin mutations in step with
 nosh's command store; cloned shells detach the observer so a subshell's local
 history edits do not silently mutate its parent's storage.
+`Observer::added` carries current-view duplicate IDs with the new entry.
+`erasedups` is one queued transaction, not a loop of synchronous removals; insertion
+failure rolls back its deletions while the newly submitted input remains in RAM.
 Opening and refreshing use one command-cache merge, and both brush view paths use
 the same item conversion, preserving local IDs and export state. Initial navigation
 retains only the last session anchor, not another copy of the command text.
 SQL only loads bounded recent raw commands, resolves exact anchors and streams
 ordered records; the single Rust grouping path applies text and worktree filters.
+Scans have fixed row, byte and time budgets. Exhaustion explicitly marks the result
+incomplete, never as no matches, and does not publish an unfinished repeat group.
+Existing cancellation remains independent of these budgets.
 The host reuses brush's `HISTFILE` path resolution for both recording and refresh.
 The brush observer can capture a one-shot execution completion callback.
 `start_input` binds it before execution and `finish_input_with_status` completes

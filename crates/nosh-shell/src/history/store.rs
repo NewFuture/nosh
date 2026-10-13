@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
@@ -15,6 +15,10 @@ pub(super) const INPUT_BYTES: usize = 256 * 1024;
 pub(super) const PAGE_ITEMS: usize = 64;
 const PAGE_BYTES: usize = 1024 * 1024;
 const OPERATION_WAIT: Duration = Duration::from_secs(2);
+const SCAN_ITEMS: usize = 10_000;
+const SCAN_BYTES: usize = 16 * 1024 * 1024;
+const SCAN_TIME: Duration = Duration::from_millis(250);
+const SCAN_NOTICE: &str = "history search budget exceeded; results are incomplete";
 const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,7 +290,12 @@ enum Job {
         epoch: u64,
         retention: Option<usize>,
     },
-    Add(CommandRecord, u64, Option<mpsc::Sender<Result<(), String>>>),
+    Add(
+        CommandRecord,
+        Vec<String>,
+        u64,
+        Option<mpsc::Sender<Result<(), String>>>,
+    ),
     Outcome {
         key: String,
         text: String,
@@ -562,7 +571,12 @@ impl Store {
         &self.0.session
     }
 
+    #[cfg(test)]
     pub(crate) fn record(&self, text: &str, kind: Kind) -> Option<i64> {
+        self.record_replacing(text, kind, &[])
+    }
+
+    pub(crate) fn record_replacing(&self, text: &str, kind: Kind, replace: &[i64]) -> Option<i64> {
         if text.trim().is_empty() {
             return None;
         }
@@ -603,15 +617,26 @@ impl Store {
             entry
         };
         let id = (!kind.is_question()).then_some(entry.legacy_id);
-        if let Err(error) = self.add_entry(entry, false) {
+        if let Err(error) = self.add_entry(entry, false, replace) {
             self.report(format!("command history not saved: {error}"));
         }
         id
     }
 
-    fn add_entry(&self, entry: Entry, confirm: bool) -> io::Result<()> {
-        let (persist, epoch) = {
+    fn add_entry(&self, entry: Entry, confirm: bool, replace: &[i64]) -> io::Result<()> {
+        if entry.kind.is_question() && !replace.is_empty() {
+            return Err(io::Error::other(
+                "temporary questions cannot replace command history",
+            ));
+        }
+        let (persist, epoch, replaced) = {
             let mut model = lock(&self.0.model);
+            let replaced = model
+                .commands
+                .iter()
+                .filter(|old| replace.contains(&old.legacy_id) && old.text == entry.text)
+                .map(|old| old.key.clone())
+                .collect::<BTreeSet<_>>();
             let persist =
                 !entry.kind.is_question() && model.database.is_some() && model.retention != Some(0);
             if entry.kind.is_question() {
@@ -623,6 +648,9 @@ impl Store {
                     );
                 }
             } else {
+                model.commands.retain(|old| !replaced.contains(&old.key));
+                model.persisted.retain(|key| !replaced.contains(key));
+                model.exported.retain(|key| !replaced.contains(key));
                 model.commands.push(entry.clone());
                 trim_commands(&mut model);
                 if persist {
@@ -630,7 +658,7 @@ impl Store {
                 }
             }
             model.revision += 1;
-            (persist, model.epoch)
+            (persist, model.epoch, replaced.into_iter().collect())
         };
         if persist && let Some(command) = CommandRecord::new(entry) {
             let key = command.0.key.clone();
@@ -640,7 +668,11 @@ impl Store {
             } else {
                 (None, None)
             };
-            if let Err(error) = self.0.tx.try_send(Job::Add(command, epoch, reply)) {
+            if let Err(error) = self
+                .0
+                .tx
+                .try_send(Job::Add(command, replaced, epoch, reply))
+            {
                 lock(&self.0.model).pending.remove(&key);
                 return Err(io::Error::other(error.to_string()));
             }
@@ -891,6 +923,7 @@ impl brush_core::history::Observer for Store {
         &self,
         item: &mut brush_core::history::Item,
         directory: Option<&Path>,
+        replace: &[i64],
     ) -> io::Result<()> {
         if item.command_line.len() > INPUT_BYTES {
             return Err(io::Error::other(
@@ -933,6 +966,7 @@ impl brush_core::history::Observer for Store {
                 sequence: None,
             },
             true,
+            replace,
         )
     }
 
@@ -1223,6 +1257,7 @@ fn select_repeated(
     mut memory: Vec<Entry>,
     known_outcomes: &BTreeMap<String, (String, i32)>,
 ) -> Result<Page, String> {
+    let started = Instant::now();
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| error.to_string())?;
@@ -1273,6 +1308,9 @@ fn select_repeated(
         .map_err(|error| error.to_string())?;
     let mut disk = rows.next().transpose().map_err(|error| error.to_string())?;
     let mut page = RepeatedPage::new(query, snapshot, anchor.map(Cow::Owned));
+    let mut scanned = 0usize;
+    let mut bytes = 0usize;
+    let mut limited = false;
     while disk.is_some() || memory.peek().is_some() {
         let from_disk = match (disk.as_ref(), memory.peek()) {
             (Some(left), Some(right)) => query.compare(left, right).is_le(),
@@ -1288,6 +1326,16 @@ fn select_repeated(
         } else {
             memory.next().expect("available memory row")
         };
+        if scanned == SCAN_ITEMS
+            || bytes.saturating_add(entry.text.len()) > SCAN_BYTES
+            || started.elapsed() >= SCAN_TIME
+        {
+            limited = true;
+            page.more = true;
+            break;
+        }
+        scanned += 1;
+        bytes += entry.text.len();
         if entry.exit_code.is_none()
             && let Some((text, exit_code)) = known_outcomes.get(&entry.key)
             && entry.text == *text
@@ -1304,7 +1352,12 @@ fn select_repeated(
     drop(rows);
     drop(statement);
     transaction.commit().map_err(|error| error.to_string())?;
-    Ok(page.finish())
+    let mut page = page.finish();
+    if limited {
+        page.failed = true;
+        page.notice = Some(SCAN_NOTICE.into());
+    }
+    Ok(page)
 }
 
 fn update_model(inner: &Weak<Inner>, update: impl FnOnce(&mut Model)) {
@@ -1401,7 +1454,7 @@ fn worker(inner: Weak<Inner>, rx: mpsc::Receiver<Job>, generation: Arc<AtomicU64
                     }
                 }
             }
-            Job::Add(command, epoch, reply) => {
+            Job::Add(command, replace, epoch, reply) => {
                 let entry = command.0;
                 let result = if epoch != active_epoch {
                     Err(
@@ -1414,6 +1467,14 @@ fn worker(inner: Weak<Inner>, rx: mpsc::Receiver<Job>, generation: Arc<AtomicU64
                             let transaction = connection
                                 .transaction()
                                 .map_err(|error| error.to_string())?;
+                            for key in &replace {
+                                transaction
+                                    .execute(
+                                        "DELETE FROM commands WHERE id=?1 AND command=?2",
+                                        params![key, entry.text],
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                            }
                             insert(&transaction, &entry)?;
                             let sequence = transaction.last_insert_rowid();
                             let cutoff = prune(&transaction, retention)?;
@@ -1433,6 +1494,11 @@ fn worker(inner: Weak<Inner>, rx: mpsc::Receiver<Job>, generation: Arc<AtomicU64
                     model.pending.remove(&entry.key);
                     match result {
                         Ok((sequence, cutoff)) => {
+                            for key in &replace {
+                                model.pending.remove(key);
+                                model.persisted.remove(key);
+                                model.exported.remove(key);
+                            }
                             if model.epoch == epoch {
                                 model.snapshot = model.snapshot.max(sequence);
                                 model.persisted.insert(entry.key.clone());
@@ -1606,15 +1672,24 @@ fn worker(inner: Weak<Inner>, rx: mpsc::Receiver<Job>, generation: Arc<AtomicU64
                 };
                 let result = if let Some(connection) = &database {
                     let generation = generation.clone();
+                    let started = Instant::now();
                     let installed = connection
                         .progress_handler(
                             1_000,
-                            Some(move || current != generation.load(Ordering::Acquire)),
+                            Some(move || {
+                                current != generation.load(Ordering::Acquire)
+                                    || started.elapsed() >= SCAN_TIME
+                            }),
                         )
                         .map_err(|error| error.to_string());
                     let result = installed.and_then(|()| {
                         select_repeated(connection, &query, memory, &known_outcomes)
                     });
+                    let result = if result.is_err() && started.elapsed() >= SCAN_TIME {
+                        Err(SCAN_NOTICE.into())
+                    } else {
+                        result
+                    };
                     match connection.progress_handler(0, None::<fn() -> bool>) {
                         Ok(()) => result,
                         Err(error) => {
@@ -1629,9 +1704,25 @@ fn worker(inner: Weak<Inner>, rx: mpsc::Receiver<Job>, generation: Arc<AtomicU64
                 }
                 update_model(&inner, |model| {
                     let mut page = match result {
+                        Ok(page) if page.failed && page.entries.is_empty() => {
+                            let mut cached = cached_page(model, &query);
+                            for entry in &mut cached.entries {
+                                entry.grouped_outcomes = None;
+                            }
+                            cached.failed = true;
+                            cached.notice = page
+                                .notice
+                                .map(|notice| format!("{notice}; cached matches only"));
+                            cached
+                        }
                         Ok(page) => page,
                         Err(error) => {
                             let mut page = cached_page(model, &query);
+                            if error.contains(SCAN_NOTICE) {
+                                for entry in &mut page.entries {
+                                    entry.grouped_outcomes = None;
+                                }
+                            }
                             page.notice = Some(format!("history search failed: {error}"));
                             page.failed = true;
                             page

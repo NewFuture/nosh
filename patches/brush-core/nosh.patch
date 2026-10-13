@@ -799,7 +799,7 @@ index 9884a8c7b88a022a60c8e44c96b4a99e57e1b233..9b39a3d78d1ecedde694ade068fd8a30
              ]
          );
 diff --git a/brush-core/src/history.rs b/brush-core/src/history.rs
-index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c26180efc 100644
+index f5a6215f60ec5f0782efdd974eebf42e11d4485c..6d43023a498c22e5a7cc83e0260595d9dd2361e0 100644
 --- a/brush-core/src/history.rs
 +++ b/brush-core/src/history.rs
 @@ -3,7 +3,8 @@
@@ -812,7 +812,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
  };
  
  use crate::error;
-@@ -11,17 +12,201 @@ use crate::error;
+@@ -11,17 +12,206 @@ use crate::error;
  /// Represents a unique identifier for a history item.
  type ItemId = i64;
  
@@ -864,8 +864,13 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
 +    fn validate_export(&self, path: &Path) -> std::io::Result<()>;
 +    /// Marks a successfully appended set as exported.
 +    fn exported(&self, ids: &[i64]);
-+    /// Records a manually inserted command.
-+    fn added(&self, item: &mut Item, directory: Option<&Path>) -> std::io::Result<()>;
++    /// Records a command and replaces the supplied duplicates atomically.
++    fn added(
++        &self,
++        item: &mut Item,
++        directory: Option<&Path>,
++        replace: &[ItemId],
++    ) -> std::io::Result<()>;
 +    /// Updates an existing command without recreating deleted records.
 +    fn updated(&self, item: &Item) -> std::io::Result<()>;
 +    /// Removes the identified command.
@@ -1015,7 +1020,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
      /// Constructs a new `History` instance, with its contents initialized from the given readable
      /// stream. If errors are encountered reading lines from the stream, unreadable lines will
      /// be skipped but the call will still return successfully, with a warning logged. An error
-@@ -95,6 +280,12 @@ impl History {
+@@ -95,6 +285,12 @@ impl History {
      /// * `id` - The unique identifier of the history item to update.
      /// * `item` - The new history item to replace the old one.
      pub fn update_by_id(&mut self, id: ItemId, item: Item) -> Result<(), error::Error> {
@@ -1028,7 +1033,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
          let existing_item = self
              .id_map
              .get_mut(&id)
-@@ -105,8 +296,11 @@ impl History {
+@@ -105,8 +301,11 @@ impl History {
  
      /// Removes the nth item from the history. Returns the removed item, or `None` if no such item
      /// exists (i.e., because it was out of range).
@@ -1041,7 +1046,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
              self.items = self
                  .items
                  .into_iter()
-@@ -117,9 +311,9 @@ impl History {
+@@ -117,9 +316,9 @@ impl History {
  
              self.id_map.remove_mut(&id);
  
@@ -1053,12 +1058,12 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
          }
      }
  
-@@ -129,13 +323,32 @@ impl History {
+@@ -129,13 +328,45 @@ impl History {
      ///
      /// * `item` - The history item to add.
      pub fn add(&mut self, mut item: Item) -> Result<ItemId, error::Error> {
 -        let id = self.next_id;
-+        self.add_at(&mut item, None)
++        self.add_at(&mut item, None, &[])
 +    }
 +
 +    /// Adds a known shell input with its actual input directory.
@@ -1066,8 +1071,9 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
 +        &mut self,
 +        mut item: Item,
 +        directory: &Path,
++        replace: &[ItemId],
 +    ) -> Result<ItemId, error::Error> {
-+        self.add_at(&mut item, Some(directory))
++        self.add_at(&mut item, Some(directory), replace)
 +    }
  
 -        item.id = id;
@@ -1076,10 +1082,22 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
 +        &mut self,
 +        item: &mut Item,
 +        directory: Option<&Path>,
++        replace: &[ItemId],
 +    ) -> Result<ItemId, error::Error> {
 +        item.id = self.next_id;
 +        if let Some(observer) = &self.observer {
-+            observer.added(item, directory)?;
++            observer.added(item, directory, replace)?;
++        }
++        for id in replace {
++            self.id_map.remove_mut(id);
++        }
++        if !replace.is_empty() {
++            self.items = self
++                .items
++                .into_iter()
++                .filter(|id| !replace.contains(id))
++                .copied()
++                .collect();
 +        }
 +        let id = item.id;
 +        self.next_id = self.next_id.max(id.saturating_add(1));
@@ -1090,7 +1108,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
  
          Ok(id)
      }
-@@ -147,6 +360,11 @@ impl History {
+@@ -147,6 +378,11 @@ impl History {
      ///
      /// * `id` - The unique identifier of the history item to delete.
      pub fn delete_item_by_id(&mut self, id: ItemId) -> Result<(), error::Error> {
@@ -1102,7 +1120,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
          self.id_map.remove_mut(&id);
          self.items = self
              .items
-@@ -160,6 +378,9 @@ impl History {
+@@ -160,6 +396,9 @@ impl History {
  
      /// Clears all history items.
      pub fn clear(&mut self) -> Result<(), error::Error> {
@@ -1112,7 +1130,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
          self.id_map = rpds::HashTrieMapSync::new_sync();
          self.items = rpds::VectorSync::new_sync();
          Ok(())
-@@ -181,8 +402,37 @@ impl History {
+@@ -181,8 +420,37 @@ impl History {
          unsaved_items_only: bool,
          write_timestamps: bool,
      ) -> Result<(), error::Error> {
@@ -1150,7 +1168,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
  
          if append {
              file_options.append(true);
-@@ -192,25 +442,38 @@ impl History {
+@@ -192,25 +460,38 @@ impl History {
  
          let mut file = file_options.create(true).open(history_file_path.as_ref())?;
  
@@ -1192,7 +1210,7 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..4cf37f66fc73abf7f5c867e0d159b82c
  
          Ok(())
      }
-@@ -497,3 +760,49 @@ impl<'a> Iterator for Search<'a> {
+@@ -497,3 +778,49 @@ impl<'a> Iterator for Search<'a> {
          }
      }
  }
@@ -1436,7 +1454,7 @@ index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd580
      ///
      /// # Arguments
 diff --git a/brush-core/src/shell/history.rs b/brush-core/src/shell/history.rs
-index 54be623bffac00010d9ea3b2b08306181dfc1743..372ac732b47e2eb2868b6f6bd6ef021a2a549555 100644
+index 54be623bffac00010d9ea3b2b08306181dfc1743..4a0133bc63ec1c44e98c5b572fb2920b9dff1d58 100644
 --- a/brush-core/src/shell/history.rs
 +++ b/brush-core/src/shell/history.rs
 @@ -42,7 +42,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
@@ -1456,7 +1474,7 @@ index 54be623bffac00010d9ea3b2b08306181dfc1743..372ac732b47e2eb2868b6f6bd6ef021a
      }
  
      /// Returns the path to the history file used by the shell, if one is set.
-@@ -74,23 +82,109 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
+@@ -74,23 +82,108 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
      /// Adds a command to history.
      pub fn add_to_history(&mut self, command: &str) -> Result<(), error::Error> {
          if let Some(history) = &mut self.history {
@@ -1472,7 +1490,7 @@ index 54be623bffac00010d9ea3b2b08306181dfc1743..372ac732b47e2eb2868b6f6bd6ef021a
 +        if !self.history_should_record(command)? {
 +            return Ok(());
 +        }
-+        self.discard_duplicate_history(command)?;
++        let replace = self.history_duplicate_ids(command);
 +        let file = self.history_file_path();
 +        let size = self.env_str("HISTSIZE").map(|value| value.into_owned());
 +        let file_size = self.env_str("HISTFILESIZE").map(|value| value.into_owned());
@@ -1495,6 +1513,7 @@ index 54be623bffac00010d9ea3b2b08306181dfc1743..372ac732b47e2eb2868b6f6bd6ef021a
 +                    dirty: true,
 +                },
 +                &directory,
++                &replace,
 +            )?;
 +            history.start_input(Some(id))?;
          }
@@ -1560,23 +1579,21 @@ index 54be623bffac00010d9ea3b2b08306181dfc1743..372ac732b47e2eb2868b6f6bd6ef021a
 +        Ok(true)
 +    }
 +
-+    /// Applies the explicit erasedups rule to the current command list.
-+    pub fn discard_duplicate_history(&mut self, command: &str) -> Result<(), error::Error> {
++    /// Selects the current-view records replaced by the explicit erasedups rule.
++    pub fn history_duplicate_ids(&self, command: &str) -> Vec<i64> {
 +        if self
 +            .env_str("HISTCONTROL")
 +            .is_some_and(|value| value.split(':').any(|part| part == "erasedups"))
-+            && let Some(history) = &mut self.history
++            && let Some(history) = &self.history
 +        {
-+            let ids = history
++            history
 +                .iter()
 +                .filter(|item| item.command_line == command)
 +                .map(|item| item.id)
-+                .collect::<Vec<_>>();
-+            for id in ids {
-+                history.delete_item_by_id(id)?;
-+            }
++                .collect()
++        } else {
++            Vec::new()
 +        }
-+        Ok(())
 +    }
  }
 diff --git a/brush-core/src/sys/stubs/async_pipe.rs b/brush-core/src/sys/stubs/async_pipe.rs
