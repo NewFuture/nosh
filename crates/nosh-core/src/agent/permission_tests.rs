@@ -88,7 +88,7 @@ fn full_matrix_counts_real_dispatch_without_executing_harmful_commands() {
         let mut approvals = Scripted::new([]);
         assert!(matches!(
             agent.exec_call(&mut shell, &call("rm -rf /"), &mut approvals, &mut ui),
-            Exec::CommandResult(_)
+            Exec::CommandResult(..)
         ));
         assert!(approvals.seen.is_empty());
         assert_eq!(count(), 1);
@@ -97,7 +97,7 @@ fn full_matrix_counts_real_dispatch_without_executing_harmful_commands() {
         let mut approvals = Scripted::new([ApprovalResponse::Approve]);
         let result = agent.exec_call(&mut shell, &call("rm -rf /"), &mut approvals, &mut ui);
         if mode == Confirm {
-            assert!(matches!(result, Exec::CommandResult(_)));
+            assert!(matches!(result, Exec::CommandResult(..)));
             assert_eq!(approvals.seen.len(), 1);
             assert!(approvals.seen[0].strong);
             assert!(!approvals.seen[0].can_grant);
@@ -189,6 +189,45 @@ fn invalid_grants_and_missing_terminals_never_execute() {
     ));
     assert_eq!(count(), 0);
     assert!(ui.events.iter().any(|e| e.contains("approval unavailable")));
+}
+
+#[test]
+fn denial_does_not_block_alternatives_or_new_authorization() {
+    let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+    let mut agent = fake_agent(Confirm, UserRules::default());
+    let mut approvals = Scripted::new([ApprovalResponse::Deny { reason: None }]);
+    let mut ui = RecordUi::default();
+    let pending = call("touch output");
+    assert!(matches!(
+        agent.exec_call(&mut shell, &pending, &mut approvals, &mut ui),
+        Exec::Denied(_)
+    ));
+    assert!(matches!(
+        agent.exec_call(
+            &mut shell,
+            &call("printf available"),
+            &mut approvals,
+            &mut ui
+        ),
+        Exec::CommandResult(..)
+    ));
+    assert!(matches!(
+        agent.exec_call(&mut shell, &pending, &mut approvals, &mut ui),
+        Exec::RepeatedDenial(_)
+    ));
+    assert_eq!(approvals.seen.len(), 1);
+    assert_eq!(count(), 1);
+    agent
+        .cfg
+        .rules
+        .allow
+        .push(UserRule::exact("touch output").unwrap());
+    assert!(matches!(
+        agent.exec_call(&mut shell, &pending, &mut approvals, &mut ui),
+        Exec::CommandResult(..)
+    ));
+    assert_eq!(approvals.seen.len(), 1);
+    assert_eq!(count(), 2);
 }
 
 #[test]
@@ -357,7 +396,7 @@ fn routine_copy_and_move_execute_without_approval() {
         &mut approvals,
         &mut ui,
     );
-    assert!(matches!(result, Exec::CommandResult(_)));
+    assert!(matches!(result, Exec::CommandResult(..)));
     assert!(approvals.seen.is_empty());
     assert_eq!(
         std::fs::read_to_string(root.join("moved")).unwrap(),
@@ -501,7 +540,7 @@ fn path_and_hash_lookups_do_not_auto_admit_workspace_lookalikes() {
             &mut approvals,
             &mut RecordUi::default()
         ),
-        Exec::CommandResult(_)
+        Exec::CommandResult(..)
     ));
     assert!(
         approvals.seen.is_empty(),
@@ -563,7 +602,7 @@ fn expanded_commands_and_disappearing_arguments_keep_the_approval_boundary() {
     shell.run_user_line("alias cargo='/usr/bin/cargo'");
     assert!(matches!(
         agent.exec_call(&mut shell, &call("cargo test"), &mut approvals, &mut ui),
-        Exec::CommandResult(_)
+        Exec::CommandResult(..)
     ));
     assert_eq!(approvals.seen.len(), 1);
     assert_eq!(count(), 1);

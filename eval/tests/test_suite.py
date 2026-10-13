@@ -38,7 +38,7 @@ class ContractTests(unittest.TestCase):
         for name in suite.BUILTIN_SUITES:
             with self.subTest(name=name):
                 expanded = suite.load_suite(name)
-                self.assertEqual(expanded["dataset_revision"], 26)
+                self.assertEqual(expanded["dataset_revision"], 34)
                 self.assertEqual(expanded, suite.load_suite(runtime.HERE / "suites" / f"{name}.json"))
                 before = copy.deepcopy(expanded)
                 self.assertEqual(suite.validate_suite(expanded), before)
@@ -178,7 +178,7 @@ class ExpandedContractTests(unittest.TestCase):
     def test_current_tasks_declare_diagnosis_routing_and_short_requests(self):
         diagnosis = SCENARIOS["explain-failure"]
         self.assertEqual(diagnosis["inputs"][0], "python3 broken.py")
-        self.assertTrue(diagnosis["inputs"][1].startswith("#fix "))
+        self.assertEqual(diagnosis["inputs"][1], "#fix")
         self.assertEqual(diagnosis["completions"][0]["kind"], "shell")
         short = [s for s in SUITE["scenarios"] if s["group"] == "expanded" and len(s["inputs"]) == 1]
         self.assertEqual(len(short), 12)
@@ -285,9 +285,9 @@ class CatalogSuiteTests(unittest.TestCase):
             for scenario in json.loads(path.read_text(encoding="utf-8")):
                 self.assertNotIn(scenario["id"], catalog)
                 catalog[scenario["id"]] = scenario
-        self.assertEqual(len(catalog), 39)
+        self.assertEqual(len(catalog), 42)
         self.assertFalse({"generate-clarify", "generate-missing-inputs", "next-review-after-tests"} & catalog.keys())
-        for name, count in (("regression", 27), ("command-assist", 8), ("smoke", 5), ("workflows", 8)):
+        for name, count in (("regression", 27), ("command-assist", 8), ("smoke", 5), ("workflows", 11)):
             loaded = suite_api.load_suite(runtime.HERE / "suites" / f"{name}.json")
             self.assertEqual(len(loaded["scenarios"]), count)
             for scenario in loaded["scenarios"]:

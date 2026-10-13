@@ -21,10 +21,10 @@ from .contracts import CAPTURE_CHECKS, STATEFUL_CHECKS
 EPOCH = 1_700_000_000
 OWNER = "nosh-eval-workspace-v1\n"
 PROJECT_FIXTURES = {
-    "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "dirty-git", "staged-git",
+    "rust", "rust-built", "rust-broken", "node", "python", "python-broken", "python-config", "dirty-git", "staged-git",
 }
 FIXTURES = {
-    "big", "port", "project", "rename", "typo", "failure", "diagnostic-failure", "history", "logs",
+    "big", "port", "project", "rename", "rename-conflict", "typo", "failure", "diagnostic-failure", "history", "logs",
     "partial-archive", "config-lookup", "config-missing",
 } | PROJECT_FIXTURES
 PROJECT = {
@@ -108,6 +108,35 @@ class MathTests(unittest.TestCase):
     ".gitignore": "__pycache__/\n",
 }
 
+PYTHON_CONFIG_PROJECT = {
+    "pyproject.toml": '[project]\nname = "example-service"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n',
+    "settings.py": (
+        "import json\nfrom pathlib import Path\n\n"
+        "def load_settings():\n"
+        "    return json.loads(Path('config.json').read_text(encoding='utf-8'))\n"
+    ),
+    "config.example.json": '{"profile": "development", "retries": 2}\n',
+    "tests/__init__.py": "",
+    "tests/test_settings.py": """import unittest
+from settings import load_settings
+
+
+class SettingsTests(unittest.TestCase):
+    def test_development_profile(self):
+        self.assertEqual(load_settings()["profile"], "development")
+
+    def test_retry_configuration(self):
+        self.assertEqual(load_settings()["retries"], 2)
+""",
+    "README.md": (
+        "# example-service\n\n"
+        "Development settings are loaded from config.json. Copy config.example.json "
+        "to config.json to use the checked-in development defaults.\n\n"
+        "## Tests\n\nRun `python3 -m unittest discover -s tests -v`. No dependencies are required.\n"
+    ),
+    ".gitignore": "__pycache__/\nconfig.json\n",
+}
+
 
 RUST_ARTIFACT = re.compile(
     r"target/(?:CACHEDIR\.TAG|\.rustc_info\.json|(?:debug|release)/(?:\.cargo(?:-artifact|-build)?-lock|eval_math(?:\.d)?"
@@ -121,6 +150,8 @@ def artifact(name: str, item: dict, kind: str) -> bool:
         return False
     if kind.startswith("rust") or kind == "build-failure":
         return bool(RUST_ARTIFACT.fullmatch(name))
+    if kind == "config-repair":
+        return name == "config.json"
     return kind in ("node-build", "node-test") and name in ("dist/math.js", "dist/main.js")
 
 
@@ -281,32 +312,35 @@ def create(root: Path, kind: str, env: dict | None = None,
             file_lines={name: len(text.splitlines()) for name, text in PROJECT.items()},
             python=sorted(name for name in PROJECT if name.endswith(".py")),
         )
-    elif kind == "rename":
+    elif kind in ("rename", "rename-conflict"):
         for name in ["alpha.txt", "beta.txt", "two words.txt", "notes.txt", "readme.md"]:
             write(root, name, f"Keep these bytes: {name}\n")
         facts["renames"] = {n: n[:-4] + ".md" for n in snapshot(root) if n.endswith(".txt")}
+        if kind == "rename-conflict":
+            write(root, "alpha.md", "Existing Markdown content must not be overwritten.\n")
+            facts["rename_conflicts"] = {"alpha.txt": "alpha.md"}
     elif kind == "failure":
         write(root, "broken.py", "import json\nwith open('config.json') as stream:\n    settings = json.load(stream)\nprint(settings)\n")
     elif kind == "diagnostic-failure":
-        diagnostic_id = "CAPTURE-" + hashlib.sha256(
+        diagnostic_id = "DEPLOY-" + hashlib.sha256(
             (trial_identity or kind).encode()).hexdigest()[:8]
         write(root, "calls.count", "0")
-        write(root, "once.py",
+        write(root, "deploy.py",
               "import os\nfrom pathlib import Path\nimport sys\n"
               "counter = Path('calls.count')\n"
               "count = int(counter.read_text()) + 1\ncounter.write_text(str(count))\n"
-              "if count > 1:\n"
-              "    print('The original diagnostic is no longer available.', file=sys.stderr)\n"
-              "    raise SystemExit(17)\n"
               "if os.environ.get('REGION'):\n"
               "    raise SystemExit(0)\n"
               f"diagnostic_id = '{diagnostic_id}'\n"
+              "print('service: atlas-api', file=sys.stderr)\n"
+              "print('environment: staging', file=sys.stderr)\n"
+              "print('phase: preflight', file=sys.stderr)\n"
               "print(f'diagnostic_id: {diagnostic_id}', file=sys.stderr)\n"
               "print('error_code: REGION_UNSET', file=sys.stderr)\n"
-              "print('message: REGION is unset; configure the REGION environment variable.', file=sys.stderr)\n"
+              "print('message: REGION is unset; deployment has not started. Configure REGION for the target environment.', file=sys.stderr)\n"
               "print('exit_code: 17', file=sys.stderr)\n"
               "raise SystemExit(17)\n")
-        facts["diagnostic_id"] = diagnostic_id
+        facts.update(diagnostic_id=diagnostic_id, service="atlas-api", environment="staging")
     elif kind == "logs":
         write(root, "logs/app.log", "INFO service started\nERROR fixture error\n")
         write(root, "logs/old/access.log", "GET /health 200\n")
@@ -345,11 +379,15 @@ def create(root: Path, kind: str, env: dict | None = None,
             facts["history"] = [list(entry[:2]) for entry in HISTORY]
             facts["git_log"] = git(root, "log", "--stat", "-8")
     elif kind in PROJECT_FIXTURES:
-        project = RUST_PROJECT if kind.startswith("rust") else NODE_PROJECT if kind == "node" else PYTHON_PROJECT
+        project = (RUST_PROJECT if kind.startswith("rust") else NODE_PROJECT if kind == "node"
+                   else PYTHON_CONFIG_PROJECT if kind == "python-config" else PYTHON_PROJECT)
         for name, text in project.items():
             write(root, name, text)
         facts["project"] = kind
         facts["test_count"] = 2
+        if kind == "python-config":
+            facts["config_template"] = "config.example.json"
+            facts["config_target"] = "config.json"
         if kind == "rust-broken":
             text = RUST_PROJECT["src/main.rs"].replace(
                 'println!("{}", add(2, 3));', 'let value: i32 = "five";\n    println!("{value}");',
@@ -503,11 +541,13 @@ def fixture_state(scenario: dict, facts: dict, root: Path, after: dict, result) 
             re.sub(r"(?<=eval_math-)[0-9a-f]+", "<hash>", name)
             for name, item in after.items() if artifact(name, item, kind)
         })
-        if (kind in CAPTURE_CHECKS and "once.py" in after
-                and after["once.py"] == facts["before"].get("once.py")):
+        if (kind in CAPTURE_CHECKS and "deploy.py" in after
+                and after["deploy.py"] == facts["before"].get("deploy.py")):
             # The original snapshot remains in file_snapshot; the trial-specific
             # diagnostic ID must not make an unchanged script look nondeterministic.
-            state["files"] = dict(state["files"], **{"once.py": {"unchanged_from_fixture": True}})
+            state["files"] = dict(state["files"], **{"deploy.py": {"unchanged_from_fixture": True}})
     if kind in ("git-diff", "git-commit", "recent-history"):
         state["git"] = git_state(root)
+    if kind == "config-repair":
+        state["configuration"] = after.get(facts["config_target"])
     return state

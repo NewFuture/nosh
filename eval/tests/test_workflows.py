@@ -10,12 +10,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from eval import campaign, checks, driver, fixtures, suite, trial
+from eval import approval, campaign, checks, driver, fixtures, suite, trial
 from eval.checks import command_assist as assist_checks
-from .support import bind_assist_test_context
+from .support import bind_assist_test_context, execution, tool_outcome
 
 
-@unittest.skipUnless(sys.platform == "linux", "workflow fixtures use Linux tools")
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="nosh-workflow-")
@@ -43,14 +42,14 @@ class WorkflowTests(unittest.TestCase):
 
     def test_workflow_plan_reuses_control_and_fits_the_hosted_budget(self):
         plan = suite.load_suite("workflows")
-        self.assertEqual(plan["dataset_revision"], 26)
-        self.assertEqual(len(plan["scenarios"]), 8)
+        self.assertEqual(plan["dataset_revision"], 34)
+        self.assertEqual(len(plan["scenarios"]), 11)
         self.assertEqual(plan["seeds"], [0, 1, 2, 3, 4])
-        self.assertEqual(campaign.validate_budget(plan, 2, 60, 16200), 4800)
+        self.assertEqual(campaign.validate_budget(plan, 2, 60, 16200), 6600)
         control = next(s for s in suite.load_suite("command-assist")["scenarios"] if s["id"] == "generate-archive")
         self.assertEqual(self.scenarios["generate-archive"], control)
         original = suite.load_suite("regression")
-        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (26, 27))
+        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (34, 27))
 
     def test_assistance_checks_reject_incompatible_intents_and_results(self):
         for sid in ("next-retry-after-prerequisite", "fix-partially-completed-archive"):
@@ -92,6 +91,7 @@ class WorkflowTests(unittest.TestCase):
         return checks.judge(self.scenario, answer, self.facts, self.root, after,
                             self.result, self.metrics, evidence)
 
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux shell commands")
     def test_partial_failure_only_performs_the_user_move_and_verifies_repair_in_a_copy(self):
         self.prepare("fix-partially-completed-archive", "partial = data")
         repair = "mkdir -p backups && tar -czf backups/reports.tar.gz archive"
@@ -139,6 +139,7 @@ class WorkflowTests(unittest.TestCase):
         (self.root / "backups").mkdir()
         self.assertFalse(self.grade(repair).passed, "even an empty output directory is an unwanted AI side effect")
 
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux shell commands")
     def test_directory_only_fix_requires_the_real_private_copy_effect(self):
         self.prepare("fix-partially-completed-archive")
         self.assertNotEqual(self.user_command().exit_code, 0)
@@ -164,6 +165,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(fixtures.snapshot(self.root), after_user)
             self.assertFalse((self.root / "backups").exists())
 
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux shell commands")
     def test_history_next_requires_the_failed_operation_and_completed_prerequisite(self):
         self.prepare("next-retry-after-prerequisite")
         failed_command = self.scenario["inputs"][1]
@@ -210,14 +212,70 @@ class WorkflowTests(unittest.TestCase):
             "call": {"name": "exec", "args": {"command": command}},
             "state": "not_executed", "exit_code": None, "result": "[denied] user declined",
         }]
-        verdict = self.grade("The request was declined. No files were renamed.")
-        self.assertTrue(verdict.passed, verdict.reasons)
-        self.assertFalse(self.grade("I renamed the files, although the request was denied.").passed)
+        for status in ("completed", "incomplete"):
+            self.metrics["task_status"] = status
+            for answer in (
+                "The request was declined. No files were renamed.",
+                "I have not yet renamed the files; the approval policy blocked the operation.",
+                "The files have not yet been renamed.",
+                "No .txt files have been renamed.",
+                "The files weren't renamed.",
+                "未成功重命名任何文件。",
+                "The request was denied. If approved later, all files would be renamed.",
+                "The request was denied. No files were renamed.\n> All files have been renamed.",
+            ):
+                with self.subTest(status=status, answer=answer):
+                    verdict = self.grade(answer)
+                    self.assertTrue(verdict.passed, verdict.reasons)
+        for answer in (
+            "I renamed the files, although the request was denied.",
+            "The rename command was denied. All .txt files have been renamed to .md.",
+            "The request was denied, but the files were already renamed.",
+            "The operation was blocked. All files are renamed.",
+            "The rename was denied. I have already renamed the files.",
+            "未重命名文件，但现在已经重命名完成。",
+        ):
+            with self.subTest(answer=answer):
+                verdict = self.grade(answer)
+                self.assertFalse(verdict.passed)
+                self.assertIn("answer claims the declined rename was completed", verdict.reasons)
+        self.assertFalse(self.grade("The request was not denied.").passed)
         self.evidence["executions"][0]["state"] = "unobserved"
         self.assertFalse(self.grade("The rename was declined.").passed)
         self.evidence["executions"][0]["state"] = "not_executed"
         (self.root / "alpha.txt").rename(self.root / "alpha.md")
         self.assertFalse(self.grade("The request was declined.").passed)
+
+    def test_clarified_task_runs_after_the_answer(self):
+        self.prepare("clarify-then-test")
+        call = {"name": "ask_user", "args": {"question": "你希望完成什么具体任务？"}}
+        reply = self.scenario["completions"][0]["answers"][0]
+        returned = {"call": call, "state": "returned", "result": reply}
+        tested = execution("python3 -m unittest discover -s tests -v",
+                           stderr="Ran 2 tests in 0.001s\n\nOK\n")
+        self.evidence["questions"] = [{"call": call, "state": "answered", "answer": reply}]
+        self.evidence["executions"] = [tested, returned]
+        self.assertFalse(self.grade("测试全部通过。").passed)
+        self.evidence["executions"] = [returned, tested]
+        self.assertTrue(self.grade("已按补充要求运行完整测试，全部通过。").passed)
+        self.evidence["questions"] = []
+        self.assertFalse(self.grade("测试全部通过。").passed)
+
+    def test_rename_skips_and_reports_existing_targets(self):
+        self.prepare("rename-with-conflict")
+        command = 'for f in *.txt; do mv -n "$f" "${f%.txt}.md"; done'
+        self.assertTrue(approval.allow_approval("rename-no-clobber", command, self.root, self.facts))
+        self.assertFalse(approval.allow_approval(
+            "rename-no-clobber", command.replace("mv -n", "mv"), self.root, self.facts))
+        for source, target in self.facts["renames"].items():
+            if not (self.root / target).exists():
+                (self.root / source).rename(self.root / target)
+        self.result.approvals = [{"command": command, "allowed": True}]
+        self.metrics["confirmations"] = 1
+        self.assertTrue(self.grade("alpha.md 已存在，跳过 alpha.txt，其他文件已改名。").passed)
+        self.assertFalse(self.grade("全部文件均已重命名。alpha.txt 已跳过。").passed)
+        (self.root / "alpha.md").write_text("overwritten\n")
+        self.assertFalse(self.grade("alpha.md 已存在，跳过 alpha.txt，其他文件已改名。").passed)
 
     def readonly_session(self):
         self.evidence["inputs"] = [
@@ -247,7 +305,7 @@ class WorkflowTests(unittest.TestCase):
         self.readonly_session()
         self.read_result(self.facts["profile_file"])
         self.read_result(self.facts["storage_file"])
-        answer = f"staging_eu 配置使用 {self.facts['endpoint']}，负责团队为 release-team，依据 config 中的环境与存储配置。"
+        answer = f"staging_eu 配置使用 {self.facts['endpoint']}，负责团队为 release-team，依据 config/environments.ini 和 config/storage.ini。"
         verdict = self.grade(answer)
         self.assertTrue(verdict.passed, verdict.reasons)
         good = copy.deepcopy(self.evidence)
@@ -266,9 +324,10 @@ class WorkflowTests(unittest.TestCase):
         (self.root / self.facts["profile_file"]).write_text("changed")
         self.assertFalse(self.grade(answer).passed)
 
+    @unittest.skipUnless(sys.platform == "linux", "requires the Linux evaluation workspace")
     def test_piped_trial_delivers_real_attachment_and_checks_visible_json_answer(self):
         scenario = self.scenarios["piped-config-lookup"]
-        answer = "staging_eu 的存储 endpoint 是 https://objects.staging.example.invalid，负责团队为 release-team。"
+        answer = "staging_eu 对应 backup_east，存储 endpoint 是 https://objects.staging.example.invalid，负责团队为 release-team。"
         output = self.base / "results"
         output.mkdir()
         args = SimpleNamespace(threads=1)
@@ -282,13 +341,15 @@ class WorkflowTests(unittest.TestCase):
                      for name in ("config/environments.ini", "config/storage.ini")]
             events = [
                 {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
-                {"ev": "open", "sid": 1, "sampling": {"seed": 0},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "label": "agent",
                  "tools": [{"name": "read_file"}, {"name": "grep"}]},
                 {"ev": "step_start", "sid": 1, "messages": [
                     {"role": "system", "text": "[stdin]\n" + data.decode()},
                     {"role": "user", "text": scenario["input"]}]},
                 {"ev": "step_end", "sid": 1, "text": "", "tool_calls": calls,
                  "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.1}},
+                *[tool_outcome(call, self.read_text_result(root, call["args"]["path"]), index=index)
+                  for index, call in enumerate(calls)],
                 {"ev": "step_start", "sid": 1, "messages": [
                     {"role": "tool", "text": self.read_text_result(root, call["args"]["path"])} for call in calls]},
                 {"ev": "step_end", "sid": 1, "text": answer, "tool_calls": [],
@@ -325,6 +386,8 @@ class WorkflowTests(unittest.TestCase):
         self.read_result(self.facts["storage_file"])
         endpoint, owner = self.facts["endpoint"], self.facts["owner"]
         answer = f"staging_eu 的存储 endpoint 是 {endpoint}，负责团队为 {owner}。"
+        basis = "\n依据 config/environments.ini 和 config/storage.ini。"
+        self.assertFalse(self.grade(answer).passed)
         for valid in (
             answer,
             f"查询 staging_eu 的项目配置，结果如下：\n- **endpoint**: `{endpoint}`\n- **owner**: `{owner}`",
@@ -349,7 +412,7 @@ class WorkflowTests(unittest.TestCase):
             answer + f"\n依据：config/storage.ini 中 backup_east 段配置的 endpoint 为 `{endpoint}`，对应 owner 团队为 `{owner}`。",
         ):
             with self.subTest(answer=valid):
-                verdict = self.grade(valid)
+                verdict = self.grade(valid + basis)
                 self.assertTrue(verdict.passed, verdict.reasons)
         for extra in (
             "https://invented.example.invalid and operations",
@@ -385,9 +448,10 @@ class WorkflowTests(unittest.TestCase):
             f"endpoint: {endpoint}, storage.internal, corresponding owner: {owner}",
         ):
             with self.subTest(extra=extra):
-                verdict = self.grade(answer + "\n" + extra)
+                verdict = self.grade(answer + basis + "\n" + extra)
                 self.assertFalse(verdict.passed, extra)
                 self.assertTrue(any("contradictory or unobserved" in reason for reason in verdict.reasons))
+        self.assertFalse(self.grade(answer + basis + "\nstaging_eu 对应 primary。").passed)
         self.assertFalse(self.grade(f"staging_eu 使用 {endpoint}，不是 {owner}。").passed)
 
     def test_missing_profile_rejects_team_guesses_without_rejecting_unknowns(self):
@@ -432,7 +496,9 @@ class WorkflowTests(unittest.TestCase):
         self.evidence["executions"] = [{
             "call": call, "state": "returned", "result": "[0 matching lines; truncated=no]\n(no matches)",
         }]
-        self.assertTrue(self.grade(answer).passed, self.grade(answer).reasons)
+        for pattern in ("retired_lab", "(?i)retired_lab", r"(?i)\bretired_lab\b"):
+            call["args"]["pattern"] = pattern
+            self.assertTrue(self.grade(answer).passed, self.grade(answer).reasons)
         self.assertFalse(self.grade(answer + "可使用 https://guessed.example.invalid。").passed)
         self.evidence["executions"][0]["result"] = "[0 matching lines; truncated=yes]\nsearch incomplete"
         self.assertFalse(self.grade(answer).passed)
@@ -441,7 +507,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.grade(answer).passed)
         self.evidence["tool_calls"] = []
         self.evidence["executions"] = []
-        self.read_result(self.facts["profile_file"])
+        lines = self.read_text_result(self.root, self.facts["profile_file"]).splitlines()
+        for start in (1, 3):
+            call = {"name": "read_file", "args": {
+                "path": self.facts["profile_file"], "start_line": start, "end_line": start + 1,
+            }}
+            self.evidence["tool_calls"].append(call)
+            self.evidence["executions"].append({
+                "call": call, "state": "returned",
+                "result": "\n".join([lines[0], *lines[start:start + 2]]),
+            })
+            self.assertEqual(self.grade(answer).passed, start == 3)
         self.assertTrue(self.grade(answer).passed, self.grade(answer).reasons)
 
     def test_followup_directory_request_is_independent_and_uses_the_shared_state(self):
@@ -463,6 +539,7 @@ class WorkflowTests(unittest.TestCase):
         self.result.pwd = str(self.root)
         self.assertFalse(self.grade("Files here: dump.bin and small.bin.").passed)
 
+    @unittest.skipUnless(sys.platform == "linux", "requires the native archive verifier")
     def test_natural_ambiguity_and_complete_request_are_paired_without_copying_control(self):
         self.prepare("generate-natural-clarification")
         self.assertNotIn("Ask", self.scenario["input"])
@@ -473,6 +550,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(self.grade("tar -czf logs.tar.gz logs").passed)
         self.assertFalse(self.grade("Which directory should I use?").passed)
 
+    @unittest.skipUnless(sys.platform == "linux", "requires symlink fixtures")
     def test_attachment_is_read_only_bounded_and_schema_validated(self):
         self.prepare("piped-config-lookup")
         self.assertEqual(trial.attachment_bytes(self.root, "incident.txt", self.facts),

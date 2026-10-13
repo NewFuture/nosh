@@ -153,7 +153,7 @@ impl UserInput for ThemedUserInput {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "ask_user".into(),
-        description: "Ask the user for missing information or choices. Their reply can update the request; wait for it before calling other tools.".into(),
+        description: "Ask for missing task details and wait for the reply. The reply may change the task; it is not execution approval. Use this tool instead of asking in the final answer.".into(),
         parameters: json!({
             "type": "object",
             "properties": {

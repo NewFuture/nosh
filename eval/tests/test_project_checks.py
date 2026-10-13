@@ -7,16 +7,18 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from eval import approval, checks, driver, fixtures, runtime
+from eval import approval, checks, driver, fixtures, runtime, suite
 from eval.checks import project as project_checks
-from .support import SCENARIOS, SUITE, execution
+from .support import SCENARIOS, execution
 
 
 @unittest.skipUnless(sys.platform == "linux", "real Linux project fixtures")
 class ProjectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tools = runtime.discover_tools(SUITE["scenarios"])
+        cls.scenarios = dict(SCENARIOS)
+        cls.scenarios.update({s["id"]: s for s in suite.load_suite("workflows")["scenarios"]})
+        cls.tools = runtime.discover_tools(list(cls.scenarios.values()))
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -28,7 +30,7 @@ class ProjectTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def prepare(self, sid):
-        self.scenario = copy.deepcopy(SCENARIOS[sid])
+        self.scenario = copy.deepcopy(self.scenarios[sid])
         self.root, self.home, self.facts = self.workspace.prepare(self.scenario)
         self.env = runtime.environment(self.home, 1, None, self.tools)
         self.facts["tools"] = self.tools
@@ -61,6 +63,8 @@ class ProjectTests(unittest.TestCase):
             ("zh-rust-test", "cargo test --manifest-path Cargo.toml --offline --locked --all-features 2>&1"),
             ("zh-node-test", "npm test 2>&1"),
             ("zh-python-test", "python3 -m unittest discover -s tests -v 2>&1"),
+            ("zh-python-test", "python3 -m unittest discover -s ./tests -v"),
+            ("zh-python-test", "python3 -m unittest tests.test_math -v"),
         ]
         for sid, command in cases:
             with self.subTest(scenario=sid):
@@ -70,8 +74,61 @@ class ProjectTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 verdict = self.grade()
                 self.assertTrue(verdict.passed, verdict.reasons)
+                self.assertFalse(self.grade("测试全部失败。" if sid.endswith("-test") else "构建失败。").passed)
+                self.metrics["task_status"] = "incomplete"
+                self.assertFalse(self.grade().passed)
+                self.metrics["task_status"] = "completed"
                 self.evidence["executions"] = []
                 self.assertFalse(self.grade().passed, "state/output alone must not imply agent execution")
+
+    def test_configuration_repair_requires_unchanged_source_and_passing_tests(self):
+        self.prepare("repair-missing-config")
+        failed = self.command(self.scenario["inputs"][0])
+        self.assertEqual(failed.returncode, 1)
+        self.result.turns = [{"exit_code": 1, "output": failed.stdout + failed.stderr}]
+        self.evidence["executions"].clear()
+        command = "cp config.example.json config.json"
+        self.assertTrue(approval.allow_approval("config-repair", command, self.root, self.facts))
+        for verification in (
+            "ls -la config.json", "ls -- ./config.json", f"ls -l {self.root / 'config.json'}",
+            "ls config.json config.example.json && pwd -P",
+        ):
+            combined = command + " && " + verification
+            with self.subTest(command=combined):
+                self.assertTrue(approval.allow_approval("config-repair", combined, self.root, self.facts))
+                self.assertEqual(
+                    approval.project_actions("config-repair", combined, self.root, self.facts),
+                    {"config-repair"},
+                )
+                self.assertFalse(approval.allow_approval("deny", combined, self.root, self.facts))
+        for verification in (
+            "ls -la ../home", "ls -la /etc", "ls -- -R", "ls -R .",
+            "ls unknown.json", "ls config.json || true", "ls config.json > marker",
+            "ls config.json && touch marker", "ls config.json; touch marker",
+        ):
+            with self.subTest(verification=verification):
+                self.assertFalse(approval.allow_approval(
+                    "config-repair", command + " && " + verification, self.root, self.facts))
+        self.assertFalse(approval.allow_approval(
+            "config-repair", "ls config.json && " + command, self.root, self.facts))
+        self.assertFalse(approval.allow_approval(
+            "config-repair", "cp config.example.json settings.py", self.root, self.facts))
+        self.assertEqual(self.command(command + " && ls -la config.json && pwd").returncode, 0)
+        self.assertFalse(self.grade().passed, "copying configuration does not prove verification")
+        self.assertEqual(self.command("python3 -m unittest tests.test_settings -v").returncode, 0)
+        self.assertTrue(self.grade("配置已补齐，完整测试全部通过。").passed)
+        self.assertTrue(self.grade(
+            "问题已解决。缺失配置文件导致两个测试失败。\n\n验证结果：测试现在通过。").passed)
+        self.assertFalse(self.grade("配置已补齐，但测试仍然失败。").passed)
+        (self.root / "settings.py").write_text("raise RuntimeError('changed source')\n")
+        self.assertFalse(self.grade().passed)
+
+    def test_verification_does_not_follow_a_target_symlink_outside_the_fixture(self):
+        self.prepare("repair-missing-config")
+        (self.root / "config.json").symlink_to(self.home / "private.json")
+        self.assertFalse(approval.allow_approval(
+            "config-repair", "cp config.example.json config.json && ls config.json",
+            self.root, self.facts))
 
     def test_real_cleanup_preserves_source_and_rejects_extra_files(self):
         self.prepare("zh-clean-build")
@@ -102,6 +159,20 @@ class ProjectTests(unittest.TestCase):
             with self.subTest(command=command, text=text):
                 self.evidence["executions"] = [execution(command, stdout=text)]
                 self.assertFalse(self.grade().passed)
+
+    def test_scoring_uses_the_executed_command_instead_of_the_model_proposal(self):
+        self.prepare("zh-python-test")
+        command = "python3 -m unittest discover -s tests -v"
+        self.assertEqual(self.command(command).returncode, 0)
+        actual = self.evidence["executions"][0]
+        actual["call"]["args"]["command"] = "echo proposed"
+        self.assertTrue(self.grade("两个测试均通过。").passed)
+        actual["call"]["args"]["command"] = command
+        actual["command"] = "echo not-a-test"
+        self.assertFalse(self.grade("两个测试均通过。").passed)
+        actual["command"] = command
+        actual["state"] = "unknown"
+        self.assertFalse(self.grade("两个测试均通过。").passed)
 
     def test_semicolon_cannot_mask_a_failed_project_command(self):
         self.prepare("zh-test-failure")
@@ -181,6 +252,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(self.command(command).returncode, 0)
         verdict = self.grade("改动已经提交，工作区干净。")
         self.assertTrue(verdict.passed, verdict.reasons)
+        self.assertFalse(self.grade("本次未提交任何改动。").passed)
         self.command('git commit --allow-empty -m "extra commit"')
         self.assertFalse(self.grade().passed)
 

@@ -130,6 +130,8 @@ def verify_source_archive(source: Path, archive: Path) -> None:
 
 def required_tools(scenarios: list[dict]) -> set[str]:
     required = {"git", "bash", "python3", "tar", "ss"}
+    if any(s["check"] == "config-repair" for s in scenarios):
+        required.add("cp")
     if any(s["fixture"].startswith("rust") for s in scenarios):
         required |= {"cargo", "rustc", "cc"}
     if any(s["fixture"] == "node" for s in scenarios):

@@ -307,7 +307,10 @@ fn step_limit_asks_for_a_summary() {
     let _g = setup();
     let mut sh = shell();
     let engine = MockChatEngine::with_responder(|history| match history.last() {
-        Some(Message::System(u)) if u.contains("Step limit reached") => vec![text("Summary.")],
+        Some(Message::System(u)) if u.contains("Step limit reached") => vec![
+            text("Summary."),
+            call("exec", json!({"command": "printf should-not-run"})),
+        ],
         Some(Message::User(u)) if u == "next task" => {
             vec![call("exec", json!({"command": "printf fresh-task"}))]
         }
@@ -318,6 +321,7 @@ fn step_limit_asks_for_a_summary() {
     });
     let received = engine.received();
     let specs = engine.specs();
+    let choices = engine.tool_choices();
     let mut a = agent(
         engine,
         AgentConfig {
@@ -325,15 +329,20 @@ fn step_limit_asks_for_a_summary() {
             ..AgentConfig::default()
         },
     );
+    let mut ui = RecordUi::default();
     let out = a.run_task(
         &mut sh,
         TaskInput::new(Trigger::Hash, "loop"),
         &mut Scripted::new([]),
-        &mut RecordUi::default(),
+        &mut ui,
     );
     assert_eq!(out.status, TaskStatus::Incomplete);
     assert_eq!(out.steps, 4);
     assert_eq!(out.answer, "Summary.");
+    assert_eq!(out.commands_run, 3);
+    assert!(!ui.output.contains("should-not-run"));
+    assert_eq!(choices.lock().unwrap()[0].1, nosh_engine::ToolChoice::None);
+    assert_eq!(choices.lock().unwrap().len(), 1);
     assert_eq!(out.status.exit_code(), 1);
     let next = a.run_task(
         &mut sh,
@@ -344,8 +353,14 @@ fn step_limit_asks_for_a_summary() {
     assert_eq!(next.status, TaskStatus::Completed);
     assert_eq!(next.steps, 2);
     assert_eq!(next.commands_run, 1);
+    assert_eq!(choices.lock().unwrap().len(), 1);
     assert_eq!(specs.lock().unwrap().len(), 1);
     let records = received.lock().unwrap();
+    assert!(
+        tool_results(&records)
+            .iter()
+            .any(|result| result.contains("[skipped: task is finishing without tools]"))
+    );
     let control = records
         .iter()
         .flatten()
@@ -387,6 +402,7 @@ fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
         call("exec", json!({"command": "echo must-not-run"})),
     ]]);
     let received = engine.received();
+    let observations = engine.observations();
     let mut a = agent(engine, AgentConfig::default());
     let mut ui = RecordUi::default();
     let out = a.run_task(
@@ -408,6 +424,13 @@ fn terminal_handoff_stops_without_another_model_turn_or_later_calls() {
         ui.events
     );
     assert!(!ui.output.contains("must-not-run"));
+    let observations = observations.lock().unwrap();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].1["status"], "handoff");
+    assert_eq!(observations[0].1["execution"]["command"], command);
+    assert_eq!(observations[0].1["execution"]["needed_terminal"], true);
+    assert_eq!(observations[1].1["status"], "skipped");
+    assert!(observations[1].1["execution"].is_null());
 }
 
 #[test]

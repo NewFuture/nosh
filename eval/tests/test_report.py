@@ -17,7 +17,7 @@ class ReportTests(unittest.TestCase):
         return {
             "schema_version": 2,
             "metadata": {"run_id": "test", "observation": "native-v1",
-                         "dataset_revision": 12,
+                         "dataset_revision": SUITE["dataset_revision"],
                          "build": {"binary_sha256": "a" * 64},
                          "scenarios": [{"id": "example"}], "seeds": [0, 1], "repeat": 1},
             "trials": [{"scenario_id": "example", "seed": 0, "repeat": 0, "status": "pass",
@@ -142,10 +142,8 @@ class ReportTests(unittest.TestCase):
     def test_assist_passes_always_require_directory_state(self):
         data = self.sample()
         data["metadata"]["scenarios"][0]["assistance"] = {"intent": "generate", "result": "command", "automatic": False}
-        for revision in (1, SUITE["dataset_revision"]):
-            data["metadata"]["dataset_revision"] = revision
-            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "directory state"):
-                report.validate(data)
+        with self.assertRaisesRegex(ValueError, "directory state"):
+            report.validate(data)
         for value in (None, {}, ["z", "a"], ["a", "a"], [1]):
             data["trials"][0]["final_state"]["directories"] = value
             with self.subTest(directories=value), self.assertRaisesRegex(ValueError, "directory state"):
@@ -209,7 +207,7 @@ class ExpandedReportTests(unittest.TestCase):
         data = {
             "schema_version": 2,
             "metadata": {"run_id": "unit-test", "observation": "native-v1",
-                         "dataset_revision": 12,
+                         "dataset_revision": SUITE["dataset_revision"],
                          "build": {"binary_sha256": "a" * 64},
                          "scenarios": SUITE["scenarios"], "seeds": SUITE["seeds"], "repeat": 2},
             "trials": [],

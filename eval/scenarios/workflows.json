@@ -80,6 +80,50 @@
     "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "any", "final_question": "forbid"}
   },
   {
+    "id": "clarify-then-test",
+    "title": "Clarify a missing goal and run the tests requested in the answer",
+    "mode": "repl",
+    "fixture": "python",
+    "inputs": ["帮我处理一下"],
+    "completions": [
+      {"kind": "agent", "answers": ["运行这个项目的完整测试。"]}
+    ],
+    "group": "expanded",
+    "approval": "python-test",
+    "check": "python-test",
+    "expect": {"max_steps": 6, "max_confirmations": 1, "response_language": "zh", "final_question": "forbid"}
+  },
+  {
+    "id": "repair-missing-config",
+    "title": "Repair missing development configuration and verify the full test suite",
+    "mode": "repl",
+    "fixture": "python-config",
+    "inputs": [
+      "python3 -m unittest discover -s tests -v",
+      "#fix 补齐缺失配置，并重新运行测试验证。"
+    ],
+    "completions": [
+      {"kind": "shell", "exit_code": 1, "contains": ["FileNotFoundError", "config.json", "FAILED"]},
+      {"kind": "agent"}
+    ],
+    "group": "expanded",
+    "approval": "config-repair",
+    "check": "config-repair",
+    "expect": {"max_steps": 6, "max_confirmations": 3, "response_language": "zh", "final_question": "forbid"}
+  },
+  {
+    "id": "rename-with-conflict",
+    "title": "Rename text files without overwriting an existing target and report what was skipped",
+    "mode": "repl",
+    "fixture": "rename-conflict",
+    "inputs": ["# 把当前目录的 .txt 文件改成 .md，不覆盖已有文件，并说明跳过了哪些文件。"],
+    "completions": [{"kind": "agent"}],
+    "group": "expanded",
+    "approval": "rename-no-clobber",
+    "check": "rename-conflict",
+    "expect": {"max_steps": 6, "max_confirmations": 4, "response_language": "zh", "final_question": "forbid"}
+  },
+  {
     "id": "generate-natural-clarification",
     "title": "Noninteractive generation declines unspecified archive operands",
     "mode": "suggest",

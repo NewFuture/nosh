@@ -24,6 +24,7 @@ def execution(command: str, result: driver.Result | None = None) -> dict:
     stderr = result.stderr or ""
     return {
         "call": {"name": "exec", "args": {"command": command}},
+        "command": command,
         "state": "executed",
         "exit_code": result.exit_code,
         "timed_out": False,
@@ -269,11 +270,11 @@ class DatasetRevisionTests(ProjectWorkCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_current_suite_preserves_capture_and_prior_task_contracts(self):
+    def test_current_suite_declares_capture_and_task_contracts(self):
         data = suite.load_suite(SCENARIO_PATH)
         scenarios = {scenario["id"]: scenario for scenario in data["scenarios"]}
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(data["dataset_revision"], 26)
+        self.assertEqual(data["dataset_revision"], 34)
         self.assertEqual(data["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(len(scenarios), 27)
         self.assertEqual(scenarios["zh-git-commit"]["inputs"], ["提交改动"])
@@ -293,20 +294,17 @@ class DatasetRevisionTests(ProjectWorkCase):
             suite.validate_suite(missing)
         with self.assertRaisesRegex(ValueError, "unsupported scenario schema"):
             suite.validate_suite(dict(current, schema_version=1))
-        for revision in (1, 12):
-            changed = copy.deepcopy(current)
-            changed["dataset_revision"] = revision
-            next(s for s in changed["scenarios"] if s["id"] == "zh-git-commit")["fixture"] = "dirty-git"
-            with self.assertRaisesRegex(ValueError, "required facts"):
-                suite.validate_suite(changed)
+        changed = copy.deepcopy(current)
+        next(s for s in changed["scenarios"] if s["id"] == "zh-git-commit")["fixture"] = "dirty-git"
+        with self.assertRaisesRegex(ValueError, "required facts"):
+            suite.validate_suite(changed)
 
-        revision_four = copy.deepcopy(current)
-        revision_four["dataset_revision"] = 4
-        for scenario in revision_four["scenarios"]:
+        misrouted = copy.deepcopy(current)
+        for scenario in misrouted["scenarios"]:
             if scenario["check"] in suite.CAPTURE_CHECKS:
                 scenario["inputs"][-1] = "# 根据刚才的输出诊断"
         with self.assertRaisesRegex(ValueError, "explicit #fix"):
-            suite.load_suite(self.write_suite(revision_four))
+            suite.load_suite(self.write_suite(misrouted))
 
         for revision in (0, -1, True, 2.0, "2", None, []):
             invalid = dict(current, dataset_revision=revision)

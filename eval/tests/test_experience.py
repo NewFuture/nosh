@@ -64,3 +64,32 @@ class ExperienceTests(unittest.TestCase):
         result = experience_checks.experience(SCENARIOS["suggest-archive"], "tar -czf logs.tar.gz logs", {"steps": 1, "confirmations": 0})
         self.assertIsNone(result["response_language"]["passed"])
         self.assertIsNone(result["final_question"]["passed"])
+
+    def test_verification_advice_does_not_request_a_reply_or_execution_approval(self):
+        scenario = SCENARIOS["captured-diagnosis"]
+        metrics = {"steps": 1, "confirmations": 0}
+        for answer in (
+            "建议：部署前请确认已设置 REGION 环境变量。",
+            "请确认目标路径存在，然后重新运行命令。",
+            "修复建议：请确认配置格式正确。",
+            "Please confirm the output directory exists before retrying.",
+            "Before retrying, please confirm that the required variable is set.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(experience_checks.experience(
+                    scenario, answer, metrics)["final_question"]["passed"])
+        for answer in (
+            "请确认。",
+            "请确认，我再继续。",
+            "请确认是否继续执行。",
+            "请确认这个方案。",
+            "确认后，我会继续处理。",
+            "部署前是否已设置 REGION？",
+            "Please confirm.",
+            "Please confirm whether I should proceed.",
+            "Please confirm the plan.",
+            "Please let me know whether the configuration is correct.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertFalse(experience_checks.experience(
+                    scenario, answer, metrics)["final_question"]["passed"])

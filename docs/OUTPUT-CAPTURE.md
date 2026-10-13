@@ -56,7 +56,7 @@ capture_output = "last"  # last（默认）| off
 | AI 入口 | 是否附带最近输出 | 关联要求 |
 |---|---|---|
 | 失败自动辅助 | 是，进入 CommandAssist Fix | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
-| `#fix [补充说明]` | 是，始终进入 Agent 诊断，说明可省略 | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
+| `#fix [补充说明]` | 是，进入 Agent 处理失败，省略正文时默认诊断 | 输出命令 ID 必须与保存的失败命令 ID 完全一致 |
 | `# <任务>` | 否 | 普通任务默认不带终端输出 |
 | 被路由到 AI 的解析错误、未知命令或自然语言 | 否 | 新输入不能继承上一条命令的正文 |
 | 非空输入 F2／适用的 Tab 兜底 / `nosh -s` | 否 | CommandAssist Generate 按需查询，只输出／回填 |
@@ -202,13 +202,13 @@ PTY 创建、控制终端验证、对端验证或就绪等待失败时：
 ```text
 [user_output {"command_id":17,"command":"cargo build","execution_cwd":"/work/app",
               "exit":101,"source":"terminal","state":"captured",
-              "observed_bytes":1234,"retained_bytes":1234,
-              "truncated":false,"incomplete":false,"mixed":false}]
+              "retained_bytes":1234}]
 error[E0308]: ...
 [/user_output]
 ```
 
 - JSON 元数据防止命令换行与正文混淆字段。
+- Agent 模型视图省略耗时、原始字节计数、空 reason 和值为 false 的质量标记；为 true 的截断、未完成、混流及命令／cwd 裁剪标记仍显式展示。`retained_bytes` 保留用于准确界定正文，不把正文中的伪结束标签当作边界。采集槽与宿主完整元数据不变，CommandAssist 的独立展示格式不变。
 - 执行 cwd 与任务请求时的当前 cwd 分开。
 - 空输出明确写成成功空采集；不可用状态明确要求模型不得编造错误文本。
 - 已知混流只附状态，不附正文。

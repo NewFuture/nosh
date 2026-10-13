@@ -165,6 +165,85 @@ fn agent_asks_in_full_and_read_only_sessions_without_conferring_approval() {
 }
 
 #[test]
+fn a_user_answer_allows_reassessment_but_does_not_authorize_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shell = shell(dir.path());
+    let engine = MockChatEngine::new(vec![
+        vec![call("exec", json!({"command":"touch output"}))],
+        vec![call(
+            "ask_user",
+            json!({"question":"Which output should I use?"}),
+        )],
+        vec![call("exec", json!({"command":"touch output"}))],
+        vec![text("Not executed.")],
+    ]);
+    let choices = engine.tool_choices();
+    let mut agent = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            mode: nosh_permissions::ApprovalMode::Confirm,
+            ..Default::default()
+        },
+        Environment::default(),
+        ToolSet::Full,
+    )
+    .with_user_input(Box::new(ScriptedInput::new(["Use output."])));
+    let mut approval = Scripted::new([
+        crate::ApprovalResponse::Deny { reason: None },
+        crate::ApprovalResponse::Deny { reason: None },
+    ]);
+    let outcome = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Hash, "prepare output"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(outcome.status, TaskStatus::Incomplete);
+    assert_eq!(approval.seen.len(), 2);
+    assert!(choices.lock().unwrap().is_empty());
+    assert!(!dir.path().join("output").exists());
+}
+
+#[test]
+fn a_user_answer_resets_corrections_without_granting_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shell = shell(dir.path());
+    let engine = MockChatEngine::new(vec![
+        vec![call("exec", json!({"command": "cd . && touch output"}))],
+        vec![call("exec", json!({"command": "cd . && touch output"}))],
+        vec![call(
+            "ask_user",
+            json!({"question": "Which output should I prepare?"}),
+        )],
+        vec![call("exec", json!({"command": "cd . && touch output"}))],
+        vec![call("exec", json!({"command": "touch output"}))],
+        vec![text("Not executed.")],
+    ]);
+    let mut agent = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            mode: nosh_permissions::ApprovalMode::Confirm,
+            ..Default::default()
+        },
+        Environment::default(),
+        ToolSet::Full,
+    )
+    .with_user_input(Box::new(ScriptedInput::new(["Use output."])));
+    let mut approval = Scripted::new([crate::ApprovalResponse::Deny { reason: None }]);
+    let outcome = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Hash, "prepare an output"),
+        &mut approval,
+        &mut RecordUi::default(),
+    );
+    assert_eq!(outcome.status, TaskStatus::Incomplete);
+    assert_eq!(outcome.steps, 6);
+    assert_eq!(outcome.commands_run, 0);
+    assert_eq!(approval.seen.len(), 1);
+    assert!(!dir.path().join("output").exists());
+}
+
+#[test]
 fn agent_question_cancellation_and_unavailable_input_have_distinct_statuses() {
     let dir = tempfile::tempdir().unwrap();
     let mut shell = shell(dir.path());

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from eval import campaign, checks, driver, fixtures, report, runtime, suite as suite_api
+from .support import SUITE
 
 
 class DatasetRevisionTests(unittest.TestCase):
@@ -15,7 +16,7 @@ class DatasetRevisionTests(unittest.TestCase):
         return {
             "schema_version": 2,
             "metadata": {"run_id": "revision-test", "observation": "native-v1",
-                         "dataset_revision": 12,
+                         "dataset_revision": SUITE["dataset_revision"],
                          "build": {"binary_sha256": "a" * 64},
                          "scenarios": [{"id": "example"}], "seeds": [0], "repeat": 1},
             "trials": [{"scenario_id": "example", "seed": 0, "repeat": 0, "status": "pass",
@@ -26,12 +27,12 @@ class DatasetRevisionTests(unittest.TestCase):
         }
 
 
-    def test_semantics_change_is_visible_without_losing_paired_metrics(self):
-        previous = self.sample()
-        current = copy.deepcopy(previous)
-        current["metadata"]["dataset_revision"] = 13
+    def test_revision_mismatch_is_visible_without_losing_paired_metrics(self):
+        current = self.sample()
+        reference = copy.deepcopy(current)
+        reference["metadata"]["dataset_revision"] += 1
         current["trials"][0]["metrics"]["steps"] = 3
-        comparison = report.compare(current, previous)
+        comparison = report.compare(current, reference)
         self.assertEqual(comparison["paired_trials"], 1)
         self.assertEqual(comparison["pairs"][0]["metric_delta"]["steps"], 1)
         self.assertEqual(comparison["warnings"], [
@@ -39,10 +40,11 @@ class DatasetRevisionTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            report.save(current, directory, previous)
+            report.save(current, directory, reference)
             saved = json.loads((directory / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(saved["metadata"]["dataset_revision"], 13)
-            self.assertIn("Dataset revision: 13.", (directory / "report.md").read_text(encoding="utf-8"))
+            self.assertEqual(saved["metadata"]["dataset_revision"], SUITE["dataset_revision"])
+            self.assertIn(f"Dataset revision: {SUITE['dataset_revision']}.",
+                          (directory / "report.md").read_text(encoding="utf-8"))
 
     def test_report_requires_the_current_schema_revision_and_native_observation(self):
         for field, value in (("dataset_revision", None), ("observation", "legacy")):
@@ -63,20 +65,19 @@ class DatasetRevisionTests(unittest.TestCase):
                 report.validate(data)
 
     @unittest.skipUnless(sys.platform == "linux", "runner metadata uses Linux process priority")
-    def test_runtime_records_explicit_dataset_revisions(self):
+    def test_runtime_records_the_current_dataset_revision(self):
         args = SimpleNamespace(build_info=None, label="revision-test",
                                threads=1, timeout=None, seeds=None, repeat=1)
-        suite = {"schema_version": 2, "dataset_revision": 12,
+        suite = {"schema_version": 2, "dataset_revision": SUITE["dataset_revision"],
                  "timeout_s": 30, "seeds": [0], "scenarios": [{"id": "example"}]}
         with tempfile.TemporaryDirectory() as temporary, patch("eval.runtime.machine_info", return_value={}):
             path = Path(temporary) / "test-input"
             path.write_bytes(b"metadata-only fixture")
-            for revision in (12, 13):
-                configured = dict(suite, dataset_revision=revision)
-                measured = runtime.metadata(args, configured, path, path, path, {})
-                self.assertEqual(measured["dataset_revision"], revision)
-                self.assertEqual(measured["observation"], "native-v1")
-                self.assertEqual(configured, dict(suite, dataset_revision=revision))
+            configured = dict(suite)
+            measured = runtime.metadata(args, configured, path, path, path, {})
+            self.assertEqual(measured["dataset_revision"], SUITE["dataset_revision"])
+            self.assertEqual(measured["observation"], "native-v1")
+            self.assertEqual(configured, suite)
             args.timeout = 60
             configured = dict(suite, timeout_s=240)
             measured = runtime.metadata(args, configured, path, path, path, {})
@@ -101,16 +102,15 @@ class DatasetRevisionTests(unittest.TestCase):
         self.assertEqual(campaign.validate_budget(subset, 2, 240, available_s), 480)
 
     @unittest.skipUnless(sys.platform == "linux", "runner metadata uses Linux process priority")
-    def test_nested_scorers_are_fingerprinted_but_tests_and_archives_are_not(self):
+    def test_nested_scorers_are_fingerprinted_but_tests_are_not(self):
         args = SimpleNamespace(build_info=None, label="source-test",
                                threads=1, timeout=None, seeds=None, repeat=1)
-        suite = {"schema_version": 2, "dataset_revision": 12,
+        suite = {"schema_version": 2, "dataset_revision": SUITE["dataset_revision"],
                  "timeout_s": 30, "seeds": [0], "scenarios": [{"id": "example"}]}
         with tempfile.TemporaryDirectory() as temporary, patch("eval.runtime.machine_info", return_value={}):
             root = Path(temporary)
             (root / "checks").mkdir()
             (root / "tests").mkdir()
-            (root / "baselines").mkdir()
             (root / "campaign.py").write_text("runner = 1\n")
             (root / "checks" / "__init__.py").write_text("")
             scorer = root / "checks" / "agent.py"
@@ -125,7 +125,6 @@ class DatasetRevisionTests(unittest.TestCase):
                 self.assertNotEqual(before["harness_content_sha256"], changed["harness_content_sha256"])
                 self.assertEqual(before["suite_sha256"], changed["suite_sha256"])
                 (root / "tests" / "test_ignore.py").write_text("test = 1\n")
-                (root / "baselines" / "old.py").write_text("score = 0\n")
                 ignored = runtime.metadata(args, suite, binary, binary, binary, {})
                 for key in ("harness_sha256", "harness_content_sha256", "grading_content_sha256", "suite_sha256"):
                     self.assertEqual(changed[key], ignored[key])
@@ -178,6 +177,7 @@ class TaskCompletionIntegrationTests(unittest.TestCase):
             def grade(command, output):
                 evidence = {"executions": [{
                     "call": {"name": "exec", "args": {"command": command}},
+                    "command": command,
                     "state": "executed", "exit_code": 0, "timed_out": False, "interrupted": False,
                     "result": "[exit_code=0 duration=0.01s truncated=no]\n--- stdout ---\n" + output,
                 }]}

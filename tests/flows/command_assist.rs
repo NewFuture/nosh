@@ -168,11 +168,11 @@ fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
             Some("\"sh -c 'exit 7'\"")
         );
         assert_eq!(context.contains("[user_output "), index == 0);
-        let mut expected = "Explain why the command failed and how to fix it.".to_string();
-        if !additional.is_empty() {
-            expected.push_str("\n\nAdditional context from the user:\n");
-            expected.push_str(additional);
-        }
+        let expected = if additional.is_empty() {
+            "Explain why the command failed and how to fix it.".to_string()
+        } else {
+            format!("Help with the failed command.\n\n{additional}")
+        };
         assert_eq!(request, &expected);
     }
     assert_eq!(sh.recent_commands().len(), 1);

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from eval import approval, checks, driver, fixtures
 from eval.checks import command_assist as assist_checks, files as file_checks
+from eval.checks.common import completion_contradictions
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux fixture tools")
@@ -33,6 +34,32 @@ class CheckTests(unittest.TestCase):
                                 "These exclude notes.txt, which is only 100 bytes.").passed)
         self.assertFalse(verdict("dump.bin, archive.bin, video.bin").passed)
         self.assertFalse(verdict("Done.").passed)
+
+    def test_resolved_causal_history_is_not_a_current_failure(self):
+        for action, answer in (
+            ("test", "问题已解决。缺失配置导致两个测试失败。\n验证结果：测试现在通过。"),
+            ("test", "测试失败的原因是依赖未安装。安装完成后，测试均已通过。"),
+            ("test", "The tests failed because a setting was missing. All tests now pass."),
+            ("build", "编译失败的原因是依赖缺失。编译现已成功。"),
+            ("rename", "权限不足导致重命名失败。修正权限后重命名现已完成。"),
+        ):
+            with self.subTest(action=action, answer=answer):
+                self.assertEqual(completion_contradictions(answer, action), [])
+        for answer in (
+            "缺失配置导致测试失败。",
+            "测试已通过。\n测试失败的原因是配置缺失。",
+            "测试仍然失败，因为配置缺失。测试现在通过。",
+            "测试现在通过。\n当前测试失败。",
+            "测试失败的原因是配置缺失。预计测试现在通过。",
+            "测试失败的原因是配置缺失。如果补齐配置，测试将会通过。",
+            "测试失败的原因是配置缺失。\n> 测试现在通过。",
+            "The tests still failed because a setting was missing. Tests now pass.",
+            "Tests now pass. The tests failed because a setting is missing.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(completion_contradictions(answer, "test"))
+        self.assertTrue(completion_contradictions(
+            "缺失配置导致测试失败。测试现在通过，共运行 3 个测试。", "test", 2))
 
     def test_largest_separates_reference_list_but_keeps_all_ranked_items(self):
         root = self.base / "big"
@@ -233,6 +260,8 @@ class CheckTests(unittest.TestCase):
             "config.json is missing from the current directory/relative path.",
             "config.json is missing at this address.",
             "config.json 的相对路径不存在。",
+            "config.json 不存在，请修改终端配色。",
+            "config.json is missing. Change the terminal font.",
         ):
             with self.subTest(answer=answer):
                 self.assertIn("answer provides no recognized remedy", verdict(answer).reasons)
@@ -278,6 +307,8 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(checks.judge(scenario, "done", facts, root, after, self.result, self.metrics).passed)
         self.result.approvals = [{"allowed": True}]
         self.assertTrue(checks.judge(scenario, "done", facts, root, after, self.result, self.metrics).passed)
+        self.assertFalse(checks.judge(
+            scenario, "没有重命名任何文件。", facts, root, after, self.result, self.metrics).passed)
         (root / "readme.md").write_text("changed")
         self.assertFalse(checks.judge(scenario, "done", facts, root, fixtures.snapshot(root), self.result, self.metrics).passed)
         loop = 'for f in *.txt; do mv "$f" "${f%.txt}.md"; done'
@@ -312,6 +343,43 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(checks.judge(*invented).passed)
         self.assertTrue(approval.allow_approval("cwd", "cd data && ls -la", root, facts))
         self.assertFalse(approval.allow_approval("cwd", "cd / && ls -la", root, facts))
+        for command in ("cd data && pwd", "cd -- ./data && pwd -P", "cd data; pwd -L", "cd data && pwd --"):
+            self.assertTrue(approval.allow_approval("cwd", command, root, facts), command)
+            probe = driver.run_cli(
+                ["bash", "--noprofile", "--norc", "-c", command],
+                root, fixtures.project_environment(self.base / "home"), 5,
+            )
+            self.assertIsNone(probe.error)
+            self.assertEqual(probe.exit_code, 0)
+            self.assertEqual(probe.stdout.strip(), str(root / "data"))
+            self.assertFalse(approval.allow_approval("deny", command, root, facts))
+        for command in (
+            "cd data && pwd && ls -la",
+            "cd -- ./data && ls -- . && pwd -P",
+            f"cd data; pwd -L && ls -l {root / 'data'}",
+        ):
+            self.assertTrue(approval.allow_approval("cwd", command, root, facts), command)
+            probe = driver.run_cli(
+                ["bash", "--noprofile", "--norc", "-c", command],
+                root, fixtures.project_environment(self.base / "home"), 5,
+            )
+            self.assertIsNone(probe.error)
+            self.assertEqual(probe.exit_code, 0)
+            self.assertIn(str(root / "data"), probe.stdout.splitlines())
+            self.assertIn("dump.bin", probe.stdout)
+            self.assertIn("small.bin", probe.stdout)
+            self.assertFalse(approval.allow_approval("deny", command, root, facts))
+        for command in (
+            "cd . && pwd", "cd / && pwd", "cd data || pwd",
+            "cd data && pwd ..", "cd data && pwd --help",
+            "cd data && pwd > marker", "cd data && pwd && touch marker",
+            "cd data && pwd; touch marker", "cd data && pwd | cat",
+            "cd data && pwd && ls ..", "cd data && pwd && ls /etc",
+            "cd data && pwd && ls -R .", "cd data && pwd && ls &&",
+            "cd data && pwd && ls || true", "cd data && pwd && ls > marker",
+        ):
+            self.assertFalse(approval.allow_approval("cwd", command, root, facts), command)
+        self.assertEqual(fixtures.snapshot(root), facts["before"])
 
     def test_cwd_listing_respects_parent_scope_and_negative_references(self):
         root = self.base / "big"

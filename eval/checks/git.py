@@ -7,7 +7,7 @@ import re
 import subprocess
 
 from .. import fixtures
-from .common import HISTORY_ALIASES, history_contradictions
+from .common import HISTORY_ALIASES, completion_contradictions, history_contradictions
 from .experience import history_prose
 
 
@@ -151,6 +151,7 @@ def git_judgment(kind: str, answer: str, facts: dict, root: Path, evidence: dict
     if kind != "git-commit" and state != before:
         reasons.append("read-only task changed git HEAD, index or worktree")
     if kind == "git-commit":
+        reasons.extend(completion_contradictions(answer, "commit"))
         if state["parents"] != [before["head"]] or state["commits"] != before["commits"] + 1:
             reasons.append("expected exactly one new commit on the original HEAD")
         if state["status"]:

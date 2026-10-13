@@ -481,7 +481,7 @@ class CommandAssistTests(unittest.TestCase):
                                         scenario or self.scenarios["next-no-goal"], path, seed=0)
 
     def test_suite_covers_three_intents_and_noninteractive_results(self):
-        self.assertEqual(self.suite["dataset_revision"], 26)
+        self.assertEqual(self.suite["dataset_revision"], 34)
         self.assertEqual({s["assistance"]["intent"] for s in self.suite["scenarios"]}, {"generate", "fix", "next"})
         self.assertEqual({s["assistance"]["result"] for s in self.suite["scenarios"]}, {"command", "none"})
         self.assertTrue(all("require_query" not in s["assistance"] for s in self.suite["scenarios"]))

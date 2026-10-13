@@ -20,7 +20,8 @@ fn grep(
 #[test]
 fn tool_catalog_matches_the_advertised_schema_and_order() {
     let command = exec_spec();
-    assert!(command.description.contains("current shell session"));
+    assert!(command.description.contains("current directory"));
+    assert!(command.description.contains("shared session"));
     assert!(!command.description.contains("Bash"));
     for (set, names) in [
         (ToolSet::Full, vec!["exec", "read_file", "grep"]),
@@ -189,7 +190,7 @@ fn directory_read_error_only_suggests_a_shared_read_only_tool() {
 }
 
 #[test]
-fn user_output_format_preserves_metadata_and_capture_quality() {
+fn user_output_omits_audit_noise_without_losing_binding_or_quality() {
     let mut output = UserOutput {
         command_id: 7,
         command: "cargo build".into(),
@@ -207,10 +208,50 @@ fn user_output_format_preserves_metadata_and_capture_quality() {
         mixed: false,
     };
     let captured = format_user_output(&output);
-    assert!(captured.contains("\"command_id\":7"));
-    assert!(captured.contains("actual error"));
+    let header: Value = serde_json::from_str(
+        captured
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("[user_output ")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        header,
+        json!({
+            "command_id": 7, "command": "cargo build", "execution_cwd": "/work/app",
+            "exit": 101, "source": "terminal", "state": "captured",
+            "retained_bytes": output.text.len(),
+        })
+    );
+    assert!(captured.ends_with("actual error\n\n[/user_output]"));
+    let audit = output_metadata(&output);
+    assert_eq!(audit["duration_ms"], 25);
+    assert_eq!(audit["observed_bytes"], 13);
+    assert_eq!(audit["mixed"], false);
+    output.duration = Duration::from_secs(30);
+    output.observed_bytes = Some(999);
+    assert_eq!(format_user_output(&output), captured);
+    output.truncated = true;
+    output.incomplete = true;
+    output.command_truncated = true;
+    output.cwd_truncated = true;
+    let partial = format_user_output(&output);
+    for flag in [
+        "truncated",
+        "incomplete",
+        "command_truncated",
+        "cwd_truncated",
+    ] {
+        assert!(partial.contains(&format!("\"{flag}\":true")));
+    }
     output.mixed = true;
-    assert!(!format_user_output(&output).contains("actual error"));
+    let mixed = format_user_output(&output);
+    assert!(mixed.contains("\"mixed\":true"));
+    assert!(!mixed.contains("actual error"));
 }
 
 #[test]
@@ -271,8 +312,11 @@ fn compact_assist_output_preserves_capture_quality_without_repeating_execution()
             assert_eq!(full_fields["command"], "cargo build");
             assert_eq!(full_fields["execution_cwd"], "/work/app");
             assert_eq!(full_fields["exit"], 101);
-            assert_eq!(full_fields["duration_ms"], 25);
-            assert_eq!(full_fields["observed_bytes"], 13);
+            assert!(full_fields.get("duration_ms").is_none());
+            assert!(full_fields.get("observed_bytes").is_none());
+            let audit = output_metadata(&output);
+            assert_eq!(audit["duration_ms"], 25);
+            assert_eq!(audit["observed_bytes"], 13);
             assert_eq!(full_fields["retained_bytes"], output.text.len());
             assert_eq!(full_fields["command_truncated"], true);
             assert_eq!(full_fields["cwd_truncated"], true);

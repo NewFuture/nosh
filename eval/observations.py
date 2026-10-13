@@ -23,7 +23,7 @@ def session_key(event: dict) -> tuple[int, int]:
 def index_trace(events: list[dict]) -> tuple[dict, set]:
     records = defaultdict(list)
     engines, opened, active, pending = set(), set(), set(), set()
-    session_events = {"open", "step_start", "step_end", "close", "rewind", "compact", "tool_choice", "observation"}
+    session_events = {"open", "step_start", "step_end", "step_error", "close", "rewind", "compact", "tool_choice", "observation"}
     for event in events:
         kind = event["ev"]
         if kind == "engine":
@@ -50,7 +50,7 @@ def index_trace(events: list[dict]) -> tuple[dict, set]:
                 if key in pending:
                     raise ValueError("overlapping observed engine steps")
                 pending.add(key)
-            elif kind == "step_end":
+            elif kind in ("step_end", "step_error"):
                 if key not in pending:
                     raise ValueError("engine result has no matching started step")
                 pending.remove(key)
@@ -58,8 +58,41 @@ def index_trace(events: list[dict]) -> tuple[dict, set]:
                 if key in pending:
                     raise ValueError("closed engine is missing its step result")
                 active.remove(key)
+            elif kind in ("rewind", "compact"):
+                fields = ("keep",) if kind == "rewind" else ("keep_recent", "changed")
+                if any(type(event.get(field)) is not int or not 0 <= event[field] < 2**64 for field in fields):
+                    raise ValueError("invalid engine recovery operation")
         records[kind].append(event)
     return records, pending
+
+
+def step_recoveries(events: list[dict]) -> dict[int, str]:
+    """Require the host's rewind/compact/retry sequence, not an error-text guess."""
+    starts, recovery, recovered = {}, {}, {}
+    order = ("rewind", "compact", "step_start", "step_end")
+    for index, event in enumerate(events):
+        key = (event.get("engine"), event.get("sid"))
+        if any(type(value) is not int or not 0 <= value < 2**64 for value in key):
+            continue
+        kind = event["ev"]
+        if kind == "step_error":
+            recovery[key] = (index, starts.get(key), 0)
+        elif key in recovery and kind != "tool_choice":
+            failure, messages, stage = recovery[key]
+            if kind != order[stage] or (kind == "step_start"
+                    and (not isinstance(messages, list)
+                         or json.dumps(event.get("messages"), sort_keys=True, allow_nan=False)
+                         != json.dumps(messages, sort_keys=True, allow_nan=False))):
+                recovery.pop(key)
+            elif kind == "step_end":
+                recovered[failure] = "completed"
+                recovery.pop(key)
+            else:
+                recovery[key] = (failure, messages, stage + 1)
+        if kind == "step_start":
+            starts[key] = event.get("messages")
+    recovered.update((failure, "retrying") for failure, _, stage in recovery.values() if stage == 3)
+    return recovered
 
 
 def assistance_observations(events: list[dict]) -> list[dict]:
@@ -77,6 +110,10 @@ def assistance_observations(events: list[dict]) -> list[dict]:
         if event.get("ev") != "observation":
             continue
         value = event.get("value")
+        if isinstance(value, dict) and value.get("workflow") == "agent":
+            if labels.get(key) != "agent":
+                raise ValueError("Agent tool observation has no Agent session")
+            continue
         if not isinstance(value, dict) or value.get("workflow") != "command_assist":
             raise ValueError("unknown host observation")
         expected = f"command_assist.{value.get('intent')}.{'background' if value.get('background') else 'foreground'}"
@@ -150,19 +187,94 @@ def assistance_observations(events: list[dict]) -> list[dict]:
     return results
 
 
-def execution_evidence(events: list[dict]) -> list[dict]:
+def apply_agent_outcome(execution: dict, value: dict) -> None:
+    statuses = {
+        "read", "error", "correction", "answered", "executed", "execution_error",
+        "denied", "repeated_denial", "handoff", "aborted", "cancelled", "failed", "skipped",
+    }
+    status = value.get("status")
+    if (value.get("kind") != "tool_result" or type(value.get("version")) is not int or value["version"] != 1
+            or not isinstance(status, str) or status not in statuses or not isinstance(value.get("result"), str)
+            or json.dumps(value.get("call"), sort_keys=True, allow_nan=False)
+               != json.dumps(execution["call"], sort_keys=True, allow_nan=False)
+            or not isinstance(value.get("current_cwd"), str)
+            or not PurePosixPath(value["current_cwd"]).is_absolute()):
+        raise ValueError("invalid native Agent tool outcome")
+    name = execution["call"]["name"]
+    command_states = {"executed", "execution_error", "handoff", "aborted"}
+    if ((status in command_states | {"correction"} and name != "exec")
+            or (status == "read" and name not in ("read_file", "grep"))
+            or (status == "answered" and name != "ask_user")):
+        raise ValueError("native tool status does not match the proposed tool")
+    execution.update(result=value["result"], native_status=status, current_cwd=value["current_cwd"])
+    command = value.get("execution")
+    if status not in command_states:
+        if command is not None:
+            raise ValueError("unexecuted tool outcome contains execution metadata")
+        execution["state"] = "not_executed" if name == "exec" else "returned"
+        return
+    if (not isinstance(command, dict)
+            or not isinstance(command.get("command"), str) or not command["command"].strip()
+            or not isinstance(command.get("cwd"), str) or not PurePosixPath(command["cwd"]).is_absolute()
+            or type(command.get("edited")) is not bool or type(command.get("rewritten")) is not bool):
+        raise ValueError("invalid actual command metadata")
+    requested = execution["call"]["args"].get("command")
+    if (not isinstance(requested, str) or (command["command"] != requested.strip()
+            and not command["edited"] and not command["rewritten"])):
+        raise ValueError("actual command differs without a recorded edit or rewrite")
+    flags = ("timed_out", "interrupted", "needed_terminal", "truncated")
+    if status == "execution_error":
+        if any(command.get(field) is not None for field in ("exit_code", "duration_s", *flags)):
+            raise ValueError("unknown execution result cannot contain successful-result metadata")
+        execution["state"] = "unknown"
+    else:
+        if (type(command.get("exit_code")) is not int or not -(2**31) <= command["exit_code"] < 2**31
+                or not finite_number(command.get("duration_s")) or command["duration_s"] < 0
+                or any(type(command.get(field)) is not bool for field in flags)):
+            raise ValueError("executed command has incomplete result metadata")
+        execution.update(state="executed", exit_code=command["exit_code"], duration_s=command["duration_s"],
+                         **{field: command[field] for field in flags})
+    execution.update(command=command["command"], execution_cwd=command["cwd"],
+                     edited=command["edited"], rewritten=command["rewritten"])
+
+
+def execution_evidence(events: list[dict], *, require_complete: bool = False) -> list[dict]:
     executions = []
     pending: dict[tuple, list[dict]] = {}
+    receipts: dict[tuple, list[dict]] = {}
     steps: dict[tuple, int] = {}
+    turns: dict[tuple, int] = {}
+    labels: dict[tuple, str] = {}
+    agent_calls = []
     for event in events:
-        if event["ev"] not in ("step_start", "step_end"):
+        if event["ev"] not in ("open", "step_start", "step_end", "observation"):
             continue
         key = session_key(event)
-        if event["ev"] == "step_start":
+        if event["ev"] == "open":
+            label = event.get("label", "")
+            if not isinstance(label, str):
+                raise ValueError("invalid observed session label")
+            labels[key] = label
+            continue
+        agent = not labels.get(key, "").startswith("command_assist.")
+        if event["ev"] == "observation":
+            value = event.get("value")
+            if not isinstance(value, dict):
+                raise ValueError("invalid native tool observation")
+            if value.get("workflow") != "agent":
+                continue
+            index = value.get("call_index")
+            calls = pending.get(key, [])
+            if (not agent or type(value.get("turn")) is not int or value["turn"] != turns.get(key)
+                    or type(index) is not int or not 0 <= index < len(calls)
+                    or "native_status" in calls[index]):
+                raise ValueError("native Agent outcome has no unique proposed call")
+            apply_agent_outcome(calls[index], value)
+        elif event["ev"] == "step_start":
             steps[key] = steps.get(key, 0) + 1
             if not isinstance(event.get("messages"), list):
                 raise ValueError("trace step is missing its messages")
-            waiting = pending.get(key, [])
+            waiting = receipts.get(key, [])
             for message in event["messages"]:
                 if (not isinstance(message, dict) or not isinstance(message.get("role"), str)
                         or not isinstance(message.get("text"), str)):
@@ -171,15 +283,18 @@ def execution_evidence(events: list[dict]) -> list[dict]:
                     continue
                 execution = waiting.pop(0)
                 text = message["text"]
-                header = re.match(r"^\[exit_code=(-?\d+) duration=[\d.]+s truncated=(yes|no)([^\]]*)\]\n", text)
-                execution.update(result=text, state="returned")
-                if execution["call"]["name"] == "exec":
-                    execution["state"] = "executed" if header else "not_executed"
-                    if header:
-                        execution.update(exit_code=int(header[1]), truncated=header[2] == "yes",
-                                         timed_out="timed_out=yes" in header[3],
-                                         interrupted="interrupted=yes" in header[3])
+                if agent:
+                    if "native_status" not in execution or text != execution["result"]:
+                        raise ValueError("model tool feedback differs from its native Agent outcome")
+                    if (message.get("source") == "user") != (execution["native_status"] == "answered"):
+                        raise ValueError("native user answer provenance differs from tool feedback")
+                else:
+                    execution.update(result=text, state="returned")
+                execution["submitted_to_model"] = True
+            if agent and waiting:
+                raise ValueError("Agent generated again before submitting all tool results")
         elif event["ev"] == "step_end":
+            turns[key] = turns.get(key, 0) + 1
             if not isinstance(event.get("tool_calls"), list):
                 raise ValueError("trace step is missing its tool calls")
             waiting = []
@@ -191,7 +306,12 @@ def execution_evidence(events: list[dict]) -> list[dict]:
                     execution.update(engine=key[0], sid=key[1], step=steps.get(key, 0))
                 executions.append(execution)
                 waiting.append(execution)
+                if agent:
+                    agent_calls.append(execution)
             pending[key] = waiting
+            receipts[key] = list(waiting)
+    if require_complete and any("native_status" not in call for call in agent_calls):
+        raise ValueError("native Agent tool outcome is missing")
     return executions
 
 
@@ -210,7 +330,9 @@ def question_evidence(result: driver.Result, executions: list[dict]) -> list[dic
             raise ValueError("user question does not match its native call")
         seen.add(key)
         if question["state"] == "answered":
-            if not isinstance(question.get("answer"), str) or actual["state"] != "returned":
+            if (not isinstance(question.get("answer"), str) or actual["state"] != "returned"
+                    or actual.get("native_status") != "answered"
+                    or actual.get("submitted_to_model") is not True):
                 raise ValueError("scripted answer was not returned to the original model session")
             try:
                 reply = json.loads(actual["result"])
@@ -279,6 +401,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
     assistance = []
     questions = []
     engines = []
+    engine_recoveries = []
     if scenario["check"] != "typos":
         if not trace.is_file():
             raise ValueError("native engine trace is missing")
@@ -288,11 +411,21 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             raise ValueError("invalid engine trace schema")
         if "evaluation trace:" in result.stderr or "evaluation trace:" in result.transcript:
             raise ValueError("nosh reported an evaluation trace failure")
-        errors = [e.get("error") for e in events if e["ev"] == "step_error"]
-        if any(not isinstance(error, str) for error in errors):
+        failures = [(index, event) for index, event in enumerate(events) if event["ev"] == "step_error"]
+        if any(not isinstance(event.get("error"), str) for _, event in failures):
             raise ValueError("invalid engine error observation")
+        recovered = step_recoveries(events)
+        accepted = {"completed", "retrying"} if deadline_timeout else {"completed"}
+        errors = [event["error"] for index, event in failures if recovered.get(index) not in accepted]
         if errors:
             raise RuntimeError("model engine failed: " + "; ".join(errors))
+        engine_recoveries = [
+            {"engine": event["engine"], "sid": event["sid"], "error": event["error"], "status": recovered[index]}
+            for index, event in failures if index in recovered
+        ]
+        if engine_recoveries:
+            notes.append("Engine recovery is verified from host operations and matching retry input. "
+                         "Steps include failed attempts; timing and token usage cover successful step results only.")
         records, pending = index_trace(events)
         engines = [event["info"] for event in records["engine"]]
         for info in engines:
@@ -320,9 +453,9 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             raise ValueError("incomplete engine observations; no successful fallback")
         if deadline_timeout:
             completed_tasks = sum(turn.get("kind") == "agent" for turn in result.turns)
-            if len(starts) == len(ends) + 1 and len(pending) == 1:
+            if len(starts) == len(ends) + len(failures) + 1 and len(pending) == 1:
                 deadline_state = "during_generation"
-            elif len(starts) == len(ends) and not pending:
+            elif len(starts) == len(ends) + len(failures) and not pending:
                 last = ends[-1]
                 if (last.get("stop") != "end_of_turn" or last.get("tool_calls") != []
                         or last.get("errors") != []):
@@ -340,7 +473,7 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             if (not isinstance(event.get("text"), str) or not isinstance(usage, dict)
                     or not finite_number(usage.get("ttft_s")) or usage["ttft_s"] < 0):
                 raise ValueError("invalid generated text or step usage in trace")
-        executions = execution_evidence(events)
+        executions = execution_evidence(events, require_complete=not deadline_timeout)
         questions = question_evidence(result, executions)
         assistance = assistance_observations(events)
         expected_assistance = scenario.get("assistance")
@@ -359,9 +492,9 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
             if any(value is not None and (not finite_number(value) or value < 0) for value in values):
                 raise ValueError(f"invalid {metric} usage")
             metrics[metric] = sum(values) if values and all(value is not None for value in values) else None
-        metrics["timing_complete"] = not pending
+        metrics["timing_complete"] = not pending and not failures
         metrics["case_other_s"] = None
-        if not pending and all(metrics[name] is not None for name in ("prefill_s", "decode_s")):
+        if metrics["timing_complete"] and all(metrics[name] is not None for name in ("prefill_s", "decode_s")):
             other_s = result.total_s - sum(metrics[name] for name in ("load_s", "prefill_s", "decode_s"))
             if not finite_number(other_s) or other_s < 0:
                 raise ValueError("invalid case_other_s: native model timings exceed measured case wall time")
@@ -412,6 +545,6 @@ def observe(result: driver.Result, scenario: dict, trace: Path, *, seed: int,
         if metrics["task_status"] == "completed" and "".join(cli_text).strip() != answer:
             raise ValueError("CLI agent answer differs from the native final response")
     return {"metrics": metrics, "answer": answer, "inputs": inputs, "tool_calls": tools,
-            "engines": engines,
+            "engines": engines, "engine_recoveries": engine_recoveries,
             "executions": executions, "questions": questions, "sampling": sampling, "generated_answers": generated,
             "assistance": assistance, "deadline_state": deadline_state, "metric_notes": notes}

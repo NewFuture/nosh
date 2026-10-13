@@ -11,7 +11,7 @@ from unittest.mock import patch
 from eval import driver, fixtures, observations, report, trial
 from eval.checks import experience as experience_checks
 from types import SimpleNamespace
-from .support import SCENARIOS
+from .support import SCENARIOS, SUITE, tool_outcome
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux PTY and wait4")
@@ -304,7 +304,7 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
         question = {"name":"ask_user", "args":{"question":"你希望我完成什么具体任务？"}}
         answer = "好的，已停止处理。"
         reply = scenario["completions"][0]["answers"][0]
-        meta = {"run_id": "unit-test", "observation": "native-v1", "dataset_revision": 16,
+        meta = {"run_id": "unit-test", "observation": "native-v1", "dataset_revision": SUITE["dataset_revision"],
                 "build": {"binary_sha256": "a" * 64},
                 "settings": {"timeout_s": 5}, "scenarios": [scenario], "seeds": [0], "repeat": 1}
         args = SimpleNamespace(threads=1)
@@ -312,10 +312,12 @@ out("\\r\\n| 这是类型错误，改成整数即可。\\r\\n| + 3 steps | 0.1 s
         def child(argv, cwd, env, timeout, case, approve):
             events = [
                 {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
-                {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "tools":[{"name":"ask_user"}]},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "label": "agent", "tools":[{"name":"ask_user"}]},
                 {"ev": "step_start", "sid": 1, "messages": [{"role": "user", "text": case["inputs"][0]}]},
                 {"ev": "step_end", "sid": 1, "tool_calls": [question], "text": "", "usage": {"ttft_s": 0.01},
                  "stop":"end_of_turn", "errors":[]},
+                tool_outcome(question, json.dumps({"question":question["args"]["question"], "choices":[], "answer":reply}),
+                             status="answered"),
                 {"ev": "step_start", "sid": 1, "messages":[{"role":"tool", "source":"user",
                     "text":json.dumps({"question":question["args"]["question"], "choices":[], "answer":reply})}]},
                 {"ev": "step_end", "sid": 1, "tool_calls": [], "text": answer, "usage": {"ttft_s": 0.01},
@@ -373,7 +375,7 @@ assert b"exit 0" in line()
             trace = Path(temporary) / "trace.jsonl"
             events = [
                 {"ev": "engine", "info": {"load_s": 0.1, "device": "cpu"}},
-                {"ev": "open", "sid": 1, "sampling": {"seed": 0}},
+                {"ev": "open", "sid": 1, "sampling": {"seed": 0}, "label": "agent"},
             ]
             for index in range(3):
                 events.extend([
@@ -384,6 +386,9 @@ assert b"exit 0" in line()
                      "errors": [], "stop": "end_of_turn", "usage": {"ttft_s": 0.01},
                      "tool_calls": [{"name": "exec", "args": {"command": "cargo build"}}] if index < 2 else []},
                 ])
+                if index < 2:
+                    events.append(tool_outcome({"name": "exec", "args": {"command": "cargo build"}},
+                                               "[denied] command was not run", status="denied", turn=index + 1))
             trace.write_text("\n".join(json.dumps(dict(e, schema_version=1, engine=1)) for e in events))
             observed = observations.observe(result, scenario, trace, seed=0)
         self.assertEqual(observed["metrics"]["confirmations"], 2)

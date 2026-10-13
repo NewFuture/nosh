@@ -351,6 +351,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
             "call": {"name": "exec", "args": {
                 "command": "cargo --version; node --version; python3 --version",
             }},
+            "command": "cargo --version; node --version; python3 --version",
             "state": "executed", "exit_code": 0,
             "result": "\n".join(self.facts["versions"].values()),
         }]}
@@ -362,6 +363,7 @@ class RevisedOracleSmokeTests(FixtureOracleTestCase):
             'cargo --version 2>/dev/null || echo "cargo not found"; '
             'node -v 2>&1; python3 -V'
         )
+        execution["command"] = execution["call"]["args"]["command"]
         self.assertTrue(self.grade(self.versions).passed)
         execution["result"] = "cargo not found\nv22.23.3\nPython 3.14.4"
         self.assertFalse(self.grade(self.versions).passed)

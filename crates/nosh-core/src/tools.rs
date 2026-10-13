@@ -67,7 +67,7 @@ impl ToolSet {
 pub fn exec_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::Exec.name().into(),
-        description: "Run a command in the current shell session. Returns output and exit code."
+        description: "Run shell code in the current directory of the shared session. Returns output and exit code."
             .into(),
         parameters: json!({
             "type": "object",
@@ -119,9 +119,19 @@ pub fn specs(set: ToolSet) -> Vec<ToolSpec> {
 }
 
 pub(crate) fn format_user_output(output: &UserOutput) -> String {
+    let mut metadata = output_metadata(output);
+    // Byte length delimits the untrusted body; timing and inactive flags stay host-side.
+    metadata
+        .as_object_mut()
+        .expect("output metadata is an object")
+        .retain(|key, value| {
+            !matches!(key.as_str(), "duration_ms" | "observed_bytes")
+                && !value.is_null()
+                && value.as_bool() != Some(false)
+        });
     format!(
         "[user_output {}]\n{}\n[/user_output]",
-        output_metadata(output),
+        metadata,
         output_body(output)
     )
 }
