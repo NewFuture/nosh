@@ -226,6 +226,7 @@ fn execution_errors_report_unknown_effects_without_running_later_calls() {
         &mut crate::RecordUi::default(),
     );
     assert_eq!(outcome.status, TaskStatus::Failed);
+    assert_eq!(outcome.commands_run, 1);
     assert!(outcome.error.unwrap().contains("Effects may have occurred"));
     assert!(dir.path().join("effect.txt").exists());
     assert!(!dir.path().join("later").exists());

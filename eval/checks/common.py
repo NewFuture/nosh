@@ -139,7 +139,9 @@ def completion_contradictions(answer: str, action: str, test_count: int | None =
             continue
         current = re.sub(
             r"(?<![\d.])0\s*(?:(?:个|项)?(?:测试|用例)(?:失败|未通过)"
-            r"|(?:tests?\s+)?(?:failed|failures?)\b)",
+            r"|(?:tests?\s+)?(?:failed|failures?)\b)"
+            r"|\bno\s+tests?\s+(?:(?:have|has)\s+)?failed\b"
+            r"|(?:没有|无)(?:任何|一个)?(?:测试|用例)(?:失败|未通过)",
             "", clause, flags=re.I,
         )
         failed = re.search(

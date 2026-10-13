@@ -161,10 +161,11 @@ def config_basis_reasons(answer, facts):
             columns = headers
         elif columns and max(columns.values()) < len(cells) and cells[columns["profile"]] == profile:
             claims.append((cells[columns["store"]], False))
+    negative_relation = r"不是|并非|is\s+not|does(?:\s+not|n't)\s+(?:map|point)\s+to"
     relation = re.compile(
         r"(?<![\w.-])" + re.escape(profile) + r"(?![\w.-])"
         r"\s*(?:的\s*)?(?:(?:存储配置|存储|store|storage)\s*)?"
-        r"(?P<relation>不是|并非|is\s+not|maps?\s+to|points?\s+to|uses?|"
+        rf"(?P<relation>{negative_relation}|maps?\s+to|points?\s+to|uses?|"
         r"映射到|对应(?:于|到)?|指向|使用(?:的)?(?:是)?|选择|是|为|->|→|[:：=])"
         r"\s*(?:(?:the|store|storage|存储配置|名为)\s+)?[\"']?"
         r"(?P<store>[A-Za-z0-9_.-]+)", re.I,
@@ -172,8 +173,8 @@ def config_basis_reasons(answer, facts):
     for match in relation.finditer(text):
         if match["store"].lower() in ("endpoint", "owner", "team", "http", "https"):
             continue
-        negative = bool(re.fullmatch(r"不是|并非|is\s+not", match["relation"], re.I))
-        claims.append((match["store"], negative))
+        negative = bool(re.fullmatch(negative_relation, match["relation"], re.I))
+        claims.append((match["store"].rstrip("."), negative))
     reverse = re.compile(
         r"(?<![\w.-])([A-Za-z0-9_.-]+)\s*(?:是|为|is)\s*(?:the\s+)?"
         + re.escape(profile) + r"\s*(?:的|'s)?\s*(?:存储配置|存储|store|storage)\b", re.I,

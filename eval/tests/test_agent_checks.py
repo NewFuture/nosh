@@ -61,6 +61,30 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(completion_contradictions(
             "缺失配置导致测试失败。测试现在通过，共运行 3 个测试。", "test", 2))
 
+    def test_no_failed_tests_is_not_a_failure_or_missing_execution(self):
+        for answer in (
+            "No tests failed. All 2 tests passed.",
+            "No test has failed. All 2 tests passed.",
+            "No tests have failed. All 2 tests passed.",
+            "0 tests failed. All 2 tests passed.",
+            "没有测试失败。2 个测试通过。",
+            "没有任何用例失败。2 个测试通过。",
+            "无测试失败。2 个测试通过。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertEqual(completion_contradictions(answer, "test", 2), [])
+        for answer in (
+            "Tests failed. All 2 tests passed.",
+            "No tests failed. I did not run the tests.",
+            "No tests failed. Only 1 test passed.",
+            "No tests failed. 2 tests skipped.",
+            "没有运行测试。",
+            "没有测试通过。",
+            "没有测试失败，但当前测试失败。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(completion_contradictions(answer, "test", 2))
+
     def test_largest_separates_reference_list_but_keeps_all_ranked_items(self):
         root = self.base / "big"
         facts = fixtures.create(root, "big")

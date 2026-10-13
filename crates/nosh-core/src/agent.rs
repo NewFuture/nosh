@@ -139,6 +139,7 @@ pub struct TaskOutcome {
     /// Text of the last model turn.
     pub answer: String,
     pub proposed: Option<String>,
+    /// Commands dispatched to the executor, including unknown-result errors.
     pub commands_run: usize,
     pub denied: usize,
     pub usage: Usage,
@@ -725,7 +726,11 @@ impl Agent {
                     Exec::Cancelled(_) => {
                         aborted = true;
                     }
-                    Exec::Failed(error) | Exec::CommandError(error, _) => {
+                    Exec::CommandError(error, _) => {
+                        out.commands_run += 1;
+                        fatal = Some(error);
+                    }
+                    Exec::Failed(error) => {
                         fatal = Some(error);
                     }
                 }

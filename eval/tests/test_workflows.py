@@ -42,14 +42,14 @@ class WorkflowTests(unittest.TestCase):
 
     def test_workflow_plan_reuses_control_and_fits_the_hosted_budget(self):
         plan = suite.load_suite("workflows")
-        self.assertEqual(plan["dataset_revision"], 34)
+        self.assertEqual(plan["dataset_revision"], 35)
         self.assertEqual(len(plan["scenarios"]), 11)
         self.assertEqual(plan["seeds"], [0, 1, 2, 3, 4])
         self.assertEqual(campaign.validate_budget(plan, 2, 60, 16200), 6600)
         control = next(s for s in suite.load_suite("command-assist")["scenarios"] if s["id"] == "generate-archive")
         self.assertEqual(self.scenarios["generate-archive"], control)
         original = suite.load_suite("regression")
-        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (34, 27))
+        self.assertEqual((original["dataset_revision"], len(original["scenarios"])), (35, 27))
 
     def test_assistance_checks_reject_incompatible_intents_and_results(self):
         for sid in ("next-retry-after-prerequisite", "fix-partially-completed-archive"):
@@ -455,6 +455,31 @@ class WorkflowTests(unittest.TestCase):
                 self.assertTrue(any("contradictory or unobserved" in reason for reason in verdict.reasons))
         self.assertFalse(self.grade(answer + basis + "\nstaging_eu 对应 primary。").passed)
         self.assertFalse(self.grade(f"staging_eu 使用 {endpoint}，不是 {owner}。").passed)
+
+    def test_mapping_negation_distinguishes_the_selected_store_from_other_stores(self):
+        self.prepare("piped-config-lookup")
+        self.readonly_session()
+        self.read_result(self.facts["profile_file"])
+        self.read_result(self.facts["storage_file"])
+        answer = (
+            f"staging_eu 对应 backup_east，endpoint 是 {self.facts['endpoint']}，"
+            f"负责团队为 {self.facts['owner']}。\n依据 config/environments.ini 和 config/storage.ini。"
+        )
+        for relation, negative in (
+            ("maps to", False), ("points to", False),
+            ("does not map to", True), ("doesn't map to", True),
+            ("does not point to", True), ("doesn't point to", True),
+        ):
+            for store in ("backup_east", "primary", "backup_east.other"):
+                for ending in ("", ".", "。"):
+                    extra = f"\nstaging_eu {relation} {store}{ending}"
+                    with self.subTest(statement=extra):
+                        facts = self.grade(answer + extra).details["facts"]
+                        self.assertEqual(facts["passed"], (store == "backup_east") != negative,
+                                         facts["reasons"])
+                        if not facts["passed"]:
+                            self.assertIn("answer contradicts the selected profile-to-store mapping",
+                                          facts["reasons"])
 
     def test_missing_profile_rejects_team_guesses_without_rejecting_unknowns(self):
         self.prepare("piped-config-missing")
