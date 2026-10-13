@@ -226,6 +226,7 @@ fn arrow_entries_open_filterable_history_without_restoring_tab_navigation() {
     submit(&mut terminal, "printf 'MENU_A\\n'", "\nMENU_A");
     submit(&mut terminal, "printf 'MENU_B\\n'", "\nMENU_B");
     submit(&mut terminal, "printf 'MENU_B\\n'", "\nMENU_B");
+    wait_outcome(&home, "printf 'MENU_B\\n'", 0);
     terminal.send(b"\x1b[A");
     let frame = wait_raw_frame(&mut terminal, |frame| frame.contains("History [all]"));
     let input = before_cursor(&frame);
@@ -289,6 +290,8 @@ fn selected_history_is_a_styled_inline_preview_until_explicitly_adopted() {
     terminal.wait_for("history-test> ");
     submit(&mut terminal, "printf 'GHOST_OLD\\n'", "\nGHOST_OLD");
     submit(&mut terminal, "printf 'GHOST_NEW\\n'", "\nGHOST_NEW");
+    wait_outcome(&home, "printf 'GHOST_OLD\\n'", 0);
+    wait_outcome(&home, "printf 'GHOST_NEW\\n'", 0);
     terminal.send(b"\x1b[A");
     let frame = wait_raw_frame(&mut terminal, |frame| {
         frame.contains("History [all]") && inline_preview(frame).contains("GHOST_NEW")
@@ -611,9 +614,9 @@ fn history_status_bar_owns_scope_progress_and_keys_without_repeated_menu_caption
         "\nSTATUS_REUSE_MARKER",
     );
     terminal.send(b"\x12STATUS_REUSE_MARKER");
-    terminal.wait_for("history-test> ");
-    terminal.wait_for("\x1b[?25h");
-    let frame = last_frame(&terminal);
+    let frame = wait_frame(&mut terminal, |frame| {
+        frame.contains("History [all]") && frame.contains("history-test> STATUS_REUSE_MARKER")
+    });
     let input = frame.find("history-test> ").unwrap();
     for text in [
         "History [all]",
@@ -626,9 +629,9 @@ fn history_status_bar_owns_scope_progress_and_keys_without_repeated_menu_caption
         assert!(frame[..input].contains(text), "{text}: {frame:?}");
     }
     terminal.send(b"\x15NO_SUCH_HISTORY_STATUS_ROW");
-    terminal.wait_for("No matches");
-    terminal.wait_for("\x1b[?25h");
-    let frame = last_frame(&terminal);
+    let frame = wait_frame(&mut terminal, |frame| {
+        frame.contains("No matches") && frame.contains("history-test> NO_SUCH_HISTORY_STATUS_ROW")
+    });
     let input = frame.find("history-test> ").unwrap();
     assert_eq!(frame.matches("No matches").count(), 1, "{frame:?}");
     assert!(frame[..input].contains("No matches"), "{frame:?}");
