@@ -90,7 +90,14 @@ fn wait_empty_prompt(terminal: &mut Terminal, start: usize) {
             .split("\x1b[?25l")
             .filter_map(|frame| frame.split_once("\x1b[?25h").map(|(frame, _)| frame))
             .last();
-        if frame.is_some_and(|frame| before_cursor(frame).ends_with("history-test> ")) {
+        if frame.is_some_and(|frame| {
+            let before = frame.rsplit_once("\x1b7").expect("saved input cursor").0;
+            let empty = before.rsplit_once("\x1b8").map_or_else(
+                || nosh_shell::style::strip_ansi(before).ends_with("history-test> "),
+                |(_, input)| nosh_shell::style::strip_ansi(input).is_empty(),
+            );
+            frame.contains("history-test> ") && !frame.contains("History [") && empty
+        }) {
             return;
         }
         assert!(
