@@ -859,63 +859,6 @@ impl EmbeddedShell {
         self.lock().parse_string(line.to_owned())
     }
 
-    /// Detects a literal, unredirected `cd` to the current directory before `&&`.
-    pub fn has_redundant_cd_prefix(&self, line: &str) -> bool {
-        use brush_parser::ast;
-
-        if !matches!(self.resolve("cd"), Resolution::Builtin) {
-            return false;
-        }
-        let Ok(program) = self.parse(line) else {
-            return false;
-        };
-        let Some(list) = program.complete_commands.first() else {
-            return false;
-        };
-        let Some(ast::CompoundListItem(chain, ast::SeparatorOperator::Sequence)) = list.0.first()
-        else {
-            return false;
-        };
-        if chain.first.bang
-            || chain.first.timed.is_some()
-            || !matches!(chain.additional.first(), Some(ast::AndOr::And(_)))
-        {
-            return false;
-        }
-        let [ast::Command::Simple(command)] = chain.first.seq.as_slice() else {
-            return false;
-        };
-        if command.prefix.is_some()
-            || command
-                .word_or_name
-                .as_ref()
-                .and_then(crate::trigger::static_word)
-                .as_deref()
-                != Some("cd")
-        {
-            return false;
-        }
-        let options = self.parser_options();
-        let args: Option<Vec<_>> = crate::command_context::items(command)
-            .map(|item| match item {
-                ast::CommandPrefixOrSuffixItem::Word(word) => {
-                    crate::command_context::literal(word, &options, &|_| None)
-                }
-                _ => None,
-            })
-            .collect();
-        let Some(args) = args else {
-            return false;
-        };
-        let target = match args.as_slice() {
-            [target] => target,
-            [flag, target] if flag == "--" => target,
-            _ => return false,
-        };
-        let cwd = self.cwd();
-        !target.is_empty() && cwd.join(target) == cwd
-    }
-
     pub fn set_last_exit_status(&mut self, code: i32) {
         self.lock().set_last_exit_status(code as u8);
     }
@@ -2062,59 +2005,6 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn redundant_cd_detection_is_static_and_preserves_meaningful_directory_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut shell = EmbeddedShell::new(ShellOptions {
-            working_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        })
-        .unwrap();
-        let cwd = shell.cwd();
-        let oldpwd = shell.var("OLDPWD");
-        for command in [
-            "cd . && pwd".to_string(),
-            "cd -- './' && ls".to_string(),
-            format!("cd '{}' && ls", cwd.display()),
-            format!("cd '{}/.' && ls", cwd.display()),
-        ] {
-            assert!(shell.has_redundant_cd_prefix(&command), "{command}");
-        }
-        for command in [
-            "cd .",
-            "cd child && pwd",
-            "cd ./child/.. && pwd",
-            "cd - && pwd",
-            "cd -P . && pwd",
-            "cd \"$PWD\" && pwd",
-            "cd \"$(touch marker; pwd)\" && pwd",
-            "CDPATH=x cd . && pwd",
-            "cd . > marker && pwd",
-            "! cd . && pwd",
-            "time cd . && pwd",
-            "cd . || pwd",
-            "cd . | cat",
-            "cd . && pwd &",
-            "true && cd . && pwd",
-            "cd '' && pwd",
-            "cd . &&",
-        ] {
-            assert!(!shell.has_redundant_cd_prefix(command), "{command}");
-        }
-        assert_eq!(shell.cwd(), cwd);
-        assert_eq!(shell.var("OLDPWD"), oldpwd);
-        assert!(!dir.path().join("marker").exists());
-        std::os::unix::fs::symlink(&cwd, dir.path().join("alias")).unwrap();
-        assert!(!shell.has_redundant_cd_prefix("cd alias && pwd"));
-        shell.run_user_line("alias cd='printf custom'");
-        assert!(matches!(shell.resolve("cd"), Resolution::Alias(_)));
-        assert!(!shell.has_redundant_cd_prefix("cd . && pwd"));
-        shell.run_user_line("unalias cd");
-        shell.run_user_line("cd() { printf custom; }");
-        assert!(matches!(shell.resolve("cd"), Resolution::Function));
-        assert!(!shell.has_redundant_cd_prefix("cd . && pwd"));
-    }
 
     #[derive(Default)]
     struct TextSink {

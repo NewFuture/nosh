@@ -1,10 +1,16 @@
 use super::support::*;
 
 #[test]
-fn redundant_cd_is_corrected_before_approval_without_executing_or_rewriting() {
+fn same_directory_cd_prefix_runs_unchanged_with_normal_approval() {
     let _g = setup();
     for (index, command, responses, status, runs) in [
-        (0, "printf inspected", vec![], TaskStatus::Completed, 1),
+        (
+            0,
+            "printf inspected",
+            vec![ApprovalResponse::Approve],
+            TaskStatus::Completed,
+            1,
+        ),
         (
             1,
             "touch created.txt",
@@ -24,12 +30,9 @@ fn redundant_cd_is_corrected_before_approval_without_executing_or_rewriting() {
         let mut sh = shell();
         sh.run_user_line(&format!("cd {}", dir.display()));
         let oldpwd = sh.var("OLDPWD");
+        let proposed = format!("cd . && {command}");
         let engine = MockChatEngine::new(vec![
-            vec![
-                call("exec", json!({"command": format!("cd . && {command}")})),
-                call("exec", json!({"command": "touch should-not-run"})),
-            ],
-            vec![call("exec", json!({"command": command}))],
+            vec![call("exec", json!({"command": proposed}))],
             vec![text("Task ended.")],
         ]);
         let received = engine.received();
@@ -50,58 +53,61 @@ fn redundant_cd_is_corrected_before_approval_without_executing_or_rewriting() {
         );
         assert_eq!(result.status, status);
         assert_eq!(result.commands_run, runs);
-        assert_eq!(approval.seen.len(), usize::from(index != 0));
+        assert_eq!(approval.seen.len(), 1);
         assert_eq!(result.denied, usize::from(index == 1));
         assert_eq!(sh.cwd(), dir);
-        assert_eq!(sh.var("OLDPWD"), oldpwd);
-        assert!(!dir.join("should-not-run").exists());
         assert_eq!(dir.join("created.txt").exists(), index == 2);
         let results = tool_results(&received.lock().unwrap());
-        assert!(results[0].contains("exec already runs in"));
-        assert!(results[0].contains("Nothing was run or sent for approval"));
-        assert!(results[1].contains("[skipped]"));
+        assert!(!results[0].contains("exec already runs in"));
         let observations = observations.lock().unwrap();
-        assert_eq!(observations.len(), 3);
-        assert_eq!(observations[0].1["status"], "correction");
-        assert!(observations[0].1["execution"].is_null());
+        assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].1["result"], results[0]);
-        assert_eq!(observations[1].1["status"], "skipped");
         assert_eq!(
-            observations[2].1["status"],
+            observations[0].1["status"],
             if index == 1 { "denied" } else { "executed" }
         );
+        if runs == 1 {
+            assert_eq!(observations[0].1["execution"]["command"], proposed);
+            assert_eq!(observations[0].1["execution"]["rewritten"], false);
+            assert_eq!(sh.var("OLDPWD"), Some(dir.to_string_lossy().into_owned()));
+        } else {
+            assert_eq!(sh.var("OLDPWD"), oldpwd);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
 #[test]
-fn redundant_cd_retries_are_bounded_and_do_not_poison_the_next_task() {
+fn compatible_cd_prefixes_preserve_the_normal_step_budget() {
     let _g = setup();
     let dir = tmpdir("cd-correction-limit");
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
     let engine = MockChatEngine::new(vec![
-        vec![call("exec", json!({"command": "cd . && touch never"}))],
-        vec![call("exec", json!({"command": "cd . && ls"}))],
         vec![call("exec", json!({"command": "cd . && pwd"}))],
+        vec![call("exec", json!({"command": "cd . && pwd"}))],
+        vec![text("Budget ended.")],
         vec![call("exec", json!({"command": "printf recovered"}))],
         vec![text("Recovered.")],
     ]);
-    let mut agent = agent(engine, AgentConfig::default());
-    let mut approval = Scripted::new([]);
+    let mut agent = agent(
+        engine,
+        AgentConfig {
+            max_steps: 2,
+            ..Default::default()
+        },
+    );
+    let mut approval = Scripted::new([ApprovalResponse::Approve, ApprovalResponse::Approve]);
     let outcome = agent.run_task(
         &mut sh,
         TaskInput::new(Trigger::Hash, "inspect"),
         &mut approval,
         &mut RecordUi::default(),
     );
-    assert_eq!(outcome.status, TaskStatus::Failed);
+    assert_eq!(outcome.status, TaskStatus::Incomplete);
     assert_eq!(outcome.steps, 3);
-    assert_eq!(outcome.commands_run, 0);
+    assert_eq!(outcome.commands_run, 2);
     assert_eq!(outcome.denied, 0);
-    assert!(outcome.error.unwrap().contains("unnecessary cd prefix"));
-    assert!(approval.seen.is_empty());
-    assert!(!dir.join("never").exists());
     let next = agent.run_task(
         &mut sh,
         TaskInput::new(Trigger::Hash, "try a different task"),
@@ -114,130 +120,52 @@ fn redundant_cd_retries_are_bounded_and_do_not_poison_the_next_task() {
 }
 
 #[test]
-fn actual_tool_results_reset_cd_corrections_without_extending_the_step_budget() {
+fn compatible_cd_prefixes_do_not_skip_independent_reads() {
     let _g = setup();
-    let dir = tmpdir("cd-correction-progress");
-    std::fs::write(dir.join("notes.txt"), "error: text from a real file\n").unwrap();
+    let dir = tmpdir("cd-prefix-batch");
+    std::fs::write(dir.join("notes.txt"), "known fact\n").unwrap();
     let mut sh = shell();
     sh.run_user_line(&format!("cd {}", dir.display()));
-    for (tool, args, commands) in [
-        ("exec", json!({"command": "printf observed"}), 3),
-        ("exec", json!({"command": "false"}), 3),
-        ("read_file", json!({"path": "notes.txt"}), 0),
-        ("grep", json!({"path": "notes.txt", "pattern": "error"}), 0),
-    ] {
-        for max_steps in [10, 4] {
-            let engine = MockChatEngine::new(vec![
-                vec![call("exec", json!({"command": "cd . && pwd"}))],
-                vec![call(tool, args.clone())],
-                vec![call("exec", json!({"command": "cd . && pwd"}))],
-                vec![call(tool, args.clone())],
-                vec![call("exec", json!({"command": "cd . && pwd"}))],
-                vec![call(tool, args.clone())],
-                vec![text("Inspection complete.")],
-            ]);
-            let choices = engine.tool_choices();
-            let mut agent = agent(
-                engine,
-                AgentConfig {
-                    max_steps,
-                    ..Default::default()
-                },
-            );
-            let mut approval = Scripted::new([]);
-            let outcome = agent.run_task(
-                &mut sh,
-                TaskInput::new(Trigger::Hash, "inspect"),
-                &mut approval,
-                &mut RecordUi::default(),
-            );
-            assert_eq!(
-                outcome.status,
-                if max_steps == 10 {
-                    TaskStatus::Completed
-                } else {
-                    TaskStatus::Incomplete
-                }
-            );
-            assert_eq!(outcome.steps, if max_steps == 10 { 7 } else { 5 });
-            assert_eq!(
-                outcome.commands_run,
-                if max_steps == 10 {
-                    commands
-                } else {
-                    commands.min(2)
-                }
-            );
-            assert!(approval.seen.is_empty());
-            if max_steps == 4 {
-                assert_eq!(choices.lock().unwrap()[0].1, nosh_engine::ToolChoice::None);
-            } else {
-                assert!(choices.lock().unwrap().is_empty());
-            }
-        }
-    }
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn tool_errors_do_not_reset_cd_correction_retries() {
-    let _g = setup();
-    let dir = tmpdir("cd-correction-errors");
-    let mut sh = shell();
-    sh.run_user_line(&format!("cd {}", dir.display()));
-    for (tool, args) in [
-        ("read_file", json!({"path": "missing.txt"})),
-        ("grep", json!({"path": ".", "pattern": "["})),
-        ("exec", json!({})),
-        ("exec", json!({"command": "if"})),
-        ("unknown_tool", json!({})),
+    for (response, allowed) in [
+        (ApprovalResponse::Approve, true),
+        (ApprovalResponse::Deny { reason: None }, false),
     ] {
         let engine = MockChatEngine::new(vec![
-            vec![call("exec", json!({"command": "cd . && pwd"}))],
-            vec![call(tool, args.clone())],
-            vec![call("exec", json!({"command": "cd . && pwd"}))],
-            vec![call(tool, args)],
-            vec![call("exec", json!({"command": "cd . && pwd"}))],
+            vec![
+                call("exec", json!({"command":"cd . && printf inspected"})),
+                call("ReadTextFile", json!({"file_path":"notes.txt"})),
+            ],
+            vec![text("Inspection ended.")],
         ]);
-        let mut agent = agent(engine, AgentConfig::default());
-        let mut approval = Scripted::new([]);
+        let received = engine.received();
+        let mut agent = agent(
+            engine,
+            AgentConfig {
+                mode: ApprovalMode::Confirm,
+                ..Default::default()
+            },
+        );
+        let mut approval = Scripted::new([response]);
         let outcome = agent.run_task(
             &mut sh,
             TaskInput::new(Trigger::Hash, "inspect"),
             &mut approval,
             &mut RecordUi::default(),
         );
-        assert_eq!(outcome.status, TaskStatus::Failed);
-        assert_eq!(outcome.steps, 5);
-        assert_eq!(outcome.commands_run, 0);
-        assert!(outcome.error.unwrap().contains("unnecessary cd prefix"));
-        assert!(approval.seen.is_empty());
+        assert_eq!(outcome.commands_run, usize::from(allowed));
+        assert_eq!(outcome.denied, usize::from(!allowed));
+        assert_eq!(approval.seen.len(), 1);
+        let results = tool_results(&received.lock().unwrap());
+        assert_eq!(results.len(), 2);
+        assert!(
+            if allowed {
+                results[1].contains("known fact")
+            } else {
+                results[1].starts_with("[skipped]")
+            },
+            "{results:?}"
+        );
     }
-    let engine = MockChatEngine::new(vec![
-        vec![call("exec", json!({"command": "cd . && pwd"}))],
-        vec![call("exec", json!({"command": "cd . && pwd"}))],
-        vec![call("exec", json!({"command": "touch denied.txt"}))],
-        vec![call("exec", json!({"command": "cd . && pwd"}))],
-    ]);
-    let mut agent = agent(
-        engine,
-        AgentConfig {
-            mode: ApprovalMode::Confirm,
-            ..Default::default()
-        },
-    );
-    let mut approval = Scripted::new([ApprovalResponse::Deny { reason: None }]);
-    let outcome = agent.run_task(
-        &mut sh,
-        TaskInput::new(Trigger::Hash, "inspect"),
-        &mut approval,
-        &mut RecordUi::default(),
-    );
-    assert_eq!(outcome.status, TaskStatus::Failed);
-    assert_eq!(outcome.steps, 4);
-    assert_eq!(outcome.commands_run, 0);
-    assert_eq!(approval.seen.len(), 1);
-    assert!(!dir.join("denied.txt").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -917,7 +845,7 @@ fn unavailable_tools_are_rejected_before_approval_or_execution() {
     sh.run_user_line(&format!("cd {}", dir.display()));
     for (set, name, names) in [
         (ToolSet::Full, "list_dir", "exec, read_file, grep"),
-        (ToolSet::Full, "run_command", "exec, read_file, grep"),
+        (ToolSet::ReadOnly, "run_command", "read_file, grep"),
         (ToolSet::ReadOnly, "exec", "read_file, grep"),
     ] {
         let engine = MockChatEngine::new(vec![

@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use clap::Subcommand;
-use nosh_engine::{ChatEngine, Event, Message, SessionSpec, ToolSpec};
+use nosh_engine::{ChatEngine, Event, Message, SessionSpec};
 use nosh_llm::{KvDtype, LocalChatEngine, LocalEngineOptions};
 use nosh_platform::process::rss_mb;
 use nosh_shell::style;
@@ -137,15 +137,7 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                 sampling.temperature = t;
             }
             let tool_specs = if tools {
-                vec![ToolSpec {
-                    name: "exec".into(),
-                    description: "Run a bash command in the user's shell session.".into(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {"command": {"type": "string", "description": "The command line."}},
-                        "required": ["command"]
-                    }),
-                }]
+                vec![nosh_core::tools::exec_spec()]
             } else {
                 vec![]
             };

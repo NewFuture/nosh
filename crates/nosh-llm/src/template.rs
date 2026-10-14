@@ -36,19 +36,28 @@ pub fn concat(segs: &[Seg]) -> String {
     segs.iter().map(|s| s.text.as_str()).collect()
 }
 
-/// Shared call syntax followed by unchanged JSON tool definitions.
+/// Shared call syntax and canonical schemas without host-only compatibility metadata.
 pub fn tool_definitions(tools: &[ToolSpec]) -> String {
+    let parameters: Vec<_> = tools.iter().map(ToolSpec::model_parameters).collect();
     let mut s = String::from(
-        "# Tools\n\nTool calls:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\nWrap values containing <, & or newlines in <![CDATA[...]]>.\n\n<tools>",
+        "# Tools\n\nTool calls:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\nWrap values containing <, & or newlines in <![CDATA[...]]>.\n",
     );
-    for t in tools {
+    if parameters.iter().any(|parameters| {
+        parameters["properties"]
+            .as_object()
+            .is_some_and(|properties| properties.values().any(|param| param["type"] == "array"))
+    }) {
+        s.push_str("Array values must be JSON, e.g. [\"yes\", \"no\"].\n");
+    }
+    s.push_str("\n<tools>");
+    for (t, parameters) in tools.iter().zip(parameters) {
         s.push('\n');
         s.push_str(&pyjson::dumps(&serde_json::json!({
             "type": "function",
             "function": {
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.parameters,
+                "parameters": parameters,
             }
         })));
     }
@@ -344,6 +353,25 @@ mod tests {
             concat(&render_system(Some("No tools."), &[])),
             "<s><|im_start|>system\nNo tools.<|im_end|>\n"
         );
+    }
+
+    #[test]
+    fn array_call_guidance_is_only_shown_when_an_array_parameter_is_available() {
+        let mut tool = ToolSpec {
+            name: "ask_user".into(),
+            description: "Ask.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"question": {"type": "string"}}
+            }),
+        };
+        let guidance = "Array values must be JSON, e.g. [\"yes\", \"no\"].";
+        assert!(!tool_definitions(std::slice::from_ref(&tool)).contains(guidance));
+        tool.parameters["properties"]["choices"] =
+            json!({"type": "array", "items": {"type": "string"}});
+        let rendered = tool_definitions(&[tool]);
+        assert!(rendered.contains(guidance));
+        assert!(rendered.find(guidance).unwrap() < rendered.find("<tools>").unwrap());
     }
 
     #[test]

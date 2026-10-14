@@ -3,7 +3,7 @@
 //! `</function>`. Inside a call, `<param`/`</param>` (20/21) delimit arguments;
 //! values may be CDATA or entity-escaped, and are converted per JSON Schema.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::tokenizer::{Tok, Utf8Stream};
 use nosh_engine::{CallError, CallErrorKind, ToolCall, ToolSpec};
@@ -246,14 +246,22 @@ pub fn parse_call(raw: &str, tools: &[ToolSpec]) -> Result<ToolCall, CallError> 
         )
     })?;
 
-    let tool = tools.iter().find(|t| t.name == name).ok_or_else(|| {
-        let known: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        err(
-            CallErrorKind::UnknownTool,
-            Some(&name),
-            format!("unknown tool '{name}'; available: {}", known.join(", ")),
-        )
-    })?;
+    let mut matches = tools.iter().filter(|tool| tool.matches_name(&name));
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .or_else(|| {
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
+        .ok_or_else(|| {
+            let known: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            err(
+                CallErrorKind::UnknownTool,
+                Some(&name),
+                format!("unknown tool '{name}'; available: {}", known.join(", ")),
+            )
+        })?;
 
     let mut raw_args: Vec<(String, String)> = Vec::new();
     loop {
@@ -312,69 +320,15 @@ pub fn parse_call(raw: &str, tools: &[ToolSpec]) -> Result<ToolCall, CallError> 
         rest = after;
     }
 
-    let mut args = Map::new();
-    for (k, v) in raw_args {
-        let typed = match tool.param_type(&k) {
-            Some("integer") => v
-                .trim()
-                .parse::<i64>()
-                .ok()
-                .or_else(|| {
-                    // `60.0` is an integer; `1.9`, NaN, infinities and values
-                    // out of range are not.
-                    let f = v.trim().parse::<f64>().ok()?;
-                    (f.is_finite()
-                        && f.fract() == 0.0
-                        && (i64::MIN as f64..i64::MAX as f64).contains(&f))
-                    .then_some(f as i64)
-                })
-                .map(Value::from)
-                .ok_or_else(|| {
-                    err(
-                        CallErrorKind::BadType,
-                        Some(&name),
-                        format!("param '{k}' must be an integer, got '{v}'"),
-                    )
-                })?,
-            Some("number") => v.trim().parse::<f64>().map(Value::from).map_err(|_| {
-                err(
-                    CallErrorKind::BadType,
-                    Some(&name),
-                    format!("param '{k}' must be a number, got '{v}'"),
-                )
-            })?,
-            Some("boolean") => match v.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" => Value::Bool(true),
-                "false" | "0" | "no" => Value::Bool(false),
-                _ => {
-                    return Err(err(
-                        CallErrorKind::BadType,
-                        Some(&name),
-                        format!("param '{k}' must be true or false, got '{v}'"),
-                    ));
-                }
-            },
-            Some("array") | Some("object") => serde_json::from_str(&v).map_err(|_| {
-                err(
-                    CallErrorKind::BadType,
-                    Some(&name),
-                    format!("param '{k}' must be JSON, got '{v}'"),
-                )
-            })?,
-            _ => Value::String(v),
-        };
-        args.insert(k, typed);
-    }
-    for req in tool.required() {
-        if !args.contains_key(req) {
-            return Err(err(
-                CallErrorKind::MissingParam,
-                Some(&name),
-                format!("missing required param '{req}' for {name}"),
-            ));
-        }
-    }
-    Ok(ToolCall { name, args })
+    let args = tool.normalize_args(
+        raw_args
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value))),
+    )?;
+    Ok(ToolCall {
+        name: tool.name.clone(),
+        args,
+    })
 }
 
 #[cfg(test)]
@@ -390,10 +344,11 @@ mod tests {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string"},
-                        "timeout_sec": {"type": "integer"},
+                        "command": {"type": "string", "minLength": 1},
+                        "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 600},
                     },
                     "required": ["command"],
+                    "additionalProperties": false,
                 }),
             },
             ToolSpec {
@@ -466,6 +421,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.str_arg("command"), Some("echo '</param>'"));
+    }
+
+    #[test]
+    fn invalid_parameters_are_not_ignored_or_overwritten() {
+        for (raw, kind, message) in [
+            (
+                r#"<function name="exec"><param name="command">pwd</param><param name="cwd">/tmp</param></function>"#,
+                CallErrorKind::Malformed,
+                "allowed: command, timeout_sec",
+            ),
+            (
+                r#"<function name="exec"><param name="command">pwd</param><param name="command">ls</param></function>"#,
+                CallErrorKind::Malformed,
+                "conflicting values for param 'command'",
+            ),
+            (
+                r#"<function name="exec"><param name="command">pwd</param><param name="timeout_sec">0</param></function>"#,
+                CallErrorKind::BadType,
+                "at least 1",
+            ),
+            (
+                r#"<function name="exec"><param name="command">pwd</param><param name="timeout_sec">601</param></function>"#,
+                CallErrorKind::BadType,
+                "at most 600",
+            ),
+        ] {
+            let error = parse_call(raw, &tools()).unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.tool.as_deref(), Some("exec"));
+            assert!(error.message.contains(message), "{error}");
+        }
+        let call = parse_call(
+            r#"<function name="EXEC"><param name="command">pwd</param><param name="command">pwd</param><param name="timeout-sec">5</param><param name="timeout_sec">5.0</param></function>"#,
+            &tools(),
+        ).unwrap();
+        assert_eq!(call.name, "exec");
+        assert_eq!(call.str_arg("command"), Some("pwd"));
+        assert_eq!(call.int_arg("timeout_sec"), Some(5));
+    }
+
+    #[test]
+    fn json_array_parameters_keep_their_declared_shape() {
+        let tool = ToolSpec {
+            name: "ask_user".into(),
+            description: "Ask.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "choices": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+        };
+        for bad in [r#""yes""#, "{}", "[1]"] {
+            let raw = format!(
+                r#"<function name="ask_user"><param name="question">Format?</param><param name="choices">{bad}</param></function>"#
+            );
+            let error = parse_call(&raw, std::slice::from_ref(&tool)).unwrap_err();
+            assert_eq!(error.kind, CallErrorKind::BadType);
+            assert_eq!(error.tool.as_deref(), Some("ask_user"));
+        }
+        let call = parse_call(
+            r#"<function name="ask_user"><param name="question">Format?</param><param name="choices">["tar.gz","zip"]</param></function>"#,
+            std::slice::from_ref(&tool),
+        )
+        .unwrap();
+        assert_eq!(call.args["choices"], json!(["tar.gz", "zip"]));
+        let call = parse_call(
+            r#"<function name="ask_user"><param name="question">Format?</param><param name="choices">null</param></function>"#,
+            std::slice::from_ref(&tool),
+        ).unwrap();
+        assert!(!call.args.contains_key("choices"));
     }
 
     #[test]

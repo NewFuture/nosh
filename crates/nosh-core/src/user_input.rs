@@ -153,15 +153,17 @@ impl UserInput for ThemedUserInput {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "ask_user".into(),
-        description: "Ask for missing task details and wait for the reply. The reply may change the task; it is not execution approval. Use this tool instead of asking in the final answer.".into(),
+        description: "Ask the user for missing details or a choice, not in the final answer. Call alone and wait for the reply; it is not execution approval.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "question": {"type": "string", "description": "Question to ask."},
-                "choices": {"type": "array", "items": {"type":"string"}, "description": "Optional choices. The user can also type their own answer."}
+                "question": {"type": "string", "minLength": 1, "x-aliases": ["prompt"], "description": "One clear question."},
+                "choices": {"type": "array", "items": {"type": "string", "minLength": 1, "x-scalar-text": true}, "maxItems": MAX_CHOICES, "uniqueItems": true, "x-aliases": ["options"], "description": "Distinct nonempty single-line options. The user can also type any answer."}
             },
             "required": ["question"],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-name-aliases": ["ask_question"],
+            "x-ignored-parameters": ["reason", "explanation"]
         }),
     }
 }
@@ -176,13 +178,9 @@ fn valid_text(text: &str, limit: usize) -> bool {
 
 impl UserQuestion {
     pub(crate) fn parse(call: &ToolCall) -> Result<Self, InputError> {
-        if call
-            .args
-            .keys()
-            .any(|key| key != "question" && key != "choices")
-        {
-            return Err(InputError::Invalid("unknown ask_user parameter".into()));
-        }
+        let call = spec()
+            .prepare_call(call)
+            .map_err(|error| InputError::Invalid(error.to_string()))?;
         let question = call.str_arg("question").filter(|text| valid_text(text, TEXT_BYTES))
             .ok_or_else(|| InputError::Invalid("question must be nonempty text of at most 4096 bytes without hidden characters".into()))?;
         let choices = match call.args.get("choices") {
@@ -226,10 +224,9 @@ impl UserQuestion {
 
 pub(crate) fn ask(
     input: &mut dyn UserInput,
-    call: &ToolCall,
+    question: UserQuestion,
     cancel: &CancelHandle,
 ) -> Result<UserAnswer, InputError> {
-    let question = UserQuestion::parse(call)?;
     if cancel.is_cancelled() {
         return Err(InputError::Cancelled);
     }

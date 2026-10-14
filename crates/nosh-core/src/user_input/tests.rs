@@ -64,9 +64,8 @@ fn question_schema_parses_xml_choices_and_enforces_host_boundaries() {
         json!({"question":""}),
         json!({"question":13}),
         json!({"question":"x".repeat(4097)}),
-        json!({"question":"x","choices":null}),
         json!({"question":"x","choices":"yes"}),
-        json!({"question":"x","choices":[1]}),
+        json!({"question":"x","choices":[{"label":"yes","value":"y"}]}),
         json!({"question":"x","choices":[""]}),
         json!({"question":"x","choices":["one"," one "]}),
         json!({"question":"x","choices":["a\nb"]}),
@@ -83,6 +82,8 @@ fn question_schema_parses_xml_choices_and_enforces_host_boundaries() {
     for args in [
         json!({"question":"x"}),
         json!({"question":"x","choices":[]}),
+        json!({"question":"x","choices":null}),
+        json!({"question":"x","choices":""}),
     ] {
         assert!(
             UserQuestion::parse(&question(args))
@@ -91,6 +92,29 @@ fn question_schema_parses_xml_choices_and_enforces_host_boundaries() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn compatible_question_fields_keep_the_original_text_and_deduplicate_equal_options() {
+    let mut call = question(json!({
+        "prompt":" Format? ",
+        "options":"[\"tar.gz\",\"zip\",\"zip\"]",
+        "explanation":"ask first"
+    }));
+    call.name = "AskQuestion".into();
+    let parsed = UserQuestion::parse(&call).unwrap();
+    assert_eq!(parsed.question, " Format? ");
+    assert_eq!(parsed.choices, ["tar.gz", "zip"]);
+    let labels = UserQuestion::parse(&question(json!({
+        "question":"Choose","choices":[1,true,"1",false]
+    })))
+    .unwrap();
+    assert_eq!(labels.choices, ["1", "true", "false"]);
+    let mut conflict = call;
+    conflict
+        .args
+        .insert("question".into(), json!("Different question"));
+    assert!(UserQuestion::parse(&conflict).is_err());
 }
 
 #[test]
@@ -106,9 +130,13 @@ fn choice_text_and_custom_answers_are_returned_verbatim() {
     ] {
         let mut input = ScriptedInput::new([answer]);
         assert_eq!(
-            ask(&mut input, &call, &CancelHandle::default())
-                .unwrap()
-                .answer,
+            ask(
+                &mut input,
+                UserQuestion::parse(&call).unwrap(),
+                &CancelHandle::default()
+            )
+            .unwrap()
+            .answer,
             answer
         );
         assert_eq!(input.seen[0].choices, ["tar.gz", "zip"]);
@@ -205,18 +233,15 @@ fn a_user_answer_allows_reassessment_but_does_not_authorize_execution() {
 }
 
 #[test]
-fn a_user_answer_resets_corrections_without_granting_approval() {
+fn a_user_answer_does_not_approve_a_compatible_cd_prefixed_command() {
     let dir = tempfile::tempdir().unwrap();
     let mut shell = shell(dir.path());
     let engine = MockChatEngine::new(vec![
-        vec![call("exec", json!({"command": "cd . && touch output"}))],
-        vec![call("exec", json!({"command": "cd . && touch output"}))],
         vec![call(
-            "ask_user",
-            json!({"question": "Which output should I prepare?"}),
+            "AskQuestion",
+            json!({"prompt": "Which output should I prepare?"}),
         )],
-        vec![call("exec", json!({"command": "cd . && touch output"}))],
-        vec![call("exec", json!({"command": "touch output"}))],
+        vec![call("run_command", json!({"cmd": "cd . && touch output"}))],
         vec![text("Not executed.")],
     ]);
     let mut agent = Agent::new(
@@ -237,7 +262,7 @@ fn a_user_answer_resets_corrections_without_granting_approval() {
         &mut RecordUi::default(),
     );
     assert_eq!(outcome.status, TaskStatus::Incomplete);
-    assert_eq!(outcome.steps, 6);
+    assert_eq!(outcome.steps, 3);
     assert_eq!(outcome.commands_run, 0);
     assert_eq!(approval.seen.len(), 1);
     assert!(!dir.path().join("output").exists());
@@ -283,7 +308,7 @@ fn malformed_questions_do_not_prompt_and_can_be_corrected_within_the_step_budget
     let engine = MockChatEngine::new(vec![
         vec![call(
             "ask_user",
-            json!({"question":"Format?","choices":[1]}),
+            json!({"question":"Format?","choices":[{"label":"zip","value":"1"}]}),
         )],
         vec![call(
             "ask_user",
@@ -364,7 +389,7 @@ fn mixed_question_turns_execute_neither_the_question_nor_other_tools() {
     let dir = tempfile::tempdir().unwrap();
     let mut shell = shell(dir.path());
     let turn = vec![
-        call("ask_user", json!({"question":"Which?"})),
+        call("AskQuestion", json!({"prompt":"Which?"})),
         call("exec", json!({"command":"touch mixed"})),
     ];
     let engine = MockChatEngine::new(vec![turn, vec![text("not executed")]]);

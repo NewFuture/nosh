@@ -56,6 +56,98 @@ fn multi_step_task_uses_tool_results() {
 }
 
 #[test]
+fn invalid_tool_parameters_do_not_execute_and_can_be_corrected() {
+    let _g = setup();
+    let root = tmpdir("invalid-tool-parameters");
+    std::fs::write(root.join("fact.txt"), "first\nsecond\n").unwrap();
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    for invalid in [
+        call("exec", json!({"command":"touch unexpected","cwd":"/tmp"})),
+        call(
+            "exec",
+            json!({"command":"touch unexpected","cmd":"printf different"}),
+        ),
+        call(
+            "exec",
+            json!({"command":"touch unexpected","timeout_sec":1,"timeout_ms":2000}),
+        ),
+        call(
+            "exec",
+            json!({"command":"touch unexpected","timeout_sec":"soon"}),
+        ),
+        call("read_file", json!({"path":"fact.txt","offset":2})),
+        call("read_file", json!({"path":"fact.txt","start_line":1.5})),
+        call(
+            "read_file",
+            json!({"path":"fact.txt","start_line":"second"}),
+        ),
+        call(
+            "grep",
+            json!({"pattern":"first","ignore_case":true,"case_sensitive":true}),
+        ),
+        call("grep", json!({"pattern":"first","glob":["*.txt","*.rs"]})),
+    ] {
+        let engine = MockChatEngine::new(vec![
+            vec![invalid],
+            vec![call("exec", json!({"command":"printf corrected"}))],
+            vec![text("done")],
+        ]);
+        let received = engine.received();
+        let observed = engine.observations();
+        let mut agent = agent(engine, AgentConfig::default());
+        let mut ui = RecordUi::default();
+        let mut approval = Scripted::new([]);
+        let outcome = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "inspect"),
+            &mut approval,
+            &mut ui,
+        );
+        assert_eq!(outcome.status, TaskStatus::Completed);
+        assert_eq!(outcome.commands_run, 1);
+        assert_eq!(ui.output, "corrected");
+        assert!(!root.join("unexpected").exists());
+        assert!(approval.seen.is_empty());
+        let results = tool_results(&received.lock().unwrap());
+        assert!(results[0].starts_with("error:"), "{results:?}");
+        assert_eq!(observed.lock().unwrap()[0].1["status"], "error");
+    }
+}
+
+#[test]
+fn equivalent_tool_calls_execute_once_without_correction_turns() {
+    let _g = setup();
+    let root = tmpdir("compatible-tool-parameters");
+    let mut sh = shell();
+    sh.run_user_line(&format!("cd {}", root.display()));
+    for args in [
+        json!({"cmd":"printf compatible","timeout_seconds":"5","reason":"inspect","workdir":root}),
+        json!({"command":["printf compatible"],"timeout_sec":1.5,"timeout_ms":"1500"}),
+        json!({"script":"printf compatible","timeout_sec":0}),
+        json!({"code":"printf compatible","timeout_sec":"1000"}),
+        json!({"command":"printf compatible","timeout_sec":null}),
+    ] {
+        let engine = MockChatEngine::new(vec![vec![call("ExecCommand", args)], vec![text("done")]]);
+        let received = engine.received();
+        let mut agent = agent(engine, AgentConfig::default());
+        let mut ui = RecordUi::default();
+        let outcome = agent.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "inspect"),
+            &mut Scripted::new([]),
+            &mut ui,
+        );
+        assert_eq!(outcome.status, TaskStatus::Completed);
+        assert_eq!(outcome.commands_run, 1);
+        assert_eq!(outcome.steps, 2);
+        assert_eq!(ui.output, "compatible");
+        assert!(tool_results(&received.lock().unwrap())[0].starts_with("[exit_code=0"));
+        assert_eq!(sh.cwd(), root.as_path());
+    }
+}
+
+#[test]
 fn compaction_failure_preserves_executed_results_for_the_next_task() {
     use nosh_engine::{
         CancelHandle, ChatEngine, EngineError, Event, SessionId, SessionSpec, StepOutcome,

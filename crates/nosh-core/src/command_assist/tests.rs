@@ -192,6 +192,81 @@ fn query_results_are_used_without_executing_targets_or_reading_protected_files()
 }
 
 #[test]
+fn query_parameter_errors_match_agent_read_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = shell(dir.path());
+    let cfg = AgentConfig::default();
+    let request =
+        AssistRequest::capture(&shell, &cfg, Intent::Generate, "inspect".into(), None, None)
+            .unwrap();
+    let cancel = CancelHandle::default();
+    for (name, args) in [
+        ("read_file", json!({"path":"missing","offset":2})),
+        ("read_file", json!({"path":"missing","start_line":1.5})),
+        ("read_file", json!({"path":"missing","start_line":"second"})),
+        (
+            "grep",
+            json!({"pattern":"x","ignore_case":true,"case_sensitive":true}),
+        ),
+        ("grep", json!({"pattern":"x","glob":["*.rs","*.py"]})),
+    ] {
+        let call = ToolCall {
+            name: name.into(),
+            args: args.as_object().unwrap().clone(),
+        };
+        let expected = tools::prepare_read(&call, &request.context).unwrap_err();
+        assert_eq!(query(&request, &cfg, &call, &cancel).unwrap_err(), expected);
+    }
+}
+
+#[test]
+fn query_compatibility_does_not_add_execution_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "FIRST\nsecond\n").unwrap();
+    let shell = shell(dir.path());
+    let cfg = AgentConfig::default();
+    let request =
+        AssistRequest::capture(&shell, &cfg, Intent::Generate, "inspect".into(), None, None)
+            .unwrap();
+    let cancel = CancelHandle::default();
+    for (name, args, expected) in [
+        (
+            "ReadTextFile",
+            json!({"file_path":"note.txt","start":"2"}),
+            "second",
+        ),
+        ("RG", json!({"regex":"first","ignore_case":"true"}), "FIRST"),
+        (
+            "GetCommandHelp",
+            json!({"command_name":"ls","query":null}),
+            "[command_help]",
+        ),
+    ] {
+        let call = ToolCall {
+            name: name.into(),
+            args: args.as_object().unwrap().clone(),
+        };
+        let result = query(&request, &cfg, &call, &cancel).unwrap();
+        assert!(result.contains(expected), "{result}");
+    }
+    for name in ["run_command", "Bash", "ask_question"] {
+        let call = ToolCall {
+            name: name.into(),
+            args: json!({"cmd":"touch unexpected"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        assert!(
+            query(&request, &cfg, &call, &cancel)
+                .unwrap_err()
+                .contains("unknown command-assistance tool")
+        );
+    }
+    assert!(!dir.path().join("unexpected").exists());
+}
+
+#[test]
 fn failure_evidence_is_bound_and_fix_has_an_explicit_host_request() {
     let dir = tempfile::tempdir().unwrap();
     let mut shell = shell(dir.path());
