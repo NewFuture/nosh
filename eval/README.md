@@ -108,6 +108,8 @@ Agent 执行证据来自 `observation` 中的 `workflow: agent`、`kind: tool_re
 
 默认输出为 `eval/results/<run-id>/report.json` 和 `report.md`。`--output` 必须是尚不存在的目录；`--label` 只是名称，不证明构建来源。默认推理线程 8、Rayon 1；单次试验期限来自所选 suite：回归 240 秒，专项和 smoke 120 秒。可用 `--threads`、`--timeout` 调整。模型和工具不会自动安装。
 
+场景、分组与采集分项表先按场景索引已有试验，不为每个场景重新扫描全表。表格仍按声明的计划顺序生成，缺失／失败试验保留原计划分母，统计口径与评分要求不变。
+
 `--device` 默认显式 `cpu`，也可选 `cuda`／`cuda:N` 或 `auto`。每个原生 engine 记录都必须包含具体的实际 `device`；缺失时明确报错，不能推断为 CPU。自动模式还要求 `device_requested = "auto"` 和非空 `device_reason`。评估会将设备写入**每个隔离 trial 的配置**，不读取宿主的 nosh 配置。所有模式继承并记录 `LD_LIBRARY_PATH`，供 CUDA 构建加载运行库；只有 CUDA／auto 额外继承并记录 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`。显式 CPU/CUDA 的实际设备必须与请求一致。设备设置或实际观测不同都会触发非受控对照警告，缺失观测保持未知。GPU 型号、驱动、显存／利用率、构建 flags 和并发负载应另存实测来源；RSS 不含 GPU 显存，不调整用户的 GPU 占用或驱动。
 
 真实运行退出码：**0** 全部通过且重复结果一致，**1** 判定失败/不一致，**2** 基础设施或观测错误，**130** 中断。`--plan` 的 0 只表示计划有效，不代表模型通过。失败、超时和未完成试验不从计划分母中消失。

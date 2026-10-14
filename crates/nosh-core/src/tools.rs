@@ -263,24 +263,34 @@ fn secs(d: std::time::Duration) -> String {
     format!("{:.2}s", d.as_secs_f64())
 }
 
+pub(crate) fn command_output_truncated(r: &CommandResult) -> bool {
+    r.truncated
+        || r.stdout
+            .chars()
+            .chain(r.stderr.chars())
+            .take(OUTPUT_CHARS + 1)
+            .count()
+            > OUTPUT_CHARS
+}
+
 /// Tool result text for `exec` (plain header + raw output).
 pub fn format_command_result(r: &CommandResult, full_log: Option<&Path>) -> String {
     let body_budget = OUTPUT_CHARS;
     let out_len = r.stdout.chars().count();
     let err_len = r.stderr.chars().count();
-    let (out, err, truncated) = if out_len + err_len <= body_budget {
+    let truncated = command_output_truncated(r);
+    let (out, err) = if out_len + err_len <= body_budget {
         (
             Cow::Borrowed(r.stdout.as_str()),
             Cow::Borrowed(r.stderr.as_str()),
-            r.truncated,
         )
     } else {
-        // Give stderr up to a third of the budget, stdout the rest.
-        let err_budget = err_len.min(body_budget / 3);
+        // Reserve a third for stderr, also sharing any unused stdout space.
+        let err_budget = err_len.min((body_budget / 3).max(body_budget.saturating_sub(out_len)));
         let out_budget = body_budget - err_budget;
         let (o, _) = truncate_counted(&r.stdout, out_budget, out_len);
-        let (e, _) = truncate_counted(&r.stderr, err_budget.max(1), err_len);
-        (o, e, true)
+        let (e, _) = truncate_counted(&r.stderr, err_budget, err_len);
+        (o, e)
     };
     let mut s = format!(
         "[exit_code={} duration={} truncated={}",
@@ -342,20 +352,16 @@ impl Redactor for NoRedact {
     }
 }
 
-/// Saves the full output of a truncated command under `state/outputs/`.
+/// Saves captured output under a unique path in `state/outputs/`.
 pub fn save_output(
     id: usize,
     command: &str,
     r: &CommandResult,
     redactor: &dyn Redactor,
-) -> Option<PathBuf> {
-    save_output_in(
-        &nosh_platform::paths::state_dir().join("outputs"),
-        id,
-        command,
-        r,
-        redactor,
-    )
+) -> io::Result<PathBuf> {
+    let dir = nosh_platform::paths::state_dir().join("outputs");
+    save_output_in(&dir, id, command, r, redactor)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", dir.display())))
 }
 
 fn save_output_in(
@@ -364,25 +370,22 @@ fn save_output_in(
     command: &str,
     r: &CommandResult,
     redactor: &dyn Redactor,
-) -> Option<PathBuf> {
-    nosh_platform::paths::ensure_private_dir(dir).ok()?;
+) -> io::Result<PathBuf> {
+    nosh_platform::paths::ensure_private_dir(dir)?;
     let pid = std::process::id();
-    let path = dir.join(format!("{pid}-{id}.log"));
     let text = format!(
         "$ {command}\n[exit_code={}]\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
         r.exit_code, r.stdout, r.stderr
     );
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
     use std::io::Write;
-    let mut f = opts.open(&path).ok()?;
-    f.write_all(redactor.redact(&text).as_bytes()).ok()?;
-    Some(path)
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("{pid}-{id}-"))
+        .suffix(".log")
+        .tempfile_in(dir)?;
+    file.write_all(redactor.redact(&text).as_bytes())?;
+    file.as_file().sync_all()?;
+    let (_, path) = file.keep().map_err(|error| error.error)?;
+    Ok(path)
 }
 
 /// `~`-expanded, absolute and lexically normalized (`a/../b` → `b`), so the

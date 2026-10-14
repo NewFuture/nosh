@@ -35,6 +35,40 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((row["pass"], row["planned"], row["error"]), (1, 2, 1))
         self.assertIn("1/2 (50%)", report.markdown(data))
 
+    def test_summary_indexes_trials_without_rescanning_for_every_scenario(self):
+        data = self.sample()
+        data["metadata"]["scenarios"] = [
+            {"id": f"scenario-{index}", "group": "mvp" if index % 2 else "expanded"}
+            for index in range(40)
+        ]
+        template = data["trials"][0]
+        trials = [
+            dict(template, scenario_id=f"scenario-{index}", status="fail" if index % 2 else "pass")
+            for index in reversed(range(30))
+        ]
+        expected = [
+            {"scenario_id": scenario["id"],
+             **report.summarize([trial for trial in trials if trial["scenario_id"] == scenario["id"]], 2),
+             **report.grading_counts([trial for trial in trials if trial["scenario_id"] == scenario["id"]])}
+            for scenario in data["metadata"]["scenarios"]
+        ]
+        reads = 0
+
+        class CountedTrial(dict):
+            def __getitem__(self, key):
+                nonlocal reads
+                reads += key == "scenario_id"
+                return super().__getitem__(key)
+
+        data["trials"] = [CountedTrial(trial) for trial in trials]
+        tables = report.summary_tables(data)
+        self.assertEqual(tables["summary"], expected)
+        self.assertLessEqual(reads, 3 * len(trials))
+        overall = tables["groups"][0]
+        self.assertEqual((overall["pass"], overall["fail"], overall["missing"]), (15, 15, 50))
+        self.assertEqual(overall["planned"], 80)
+        self.assertNotIn("capture_components", tables)
+
     def test_device_is_visible_and_cpu_gpu_comparisons_are_not_controlled(self):
         cpu = self.sample()
         cpu["metadata"]["settings"] = {"device": "cpu"}

@@ -1,140 +1,86 @@
 # nosh
 
-nosh 是一个用纯 Rust 实现、内置本地小模型（默认 MiniCPM5-2B）、可以断网运行的 AI shell。
+nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行，需要帮助时直接在终端里描述任务。
 
-> 只维护当前版本。支持范围与限制见[系统设计](docs/DESIGN.md#03-实现状态)。
+默认使用本地 MiniCPM5-2B 模型，准备好模型后可离线推理，无需云端 API。支持 **Linux（含 WSL）和 macOS**，原生 Windows shell 尚未实现。
 
-- **本身就是 shell**：兼容 Bash（内核为 brush-core）。普通命令直接执行；`# 任务` 显式交给 AI，未知命令先尝试本地纠错，执行失败默认提示求助入口。
-- **前缀命令**：单独键入 `#` 自动弹出本地命令补全，`#help` 查看帮助，`#mode auto` 切换审批模式，`#theme soft-light` 保存主题选择；`#fix [补充说明]` 由 Agent 诊断上次失败。`#theme ` / `#mode ` 自动展示参数候选，子命令和固定参数也支持 Tab 补全；未知命令或错误参数不转交模型。完整语法见[交互命令](docs/DESIGN.md#91-shell-界面)。
-- **输入辅助**：交互输入自动高亮，提示待完成语法、命令识别和路径状态；慢查询不阻塞编辑，不改写或执行输入。
-- **输入编辑**：启动时自动选择 Emacs/Vi，支持常用动作改键。Tab 优先补全、明确无结果时兜底 AI；F2 直接请求建议，仅回填、不执行。完整键位、搜索与取消规则见[输入编辑](docs/INPUT-EDITING.md)。
-- **上下文历史**：上下键或 Ctrl+R 唤出历史候选，在原输入框筛选，↑/↓ 选择、Enter 回填、Esc 恢复草稿；搜索中 Ctrl+R 切全部／同工作树。命令保存到本地 SQLite，AI 提问仅留本次内存；范围、忽略规则和 history/fc 语义见[历史说明](docs/HISTORY.md)。
-- **上下文补全**：命令与路径默认 smart-case 模糊；内置 Git `switch`、GNU Make 静态目标及 `npm run`／Yarn 项目脚本补全，保留已加载定义的语义。共用一个有界、可取消的补全进程；覆盖和限制见[补全说明](docs/COMPLETION.md)。
-- **可见缩写**：适用的内置与自定义规则在空格时展开供编辑，Enter 展开后正常提交；Tab 可发现和选择，Ctrl+Space 保留原文，撤销不反弹。`#abbr` / `nosh abbr` 管理规则，粘贴、历史及 AI 回填不自动改写；详见[缩写说明](docs/ABBREVIATIONS.md)。
-- **上下文连续**：agent 和用户共用同一个 shell 会话，cwd、变量、venv 等状态会一直延续。每次任务附上当前项目类型、manifest 基本信息及 Git 状态；切换项目或进入普通目录后重新判断，不沿用上一项目的描述。
-- **本地推理**：基于 candle + GGUF。首次使用时按下载策略准备模型，之后可以完全离线；设备选择与运行限制见[推理说明](docs/INFERENCE.md)。
-- **安全**：agent 发起的命令要经过风险分级和审批。
+## 功能特性
+
+| 功能 | 你可以做什么 |
+|---|---|
+| Bash 兼容 | 运行普通命令、管道和脚本，继续使用变量、别名与函数 |
+| AI 任务 | 输入 `# 任务`，让 Agent 查询文件、分析问题并按审批策略执行命令；缺少信息时可向你提问 |
+| 连续的会话上下文 | Agent 与用户共享当前目录、变量和虚拟环境；自动了解当前项目与 Git 状态 |
+| [命令建议](docs/COMMAND-ASSIST.md) | 输入描述后按 F2，或使用 `nosh -s` 生成命令；命令结束后还可获得修复或下一步建议，**建议不自动执行** |
+| 纠错与诊断 | 未知命令先尝试本地拼写纠错；用 `#fix` 让 Agent 根据上次失败命令及可用输出诊断，也可补充要求 |
+| [输入编辑](docs/INPUT-EDITING.md) | Emacs／Vi 编辑、自定义快捷键；[语法高亮和实时提示](docs/INPUT-ASSIST.md)无需模型 |
+| [上下文补全](docs/COMPLETION.md) | 模糊补全命令与路径，补全 `git switch` 分支、GNU Make 目标和 npm／Yarn 项目脚本 |
+| [上下文历史](docs/HISTORY.md) | 用上下键或 Ctrl+R 搜索历史，按工作树筛选，选中后回填编辑 |
+| [可见缩写](docs/ABBREVIATIONS.md) | 用短名称展开常用命令，展开后可检查、修改和撤销；支持自定义规则 |
+| [主题](docs/THEMES.md) | 内置深浅主题，提示符显示环境与操作状态；可选 Starship 和 Powerline |
+| [项目环境与终端集成](docs/SHELL-INTEGRATION.md) | 可选接入已授权的 direnv／mise 环境，并向兼容终端报告目录和命令区域 |
+
+默认使用 CPU 推理，也可使用启用了 NVIDIA CUDA 的构建，详见[本地推理与 CUDA](docs/INFERENCE.md)。
+
+## 开始使用
+
+取得 `nosh` 可执行文件后（[构建入口](docs/ARCHITECTURE.md#开发入口)），在终端运行：
 
 ```bash
-nosh                                   # 进入 nosh shell
-#help                                  # nosh 提示符内查看帮助
-# 找出当前目录下最大的 10 个文件         # 前缀后加空白，交给 AI
-nosh -a "把 logs 里 7 天前的日志打包"   # 一次性任务
-nosh -s "解压 foo.tar.zst 到 /tmp"     # 只输出命令
+nosh model pull    # 提前下载并校验默认模型，约 1.57 GB
+nosh doctor        # 检查运行环境与模型
+nosh               # 进入 shell
 ```
 
-## 构建与运行（Linux）
+普通命令不需要模型。未提前下载时，首次使用 AI 会按下载设置准备模型；已有模型后可用 `nosh --offline` 启动。
+
+在 **nosh 提示符内**，普通命令和 AI 任务可以交替使用：
+
+```text
+git status
+# 找出当前目录下最大的 10 个文件
+#help
+#mode confirm
+#theme soft-light
+```
+
+单独键入 `#` 可浏览管理命令。命令失败后，输入 `#fix` 请求诊断，或用 `#fix 只分析原因，不修改文件` 补充要求。
+
+也可以从原有 shell 一次性调用：
 
 ```bash
-cargo source prepare
-cargo build --release                  # rust-toolchain.toml 固定 Rust 1.98.1
-./target/release/nosh model pull       # 下载并校验模型（约 1.57 GB），之后可离线
-./target/release/nosh doctor           # 检查 CPU、内存、模型、下载源
-./target/release/nosh                  # 启动 shell；--norc 跳过 ~/.bashrc，--safe 同时关闭 AI
+nosh -a "把 logs 里 7 天前的日志打包"   # 执行一次 AI 任务
+nosh -s "解压 foo.tar.zst 到 /tmp"     # 只输出建议命令
 ```
 
-首次 clone、切换依赖版本或补丁后，先准备 Reedline 与 brush 修补源再运行 Cargo/IDE；重复准备不会覆盖未导出的本地修改。普通 Rust 构建不要求 Python、Node 或 npm。离线准备、同仓联调、补丁导出与升级见 [源码维护说明](docs/REEDLINE-MAINTENANCE.md)。
+### 保留现有 Bash
 
-常用选项：`--auto` / `--yolo`（审批模式）、`--offline`、`--model-path <gguf>`、`--no-download`。Linux 默认配置为 `~/.config/nosh/config.toml`，平台路径、支持的键和可用示例见 [配置说明](docs/DESIGN.md#11-配置)。`--offline` 阻止模型下载与探测，不限制 shell 命令自身联网。
-
-AI 任务默认显示 **`审批: 自动`**；可用 `#mode confirm|auto|yolo` 切换。用户 deny 始终优先，有效用户白名单三档免审批，并可覆盖内置禁止；未获白名单覆盖的内置禁止在询问模式须键入 `yes`，自动 / YOLO 直接拒绝。YOLO 对其他操作免逐次审批，不绕过工具范围或外部认证。
-
-自动模式以**便利优先、防御破坏**为目标：普通 `mv` / `cp` 默认执行，危险目标、破坏性效果与用户 deny 仍拦截；不要求原子不覆盖或备份证明。常见构建 / 测试 / 检查也默认执行，明确接受未知项目代码风险，不代表沙箱隔离或可恢复保证。规则采用 TOML 条目，例如 `deny = [{ command_prefix = "docker system prune" }]`，不再使用旧字符串 glob 数组。完整矩阵、作用域及限制见 [审批说明](docs/APPROVAL-MODES.md)。
-
-`#auto off` 只暂停部分自动路由，不是全局禁用 AI；彻底关闭 nosh AI 可用 `NOSH_DISABLE_AI=1`（保留 rc）或 `--safe`（同时跳过 rc），此时也不拦截前缀命令。具体例外见 [输入判定与开关边界](docs/DESIGN.md#42-ai-触发与输入判定)。
-
-## 在现有 Bash 中使用建议
-
-保留原 Bash，在 Linux（含 WSL）或 macOS 的 **Bash 5.1+** 交互终端中加载：
+在 Linux／macOS 的 **Bash 5.1+** 交互终端中加载：
 
 ```bash
 eval "$(nosh init bash)"
 ```
 
-输入描述，按现有 `ai_suggest` 按键（默认 **F2**）生成命令；**只回填，检查、修改后自行回车执行**。空白输入不请求模型，失败或取消保留原文和光标。模型、下载和安全策略复用 `nosh -s`，不另设 Bash 配置。
+输入描述后按默认的 **F2**，建议会填回命令行，检查后自行回车执行。初始化不会修改 rc 或默认 shell。完整用法见[Bash 集成](docs/INPUT-EDITING.md#外部-bash-的轻量建议入口)。
 
-初始化只输出脚本，不加载模型、联网、修改 rc 或默认 shell；可自行把加载命令加入 `.bashrc`，nosh 读取同一份 rc 时会跳过此外部绑定。实际建议仍有模型冷启动成本，可先 `nosh model pull`。按键冲突、版本限制及宿主边界见[Bash 集成](docs/DESIGN.md#92-现有-bash-集成)和[绑定说明](docs/INPUT-EDITING.md#外部-bash-的轻量建议入口)。
+## 使用时需了解
 
-## 实时输入提示与语法高亮
+Agent 默认采用自动审批，可用 `#mode confirm` 切到询问模式。自动模式允许常见低风险操作及构建／测试，用户 deny 始终优先。**审批不是沙箱，也不保证操作可撤销**；检测到命令需要终端或密码时会交回用户，不自动重试，但命令可能已有部分执行。详见[审批说明](docs/APPROVAL-MODES.md)。
 
-正常交互终端默认启用 `input_assist`，无需插件或模型；`--safe` / `NOSH_DISABLE_AI=1` 不会关闭它。输入按语法高亮，命令与路径状态异步查询；未知或动态行为不伪装成确定错误，路径存在不代表已获执行授权。可在用户配置中关闭：
+`--offline` 只禁止模型下载与探测，不限制 shell 命令联网。`--safe` 关闭 AI 并跳过 rc；`NOSH_DISABLE_AI=1` 关闭 AI 但保留 rc。常用设置见[配置说明](docs/DESIGN.md#11-配置)。
 
-```toml
-[shell]
-input_assist = false
-```
+交互 shell 默认保留最近命令的有界输出尾部用于失败诊断，可关闭。**本地运行不等于自动脱敏**，显式启用的评测 trace 也可能保存相关内容，见[输出采集说明](docs/OUTPUT-CAPTURE.md)。
 
-基本终端和非 TTY 不启用实时输入提示；`NO_COLOR` 关闭样式，但保留已启用的状态栏文字反馈。判定规则、两个有界辅助进程、资源预算和恢复条件见[实时输入辅助](docs/INPUT-ASSIST.md)。
-
-## 可选 NVIDIA CUDA 推理
-
-默认构建是 CPU-only；CUDA 构建的 `auto` 根据可见设备与可用显存选择后端。显式 `--device cuda[:N]` 失败不会回退 CPU，GPU 当前仅支持 f16 KV。构建步骤、设备选择和运行限制见[本地推理与 CUDA](docs/INFERENCE.md)。
-
-## 命令建议与终端交接
-
-交互 shell 在**提示符上方**显示环境、输入状态、操作提示与模式，不预留屏底区域；`[shell] status_bar = false` 可关闭。内建 `soft-dark` / `soft-light` 不依赖 Starship，选择自动保存、无需重启；预览、原生 Starship 主题和可选 Powerline 见[主题说明](docs/THEMES.md)。**tmux 的未提交草稿历史残留仍未解决**；布局与兼容边界见[状态行设计](docs/STATUS-BAR.md)。
-
-Agent 使用 `exec`、`read_file`、`grep`，有交互终端时可提问；管道附件模式不开放命令执行，也不从管道读取提问回答。项目指引优先使用适用的 `AGENTS.md`，否则使用 README 简介与索引。详见[工具契约](docs/LLM-TOOLS.md)和[项目上下文](docs/PROJECT-CONTEXT.md)。
-
-**CommandAssist 只建议，不自动执行：**
-
-| 意图 | 入口与行为 |
-|---|---|
-| Generate | `nosh -s`、非管理输入的非空 F2、适用的 Tab 兜底；输出或预填完整命令 |
-| Fix | 用户命令失败后的后台修复建议；不自动执行 |
-| Next | 用户命令成功后的后台建议；没有合理下一步可以不建议，无手动入口 |
-
-手动 `#fix [补充说明]` 始终进入 Agent，自动携带上次失败命令、退出码及匹配输出；说明可省略，不走 CommandAssist Fix。Agent 的工具调用仍受现有审批规则约束。
-
-空白草稿用 F2 接受已有候选，回车才执行；没有候选时不额外请求模型，继续输入会取消旧建议。`[shell] command_assist = false` 关闭自动辅助，但保留 Generate 和 Agent 入口（包括 `#fix`）。完整协议、命令校验与调度见[CommandAssist](docs/COMMAND-ASSIST.md)；静态校验不能证明动态命令安全。
-
-agent 命令遇到 SIGTTIN 或明确的 sudo 密码诊断时，harness 直接交回原命令并结束任务，不再调用模型或执行同轮后续工具；不会自动重试，也不接触用户密码。复合命令前面的部分可能已经执行；交接提示会明确警告，请检查当前状态和整条命令后再自行运行，以免重复副作用。
-
-## 终端与字符兼容
-
-### 项目环境与命令区域
-
-可显式设置 `[shell] project_env = "direnv"` 或 `"mise"` 接入已授权的项目环境，默认关闭、两者互斥。人工提示符与 agent 工具调用之间刷新；单条 `cd … && …` 内不自动刷新。加载失败时明确警告，人工仍可修复，agent 停止执行。mise 首版仅支持已安装工具的 PATH/业务变量，不接管完整激活功能。
-
-`[shell] terminal_integration = "auto"` 默认根据终端提示简单识别，使用通用 OSC 7/133 报告目录和真实命令区域；可设为 `off` 或 `on`。工具版本、恢复规则、终端范围与资源预算见[项目环境与终端集成](docs/SHELL-INTEGRATION.md)。
-
-### 最近命令输出
-
-交互 shell 默认采集最近一条命令的终端输出，可在配置文件中关闭：
-
-```toml
-[shell]
-capture_output = "last"  # last（默认）| off
-```
-
-`last` 原样转发终端字节，只在内存保留最近用户命令的 **4,096 字节文本尾部**，按命令 ID 用于失败诊断，普通任务默认不带入。它是合并的终端输出，不是分离的 stdout/stderr；不改变文件重定向，不额外写完整日志。`off`、`-c`、脚本和一次性 `-a/-s` 不进入中转路径。
-
-**这不是脱敏功能**：显式启用的 `NOSH_EVAL_TRACE` 仍可能记录已注入的证据。注入矩阵、去重、混流、不可用状态和 PTY 降级规则统一见[输出采集设计](docs/OUTPUT-CAPTURE.md)。
-
-### 显示与输入
-
-当前 shell 面向 Linux（含 WSL）和 macOS；Windows 原生 shell 尚未实现。建议使用 UTF-8 locale 和支持 Unicode 的等宽字体。
-
-| 环境 | nosh 自身界面的行为 |
-|---|---|
-| UTF-8 的 xterm、tmux/screen 等终端 | 彩色与 Unicode 标记；命令预览按终端列宽截断，保留完整的汉字、组合字符和 emoji 字素簇，并响应窗口缩放 |
-| `NO_COLOR=1` 或 `CLICOLOR=0` | 不输出颜色/样式；仍可使用光标控制进行交互编辑 |
-| `TERM=dumb`、`unknown` 或未设置 | 无 ANSI 控制序列；使用 ASCII 标记、基本输入编辑和静态下载提示，不使用高级补全/历史搜索 |
-| 非 UTF-8 或未设置 locale、Linux 控制台或旧 VT 终端 | 装饰标记降级为 ASCII，不改写用户文本；字符编码按 `LC_ALL`、`LC_CTYPE`、`LANG` 的顺序判断，均未设置或为空时保守降级 |
-| stdout/stderr 重定向、管道和 CI | 分别判断两个输出流；重定向不加 ANSI，`nosh -a` 的回答不加竖线，思考内容和诊断留在 stderr；不可见的审批提示不会接受输入 |
-
-用户命令（包括 `-c`、脚本及其重定向）的输出按原始字节透传。agent 捕获的命令输出按 UTF-8 增量解码：跨块字符保持完整，非法字节显示为 `�`，不猜测 GBK/其他旧编码；这类命令应自行显式转码。终端预览移除 ANSI/OSC 控制序列并合并回车进度行，JSON 事件和保存结果不经过此显示层清理。
-
-普通回答和命令输出保留 emoji 连字；审批卡片中的命令仍显式显示隐藏字符，双向文本控制符在普通文本中也会显示为转义。不同终端/字体对 emoji 和东亚歧义宽度的实现仍可能有差异。
+建议使用 UTF-8 终端。基础终端会使用简化显示；tmux 的未提交草稿历史残留仍是[已知限制](docs/STATUS-BAR.md)。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [文档导航](docs/README.md) | 当前设计、功能契约与测试评测的完整入口 |
-| [代码架构与维护](docs/ARCHITECTURE.md) | crate 依赖、接口边界、实现与测试组织、开发命令 |
-| [系统设计](docs/DESIGN.md) | 当前行为、配置与实现限制 |
-| [真实模型评测](eval/README.md) | 当前运行器、场景、观测与报告契约 |
+| [功能文档导航](docs/README.md) | 各功能的详细说明与配置 |
+| [系统设计](docs/DESIGN.md) | 功能契约、实现边界与限制 |
+| [开发指引](AGENTS.md) / [代码架构](docs/ARCHITECTURE.md) | 日常开发、构建与代码组织 |
+| [真实模型评测](eval/README.md) | 评测运行方式与结果口径 |
 
 ## 许可
 

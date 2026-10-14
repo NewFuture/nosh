@@ -213,8 +213,7 @@ impl Exec {
                     "timed_out": result.map(|r| r.timed_out),
                     "interrupted": result.map(|r| r.interrupted),
                     "needed_terminal": result.map(|r| r.needed_terminal),
-                    "truncated": result.map(|r| r.truncated
-                        || r.stdout.chars().count() + r.stderr.chars().count() > tools::OUTPUT_CHARS),
+                    "truncated": result.map(tools::command_output_truncated),
                 }))
             }
             _ => None,
@@ -607,7 +606,7 @@ impl Agent {
             if let Some(key) = guidance_key.take() {
                 self.guidance_sent = Some(key);
             }
-            add_usage(&mut out.usage, &step.usage);
+            out.usage.add_step(&step.usage, out.steps == 1);
             out.answer = step.text.trim().to_string();
             if step.stop == StopReason::Cancelled || finish_reason.is_some() {
                 let cancelled = step.stop == StopReason::Cancelled;
@@ -1153,11 +1152,16 @@ Approval request: {}; {}.{}",
         };
         let id = self.next_output;
         self.next_output += 1;
-        let big = r.truncated || r.stdout.len() + r.stderr.len() > tools::OUTPUT_CHARS;
-        let log = if big {
-            tools::save_output(id, &to_run, &r, self.redactor.as_ref())
+        let (log, output_error) = if tools::command_output_truncated(&r) {
+            match tools::save_output(id, &to_run, &r, self.redactor.as_ref()) {
+                Ok(path) => (Some(path), None),
+                Err(error) => (
+                    None,
+                    Some(format!("could not save full command output: {error}")),
+                ),
+            }
         } else {
-            None
+            (None, None)
         };
         let mut summary = format!("exit {} · {:.2}s", r.exit_code, r.duration.as_secs_f64());
         if r.timed_out {
@@ -1168,6 +1172,10 @@ Approval request: {}; {}.{}",
         }
         ui.tool_end(&summary);
         let mut text = tools::format_command_result(&r, log.as_deref());
+        if let Some(error) = output_error {
+            ui.error(&error);
+            text.push_str(&format!("\n[note] {error}"));
+        }
         if edited {
             text = format!("[note] the user edited the command to: {to_run}\n{text}");
         }
@@ -1348,19 +1356,6 @@ fn needs_handoff(r: &nosh_shell::CommandResult, sudo_rewritten: bool) -> bool {
                     "sudo: a password is required" |
                     "sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper")
             }))
-}
-
-fn add_usage(total: &mut Usage, u: &Usage) {
-    total.prompt_tokens += u.prompt_tokens;
-    total.cached_tokens += u.cached_tokens;
-    total.completion_tokens += u.completion_tokens;
-    total.prefill_secs += u.prefill_secs;
-    total.decode_secs += u.decode_secs;
-    if total.ttft_secs == 0.0 {
-        total.ttft_secs = u.ttft_secs;
-    }
-    total.context_used = u.context_used;
-    total.context_max = u.context_max;
 }
 
 #[cfg(test)]

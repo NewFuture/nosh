@@ -158,6 +158,20 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Adds one completed step, retaining the first step's TTFT and latest context.
+    pub fn add_step(&mut self, step: &Self, first: bool) {
+        self.prompt_tokens += step.prompt_tokens;
+        self.cached_tokens += step.cached_tokens;
+        self.completion_tokens += step.completion_tokens;
+        self.prefill_secs += step.prefill_secs;
+        self.decode_secs += step.decode_secs;
+        if first {
+            self.ttft_secs = step.ttft_secs;
+        }
+        self.context_used = step.context_used;
+        self.context_max = step.context_max;
+    }
+
     pub fn prefill_tps(&self) -> f64 {
         self.prompt_tokens as f64 / self.prefill_secs.max(1e-9)
     }
@@ -304,6 +318,50 @@ pub trait ChatEngine: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_adds_costs_but_keeps_first_ttft_and_latest_context() {
+        for first_ttft in [0.0, 0.5] {
+            let first = Usage {
+                prompt_tokens: 100,
+                cached_tokens: 20,
+                completion_tokens: 10,
+                prefill_secs: 0.25,
+                decode_secs: 0.5,
+                ttft_secs: first_ttft,
+                context_used: 120,
+                context_max: 8192,
+            };
+            let next = Usage {
+                prompt_tokens: 25,
+                cached_tokens: 110,
+                completion_tokens: 5,
+                prefill_secs: 0.5,
+                decode_secs: 0.25,
+                ttft_secs: 2.0,
+                context_used: 135,
+                context_max: 16384,
+            };
+            let mut total = Usage::default();
+            total.add_step(&first, true);
+            assert_eq!(total, first);
+            total.add_step(&next, false);
+            assert_eq!(
+                total,
+                Usage {
+                    prompt_tokens: 125,
+                    cached_tokens: 130,
+                    completion_tokens: 15,
+                    prefill_secs: 0.75,
+                    decode_secs: 0.75,
+                    ttft_secs: first_ttft,
+                    context_used: 135,
+                    context_max: 16384,
+                }
+            );
+            assert_eq!(total.decode_tps(), 20.0);
+        }
+    }
 
     #[test]
     fn shortening_preserves_unicode_and_the_existing_marker() {
