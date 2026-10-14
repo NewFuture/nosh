@@ -236,6 +236,41 @@ fn agent_modes_without_a_model_exit_2() {
 }
 
 #[test]
+fn agent_and_suggest_report_stdin_read_errors_before_loading_a_model() {
+    let home = empty_home("stdin-error");
+    for args in [
+        &["--offline", "-a", "summarize the input"][..],
+        &["--offline", "-s"][..],
+    ] {
+        let output = nosh()
+            .env("NOSH_HOME", &home)
+            .args(args)
+            .stdin(Stdio::from(std::fs::File::open(&home).unwrap()))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("nosh: cannot read stdin: "),
+            "{:?}",
+            output.stderr
+        );
+    }
+    let output = nosh()
+        .env("NOSH_HOME", &home)
+        .args(["--offline", "-s", "list files"])
+        .stdin(Stdio::from(std::fs::File::open(&home).unwrap()))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "no model is installed");
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("model"), "{error}");
+    assert!(!error.contains("cannot read stdin"), "{error}");
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn doctor_reports_missing_model() {
     let home = empty_home("doctor");
     let out = nosh()

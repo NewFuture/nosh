@@ -5,6 +5,8 @@ pub mod abbreviations;
 mod document;
 pub mod theme;
 
+pub use document::read_text;
+
 use std::path::PathBuf;
 
 use nosh_hub::SourceSelection;
@@ -221,9 +223,9 @@ impl Config {
     /// A missing file means defaults; a file that cannot be read also gets
     /// defaults, but with a warning, since its rules would be lost silently.
     fn load_from(path: PathBuf) -> Self {
-        let mut cfg = match std::fs::read_to_string(&path) {
+        let mut cfg = match read_text(&path) {
+            Ok(text) if text.is_empty() => Self::default(),
             Ok(text) => Self::parse_at(&text, &path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => Self {
                 warnings: vec![format!("cannot be read, using defaults: {e}")],
                 safety_error: Some(format!("configuration cannot be read: {e}")),
@@ -823,6 +825,72 @@ on = true
         assert!(unreadable.warnings[0].contains("cannot be read"));
         assert!(unreadable.safety_error.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_loading_enforces_the_same_byte_limit_as_config_editing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut contents = "[agent]\nmax_steps = 3\n#".to_string();
+        contents.extend(std::iter::repeat_n('x', 1024 * 1024 - contents.len()));
+        std::fs::write(&path, &contents).unwrap();
+        let accepted = Config::load_from(path.clone());
+        assert_eq!(accepted.max_steps, 3);
+        assert!(accepted.warnings.is_empty(), "{:?}", accepted.warnings);
+        assert!(accepted.safety_error.is_none());
+
+        contents.push('x');
+        std::fs::write(&path, contents).unwrap();
+        let rejected = Config::load_from(path.clone());
+        assert_eq!(rejected.max_steps, Config::default().max_steps);
+        assert_eq!(rejected.path, Some(path));
+        assert_eq!(rejected.warnings.len(), 1);
+        assert!(rejected.warnings[0].contains("configuration exceeds 1 MiB"));
+        assert!(rejected.safety_error.is_some());
+        assert!(!rejected.abbreviations.enabled);
+        for error in [
+            read_text(rejected.path.as_ref().unwrap()).unwrap_err(),
+            theme::load(rejected.path.as_ref().unwrap()).unwrap_err(),
+            theme::Loader::new(rejected.path.clone().unwrap(), theme::Selection::default())
+                .refresh()
+                .unwrap_err(),
+            abbreviations::load(rejected.path.as_ref().unwrap()).unwrap_err(),
+        ] {
+            assert!(error.contains("configuration exceeds 1 MiB"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_loading_preserves_symlink_and_invalid_utf8_behavior() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("settings.toml");
+        let path = directory.path().join("config.toml");
+        std::fs::write(&target, "[agent]\nmax_steps = 3\n").unwrap();
+        symlink(&target, &path).unwrap();
+        let accepted = Config::load_from(path.clone());
+        assert_eq!(accepted.max_steps, 3);
+        assert!(accepted.warnings.is_empty());
+        assert!(accepted.safety_error.is_none());
+        std::fs::write(&target, [0xff]).unwrap();
+        let rejected = Config::load_from(path);
+        assert!(rejected.safety_error.is_some());
+        assert!(!rejected.warnings.is_empty());
+    }
+
+    #[test]
+    fn config_loading_rejects_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a NUL-terminated path within this temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let config = Config::load_from(path);
+        assert!(config.safety_error.is_some());
+        assert!(config.warnings[0].contains("configuration must be a regular file"));
     }
 
     #[test]

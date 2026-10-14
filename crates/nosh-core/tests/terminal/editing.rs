@@ -473,8 +473,14 @@ fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
         "xterm-256color",
         &[
             ("editing> ", b"\x12history_executed"),
-            ("touch history_executed", b"\r"),
-            ("editing> ", b"\x15exit 0\r"),
+            (
+                "@frame:editing> history_executed\nEnter edit\ntouch history_executed",
+                b"\r",
+            ),
+            (
+                "@frame:editing> touch history_executed\n!History [all]",
+                b"\x15exit 0\r",
+            ),
         ],
     );
     assert_eq!(result["history_executed"], false);
@@ -485,9 +491,15 @@ fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
         &[
             ("editing> ", b"printf original"),
             ("original", b"\x12\x15history_executed"),
-            ("touch history_executed", F2),
+            (
+                "@frame:editing> history_executed\nEnter edit\ntouch history_executed",
+                F2,
+            ),
             ("exit or cancel", b"\x1b"),
-            ("original", b"\x15exit 0\r"),
+            (
+                "@frame:editing> printf original\n!History [all]",
+                b"\x15exit 0\r",
+            ),
         ],
     );
     assert_eq!(result["history_executed"], false);
@@ -499,8 +511,14 @@ fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
         &[
             ("editing> ", b"printf original"),
             ("original", b"\x12\x15no_history_match_fixture"),
-            ("No matches", b"\r"),
-            ("editing> ", b"\x15exit 0\r"),
+            (
+                "@frame:editing> no_history_match_fixture\nNo matches",
+                b"\r",
+            ),
+            (
+                "@frame:editing> no_history_match_fixture\n!History [all]",
+                b"\x15exit 0\r",
+            ),
         ],
     );
     assert_eq!(result["history_executed"], false);

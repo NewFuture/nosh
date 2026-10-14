@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use nosh_shell::theme::{Builtin, Theme};
 
+use super::read_text;
 use crate::starship::Glyphs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,29 +266,6 @@ impl Loader {
         };
         crate::starship::environment(&selection.starship(), shell, glyphs).map(Some)
     }
-}
-
-pub fn read_text(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err(format!(
-            "{}: theme configuration must be a regular file",
-            path.display()
-        ));
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(text)
 }
 
 pub fn save(path: &Path, requested: &str) -> Result<(), String> {

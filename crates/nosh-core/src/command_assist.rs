@@ -424,16 +424,7 @@ fn run_session(
             },
         )?;
         let out = engine.step(sid, std::mem::take(&mut pending), &mut |_| {})?;
-        if step == 1 {
-            usage.ttft_secs = out.usage.ttft_secs;
-        }
-        usage.prompt_tokens += out.usage.prompt_tokens;
-        usage.cached_tokens += out.usage.cached_tokens;
-        usage.completion_tokens += out.usage.completion_tokens;
-        usage.prefill_secs += out.usage.prefill_secs;
-        usage.decode_secs += out.usage.decode_secs;
-        usage.context_used = out.usage.context_used;
-        usage.context_max = out.usage.context_max;
+        usage.add_step(&out.usage, step == 1);
         if cancel.is_cancelled() || out.stop == StopReason::Cancelled {
             return Err(AssistError::Cancelled);
         }

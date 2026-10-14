@@ -184,6 +184,38 @@ pub(super) fn framed(output: &str) -> String {
 
 pub(super) type KeyStep<'a> = (&'a str, &'a [u8]);
 
+fn frame_matches(output: &str, expected: &str) -> bool {
+    let Some((completed, _)) = output.rsplit_once("\x1b[?25h") else {
+        return false;
+    };
+    let Some((_, frame)) = completed.rsplit_once("\x1b[?25l") else {
+        return false;
+    };
+    let frame = style::strip_ansi(frame);
+    // Each line is a required fragment; "!" excludes text from this redraw.
+    expected.lines().all(|part| {
+        part.strip_prefix('!')
+            .map_or_else(|| frame.contains(part), |part| !frame.contains(part))
+    })
+}
+
+#[test]
+fn frame_steps_ignore_partial_redraws_and_old_menu_text() {
+    let menu = "\x1b[?25lediting> query\x1b7History [all]\nNo matches\x1b8\x1b[?25h";
+    let editing = "\x1b[?25lediting> query\x1b7\x1b8\x1b[?25h";
+    assert!(frame_matches(menu, "editing> query\nNo matches"));
+    assert!(!frame_matches(menu, "editing> query\n!History [all]"));
+    assert!(frame_matches(
+        &format!("{menu}{editing}"),
+        "editing> query\n!History [all]"
+    ));
+    assert!(!frame_matches(
+        &format!("{editing}\x1b[?25lediting> partial"),
+        "editing> partial"
+    ));
+    assert!(!frame_matches("editing> query", "editing> query"));
+}
+
 pub(super) fn input_worker_command() -> nosh_shell::input_assist::WorkerCommand {
     nosh_shell::input_assist::WorkerCommand {
         program: std::env::current_exe().unwrap(),
@@ -461,7 +493,12 @@ impl Probe<'_> {
                         } else {
                             let observed = observed.lock().unwrap();
                             let output = String::from_utf8_lossy(&observed[observed_start..]);
-                            output.contains(needle) || style::strip_ansi(&output).contains(needle)
+                            if let Some(expected) = needle.strip_prefix("@frame:") {
+                                frame_matches(&output, expected)
+                            } else {
+                                output.contains(needle)
+                                    || style::strip_ansi(&output).contains(needle)
+                            }
                         };
                         if ready {
                             let resize_ready = if let Some((_, columns)) =

@@ -959,6 +959,55 @@ fn command_result_budgets_count_characters_not_bytes() {
 }
 
 #[test]
+fn command_output_truncation_preserves_capture_limits_and_short_text() {
+    let mut result = CommandResult {
+        stdout: "captured prefix".into(),
+        ..CommandResult::default()
+    };
+    assert!(!command_output_truncated(&result));
+    result.truncated = true;
+    assert!(command_output_truncated(&result));
+    let output = format_command_result(&result, Some(Path::new("/tmp/captured.log")));
+    assert!(output.contains("truncated=yes"));
+    assert!(output.contains("captured prefix"));
+    assert!(output.contains("[full output: /tmp/captured.log]"));
+    assert!(!output.contains("characters omitted"));
+}
+
+#[test]
+fn command_result_streams_share_the_entire_character_budget() {
+    for stdout_chars in [0, 1, 3999, 4000, 6000, 6001] {
+        for stderr_chars in [0, 1, 1999, 2000, 6000, 6001] {
+            let result = CommandResult {
+                stdout: "\u{4e2d}".repeat(stdout_chars),
+                stderr: "\u{9519}".repeat(stderr_chars),
+                ..CommandResult::default()
+            };
+            let output = format_command_result(&result, None);
+            let kept = output.matches('\u{4e2d}').count() + output.matches('\u{9519}').count();
+            assert_eq!(
+                kept,
+                (stdout_chars + stderr_chars).min(OUTPUT_CHARS),
+                "stdout={stdout_chars}, stderr={stderr_chars}"
+            );
+            assert_eq!(
+                output.contains("truncated=yes"),
+                stdout_chars + stderr_chars > OUTPUT_CHARS
+            );
+        }
+    }
+
+    let result = CommandResult {
+        stdout: "\u{4e2d}".repeat(OUTPUT_CHARS),
+        stderr: "\u{9519}".repeat(OUTPUT_CHARS),
+        ..CommandResult::default()
+    };
+    let output = format_command_result(&result, None);
+    assert_eq!(output.matches('\u{4e2d}').count(), 4000);
+    assert_eq!(output.matches('\u{9519}').count(), 2000);
+}
+
+#[test]
 fn command_result_format() {
     let r = CommandResult {
         exit_code: 0,
@@ -1023,6 +1072,55 @@ fn saved_output_is_written_as_is_through_the_redactor() {
             .starts_with("$ ECHO HI\n")
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_outputs_with_the_same_id_do_not_replace_previous_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = save_output_in(
+        directory.path(),
+        1,
+        "printf first",
+        &CommandResult {
+            stdout: "first".into(),
+            ..CommandResult::default()
+        },
+        &NoRedact,
+    )
+    .unwrap();
+    let original = std::fs::read_to_string(&first).unwrap();
+    let second = save_output_in(
+        directory.path(),
+        1,
+        "printf second",
+        &CommandResult {
+            stdout: "second".into(),
+            ..CommandResult::default()
+        },
+        &NoRedact,
+    )
+    .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(std::fs::read_to_string(first).unwrap(), original);
+    assert!(std::fs::read_to_string(second).unwrap().contains("second"));
+}
+
+#[test]
+fn saved_output_reports_directory_errors_without_replacing_existing_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("not-a-directory");
+    std::fs::write(&path, "existing file").unwrap();
+    let error = save_output_in(
+        &path,
+        1,
+        "printf text",
+        &CommandResult::default(),
+        &NoRedact,
+    )
+    .unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing file");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
 #[test]

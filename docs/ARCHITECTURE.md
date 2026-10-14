@@ -35,6 +35,8 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 
 引擎通用错误 `EngineError` 保留上下文已满、未知会话、配置和 I/O 分类；模型与分词失败作为带原始错误的 `Backend` 传递。`nosh-llm::LlmError` 只描述本地实现，不再成为 Agent、Mock、trace 或评测代理的接口要求。消息序列化、取消、会话生命周期与失败恢复语义保持一致。
 
+Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：token 与 prefill/decode 耗时累加，TTFT 保留首步实际值（包括零），context 保留末步快照。不把零当作尚未记录，也不累加 context 或把后续首 token 延迟替换首步测量。
+
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。
 
 Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存在的后端保留转发 trait 或兼容接口。推理依赖解耦不意味着 Shell 后端、Windows 或 IPC 已实现。
@@ -52,7 +54,7 @@ Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存�
 | `nosh-shell/src/completion/`、`input_assist/` | 编辑器适配、后台服务、分析和有界查询 |
 | `nosh-shell/src/history.rs`、`history/` | 历史适配器负责查询与行提示，Store 统一 SQLite、内存提问、brush 视图和结果聚合；Reedline 只负责筛选、选择、预览和回填，真实 CLI 回归在 `nosh-cli/tests/history.rs` |
 | `nosh-shell/src/abbreviations.rs`、`abbreviations/` | 内置/用户规则、能力检查、版本化目录及交互展开策略；不改写执行层文本 |
-| `nosh-cli/src/config/document.rs` | 主题与缩写共用的 TOML 原子更新、配置锁及并发变更检查 |
+| `nosh-cli/src/config/document.rs` | 配置加载、主题与缩写共用的有界读取，以及 TOML 原子更新、配置锁及并发变更检查 |
 | `tests/agent_flow.rs`、`tests/flows/` | 跨 crate 的 Agent、CommandAssist、context、permissions 流程；共用 `support.rs` 的夹具与进程内锁 |
 | `nosh-core/tests/terminal.rs`、`nosh-core/tests/terminal/` | 同一测试目标和三个精确命名的子进程 probe；按显示、审批、输入、命令辅助分文件，共用 PTY 驱动 |
 | `tests/fixtures/model_context.txt` | 推理与 ARM 内存测试共用的固定语料；不是设计文档，不随文档改写 |
@@ -67,7 +69,15 @@ Linux CI 为评测器设置 `NOSH_TEST_BINARY`，把当前真实 CLI/PTY 与脚�
 
 ## 开发入口
 
-首先按[源码维护说明](REEDLINE-MAINTENANCE.md)运行 `cargo source prepare`。普通应用构建不要求 Python、Node 或 npm；完整评测工具链独立于运行时。
+使用 `rust-toolchain.toml` 固定的工具链，在 Linux / macOS / WSL 下准备依赖并构建：
+
+```bash
+cargo source prepare
+cargo build --release --locked
+./target/release/nosh
+```
+
+Windows 工作树先用 Windows Git/Rust 准备源码，再在 WSL 构建应用，不用 Linux Git 操作 Windows `.git` 文件。离线准备、联调和补丁导出见[源码维护说明](REEDLINE-MAINTENANCE.md)。普通应用构建不要求 Python、Node 或 npm；完整评测工具链独立于运行时。
 
 Linux / macOS / WSL 下，按变更选择最小覆盖范围：
 
@@ -86,6 +96,6 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 ## 文档维护
 
-README 保留产品与上手入口，[文档导航](README.md) 管理分类，本文件维护代码边界，DESIGN 维护当前系统行为和配置，功能文档维护详细契约。文档引用对应来源，不复制完整规则或接口清单。
+项目 README 介绍功能与使用方式，AGENTS.md 提供简短日常开发指引，[文档导航](README.md) 管理分类。本文件维护代码边界和构建开发入口，DESIGN 维护当前系统行为和配置，功能文档维护详细契约。文档引用对应来源，不复制完整规则或接口清单。
 
 历史计划、报告、版本迁移和决策过程交给 Git 历史，不放在当前维护面。变更直接更新现行接口和测试，同步仓库内引用；不保留旧路径转发、废弃配置或未使用的抽象。仍有效的终端降级、错误拒绝和安全边界属于当前功能，不能以清理历史为由删除。

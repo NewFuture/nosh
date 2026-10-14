@@ -303,6 +303,113 @@ fn long_output_is_truncated_and_saved() {
 }
 
 #[test]
+fn command_output_truncation_agrees_with_logs_and_observations_for_unicode() {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountSaves(Arc<AtomicUsize>);
+    impl nosh_core::Redactor for CountSaves {
+        fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Cow::Borrowed(text)
+        }
+    }
+    let _g = setup();
+    let mut sh = shell();
+    for (characters, truncated) in [(6000, false), (6001, true)] {
+        let body = "\u{4e2d}".repeat(characters);
+        let engine = MockChatEngine::new(vec![
+            vec![call(
+                "exec",
+                json!({"command": format!("printf '%s' '{body}'")}),
+            )],
+            vec![text("Printed.")],
+        ]);
+        let received = engine.received();
+        let observations = engine.observations();
+        let saves = Arc::new(AtomicUsize::new(0));
+        let mut a = agent(engine, AgentConfig::default())
+            .with_redactor(Arc::new(CountSaves(saves.clone())));
+        let out = a.run_task(
+            &mut sh,
+            TaskInput::new(Trigger::Hash, "print the text"),
+            &mut Scripted::new([]),
+            &mut RecordUi::default(),
+        );
+        assert_eq!(out.status, TaskStatus::Completed);
+        assert_eq!(out.commands_run, 1);
+        assert_eq!(
+            saves.load(Ordering::SeqCst),
+            usize::from(truncated),
+            "only truncated output should be written to disk"
+        );
+        let results = tool_results(&received.lock().unwrap());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].contains("truncated=yes"), truncated);
+        assert_eq!(results[0].contains("[full output: "), truncated);
+        assert_eq!(results[0].matches('\u{4e2d}').count(), 6000);
+        let observations = observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].1["execution"]["truncated"], truncated);
+        assert_eq!(observations[0].1["result"], results[0]);
+    }
+}
+
+#[test]
+fn output_log_errors_are_reported_without_reexecuting_the_command() {
+    let _g = setup();
+    struct RestoreHome(std::ffi::OsString);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            // SAFETY: flow tests hold the shared environment lock.
+            unsafe { std::env::set_var("NOSH_HOME", &self.0) };
+        }
+    }
+    let restore = RestoreHome(std::env::var_os("NOSH_HOME").unwrap());
+    let home = tmpdir("output-log-error");
+    std::fs::create_dir(home.join("state")).unwrap();
+    std::fs::write(home.join("state").join("outputs"), "not a directory").unwrap();
+    // SAFETY: flow tests hold the shared environment lock.
+    unsafe { std::env::set_var("NOSH_HOME", &home) };
+    let mut sh = shell();
+    let engine = MockChatEngine::new(vec![
+        vec![call("exec", json!({"command": "seq 1 20000"}))],
+        vec![text("Printed once.")],
+    ]);
+    let received = engine.received();
+    let observations = engine.observations();
+    let mut a = agent(engine, AgentConfig::default());
+    let mut ui = RecordUi::default();
+    let out = a.run_task(
+        &mut sh,
+        TaskInput::new(Trigger::Hash, "count"),
+        &mut Scripted::new([]),
+        &mut ui,
+    );
+    assert_eq!(out.status, TaskStatus::Completed);
+    assert_eq!(out.commands_run, 1);
+    assert_eq!(out.steps, 2);
+    assert!(
+        ui.events
+            .iter()
+            .any(|event| event.starts_with("error could not save full command output:"))
+    );
+    let results = tool_results(&received.lock().unwrap());
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("[exit_code=0 "));
+    assert!(results[0].contains("truncated=yes"));
+    assert!(!results[0].contains("[full output: "));
+    assert!(results[0].contains("[note] could not save full command output:"));
+    let observations = observations.lock().unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].1["status"], "executed");
+    assert_eq!(observations[0].1["result"], results[0]);
+    drop(restore);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn step_limit_asks_for_a_summary() {
     let _g = setup();
     let mut sh = shell();

@@ -106,7 +106,7 @@ fn execute(command: ThemeCmd) -> Result<(), String> {
             case,
             nerd_font,
         } => {
-            let text = config::theme::read_text(&path)?;
+            let text = config::read_text(&path)?;
             let table = text
                 .parse()
                 .map_err(|e| format!("invalid configuration: {e}"))?;

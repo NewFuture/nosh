@@ -26,7 +26,7 @@ pub fn parse(table: &toml::Table) -> Result<Config, String> {
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {
-    let text = super::document::read_text(path)?;
+    let text = super::read_text(path)?;
     let table = text
         .parse()
         .map_err(|e| format!("invalid configuration: {e}"))?;

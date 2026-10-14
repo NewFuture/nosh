@@ -15,7 +15,7 @@ pub fn read_text(path: &Path) -> Result<String, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    read(file)
+    read(file).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn read(file: fs::File) -> Result<String, String> {

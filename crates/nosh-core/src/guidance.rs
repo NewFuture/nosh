@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nosh_permissions::{Context, PathClass, classify_path_real};
 use nosh_platform::fs::FileStamp;
@@ -22,7 +23,7 @@ const READMES: &[&str] = &[
 
 #[derive(Default)]
 pub(crate) struct GuidanceCache {
-    files: HashMap<PathBuf, (FileStamp, String)>,
+    files: HashMap<PathBuf, (FileStamp, Arc<str>)>,
 }
 
 pub(crate) struct Guidance {
@@ -37,7 +38,7 @@ impl GuidanceCache {
         path: &Path,
         ctx: &Context,
         warnings: &mut Vec<String>,
-    ) -> (Option<FileStamp>, Option<String>) {
+    ) -> (Option<FileStamp>, Option<Arc<str>>) {
         let stamp = FileStamp::of(path);
         if matches!(
             classify_path_real(path, ctx, true).0,
@@ -57,7 +58,7 @@ impl GuidanceCache {
         {
             return (stamp, Some(text.clone()));
         }
-        let contents = crate::project::read_metadata(path, ctx, warnings);
+        let contents = crate::project::read_metadata(path, ctx, warnings).map(Arc::<str>::from);
         if let Some(ref contents) = contents {
             let after = FileStamp::of(path);
             if after != stamp {
@@ -309,6 +310,39 @@ fn readme_excerpt(text: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_documents_share_storage_until_file_or_permission_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("AGENTS.md");
+        std::fs::write(&path, "Project conventions.\n".repeat(2000)).unwrap();
+        let mut context = Context::new(root.path(), root.path()).with_home(root.path());
+        let mut cache = GuidanceCache::default();
+        let mut warnings = Vec::new();
+        let (_, first) = cache.read_cached(&path, &context, &mut warnings);
+        let first = first.unwrap();
+        let (_, hit) = cache.read_cached(&path, &context, &mut warnings);
+        assert!(Arc::ptr_eq(&first, &hit.unwrap()));
+        assert!(Arc::ptr_eq(&first, &cache.files[&path].1));
+        assert!(warnings.is_empty());
+
+        std::fs::write(&path, "Updated project conventions.").unwrap();
+        let (_, changed) = cache.read_cached(&path, &context, &mut warnings);
+        let changed = changed.unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(&*changed, "Updated project conventions.");
+        assert!(Arc::ptr_eq(&changed, &cache.files[&path].1));
+
+        context.protected.push(path.clone());
+        let (_, blocked) = cache.read_cached(&path, &context, &mut warnings);
+        assert!(blocked.is_none());
+        assert!(cache.files.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("protected path"))
+        );
+    }
 
     #[test]
     fn agents_take_precedence_over_readme_and_legacy_names() {

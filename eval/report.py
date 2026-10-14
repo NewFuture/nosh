@@ -273,13 +273,21 @@ def grading_counts(trials: list[dict]) -> dict:
     }
 
 
+def _scenario_trials(report: dict):
+    trials = defaultdict(list)
+    for trial in report["trials"]:
+        trials[trial["scenario_id"]].append(trial)
+    meta = report["metadata"]
+    planned = len(meta["seeds"]) * meta["repeat"]
+    for scenario in meta["scenarios"]:
+        yield scenario, trials.get(scenario["id"], []), planned
+
+
 def capture_components(report: dict) -> list[dict]:
     rows = []
-    for scenario in report["metadata"]["scenarios"]:
+    for scenario, trials, planned in _scenario_trials(report):
         if scenario.get("check") not in CAPTURE_CHECKS:
             continue
-        planned = len(report["metadata"]["seeds"]) * report["metadata"]["repeat"]
-        trials = [trial for trial in report["trials"] if trial["scenario_id"] == scenario["id"]]
         for name in CAPTURE_PARTS:
             row = {"scenario_id": scenario["id"], "component": name,
                    "required": name != "citation" or CAPTURE_CHECKS[scenario["check"]],
@@ -296,22 +304,18 @@ def capture_components(report: dict) -> list[dict]:
 
 
 def aggregate(report: dict) -> list[dict]:
-    rows = []
-    for scenario in report["metadata"]["scenarios"]:
-        trials = [r for r in report["trials"] if r["scenario_id"] == scenario["id"]]
-        expected = len(report["metadata"]["seeds"]) * report["metadata"]["repeat"]
-        row = {"scenario_id": scenario["id"], **summarize(trials, expected)}
-        row.update(grading_counts(trials))
-        rows.append(row)
-    return rows
+    return [
+        {"scenario_id": scenario["id"], **summarize(trials, planned), **grading_counts(trials)}
+        for scenario, trials, planned in _scenario_trials(report)
+    ]
 
 
 def groups(report: dict) -> list[dict]:
-    meta = report["metadata"]
+    indexed = list(_scenario_trials(report))
     rows = []
     for name in ("all", "mvp", "expanded", "command-assist", "generate", "fix", "next", "model", "local"):
         scenarios = [
-            s for s in meta["scenarios"]
+            (s, trials, planned) for s, trials, planned in indexed
             if name == "all" or name == s.get("group")
             or name == s.get("assistance", {}).get("intent")
             or (name == "model" and s.get("check") != "typos")
@@ -319,9 +323,8 @@ def groups(report: dict) -> list[dict]:
         ]
         if not scenarios:
             continue
-        ids = {s["id"] for s in scenarios}
-        trials = [t for t in report["trials"] if t["scenario_id"] in ids]
-        expected = len(ids) * len(meta["seeds"]) * meta["repeat"]
+        trials = [trial for _, entries, _ in scenarios for trial in entries]
+        expected = sum(planned for _, _, planned in scenarios)
         rows.append({"group": name, **summarize(trials, expected), **grading_counts(trials)})
     return rows
 
