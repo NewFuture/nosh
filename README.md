@@ -20,7 +20,7 @@ nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行�
 | [主题](docs/THEMES.md) | 内置深浅主题，提示符显示环境与操作状态；可选 Starship 和 Powerline |
 | [项目环境与终端集成](docs/SHELL-INTEGRATION.md) | 可选接入已授权的 direnv／mise 环境，并向兼容终端报告目录和命令区域 |
 
-默认使用 CPU 推理，也可使用启用了 NVIDIA CUDA 的构建，详见[本地推理与 CUDA](docs/INFERENCE.md)。
+默认设备为 `auto`：普通构建使用 CPU，CUDA 构建会根据可见 GPU 和可用显存选择 GPU 或 CPU。详见[本地推理与 CUDA](docs/INFERENCE.md)。
 
 ## 开始使用
 
