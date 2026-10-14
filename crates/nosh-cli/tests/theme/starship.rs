@@ -28,18 +28,18 @@ fn inline_native_theme_paths_follow_the_embedded_shell_directory() {
     assert!(exported.status.success());
     fs::write(&native, exported.stdout).unwrap();
 
-    let mut shell = Shell::inline(home.path());
+    let mut shell = inline_shell(home.path());
     shell.wait(0, DARK);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"cd project\r");
     shell.wait(start, DARK);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"#theme ");
     shell.wait(start, "Light theme");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x1b");
     shell.wait(start, "Tab");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"'./palette with spaces.toml'\r");
     shell.wait(start, ".toml saved");
     shell.wait(start, LIGHT);
@@ -47,7 +47,7 @@ fn inline_native_theme_paths_follow_the_embedded_shell_directory() {
     let path = native.canonicalize().unwrap();
     assert_eq!(table["shell"]["theme"].as_str(), path.to_str());
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"#theme\r");
     shell.wait(start, &format!("theme: {}", path.display()));
 }
@@ -73,9 +73,9 @@ fn native_powerline_respects_ascii_and_no_color_terminal_capabilities() {
         if name == "COLORTERM" {
             command.env("TERM", "xterm");
         }
-        let mut shell = Shell::start(home.path(), command);
+        let mut shell = start_shell(home.path(), command);
         shell.wait(0, prompt);
-        let output = String::from_utf8_lossy(&shell.bytes);
+        let output = String::from_utf8_lossy(&shell.output);
         assert!(
             !output.contains(['\u{e0b6}', '\u{e0b4}', '\u{e0b0}']),
             "{output}"
@@ -111,9 +111,9 @@ fn native_auto_mode_allows_powerline_without_assuming_full_nerd_font_support() {
             .env("TERM", "xterm-kitty")
             .env("KITTY_WINDOW_ID", "1")
             .arg("--safe");
-        let mut shell = Shell::start(home.path(), command);
+        let mut shell = start_shell(home.path(), command);
         shell.wait(0, "\u{276f}");
-        let output = String::from_utf8_lossy(&shell.bytes);
+        let output = String::from_utf8_lossy(&shell.output);
         assert_eq!(output.contains('\u{e0b6}'), setting != "false", "{output}");
         assert_eq!(output.contains('\u{e0b4}'), setting != "false", "{output}");
         assert_eq!(output.contains('\u{f07b}'), setting == "true", "{output}");
@@ -172,7 +172,7 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
         "PROMPT_COMMAND",
         "NOSH_THEME_PROMPTS=$(( ${NOSH_THEME_PROMPTS:-0} + 1 )); printf 'THEME_PROMPT_READY:%s\\n' \"$NOSH_THEME_PROMPTS\"",
     );
-    let mut shell = Shell::start(home.path(), launch);
+    let mut shell = start_shell(home.path(), launch);
     let ready = shell.wait(0, "THEME_PROMPT_READY:1\r\n");
     shell.wait(ready, "ENV_SENTINEL");
     let calls = || fs::read_to_string(&counter).unwrap().lines().count();
@@ -187,7 +187,7 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
         shell.pump(50);
     }
     assert_eq!(calls(), initial, "editing re-ran Starship");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     let ready = shell.wait(start, "THEME_PROMPT_READY:2\r\n");
     shell.wait(ready, "ENV_SENTINEL");
@@ -200,7 +200,7 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
         format!("{saved}\n# unrelated configuration edit\n"),
     )
     .unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     let ready = shell.wait(start, "THEME_PROMPT_READY:3\r\n");
     shell.wait(ready, "ENV_SENTINEL");
@@ -216,7 +216,7 @@ fn native_theme_files_are_saved_and_engine_calls_stop_while_editing() {
     let mut table: toml::Table = String::from_utf8(exported.stdout).unwrap().parse().unwrap();
     table.insert("format".into(), "ENV_SENTINEL".into());
     fs::write(&native, toml::to_string(&table).unwrap()).unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     let ready = shell.wait(start, "THEME_PROMPT_READY:4\r\n");
     shell.wait(ready, "\x1b[38;2;76;79;105m");

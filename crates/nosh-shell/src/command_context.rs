@@ -16,7 +16,11 @@ pub(crate) struct Scope {
 impl Scope {
     pub fn for_loop(&mut self, command: &ast::ForClauseCommand) {
         self.dynamic |= matches!(command.variable_name.as_str(), "PATH" | "HOME" | "OLDPWD");
-        let writes = command.values.iter().flatten().any(word_may_write);
+        let writes = command
+            .values
+            .iter()
+            .flatten()
+            .any(|word| word_effects(word).may_write);
         self.files_changed |= writes;
         self.correction_blocked |= writes;
     }
@@ -28,8 +32,16 @@ impl Scope {
         self.files_changed |= branch.files_changed;
     }
 
-    pub fn assignment(&mut self, assignment: &ast::Assignment, value: Option<String>) {
-        let dynamic_side_effect = value.is_none() && assignment_value_may_write(&assignment.value);
+    pub fn assignment(
+        &mut self,
+        assignment: &ast::Assignment,
+        value: Option<String>,
+    ) -> WordEffects {
+        let effects = match &assignment.value {
+            ast::AssignmentValue::Scalar(word) => word_effects(word),
+            _ => WordEffects::UNKNOWN,
+        };
+        let dynamic_side_effect = value.is_none() && effects.may_write;
         self.files_changed |= dynamic_side_effect;
         self.correction_blocked |= dynamic_side_effect;
         if let ast::AssignmentName::VariableName(name) = &assignment.name
@@ -41,9 +53,10 @@ impl Scope {
             } else {
                 self.dynamic = true;
             }
-        } else if assignment_value_changes_resolution(&assignment.value) {
-            self.dynamic = true;
+        } else {
+            self.dynamic |= effects.changes_resolution;
         }
+        effects
     }
 
     pub fn after_command(&mut self, name: &str, builtin: bool, opaque: bool, sets_variable: bool) {
@@ -80,118 +93,70 @@ impl Scope {
     }
 }
 
-pub(crate) fn word_may_write(word: &ast::Word) -> bool {
-    parsed_word_pieces(word).is_none_or(|pieces| pieces_may_write(&pieces))
+/// Expansion effects only; opening a redirection target is tracked separately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WordEffects {
+    pub may_write: bool,
+    pub changes_resolution: bool,
 }
 
-pub(crate) fn word_changes_resolution(word: &ast::Word) -> bool {
-    parsed_word_pieces(word).is_none_or(|pieces| pieces_change_resolution(&pieces))
-}
-
-fn assignment_value_may_write(value: &ast::AssignmentValue) -> bool {
-    match value {
-        ast::AssignmentValue::Scalar(word) => word_may_write(word),
-        _ => true,
-    }
-}
-
-pub(crate) fn assignment_value_changes_resolution(value: &ast::AssignmentValue) -> bool {
-    match value {
-        ast::AssignmentValue::Scalar(word) => word_changes_resolution(word),
-        _ => true,
-    }
-}
-
-fn parsed_word_pieces(word: &ast::Word) -> Option<Vec<word::WordPieceWithSource>> {
-    word::parse(&word.value, &brush_parser::ParserOptions::default()).ok()
-}
-
-fn pieces_may_write(pieces: &[word::WordPieceWithSource]) -> bool {
-    use word::WordPiece as W;
-    pieces.iter().any(|piece| match &piece.piece {
-        W::CommandSubstitution(_) | W::BackquotedCommandSubstitution(_) => true,
-        W::ArithmeticExpression(_) => true,
-        W::ParameterExpansion(expr) => parameter_expr_may_write(expr),
-        W::DoubleQuotedSequence(inner) | W::GettextDoubleQuotedSequence(inner) => {
-            pieces_may_write(inner)
-        }
-        W::Text(_)
-        | W::SingleQuotedText(_)
-        | W::AnsiCQuotedText(_)
-        | W::TildeExpansion(_)
-        | W::EscapeSequence(_) => false,
-    })
-}
-
-fn pieces_change_resolution(pieces: &[word::WordPieceWithSource]) -> bool {
-    use word::WordPiece as W;
-    pieces.iter().any(|piece| match &piece.piece {
-        W::ArithmeticExpression(_) => true,
-        W::ParameterExpansion(expr) => parameter_expr_changes_resolution(expr),
-        W::DoubleQuotedSequence(inner) | W::GettextDoubleQuotedSequence(inner) => {
-            pieces_change_resolution(inner)
-        }
-        W::Text(_)
-        | W::SingleQuotedText(_)
-        | W::AnsiCQuotedText(_)
-        | W::TildeExpansion(_)
-        | W::CommandSubstitution(_)
-        | W::BackquotedCommandSubstitution(_)
-        | W::EscapeSequence(_) => false,
-    })
-}
-
-fn parameter_expr_may_write(expr: &word::ParameterExpr) -> bool {
-    use word::ParameterExpr as P;
-    match expr {
-        P::AssignDefaultValues { .. } => true,
-        P::UseDefaultValues { default_value, .. }
-        | P::IndicateErrorIfNullOrUnset {
-            error_message: default_value,
-            ..
-        }
-        | P::UseAlternativeValue {
-            alternative_value: default_value,
-            ..
-        } => text_may_write(default_value.as_deref()),
-        P::RemoveSmallestSuffixPattern { pattern, .. }
-        | P::RemoveLargestSuffixPattern { pattern, .. }
-        | P::RemoveSmallestPrefixPattern { pattern, .. }
-        | P::RemoveLargestPrefixPattern { pattern, .. }
-        | P::UppercaseFirstChar { pattern, .. }
-        | P::UppercasePattern { pattern, .. }
-        | P::LowercaseFirstChar { pattern, .. }
-        | P::LowercasePattern { pattern, .. } => text_may_write(pattern.as_deref()),
-        P::ReplaceSubstring {
-            pattern,
-            replacement,
-            ..
-        } => text_may_write(Some(pattern)) || text_may_write(replacement.as_deref()),
-        P::Parameter { .. }
-        | P::ParameterLength { .. }
-        | P::Substring { .. }
-        | P::Transform { .. }
-        | P::VariableNames { .. }
-        | P::MemberKeys { .. } => false,
-    }
-}
-
-fn parameter_expr_changes_resolution(expr: &word::ParameterExpr) -> bool {
-    use word::{Parameter as N, ParameterExpr as P};
-    let changes_parameter = |parameter: &N, indirect: bool| {
-        indirect
-            || matches!(parameter, N::Named(name) if matches!(name.as_str(), "PATH" | "HOME" | "OLDPWD"))
+impl WordEffects {
+    const UNKNOWN: Self = Self {
+        may_write: true,
+        changes_resolution: true,
     };
+
+    fn merge(&mut self, other: Self) {
+        self.may_write |= other.may_write;
+        self.changes_resolution |= other.changes_resolution;
+    }
+}
+
+pub(crate) fn word_effects(word: &ast::Word) -> WordEffects {
+    text_effects(Some(&word.value))
+}
+
+fn pieces_effects(pieces: &[word::WordPieceWithSource]) -> WordEffects {
+    use word::WordPiece as W;
+    let mut effects = WordEffects::default();
+    for piece in pieces {
+        effects.merge(match &piece.piece {
+            W::CommandSubstitution(_) | W::BackquotedCommandSubstitution(_) => WordEffects {
+                may_write: true,
+                ..WordEffects::default()
+            },
+            W::ArithmeticExpression(_) => WordEffects::UNKNOWN,
+            W::ParameterExpansion(expr) => parameter_effects(expr),
+            W::DoubleQuotedSequence(inner) | W::GettextDoubleQuotedSequence(inner) => {
+                pieces_effects(inner)
+            }
+            W::Text(_)
+            | W::SingleQuotedText(_)
+            | W::AnsiCQuotedText(_)
+            | W::TildeExpansion(_)
+            | W::EscapeSequence(_) => WordEffects::default(),
+        });
+        if effects == WordEffects::UNKNOWN {
+            break;
+        }
+    }
+    effects
+}
+
+fn parameter_effects(expr: &word::ParameterExpr) -> WordEffects {
+    use word::{Parameter as N, ParameterExpr as P};
     match expr {
         P::AssignDefaultValues {
             parameter,
             indirect,
             default_value,
             ..
-        } => {
-            changes_parameter(parameter, *indirect)
-                || text_changes_resolution(default_value.as_deref())
-        }
+        } => WordEffects {
+            may_write: true,
+            changes_resolution: *indirect
+                || matches!(parameter, N::Named(name) if matches!(name.as_str(), "PATH" | "HOME" | "OLDPWD"))
+                || text_effects(default_value.as_deref()).changes_resolution,
+        },
         P::UseDefaultValues { default_value, .. }
         | P::IndicateErrorIfNullOrUnset {
             error_message: default_value,
@@ -200,13 +165,11 @@ fn parameter_expr_changes_resolution(expr: &word::ParameterExpr) -> bool {
         | P::UseAlternativeValue {
             alternative_value: default_value,
             ..
-        } => text_changes_resolution(default_value.as_deref()),
+        } => text_effects(default_value.as_deref()),
         P::RemoveSmallestSuffixPattern { pattern, .. }
         | P::RemoveLargestSuffixPattern { pattern, .. }
         | P::RemoveSmallestPrefixPattern { pattern, .. }
-        | P::RemoveLargestPrefixPattern { pattern, .. } => {
-            text_changes_resolution(pattern.as_deref())
-        }
+        | P::RemoveLargestPrefixPattern { pattern, .. } => text_effects(pattern.as_deref()),
         P::UppercaseFirstChar {
             indirect, pattern, ..
         }
@@ -218,44 +181,44 @@ fn parameter_expr_changes_resolution(expr: &word::ParameterExpr) -> bool {
         }
         | P::LowercasePattern {
             indirect, pattern, ..
-        } => *indirect || text_changes_resolution(pattern.as_deref()),
+        } => {
+            let mut effects = text_effects(pattern.as_deref());
+            effects.changes_resolution |= *indirect;
+            effects
+        }
         P::ReplaceSubstring {
             indirect,
             pattern,
             replacement,
             ..
         } => {
-            *indirect
-                || text_changes_resolution(Some(pattern))
-                || text_changes_resolution(replacement.as_deref())
+            let mut effects = text_effects(Some(pattern));
+            effects.changes_resolution |= *indirect;
+            if effects != WordEffects::UNKNOWN {
+                effects.merge(text_effects(replacement.as_deref()));
+            }
+            effects
         }
-        P::Substring { .. } => true,
+        P::Substring { .. } => WordEffects {
+            changes_resolution: true,
+            ..WordEffects::default()
+        },
         P::Parameter { indirect, .. }
         | P::ParameterLength { indirect, .. }
-        | P::Transform { indirect, .. } => *indirect,
-        P::VariableNames { .. } | P::MemberKeys { .. } => false,
+        | P::Transform { indirect, .. } => WordEffects {
+            changes_resolution: *indirect,
+            ..WordEffects::default()
+        },
+        P::VariableNames { .. } | P::MemberKeys { .. } => WordEffects::default(),
     }
 }
 
-fn text_may_write(text: Option<&str>) -> bool {
-    text_pieces_any(text, pieces_may_write)
-}
-
-fn text_changes_resolution(text: Option<&str>) -> bool {
-    text_pieces_any(text, pieces_change_resolution)
-}
-
-fn text_pieces_any(
-    text: Option<&str>,
-    check: impl FnOnce(&[word::WordPieceWithSource]) -> bool,
-) -> bool {
+fn text_effects(text: Option<&str>) -> WordEffects {
     let Some(value) = text else {
-        return false;
+        return WordEffects::default();
     };
     word::parse(value, &brush_parser::ParserOptions::default())
-        .ok()
-        .map(|pieces| check(&pieces))
-        .unwrap_or(true)
+        .map_or(WordEffects::UNKNOWN, |pieces| pieces_effects(&pieces))
 }
 
 pub(crate) fn extended_test_may_write(expr: &ast::ExtendedTestExpr) -> bool {
@@ -265,8 +228,10 @@ pub(crate) fn extended_test_may_write(expr: &ast::ExtendedTestExpr) -> bool {
             extended_test_may_write(left) || extended_test_may_write(right)
         }
         E::Not(inner) | E::Parenthesized(inner) => extended_test_may_write(inner),
-        E::UnaryTest(_, word) => word_may_write(word),
-        E::BinaryTest(_, left, right) => word_may_write(left) || word_may_write(right),
+        E::UnaryTest(_, word) => word_effects(word).may_write,
+        E::BinaryTest(_, left, right) => {
+            word_effects(left).may_write || word_effects(right).may_write
+        }
     }
 }
 
@@ -297,26 +262,21 @@ pub(crate) fn writes_files(redirect: &ast::IoRedirect) -> bool {
     )
 }
 
-pub(crate) fn redirect_blocks_correction(redirect: &ast::IoRedirect) -> bool {
+pub(crate) fn redirect_effects(redirect: &ast::IoRedirect) -> WordEffects {
     use ast::{IoFileRedirectTarget as T, IoRedirect as R};
     match redirect {
-        R::File(_, _, T::ProcessSubstitution(..)) => true,
+        R::File(_, _, T::ProcessSubstitution(..)) => WordEffects {
+            may_write: true,
+            ..WordEffects::default()
+        },
         R::File(_, _, T::Filename(word) | T::Duplicate(word))
         | R::HereString(_, word)
-        | R::OutputAndError(word, _) => word_may_write(word),
-        R::HereDocument(_, doc) => doc.requires_expansion,
-        R::File(_, _, T::Fd(_)) => false,
-    }
-}
-
-pub(crate) fn redirect_changes_resolution(redirect: &ast::IoRedirect) -> bool {
-    use ast::{IoFileRedirectTarget as T, IoRedirect as R};
-    match redirect {
-        R::File(_, _, T::Filename(word) | T::Duplicate(word))
-        | R::HereString(_, word)
-        | R::OutputAndError(word, _) => word_changes_resolution(word),
-        R::HereDocument(_, doc) => doc.requires_expansion,
-        R::File(_, _, T::ProcessSubstitution(..) | T::Fd(_)) => false,
+        | R::OutputAndError(word, _) => word_effects(word),
+        R::HereDocument(_, doc) => WordEffects {
+            may_write: doc.requires_expansion,
+            changes_resolution: doc.requires_expansion,
+        },
+        R::File(_, _, T::Fd(_)) => WordEffects::default(),
     }
 }
 
@@ -328,4 +288,167 @@ pub(crate) fn items(
         .iter()
         .flat_map(|p| &p.0)
         .chain(simple.suffix.iter().flat_map(|s| &s.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effects(text: &str) -> (bool, bool) {
+        let word = ast::Word {
+            value: text.into(),
+            loc: None,
+        };
+        let effects = word_effects(&word);
+        (effects.may_write, effects.changes_resolution)
+    }
+
+    #[test]
+    fn words_distinguish_file_effects_from_resolution_changes() {
+        for (text, writes, changes) in [
+            ("literal", false, false),
+            ("'${PATH:=/runtime}'", false, false),
+            ("$'$(touch marker)'", false, false),
+            (r"\$PATH", false, false),
+            ("~", false, false),
+            ("$value", false, false),
+            ("${#value}", false, false),
+            ("${value@Q}", false, false),
+            ("${!prefix*}", false, false),
+            ("${!items[@]}", false, false),
+            ("${value:-plain}", false, false),
+            ("${value:?message}", false, false),
+            ("${value:+plain}", false, false),
+            ("${value#pattern}", false, false),
+            ("${value##pattern}", false, false),
+            ("${value%pattern}", false, false),
+            ("${value%%pattern}", false, false),
+            ("${value^p}", false, false),
+            ("${value^^p}", false, false),
+            ("${value,p}", false, false),
+            ("${value,,p}", false, false),
+            ("${value/pattern/replacement}", false, false),
+            ("$(PATH=/runtime)", true, false),
+            ("`touch marker`", true, false),
+            ("${value:=plain}", true, false),
+            ("${value:-$(touch marker)}", true, false),
+            ("${value:?$(touch marker)}", true, false),
+            ("${value:+$(touch marker)}", true, false),
+            ("${value#$(touch marker)}", true, false),
+            ("${value##$(touch marker)}", true, false),
+            ("${value%$(touch marker)}", true, false),
+            ("${value%%$(touch marker)}", true, false),
+            ("${value^$(touch marker)}", true, false),
+            ("${value^^$(touch marker)}", true, false),
+            ("${value,$(touch marker)}", true, false),
+            ("${value,,$(touch marker)}", true, false),
+            ("${value/$(touch marker)/replacement}", true, false),
+            ("${value/pattern/$(touch marker)}", true, false),
+            ("${!name}", false, true),
+            ("${!name@Q}", false, true),
+            ("${!name^p}", false, true),
+            ("${!name^^p}", false, true),
+            ("${!name,p}", false, true),
+            ("${!name,,p}", false, true),
+            ("${!name/pattern/replacement}", false, true),
+            ("${value:1}", false, true),
+            ("$((PATH=1))", true, true),
+            ("${PATH:=/runtime}", true, true),
+            ("${HOME:=/runtime}", true, true),
+            ("${OLDPWD:=/runtime}", true, true),
+            ("${!name:=plain}", true, true),
+            ("${value:=${PATH:=/runtime}}", true, true),
+            ("${value:-${PATH:=/runtime}}", true, true),
+            ("${value/${!name}/$(touch marker)}", true, true),
+        ] {
+            assert!(
+                word::parse(text, &brush_parser::ParserOptions::default()).is_ok(),
+                "{text}"
+            );
+            assert_eq!(effects(text), (writes, changes), "{text}");
+        }
+    }
+
+    #[test]
+    fn concatenated_and_quoted_words_combine_both_effects() {
+        let parts = [
+            ("literal", false, false),
+            ("${value}", false, false),
+            ("$(touch marker)", true, false),
+            ("`touch marker`", true, false),
+            ("${value:=plain}", true, false),
+            ("${!name}", false, true),
+            ("${value:1}", false, true),
+            ("${PATH:=/runtime}", true, true),
+            ("$((i+=1))", true, true),
+        ];
+        for (left, left_writes, left_changes) in parts {
+            for (right, right_writes, right_changes) in parts {
+                for text in [
+                    format!("{left}{right}"),
+                    format!("\"{left}{right}\""),
+                    format!("$\"{left}{right}\""),
+                ] {
+                    assert_eq!(
+                        effects(&text),
+                        (left_writes || right_writes, left_changes || right_changes),
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_words_keep_both_effects_unknown() {
+        for text in ["'", "\"", "`", "word'"] {
+            assert!(
+                word::parse(text, &brush_parser::ParserOptions::default()).is_err(),
+                "{text}"
+            );
+            assert_eq!(effects(text), (true, true), "{text}");
+        }
+    }
+
+    #[test]
+    fn redirects_distinguish_opening_files_from_expansion_effects() {
+        for (text, writes, blocks, changes) in [
+            (": > out", true, false, false),
+            (": < input", false, false, false),
+            (": <> input", true, false, false),
+            (": &> out", true, false, false),
+            (": 2>&1", false, false, false),
+            (": > \"$(touch out)\"", true, true, false),
+            (": <<< \"${PATH:=/runtime}\"", false, true, true),
+            (": <<< \"${!name}\"", false, false, true),
+            (": < <(touch out)", true, true, false),
+            (": <<EOF\n${PATH:=/runtime}\nEOF", false, true, true),
+            (": <<'EOF'\n${PATH:=/runtime}\nEOF", false, false, false),
+        ] {
+            let options = brush_parser::ParserOptions::default();
+            let program = brush_parser::Parser::new(std::io::Cursor::new(text), &options)
+                .parse_program()
+                .unwrap();
+            let ast::Command::Simple(simple) = &program.complete_commands[0].0[0].0.first.seq[0]
+            else {
+                panic!("expected a simple command: {text}");
+            };
+            let redirect = items(simple)
+                .find_map(|item| match item {
+                    ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) => Some(redirect),
+                    _ => None,
+                })
+                .unwrap();
+            let effects = redirect_effects(redirect);
+            assert_eq!(
+                (
+                    writes_files(redirect),
+                    effects.may_write,
+                    effects.changes_resolution,
+                ),
+                (writes, blocks, changes),
+                "{text}"
+            );
+        }
+    }
 }

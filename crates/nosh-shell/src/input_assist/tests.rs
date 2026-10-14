@@ -348,6 +348,8 @@ fn inert_builtins_preserve_facts_but_overrides_expansions_and_traps_do_not() {
         "true; cat < missing",
         "false; cat < missing",
         ":; cat < missing",
+        "true '${PATH:=/runtime}'; cat < missing",
+        "true \"${value:-plain}\"; cat < missing",
     ] {
         let input = fixture.input(text);
         let analysis = analysis::analyze(&input);
@@ -363,6 +365,11 @@ fn inert_builtins_preserve_facts_but_overrides_expansions_and_traps_do_not() {
         "touch missing; cat < missing",
         "true > missing; cat < missing",
         "true ${value:-$(touch missing)}; cat < missing",
+        "true \"${value:-$(touch missing)}\"; cat < missing",
+        "X=${value:-$(touch missing)} true; cat < missing",
+        "true <<< \"${value:-$(touch missing)}\"; cat < missing",
+        "true \"${value:-${PATH:=/runtime}}\"; cat < missing",
+        "true \"${value/a/$(touch missing)}\"; cat < missing",
         "true() { touch missing; }; true; cat < missing",
     ] {
         let input = fixture.input(text);
@@ -406,9 +413,28 @@ fn submission_uses_the_same_static_scope_and_path_facts() {
     );
 
     for text in [
+        "true \"${value:-plain}\"; gti status",
+        "true '${PATH:=/runtime}'; gti status",
+        "X=\"${value:-plain}\" true; gti status",
+        "PATH=/runtime true; gti status",
+    ] {
+        assert!(
+            matches!(
+                crate::trigger::classify(text, &mut fixture.shell, &TriggerConfig::default()),
+                crate::trigger::Action::Correct { from, to, .. } if from == "gti" && to == "git"
+            ),
+            "{text}"
+        );
+    }
+
+    for text in [
         "local_function() { :; }; local_function",
         "if true; then local_function() { :; }; fi; local_function",
         "true && PATH=/runtime; gti status",
+        "X=\"${value:-${PATH:=/runtime}}\" true; gti status",
+        "true \"${value:-${PATH:=/runtime}}\"; gti status",
+        "true \"${value/a/${PATH:=/runtime}}\"; gti status",
+        "true \"${!name}\"; gti status",
         "source setup; gti status",
         "touch custom_command; custom_command",
         "for PATH in /runtime; do custom_command; done",

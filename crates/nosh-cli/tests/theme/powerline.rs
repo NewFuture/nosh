@@ -19,9 +19,9 @@ fn preview(home: &Path, environment: &[(&str, &str)], force: bool) -> String {
     if force {
         command.arg("--nerd-font");
     }
-    let mut shell = Shell::start(home, command);
+    let mut shell = start_shell(home, command);
     shell.wait(0, "not applicable");
-    String::from_utf8_lossy(&shell.bytes).into_owned()
+    String::from_utf8_lossy(&shell.output).into_owned()
 }
 
 fn assert_caps(output: &str, expected: bool) {
@@ -119,34 +119,34 @@ fn default_startup_and_prompt_refresh_apply_auto_without_interrupting_a_draft() 
     let home = tempfile::tempdir().unwrap();
     let mut command = command(home.path());
     command.envs(KITTY.iter().copied()).arg("--safe");
-    let mut shell = Shell::start(home.path(), command);
+    let mut shell = start_shell(home.path(), command);
     shell.wait(0, "\u{276f}");
-    assert_caps(&String::from_utf8_lossy(&shell.bytes), true);
+    assert_caps(&String::from_utf8_lossy(&shell.output), true);
     shell.send(b"touch must_not_execute");
     shell.wait(0, "touch must_not_execute");
     let path = home.path().join("config.toml");
     fs::write(&path, "[shell]\nnerd_font = false\n").unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     for _ in 0..3 {
         shell.pump(50);
     }
     assert!(
-        !String::from_utf8_lossy(&shell.bytes[start..]).contains("Ctrl+R history"),
+        !String::from_utf8_lossy(&shell.output[start..]).contains("Ctrl+R history"),
         "changing the display setting interrupted the draft"
     );
     shell.send(b"\x03");
     shell.wait(start, "Ctrl+R history");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"printf 'PLAIN_DONE\\n'\r");
     let start = shell.wait(start, "PLAIN_DONE\r\n");
     shell.wait(start, "\u{276f}");
-    assert_caps(&String::from_utf8_lossy(&shell.bytes[start..]), false);
+    assert_caps(&String::from_utf8_lossy(&shell.output[start..]), false);
     assert!(!home.path().join("must_not_execute").exists());
 
     fs::write(&path, "[shell]\nnerd_font = 'auto'\n").unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"printf 'AUTO_DONE\\n'\r");
     let start = shell.wait(start, "AUTO_DONE\r\n");
     shell.wait(start, "\u{276f}");
-    assert_caps(&String::from_utf8_lossy(&shell.bytes[start..]), true);
+    assert_caps(&String::from_utf8_lossy(&shell.output[start..]), true);
 }
