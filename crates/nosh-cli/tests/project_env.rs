@@ -1,11 +1,14 @@
 #![cfg(unix)]
 
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+#[path = "support/terminal.rs"]
+mod terminal;
+
+use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use terminal::Terminal;
 
 fn fixture() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
@@ -45,110 +48,38 @@ fn command(home: &std::path::Path) -> Command {
 }
 
 fn interactive(home: &std::path::Path, safe: bool) -> Vec<u8> {
-    let mut master = -1;
-    let mut slave = -1;
-    let mut size = libc::winsize {
-        ws_row: 24,
-        ws_col: 100,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    assert_eq!(
-        unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut size,
-            )
-        },
-        0
-    );
-    let (mut master, slave) = unsafe {
-        (
-            std::fs::File::from_raw_fd(master),
-            std::fs::File::from_raw_fd(slave),
-        )
-    };
-    unsafe {
-        assert_ne!(
-            libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
-            -1
-        );
-        assert_ne!(
-            libc::fcntl(slave.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
-            -1
-        );
-        let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
-        assert_ne!(
-            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
-            -1
-        );
-    }
     let mut launch = command(home);
     launch
         .args([if safe { "--safe" } else { "--norc" }, "-i"])
-        .env("NOSH_DISABLE_AI", "1")
-        .stdin(slave.try_clone().unwrap())
-        .stdout(slave.try_clone().unwrap())
-        .stderr(slave.try_clone().unwrap());
-    unsafe {
-        launch.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = launch.spawn().unwrap();
-    drop(launch);
-    drop(slave);
-    let mut output = Vec::new();
+        .env("NOSH_DISABLE_AI", "1");
+    let mut terminal = Terminal::new(launch, 24, 100);
     let mut sent = false;
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        let mut bytes = [0; 8192];
-        match master.read(&mut bytes) {
-            Ok(n) => {
-                output.extend_from_slice(&bytes[..n]);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) || error.raw_os_error() == Some(libc::EIO) => {}
-            Err(error) => panic!("{error}"),
-        }
+        let status = terminal.poll();
         let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
         if !sent
-            && unsafe { libc::tcgetattr(master.as_raw_fd(), &raw mut attributes) } == 0
+            && unsafe { libc::tcgetattr(terminal.as_raw_fd(), &raw mut attributes) } == 0
             && attributes.c_lflag & libc::ICANON == 0
         {
-            master
-                .write_all(b"printf 'MANUAL-WORKED\\n'\rexit 0\r")
-                .unwrap();
+            terminal.send(b"printf 'MANUAL-WORKED\\n'\rexit 0\r");
+            terminal.wait_for("MANUAL-WORKED\r\n");
             sent = true;
         }
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = status {
             assert!(
                 status.success(),
                 "{status}: {:?}",
-                String::from_utf8_lossy(&output)
+                String::from_utf8_lossy(&terminal.output)
             );
-            break;
+            return std::mem::take(&mut terminal.output);
         }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!(
-                "interactive environment test timed out: {:?}",
-                String::from_utf8_lossy(&output)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            Instant::now() < deadline,
+            "interactive environment test timed out: {:?}",
+            String::from_utf8_lossy(&terminal.output)
+        );
     }
-    output
 }
 
 #[test]

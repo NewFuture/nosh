@@ -52,29 +52,18 @@ pub fn partial_path(dir: &Path, file: &FileEntry) -> PathBuf {
     dir.join(format!("{}.partial", file.name))
 }
 
-/// Bytes needed on disk to finish downloading `file` into `dir`.
-pub fn remaining_bytes(dir: &Path, file: &FileEntry) -> u64 {
-    let have = fs::metadata(partial_path(dir, file))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    file.size.saturating_sub(have.min(file.size))
-}
-
-struct Lock {
-    _file: File,
-}
-
 /// How often a download waiting for another process's lock re-checks it.
 const LOCK_POLL: Duration = Duration::from_millis(200);
 
 /// Takes `<name>.lock`, waiting while another process holds it; `cancelled`
 /// is checked between attempts so Ctrl-C ends the wait.
+/// The returned file holds the lock until dropped.
 fn acquire_lock(
     dir: &Path,
     file: &FileEntry,
     progress: &dyn Progress,
     cancelled: &dyn Fn() -> bool,
-) -> Result<Lock, HubError> {
+) -> Result<File, HubError> {
     let lock_path = dir.join(format!("{}.lock", file.name));
     let f = OpenOptions::new()
         .create(true)
@@ -84,7 +73,7 @@ fn acquire_lock(
     let mut waiting = false;
     loop {
         match f.try_lock() {
-            Ok(()) => return Ok(Lock { _file: f }),
+            Ok(()) => return Ok(f),
             Err(std::fs::TryLockError::WouldBlock) => {
                 if !waiting {
                     waiting = true;
@@ -638,6 +627,12 @@ mod tests {
         );
         // Once the other process is done the lock is taken.
         drop(other);
+        let lock = acquire_lock(&dir, &f, &NoProgress, &|| false).unwrap();
+        assert!(matches!(
+            acquire_lock(&dir, &f, &NoProgress, &|| true),
+            Err(HubError::Cancelled)
+        ));
+        drop(lock);
         assert!(acquire_lock(&dir, &f, &NoProgress, &|| false).is_ok());
     }
 }

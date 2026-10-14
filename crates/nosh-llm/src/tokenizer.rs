@@ -173,16 +173,6 @@ impl Tok {
         ids.extend(self.encode(&text, false)?);
         Ok(ids)
     }
-
-    pub fn decode_lossy(&self, ids: &[u32]) -> String {
-        let mut d = Utf8Stream::default();
-        let mut s = String::new();
-        for &id in ids {
-            s.push_str(&d.push(self.token_bytes(id)));
-        }
-        s.push_str(&d.finish());
-        s
-    }
 }
 
 /// Buffers incomplete UTF-8 sequences across tokens.

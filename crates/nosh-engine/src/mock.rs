@@ -40,6 +40,8 @@ pub fn bad_call(kind: CallErrorKind, message: &str) -> MockEvent {
 
 type Responder = Box<dyn FnMut(&[Message]) -> Vec<MockEvent> + Send>;
 
+const CONTEXT_MAX: usize = 8192;
+
 pub struct MockChatEngine {
     turns: VecDeque<Vec<MockEvent>>,
     responder: Option<Responder>,
@@ -50,7 +52,6 @@ pub struct MockChatEngine {
     sessions: HashMap<SessionId, Vec<Message>>,
     next_id: SessionId,
     cancel: CancelHandle,
-    context_max: usize,
 }
 
 impl MockChatEngine {
@@ -66,7 +67,6 @@ impl MockChatEngine {
             sessions: HashMap::new(),
             next_id: 1,
             cancel: CancelHandle::default(),
-            context_max: 8192,
         }
     }
 
@@ -92,10 +92,6 @@ impl MockChatEngine {
 
     pub fn tool_choices(&self) -> Arc<Mutex<Vec<(SessionId, crate::ToolChoice)>>> {
         self.tool_choices.clone()
-    }
-
-    pub fn set_context_max(&mut self, n: usize) {
-        self.context_max = n;
     }
 }
 
@@ -195,7 +191,7 @@ impl ChatEngine for MockChatEngine {
             tool_calls: out.tool_calls.clone(),
         });
         out.usage.context_used = approx_tokens(history);
-        out.usage.context_max = self.context_max;
+        out.usage.context_max = CONTEXT_MAX;
         out.usage.completion_tokens = out.text.len() / 4 + 1;
         Ok(out)
     }
@@ -242,7 +238,7 @@ impl ChatEngine for MockChatEngine {
                 .get(&sid)
                 .map(|h| approx_tokens(h))
                 .unwrap_or(0),
-            self.context_max,
+            CONTEXT_MAX,
         )
     }
 
@@ -291,6 +287,8 @@ mod tests {
             .step(sid, vec![Message::Tool("x".into())], &mut |_| {})
             .unwrap();
         assert_eq!(o.text, "all good");
+        assert_eq!(o.usage.context_max, 8192);
+        assert_eq!(m.context_usage(sid), (o.usage.context_used, 8192));
         assert_eq!(m.received().lock().unwrap().len(), 2);
         assert_eq!(m.message_count(sid), 4);
         m.rewind(sid, 1).unwrap();

@@ -218,16 +218,6 @@ pub fn local_time() -> String {
     }
 }
 
-/// `main`, `main*` (dirty), `main?` (status unavailable) or `None` outside a repository.
-pub fn git_state(cwd: &Path) -> Option<String> {
-    let branch = nosh_shell::repl::git_branch(cwd)?;
-    Some(match git_dirty(cwd) {
-        Some(true) => format!("{branch}*"),
-        Some(false) => branch,
-        None => format!("{branch}?"),
-    })
-}
-
 pub(crate) fn git_dirty(cwd: &Path) -> Option<bool> {
     let mut child = std::process::Command::new("git")
         .args([

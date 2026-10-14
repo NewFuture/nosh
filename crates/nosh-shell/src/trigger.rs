@@ -310,17 +310,15 @@ impl Collector<'_> {
                                 ast::AssignmentValue::Scalar(word) => self.literal(word),
                                 _ => None,
                             };
-                            parent_dynamic |= command_context::assignment_value_changes_resolution(
-                                &assignment.value,
-                            );
-                            local.assignment(assignment, value);
+                            parent_dynamic |=
+                                local.assignment(assignment, value).changes_resolution;
                         }
                         ast::CommandPrefixOrSuffixItem::IoRedirect(r) => {
+                            let effects = command_context::redirect_effects(r);
                             local.files_changed |= command_context::writes_files(r);
-                            local.correction_blocked |=
-                                command_context::redirect_blocks_correction(r);
-                            parent_dynamic |= command_context::redirect_changes_resolution(r);
-                            local.dynamic |= command_context::redirect_changes_resolution(r);
+                            local.correction_blocked |= effects.may_write;
+                            parent_dynamic |= effects.changes_resolution;
+                            local.dynamic |= effects.changes_resolution;
                         }
                         ast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {
                             local.files_changed = true;
@@ -342,10 +340,10 @@ impl Collector<'_> {
                     for item in &suffix.0 {
                         if let ast::CommandPrefixOrSuffixItem::Word(w) = item {
                             let value = self.literal(w);
-                            local.files_changed |=
-                                value.is_none() && command_context::word_may_write(w);
-                            parent_dynamic |= command_context::word_changes_resolution(w);
-                            local.dynamic |= command_context::word_changes_resolution(w);
+                            let effects = command_context::word_effects(w);
+                            local.files_changed |= value.is_none() && effects.may_write;
+                            parent_dynamic |= effects.changes_resolution;
+                            local.dynamic |= effects.changes_resolution;
                             argv.push(value.unwrap_or_else(|| w.value.clone()));
                         }
                     }
@@ -390,7 +388,7 @@ impl Collector<'_> {
                 let blocks = redirects
                     .iter()
                     .flat_map(|r| &r.0)
-                    .any(command_context::redirect_blocks_correction);
+                    .any(|r| command_context::redirect_effects(r).may_write);
                 scope.files_changed |= writes;
                 scope.correction_blocked |= blocks;
                 scope.dynamic |= blocks;
@@ -410,7 +408,7 @@ impl Collector<'_> {
                 let blocks = redirects
                     .iter()
                     .flat_map(|r| &r.0)
-                    .any(command_context::redirect_blocks_correction);
+                    .any(|r| command_context::redirect_effects(r).may_write);
                 scope.files_changed |= writes;
                 scope.correction_blocked |= blocks;
                 scope.dynamic |= blocks;

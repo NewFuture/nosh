@@ -59,6 +59,8 @@ Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存�
 | `nosh-core/tests/terminal.rs`、`nosh-core/tests/terminal/` | 同一测试目标和三个精确命名的子进程 probe；按显示、审批、输入、命令辅助分文件，共用 PTY 驱动 |
 | `tests/fixtures/model_context.txt` | 推理与 ARM 内存测试共用的固定语料；不是设计文档，不随文档改写 |
 
+CLI 的编辑、历史、主题、缩写、项目环境和 Bash 集成测试共用 `nosh-cli/tests/support/terminal.rs` 的控制终端、非阻塞读取、光标握手和有界排空回收，不各自维护 PTY 实现。
+
 新增工具沿 `tools.rs` 的目录和分发接线；Agent 的提问能力在 `user_input.rs`，CommandAssist 复用读取能力但不开放终端交互。工具声明顺序影响 prompt，不随文件整理改变。
 
 修改 `ChatEngine` 时同步 Local、Mock、CLI trace、评测代理和全部调用方。模板与 token 细节不移入 harness，压缩内容的共用规则在 `nosh-engine::shorten_tool_result`；模型相关分组和重新编码仍归 `Conversation`。

@@ -1,8 +1,8 @@
-//! Real controlling terminal shared by CLI editing and Bash integration tests.
+//! Shared controlling terminal, nonblocking I/O and bounded child cleanup for CLI tests.
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
@@ -79,17 +79,45 @@ impl Terminal {
         self.master.write_all(bytes).unwrap();
     }
 
+    #[allow(dead_code, reason = "not every CLI test target polls for process exit")]
     pub fn poll(&mut self) -> Option<ExitStatus> {
-        let mut chunk = [0; 8192];
-        match self.master.read(&mut chunk) {
-            Ok(n) => self.output.extend_from_slice(&chunk[..n]),
+        self.pump(0);
+        std::thread::sleep(Duration::from_millis(5));
+        self.child.try_wait().unwrap()
+    }
+
+    fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self.master.read(buffer) {
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) || error.raw_os_error() == Some(libc::EIO) => {}
-            Err(error) => panic!("PTY read: {error}"),
+                ) || error.raw_os_error() == Some(libc::EIO) =>
+            {
+                Ok(0)
+            }
+            result => result,
         }
+    }
+
+    pub fn pump(&mut self, milliseconds: i32) {
+        let mut descriptor = libc::pollfd {
+            fd: self.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: the descriptor belongs to this live terminal.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted, "{error}");
+        }
+        if ready <= 0 {
+            return;
+        }
+        let mut chunk = [0; 8192];
+        let count = self.read_available(&mut chunk).expect("PTY read");
+        self.output.extend_from_slice(&chunk[..count]);
         assert!(self.output.len() < 2 * 1024 * 1024, "PTY output limit");
         let queries = self
             .output
@@ -100,39 +128,80 @@ impl Terminal {
             self.master.write_all(b"\x1b[1;1R").unwrap();
         }
         self.replies = queries;
-        std::thread::sleep(Duration::from_millis(5));
-        self.child.try_wait().unwrap()
     }
 
     pub fn wait_for(&mut self, needle: &str) {
+        self.observed = self.wait(self.observed, needle);
+    }
+
+    pub fn wait(&mut self, start: usize, needle: &str) -> usize {
+        assert!(!needle.is_empty(), "PTY wait requires nonempty text");
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut status = None;
         loop {
-            if let Some(offset) =
-                String::from_utf8_lossy(&self.output[self.observed..]).find(needle)
+            if let Some(offset) = self.output[start..]
+                .windows(needle.len())
+                .position(|bytes| bytes == needle.as_bytes())
             {
-                self.observed += offset + needle.len();
-                return;
+                return start + offset + needle.len();
             }
             assert!(
-                status.is_none() && Instant::now() < deadline,
+                Instant::now() < deadline,
                 "waiting for {needle:?}: {:?}",
                 String::from_utf8_lossy(&self.output),
             );
-            status = self.poll();
+            // Do not reap the leader before consuming its pending terminal output.
+            self.pump(0);
+            std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    pub fn stop(&mut self) -> std::io::Result<()> {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        // SAFETY: this unreaped child owns the isolated PTY process group.
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        if let Err(error) = self.child.kill() {
+            return if self.child.try_wait()?.is_some() {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut bytes = [0; 8192];
+        loop {
+            // Drain while the killed child closes its terminal descriptors.
+            self.read_available(&mut bytes)?;
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("child {} did not exit after SIGKILL", self.child.id()),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl AsRawFd for Terminal {
+    fn as_raw_fd(&self) -> RawFd {
+        self.master.as_raw_fd()
     }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            // SAFETY: this unreaped child owns the isolated PTY process group.
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        if let Err(error) = self.stop() {
+            eprintln!("PTY cleanup failed: {error}");
+            if !std::thread::panicking() {
+                panic!("PTY cleanup failed: {error}");
             }
-            let _ = self.child.kill();
-            let _ = self.child.wait();
         }
     }
 }

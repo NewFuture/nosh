@@ -24,7 +24,6 @@ use nosh_engine::{
     StepOutcome, StopReason, ToolChoice, Usage,
 };
 
-pub const IM_START: u32 = 130_072;
 pub const IM_END: u32 = 130_073;
 pub const EOS: u32 = 1;
 

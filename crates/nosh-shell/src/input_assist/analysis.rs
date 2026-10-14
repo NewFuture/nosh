@@ -605,9 +605,7 @@ impl Analyzer<'_> {
                         ast::AssignmentValue::Scalar(word) => self.literal(word, &local),
                         _ => None,
                     };
-                    parent_dynamic |=
-                        command_context::assignment_value_changes_resolution(&assignment.value);
-                    local.assignment(assignment, value);
+                    parent_dynamic |= local.assignment(assignment, value).changes_resolution;
                 }
                 ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, child) => {
                     let mut nested = local.clone();
@@ -647,15 +645,17 @@ impl Analyzer<'_> {
         for item in items {
             match item {
                 ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-                    parent_dynamic |= command_context::redirect_changes_resolution(redirect);
+                    parent_dynamic |=
+                        command_context::redirect_effects(redirect).changes_resolution;
                     self.redirect(redirect, coords, &mut local);
                 }
                 ast::CommandPrefixOrSuffixItem::Word(word) => {
                     let range = self.word_range(word, coords);
                     self.command_role(range.clone(), Role::Text);
                     let value = self.literal(word, &local);
-                    local.files_changed |= value.is_none() && command_context::word_may_write(word);
-                    parent_dynamic |= command_context::word_changes_resolution(word);
+                    let effects = command_context::word_effects(word);
+                    local.files_changed |= value.is_none() && effects.may_write;
+                    parent_dynamic |= effects.changes_resolution;
                     printf_sets_variable |= value.as_deref() == Some("-v");
                     if check_prose && argv.len() < 32 {
                         argv.push(value.clone().unwrap_or_else(|| word.value.clone()));

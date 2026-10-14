@@ -4,14 +4,14 @@
 mod powerline;
 #[path = "theme/starship.rs"]
 mod starship;
+#[path = "support/terminal.rs"]
+mod terminal;
 
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::process::CommandExt;
+use std::fs;
+use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::{Child, Command, Output};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use terminal::Terminal;
 
 const DARK: &str = "\x1b[0;38;2;17;17;27;48;2;250;179;135m";
 const LIGHT: &str = "\x1b[0;38;2;17;17;27;48;2;254;100;11m";
@@ -127,208 +127,30 @@ fn config_path_diagnostics_cannot_inject_terminal_controls() {
     assert!(!result.stderr.contains(&0x1b));
 }
 
-struct Shell {
-    child: Child,
-    terminal: File,
-    bytes: Vec<u8>,
-    queries: usize,
+fn open_shell(home: &Path) -> Terminal {
+    let mut command = command(home);
+    command.arg("--safe");
+    start_shell(home, command)
 }
 
-impl Drop for Shell {
-    fn drop(&mut self) {
-        if let Err(error) = self.stop() {
-            eprintln!("theme PTY cleanup failed: {error}");
-            if !std::thread::panicking() {
-                panic!("theme PTY cleanup failed: {error}");
-            }
-        }
-    }
+fn inline_shell(home: &Path) -> Terminal {
+    let mut command = command(home);
+    command
+        .env_remove("NOSH_DISABLE_AI")
+        .args(["--offline", "--no-download", "--norc", "-i"]);
+    start_shell(home, command)
 }
 
-impl Shell {
-    fn new(home: &Path) -> Self {
-        Self::with_path(home, None)
-    }
-
-    fn with_path(home: &Path, path: Option<&std::ffi::OsStr>) -> Self {
-        let mut command = command(home);
-        command.arg("--safe");
-        if let Some(path) = path {
-            command.env("PATH", path);
-        }
-        Self::start(home, command)
-    }
-
-    fn inline(home: &Path) -> Self {
-        let mut command = command(home);
-        command
-            .env_remove("NOSH_DISABLE_AI")
-            .args(["--offline", "--no-download", "--norc", "-i"]);
-        Self::start(home, command)
-    }
-
-    fn start(home: &Path, mut command: Command) -> Self {
-        let (mut master, mut slave) = (-1, -1);
-        let mut size = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: openpty initializes both owned descriptors on success.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &raw mut size,
-                )
-            },
-            0
-        );
-        let (terminal, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
-        for fd in [terminal.as_raw_fd(), slave.as_raw_fd()] {
-            assert_ne!(
-                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
-                -1
-            );
-        }
-        // Readiness can be spurious; a blocking read would bypass wait's deadline.
-        let flags = unsafe { libc::fcntl(terminal.as_raw_fd(), libc::F_GETFL) };
-        assert_ne!(flags, -1);
-        assert_ne!(
-            unsafe {
-                libc::fcntl(
-                    terminal.as_raw_fd(),
-                    libc::F_SETFL,
-                    flags | libc::O_NONBLOCK,
-                )
-            },
-            -1
-        );
-        command
-            .current_dir(home)
-            .stdin(slave.try_clone().unwrap())
-            .stdout(slave.try_clone().unwrap())
-            .stderr(slave);
-        // SAFETY: the child only runs async-signal-safe terminal setup.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                Ok(())
-            });
-        }
-        Self {
-            child: command.spawn().unwrap(),
-            terminal,
-            bytes: Vec::new(),
-            queries: 0,
-        }
-    }
-
-    fn send(&mut self, bytes: &[u8]) {
-        self.terminal.write_all(bytes).unwrap();
-    }
-
-    fn stop(&mut self) -> std::io::Result<()> {
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        if let Err(error) = self.child.kill() {
-            return if self.child.try_wait()?.is_some() {
-                Ok(())
-            } else {
-                Err(error)
-            };
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut bytes = [0; 8192];
-        loop {
-            // Keep draining while the killed child closes its terminal descriptors.
-            match self.terminal.read(&mut bytes) {
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) || error.raw_os_error() == Some(libc::EIO) => {}
-                Err(error) => return Err(error),
-            }
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("child {} did not exit after SIGKILL", self.child.id()),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn pump(&mut self, milliseconds: i32) {
-        let mut poll = libc::pollfd {
-            fd: self.terminal.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut poll, 1, milliseconds) } > 0 {
-            let mut bytes = [0; 8192];
-            let count = match self.terminal.read(&mut bytes) {
-                Ok(count) => count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    return;
-                }
-                Err(error) => panic!("theme PTY read failed: {error}"),
-            };
-            self.bytes.extend_from_slice(&bytes[..count]);
-            let queries = self
-                .bytes
-                .windows(4)
-                .filter(|bytes| *bytes == b"\x1b[6n")
-                .count();
-            for _ in self.queries..queries {
-                self.send(b"\x1b[1;1R");
-            }
-            self.queries = queries;
-        }
-    }
-
-    fn wait(&mut self, start: usize, text: &str) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !String::from_utf8_lossy(&self.bytes[start..]).contains(text) {
-            assert!(
-                Instant::now() < deadline,
-                "missing {text:?}: {}",
-                String::from_utf8_lossy(&self.bytes)
-            );
-            self.pump(50);
-        }
-        start
-            + self.bytes[start..]
-                .windows(text.len())
-                .position(|bytes| bytes == text.as_bytes())
-                .expect("observed terminal text")
-            + text.len()
-    }
+fn start_shell(home: &Path, mut command: Command) -> Terminal {
+    command.current_dir(home);
+    Terminal::new(command, 24, 80)
 }
 
 #[test]
 fn theme_pty_master_is_nonblocking() {
     let home = tempfile::tempdir().unwrap();
-    let shell = Shell::new(home.path());
-    let flags = unsafe { libc::fcntl(shell.terminal.as_raw_fd(), libc::F_GETFL) };
+    let shell = open_shell(home.path());
+    let flags = unsafe { libc::fcntl(shell.as_raw_fd(), libc::F_GETFL) };
     assert_ne!(flags, -1);
     assert_ne!(flags & libc::O_NONBLOCK, 0);
 }
@@ -337,12 +159,16 @@ fn theme_pty_master_is_nonblocking() {
 fn theme_pty_cleanup_reaps_a_child_with_pending_output() {
     let home = tempfile::tempdir().unwrap();
     let mut command = Command::new("sh");
-    command.args(["-c", "printf 'OUTPUT_READY\\n'; exec yes pending-output"]);
-    let mut shell = Shell::start(home.path(), command);
-    shell.wait(0, "OUTPUT_READY");
-    std::thread::sleep(Duration::from_millis(50));
+    command.args([
+        "-c",
+        "printf '\\377OUTPUT_READY\\n'; exec yes pending-output",
+    ]);
+    let mut shell = start_shell(home.path(), command);
+    let ready = shell.wait(0, "OUTPUT_READY");
+    assert_eq!(&shell.output[..ready], b"\xffOUTPUT_READY");
+    shell.wait_for("pending-output");
     shell.stop().unwrap();
-    assert!(shell.child.try_wait().unwrap().is_some());
+    assert!(shell.poll().is_some());
 }
 
 #[test]
@@ -350,28 +176,28 @@ fn live_cli_loads_saved_theme_at_next_prompt_without_executing_the_draft() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join("config.toml");
     fs::write(&config, "[shell]\ntheme = 'soft-dark'\ncapture_output = 'off'\ninput_assist = false\ncompletion = false\ncommand_assist = false\n").unwrap();
-    let mut shell = Shell::new(home.path());
+    let mut shell = open_shell(home.path());
     shell.wait(0, DARK);
     shell.send(b"touch must_not_execute");
     shell.wait(0, "touch must_not_execute");
     assert!(theme(home.path(), &["set", "soft-light"]).status.success());
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     for _ in 0..4 {
         shell.pump(50);
     }
     assert!(
-        !String::from_utf8_lossy(&shell.bytes[start..]).contains(LIGHT),
+        !String::from_utf8_lossy(&shell.output[start..]).contains(LIGHT),
         "a config write interrupted active editing"
     );
     shell.send(b"\x03");
     shell.wait(start, LIGHT);
     assert!(!home.path().join("must_not_execute").exists());
     fs::write(&config, "[shell]\ntheme = 'invalid'\n").unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     shell.wait(start, "theme unchanged");
     shell.wait(start, LIGHT);
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains(DARK));
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains(DARK));
 }
 
 #[test]
@@ -381,31 +207,31 @@ fn prompt_command_metrics_are_real_optional_and_do_not_load_ai() {
         home.path().join("config.toml"),
         "[shell]\ncapture_output='off'\ninput_assist=false\ncompletion=false\ncommand_assist=false\n",
     ).unwrap();
-    let mut shell = Shell::new(home.path());
+    let mut shell = open_shell(home.path());
     shell.wait(0, DARK);
-    assert!(!String::from_utf8_lossy(&shell.bytes).contains("ctx "));
-    let start = shell.bytes.len();
+    assert!(!String::from_utf8_lossy(&shell.output).contains("ctx "));
+    let start = shell.output.len();
     shell.send(b"(exit 7)\r");
     shell.wait(start, "last exit 7");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"touch must_not_run");
     shell.wait(start, "touch must_not_run");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     shell.wait(start, "last exit 7");
     shell.wait(start, "Ctrl+R history");
     assert!(!home.path().join("must_not_run").exists());
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"sleep 2.1; printf 'SLOW_DONE\\n'\r");
     let start = shell.wait(start, "SLOW_DONE\r\n");
     shell.wait(start, "last ");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"printf 'METRICS_DONE\\n'\r");
     let start = shell.wait(start, "METRICS_DONE\r\n");
     shell.wait(start, DARK);
     shell.wait(start, "Ctrl+R history");
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains("last "));
-    let output = String::from_utf8_lossy(&shell.bytes);
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains("last "));
+    let output = String::from_utf8_lossy(&shell.output);
     assert!(
         !output.contains("Downloading") && !output.contains("not installed"),
         "{output}"
@@ -419,15 +245,15 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     let config = home.path().join("config.toml");
     let original = "[shell]\nai_prefix='?'\ntheme='soft-dark'\ncapture_output='off'\ninput_assist=false\ncompletion=false\ncommand_assist=false\n";
     fs::write(&config, original).unwrap();
-    let mut shell = Shell::inline(home.path());
+    let mut shell = inline_shell(home.path());
     shell.wait(0, DARK);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme\r");
     let start = shell.wait(start, "theme: soft-dark");
     shell.wait(start, DARK);
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme soft-light\r");
     let start = shell.wait(start, "soft-light saved");
     shell.wait(start, LIGHT);
@@ -435,7 +261,7 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     let table: toml::Table = saved.parse().unwrap();
     assert_eq!(table["shell"]["theme"].as_str(), Some("soft-light"));
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme\r");
     let start = shell.wait(start, "theme: soft-light");
     shell.wait(start, LIGHT);
@@ -450,7 +276,7 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
             "invalid arguments; usage: ?theme",
         ),
     ] {
-        let start = shell.bytes.len();
+        let start = shell.output.len();
         shell.send(input.as_bytes());
         let start = shell.wait(start, error);
         shell.wait(start, LIGHT);
@@ -459,13 +285,13 @@ fn inline_theme_selection_saves_and_repaints_without_loading_a_model() {
     assert!(!home.path().join("must_not_execute").exists());
 
     fs::set_permissions(&config, fs::Permissions::from_mode(0o400)).unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme soft-dark\r");
     let start = shell.wait(start, "read-only; changes were not saved");
     shell.wait(start, LIGHT);
     assert_eq!(fs::read_to_string(&config).unwrap(), saved);
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-    let output = String::from_utf8_lossy(&shell.bytes);
+    let output = String::from_utf8_lossy(&shell.output);
     assert!(
         !output.contains("not installed") && !output.contains("Downloading"),
         "{output}"
@@ -478,69 +304,69 @@ fn parameter_menus_open_without_tab_and_require_acceptance_before_switching() {
     let config = home.path().join("config.toml");
     let original = "[shell]\nai_prefix='?'\ntheme='soft-dark'\ncapture_output='off'\ninput_assist=false\ncompletion=true\ncommand_assist=false\n";
     fs::write(&config, original).unwrap();
-    let mut shell = Shell::inline(home.path());
+    let mut shell = inline_shell(home.path());
     shell.wait(0, DARK);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme ");
     shell.wait(start, "Dark theme");
     shell.wait(start, "Light theme");
     shell.wait(start, "current");
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"soft-l");
     shell.wait(start, "?theme soft-l");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\t\r");
     shell.wait(start, "?theme soft-light");
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains("soft-light saved"));
-    let start = shell.bytes.len();
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains("soft-light saved"));
+    let start = shell.output.len();
     shell.send(b"\r");
     shell.wait(start, "soft-light saved");
     shell.wait(start, LIGHT);
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme ");
     shell.wait(start, "current · Light theme");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     shell.wait(start, LIGHT);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?mode ");
     shell.wait(start, "current · Apply safety rules");
     shell.wait(start, "Ask for approval");
     shell.wait(start, "high risk");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\t\r");
     shell.wait(start, "?mode confirm");
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains("Approval: Confirm"));
-    let start = shell.bytes.len();
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains("Approval: Confirm"));
+    let start = shell.output.len();
     shell.send(b"\r");
     shell.wait(start, "Approval: Confirm");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?mode ");
     shell.wait(start, "current · Ask for approval");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x03");
     shell.wait(start, LIGHT);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme\r");
     shell.wait(start, "theme: soft-light");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?th\t");
     shell.wait(start, "show or save the theme selection");
     let saved = fs::read_to_string(&config).unwrap();
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\r");
     shell.wait(start, "Light theme");
     assert_eq!(fs::read_to_string(&config).unwrap(), saved);
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains("theme: soft-light"));
-    let start = shell.bytes.len();
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains("theme: soft-light"));
+    let start = shell.output.len();
     shell.send(b"\x1b");
     shell.wait(start, "Tab");
     shell.send(b"\r");
     shell.wait(start, "theme: soft-light");
-    let output = String::from_utf8_lossy(&shell.bytes);
+    let output = String::from_utf8_lossy(&shell.output);
     assert!(
         !output.contains("not installed") && !output.contains("Downloading"),
         "{output}"
@@ -553,38 +379,38 @@ fn parameter_menus_rearm_after_deleting_out_of_the_argument() {
     let config = home.path().join("config.toml");
     let original = "[shell]\nai_prefix='?'\ntheme='soft-dark'\ncapture_output='off'\ninput_assist=false\ncompletion=true\ncommand_assist=false\n";
     fs::write(&config, original).unwrap();
-    let mut shell = Shell::inline(home.path());
+    let mut shell = inline_shell(home.path());
     shell.wait(0, DARK);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme ");
     shell.wait(start, "Light theme");
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x1b");
     shell.wait(start, "Tab");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x7f");
     shell.wait(start, "?theme");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b" ");
     shell.wait(start, "Light theme");
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x15");
     shell.wait(start, "❯ ");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"?theme ");
     shell.wait(start, "Light theme");
 
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\x1b");
     shell.wait(start, "Tab");
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"soft-light");
     shell.wait(start, "?theme soft-light");
-    assert!(!String::from_utf8_lossy(&shell.bytes[start..]).contains("Light theme"));
+    assert!(!String::from_utf8_lossy(&shell.output[start..]).contains("Light theme"));
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
-    let start = shell.bytes.len();
+    let start = shell.output.len();
     shell.send(b"\r");
     shell.wait(start, "soft-light saved");
     shell.wait(start, LIGHT);
