@@ -149,7 +149,6 @@ pub struct TaskOutcome {
 enum Exec {
     ReadResult(String),
     Error(String),
-    Correction(String),
     UserAnswer(String),
     CommandResult(String, Box<CommandExecution>),
     CommandError(String, Box<CommandExecution>),
@@ -175,7 +174,6 @@ impl Exec {
         match self {
             Self::ReadResult(text) => ("read", text),
             Self::Error(text) => ("error", text),
-            Self::Correction(text) => ("correction", text),
             Self::UserAnswer(text) => ("answered", text),
             Self::CommandResult(text, _) => ("executed", text),
             Self::CommandError(text, _) => ("execution_error", text),
@@ -566,7 +564,6 @@ impl Agent {
             &permission_context,
         ));
         let mut errors: HashMap<String, usize> = HashMap::new();
-        let mut corrections_without_progress = 0;
         let mut finish_reason = None;
         loop {
             if cancel.is_cancelled() {
@@ -653,11 +650,17 @@ impl Agent {
             let mut aborted = false;
             let mut handed_off = false;
             let mut fatal = None;
-            let has_question = step.tool_calls.iter().any(|call| call.name == "ask_user")
-                || step
-                    .errors
-                    .iter()
-                    .any(|error| error.tool.as_deref() == Some("ask_user"));
+            let question_spec = user_input::spec();
+            let has_question = step
+                .tool_calls
+                .iter()
+                .any(|call| question_spec.matches_name(&call.name))
+                || step.errors.iter().any(|error| {
+                    error
+                        .tool
+                        .as_deref()
+                        .is_some_and(|name| question_spec.matches_name(name))
+                });
             let mixed_question = has_question && step.tool_calls.len() + step.errors.len() > 1;
             if mixed_question {
                 ui.error("ask_user must be the only tool call in its turn; no tools were executed");
@@ -668,7 +671,7 @@ impl Agent {
                     Exec::Error("error: ask_user must be the only tool call in its turn; no tools were executed".into())
                 } else if skip_remaining || aborted || handed_off || fatal.is_some() {
                     Exec::Skipped(
-                        "[skipped] an earlier call needs correction, was denied, cancelled or handed to the user"
+                        "[skipped] an earlier call was denied, cancelled or handed to the user"
                             .into(),
                     )
                 } else {
@@ -685,23 +688,11 @@ impl Agent {
                     )
                     .err();
                 match result {
-                    Exec::ReadResult(_) => {
-                        corrections_without_progress = 0;
-                    }
-                    Exec::Error(_) | Exec::Skipped(_) => {}
-                    Exec::Correction(_) => {
-                        skip_remaining = true;
-                        corrections_without_progress += 1;
-                        if corrections_without_progress > 2 {
-                            fatal = Some("the model kept adding an unnecessary cd prefix".into());
-                        }
-                    }
+                    Exec::ReadResult(_) | Exec::Error(_) | Exec::Skipped(_) => {}
                     Exec::UserAnswer(_) => {
                         self.denied_calls.clear();
-                        corrections_without_progress = 0;
                     }
                     Exec::CommandResult(..) => {
-                        corrections_without_progress = 0;
                         out.commands_run += 1;
                     }
                     Exec::Denied(_) => {
@@ -855,19 +846,22 @@ impl Agent {
         approval: &mut dyn ApprovalChannel,
         ui: &mut dyn AgentUi,
     ) -> Exec {
-        if call.name == "ask_user" && self.can_ask {
+        let question_spec = user_input::spec();
+        if question_spec.matches_name(&call.name) && self.can_ask {
+            let question = match user_input::UserQuestion::parse(call) {
+                Ok(question) => question,
+                Err(error) => {
+                    ui.error(&error.to_string());
+                    return Exec::Error(format!("error: {error}"));
+                }
+            };
             ui.pause();
-            ui.tool_start(
-                "ask_user",
-                call.str_arg("question").unwrap_or(""),
-                None,
-                "user input",
-            );
+            ui.tool_start("ask_user", &question.question, None, "user input");
             ui.state(self.cfg.mode, Activity::NeedsUser);
             ui.pause();
             return match user_input::ask(
                 self.user_input.as_mut(),
-                call,
+                question,
                 &self.engine.cancel_handle(),
             ) {
                 Ok(answer) => {
@@ -909,7 +903,13 @@ impl Agent {
             return Exec::Error(error);
         };
         match tool {
-            BuiltinTool::Exec => self.exec(shell, call, approval, ui),
+            BuiltinTool::Exec => match tool.spec().prepare_call(call) {
+                Ok(call) => self.exec(shell, &call, approval, ui),
+                Err(error) => {
+                    ui.error(&error.to_string());
+                    Exec::Error(format!("error: {error}"))
+                }
+            },
             BuiltinTool::ReadFile | BuiltinTool::Grep => {
                 self.read_tool(shell, call, approval, ui, tool)
             }
@@ -1038,9 +1038,29 @@ Approval request: {}; {}.{}",
             ui.error("missing required parameter 'command'");
             return Exec::Error("error: missing required parameter 'command'".into());
         };
-        let timeout = call
-            .int_arg("timeout_sec")
-            .map(|t| Duration::from_secs(t.clamp(1, 600) as u64))
+        let seconds = call
+            .args
+            .get("timeout_sec")
+            .and_then(serde_json::Value::as_f64);
+        let milliseconds = call
+            .args
+            .get("timeout_ms")
+            .and_then(serde_json::Value::as_f64);
+        if let (Some(seconds), Some(milliseconds)) = (seconds, milliseconds)
+            && seconds != milliseconds / 1000.0
+            && !matches!(
+                (Duration::try_from_secs_f64(seconds), Duration::try_from_secs_f64(milliseconds / 1000.0)),
+                (Ok(left), Ok(right)) if left == right
+            )
+        {
+            let error =
+                "error: conflicting timeout_sec and timeout_ms values; nothing was executed";
+            ui.error(error);
+            return Exec::Error(error.into());
+        }
+        let timeout = seconds
+            .or(milliseconds.map(|value| value / 1000.0))
+            .map(|value| Duration::from_secs_f64(value.clamp(1.0, 600.0)))
             .unwrap_or(self.cfg.command_timeout);
         let mut command = original.to_string();
         let mut edited = false;
@@ -1054,18 +1074,20 @@ Approval request: {}; {}.{}",
             }
             let mut ctx = self.cfg.permission_context(shell);
             ctx.timeout = timeout;
+            if let Some(cwd) = call.str_arg("cwd")
+                && ctx.resolve(cwd) != ctx.cwd
+            {
+                let error = format!(
+                    "error: exec uses the shared session directory {}. Use an explicit cd command to change it; nothing was executed.",
+                    ctx.cwd.display()
+                );
+                ui.error(&error);
+                return Exec::Error(error);
+            }
             let report = prepared_command(&command, &ctx, shell);
             if let Some(error) = &report.syntax_error {
                 ui.error(&format!("invalid command syntax: {error}"));
                 return Exec::Error(format!("error: invalid command syntax: {error}"));
-            }
-            if !edited && shell.has_redundant_cd_prefix(&command) {
-                let error = format!(
-                    "error: exec already runs in {}. Remove the leading cd to this same directory and submit the remaining command. Nothing was run or sent for approval.",
-                    ctx.cwd.display()
-                );
-                ui.error(&error);
-                return Exec::Correction(error);
             }
             let shown = report.rewritten.as_deref().unwrap_or(&command);
             let label = match self.authorize(call, shown, &ctx.cwd, &report, approval, ui) {
@@ -1235,6 +1257,7 @@ Approval request: {}; {}.{}",
                 return Exec::Error(format!("error: {error}"));
             }
         };
+        let call = &prepared;
         let path = tools::tool_path(&prepared, &ctx.cwd);
         let (risk, label, manual) = match self.approve_read(&path, &ctx, &prepared, approval, ui) {
             Ok(value) => value,

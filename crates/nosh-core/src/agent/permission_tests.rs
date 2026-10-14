@@ -9,20 +9,23 @@ use std::cell::RefCell;
 
 thread_local! {
     static EXECUTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static LAST_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
 }
 
 fn fake_run(
     _shell: &mut EmbeddedShell,
     command: &str,
-    _opts: &AgentExecOpts,
+    opts: &AgentExecOpts,
     _sink: &mut dyn nosh_shell::OutputSink,
 ) -> Result<nosh_shell::CommandResult, nosh_shell::ShellError> {
     EXECUTED.with(|calls| calls.borrow_mut().push(command.into()));
+    LAST_TIMEOUT.with(|timeout| *timeout.borrow_mut() = Some(opts.timeout));
     Ok(nosh_shell::CommandResult::default())
 }
 
 fn fake_agent(mode: ApprovalMode, rules: UserRules) -> Agent {
     EXECUTED.with(|calls| calls.borrow_mut().clear());
+    LAST_TIMEOUT.with(|timeout| *timeout.borrow_mut() = None);
     let mut agent = Agent::new(
         Box::new(MockChatEngine::new(vec![])),
         AgentConfig {
@@ -54,6 +57,97 @@ fn call(command: &str) -> ToolCall {
 
 fn count() -> usize {
     EXECUTED.with(|calls| calls.borrow().len())
+}
+
+#[test]
+fn compatible_execution_names_and_parameters_still_use_canonical_permissions() {
+    let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+    for name in ["exec", "RUN_COMMAND", "Bash", "exec-command"] {
+        let mut deny = UserRule::prefix("printf").unwrap();
+        deny.spec.tool = Some("exec".into());
+        let mut agent = fake_agent(
+            Yolo,
+            UserRules {
+                allow: vec![],
+                deny: vec![deny],
+            },
+        );
+        let call = ToolCall {
+            name: name.into(),
+            args: serde_json::json!({"cmd":"printf denied"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        let mut approvals = Scripted::new([]);
+        assert!(matches!(
+            agent.exec_call(&mut shell, &call, &mut approvals, &mut RecordUi::default()),
+            Exec::Denied(_)
+        ));
+        assert!(approvals.seen.is_empty());
+        assert_eq!(count(), 0);
+        agent.tools = ToolSet::ReadOnly;
+        assert!(matches!(
+            agent.exec_call(&mut shell, &call, &mut approvals, &mut RecordUi::default()),
+            Exec::Error(_)
+        ));
+        assert_eq!(count(), 0);
+    }
+}
+
+#[test]
+fn compatible_timeout_values_keep_their_units_and_existing_bounds() {
+    let mut shell = EmbeddedShell::new(nosh_shell::ShellOptions::default()).unwrap();
+    for (args, expected) in [
+        (
+            serde_json::json!({"command":"printf ok","timeout_seconds":"5"}),
+            Duration::from_secs(5),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_sec":1.5}),
+            Duration::from_millis(1500),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_ms":"1500"}),
+            Duration::from_millis(1500),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_sec":1.1001,"timeout_ms":1100.1}),
+            Duration::from_micros(1_100_100),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_sec":0}),
+            Duration::from_secs(1),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_sec":"1000"}),
+            Duration::from_secs(600),
+        ),
+        (
+            serde_json::json!({"command":"printf ok","timeout_sec":null}),
+            Duration::from_secs(60),
+        ),
+    ] {
+        let mut agent = fake_agent(Auto, UserRules::default());
+        let call = ToolCall {
+            name: "ExecCommand".into(),
+            args: args.as_object().unwrap().clone(),
+        };
+        assert!(matches!(
+            agent.exec_call(
+                &mut shell,
+                &call,
+                &mut Scripted::new([]),
+                &mut RecordUi::default()
+            ),
+            Exec::CommandResult(..)
+        ));
+        assert_eq!(
+            LAST_TIMEOUT.with(|timeout| *timeout.borrow()),
+            Some(expected),
+            "{args}"
+        );
+    }
 }
 
 #[test]
@@ -448,8 +542,8 @@ fn scoped_script_and_deep_read_denies_never_execute() {
         let mut approvals = Scripted::new([ApprovalResponse::Approve]);
         let mut ui = RecordUi::default();
         let read = ToolCall {
-            name: "grep".into(),
-            args: serde_json::json!({"path": "private", "pattern": "needle"})
+            name: "RG".into(),
+            args: serde_json::json!({"path": "private", "regex": "needle"})
                 .as_object()
                 .unwrap()
                 .clone(),

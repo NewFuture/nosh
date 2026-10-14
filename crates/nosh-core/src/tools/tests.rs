@@ -53,7 +53,13 @@ fn tool_catalog_matches_the_advertised_schema_and_order() {
             "READ_FILE",
             "",
         ] {
-            assert_eq!(set.resolve(name).is_some(), names.contains(&name));
+            let canonical = match name {
+                "run_command" => "exec",
+                "READ_FILE" => "read_file",
+                "search_text" => "grep",
+                _ => name,
+            };
+            assert_eq!(set.resolve(name).is_some(), names.contains(&canonical));
         }
     }
 }
@@ -66,7 +72,13 @@ fn model_visible_tools_have_described_parameters_and_unambiguous_examples() {
     let rendered = nosh_llm::template::tool_definitions(&specs);
     for spec in &specs {
         assert!(!spec.description.trim().is_empty(), "{}", spec.name);
-        for (name, parameter) in spec.parameters["properties"].as_object().unwrap() {
+        assert_eq!(
+            spec.parameters["additionalProperties"], false,
+            "{}",
+            spec.name
+        );
+        let parameters = spec.model_parameters();
+        for (name, parameter) in parameters["properties"].as_object().unwrap() {
             assert!(
                 parameter["description"]
                     .as_str()
@@ -81,6 +93,29 @@ fn model_visible_tools_have_described_parameters_and_unambiguous_examples() {
     assert!(!rendered.contains("command_info"));
     assert!(!rendered.contains("\"topic\""));
     assert!(!rendered.contains("default 60"));
+    for compatibility in [
+        "x-aliases",
+        "x-name-aliases",
+        "x-scalar-text",
+        "timeout_ms",
+        "ignore_case",
+        "working_directory",
+    ] {
+        assert!(!rendered.contains(compatibility), "{compatibility}");
+    }
+    assert!(
+        read_file_spec()
+            .description
+            .contains("up to 400 numbered lines")
+    );
+    assert!(
+        grep_spec().parameters["properties"]["pattern"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("(?i)")
+    );
+    assert!(crate::user_input::spec().description.contains("Call alone"));
+    assert!(rendered.contains("Array values must be JSON"));
     let help = crate::command_help::spec();
     assert_eq!(help.parameters["required"], json!(["name"]));
     assert!(help.parameters["properties"]["query"].get("enum").is_none());
@@ -1139,6 +1174,87 @@ fn prepared_reads_use_the_live_permission_context() {
     assert_eq!(read.str_arg("path"), Some("/shell-home/file"));
     let grep = prepare_read(&call("grep", json!({"pattern": "needle"})), &ctx).unwrap();
     assert_eq!(grep.str_arg("path"), Some("/workspace"));
+}
+
+#[test]
+fn ambiguous_read_arguments_are_rejected_before_file_access() {
+    let ctx = nosh_permissions::Context::new("/workspace", "/workspace");
+    for (name, args, message) in [
+        (
+            "read_file",
+            json!({"path":"missing","offset":2}),
+            "unknown param 'offset'",
+        ),
+        (
+            "read_file",
+            json!({"path":"missing","start_line":2.5}),
+            "integer",
+        ),
+        (
+            "read_file",
+            json!({"path":"missing","end_line":2,"end":3}),
+            "conflicting values",
+        ),
+        (
+            "read_file",
+            json!({"path":"missing","start_line":"second"}),
+            "integer",
+        ),
+        (
+            "grep",
+            json!({"pattern":"x","ignore_case":true,"case_sensitive":true}),
+            "conflicting",
+        ),
+        (
+            "grep",
+            json!({"pattern":"x","glob":["*.rs","*.py"]}),
+            "string",
+        ),
+    ] {
+        let call = call(name, args);
+        let prepared = prepare_read(&call, &ctx).unwrap_err();
+        assert!(prepared.contains(message), "{prepared}");
+        let direct = if name == "read_file" {
+            read_file(&call, &ctx.cwd)
+        } else {
+            grep(&call, &ctx.cwd, |_| {
+                panic!("invalid call requested file access")
+            })
+        }
+        .unwrap_err();
+        assert_eq!(direct, prepared);
+    }
+}
+
+#[test]
+fn equivalent_read_arguments_and_case_flags_work_without_model_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "FIRST\nsecond\n").unwrap();
+    let read = read_file(
+        &call(
+            "Read-File",
+            json!({"file_path":["note.txt"],"start":"2.0","end_line":null}),
+        ),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(read.contains("    2  second"), "{read}");
+    let floor = read_file(
+        &call(
+            "read_text_file",
+            json!({"filename":"note.txt","start_line":0,"end":0}),
+        ),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(floor.contains("    1  FIRST"), "{floor}");
+    for args in [
+        json!({"regex":"first","ignore_case":"yes","glob":["*.txt"]}),
+        json!({"pattern":"first","case_sensitive":"false","path":null}),
+    ] {
+        let result = grep(&call("RG", args), dir.path(), |_| Ok(())).unwrap();
+        assert!(result.contains("note.txt:1:FIRST"), "{result}");
+    }
 }
 
 #[test]

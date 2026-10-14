@@ -511,20 +511,15 @@ fn query(
     call: &ToolCall,
     cancel: &CancelHandle,
 ) -> Result<String, String> {
-    match call.name.as_str() {
+    let spec = specs()
+        .into_iter()
+        .find(|spec| spec.matches_name(&call.name))
+        .ok_or_else(|| format!("unknown command-assistance tool: {}", call.name))?;
+    match spec.name.as_str() {
         "command_help" => {
             crate::command_help::query(&request.commands, &request.context, cfg, call, cancel)
         }
         "read_file" | "grep" => {
-            let allowed = if call.name == "read_file" {
-                &["path", "start_line", "end_line"][..]
-            } else {
-                &["path", "pattern", "glob"][..]
-            };
-            if call.args.keys().any(|key| !allowed.contains(&key.as_str())) {
-                return Err("unknown query parameter".into());
-            }
-
             let call = tools::prepare_read(call, &request.context)?;
             let path = tools::tool_path(&call, &request.context.cwd);
             allow_read(&path, &call, request, cfg)?;

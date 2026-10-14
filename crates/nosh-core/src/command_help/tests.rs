@@ -106,6 +106,9 @@ fn command_names_accept_literal_subcommands_but_not_shell_syntax_or_options() {
     for (name, program, arguments) in [
         ("tar", "tar", vec!["--help"]),
         ("git commit", "git", vec!["commit", "-h"]),
+        ("git commit --help", "git", vec!["commit", "-h"]),
+        ("git commit -h", "git", vec!["commit", "-h"]),
+        ("tar --help --help", "tar", vec!["--help"]),
         (
             " /usr/bin/git  remote add ",
             "/usr/bin/git",
@@ -129,6 +132,7 @@ fn command_names_accept_literal_subcommands_but_not_shell_syntax_or_options() {
         "git\tcommit",
         "git -C elsewhere commit",
         "git commit --amend",
+        "ls -h",
         "git commit;touch marker",
         "git commit && touch marker",
         "git $(touch marker)",
@@ -412,7 +416,6 @@ fn focused_parameters_never_become_shell_arguments() {
     for args in [
         json!({"name":"ls","topic":"gzip"}),
         json!({"name":"git -C elsewhere status"}),
-        json!({"name":"ls","query":""}),
         json!({"name":"ls","query":" \t"}),
         json!({"name":"ls","query":"-c\n--version"}),
         json!({"name":"ls","query":false}),
@@ -433,6 +436,15 @@ fn focused_parameters_never_become_shell_arguments() {
             "{args}"
         );
     }
+    let overview = query(
+        &commands,
+        &context,
+        &cfg,
+        &tool(json!({"name":"ls","query":""})),
+        &CancelHandle::default(),
+    )
+    .unwrap();
+    assert!(split(&overview).0["query"].is_null());
     let result = query(
         &commands,
         &context,

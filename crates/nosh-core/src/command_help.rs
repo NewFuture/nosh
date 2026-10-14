@@ -21,15 +21,18 @@ mod help;
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "command_help".into(),
-        description: "Get usage and option help for a command.".into(),
+        description:
+            "Get usage and options for a program, not shell builtins, aliases or functions.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Command name or path, optionally with subcommands, e.g. tar or git commit."},
-                "query": {"type": "string", "description": "Literal text to find, ignoring case, e.g. gz or -C. Omit for an overview."}
+                "name": {"type": "string", "minLength": 1, "x-aliases": ["command", "command_name", "program"], "description": "Program name/path and optional subcommands, e.g. git commit. No flags or shell code."},
+                "query": {"type": "string", "minLength": 1, "x-aliases": ["keyword", "filter"], "description": "Case-insensitive literal keyword, phrase or option, e.g. gzip or -C. Omit for an overview."}
             },
             "required": ["name"],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-name-aliases": ["get_command_help"],
+            "x-ignored-parameters": ["reason", "explanation"]
         }),
     }
 }
@@ -59,7 +62,17 @@ impl<'a> HelpCommand<'a> {
         {
             return Err("name must be a command name or path followed by plain subcommand names, not shell code".into());
         }
-        let subcommands: Vec<_> = words.collect();
+        let mut subcommands: Vec<_> = words.collect();
+        let git = Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("git");
+        while subcommands
+            .last()
+            .is_some_and(|word| *word == "--help" || (git && *word == "-h"))
+        {
+            subcommands.pop();
+        }
         if subcommands.iter().any(|word| {
             word.starts_with('-')
                 || !word
@@ -71,12 +84,7 @@ impl<'a> HelpCommand<'a> {
             );
         }
         // Git's --help launches a documentation viewer; -h prints builtin usage.
-        let flag = if !subcommands.is_empty()
-            && Path::new(program)
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some("git")
-        {
+        let flag = if !subcommands.is_empty() && git {
             "-h"
         } else {
             "--help"
@@ -104,9 +112,9 @@ pub(crate) fn query(
     call: &ToolCall,
     cancel: &CancelHandle,
 ) -> Result<String, String> {
-    if call.args.keys().any(|key| key != "name" && key != "query") {
-        return Err(format!("unknown {} parameter", call.name));
-    }
+    let call = spec()
+        .prepare_call(call)
+        .map_err(|error| error.to_string())?;
     let target = HelpCommand::parse(call.str_arg("name").ok_or("invalid command name")?)?;
     let query = match call.args.get("query") {
         None => None,

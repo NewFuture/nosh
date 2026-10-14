@@ -42,7 +42,7 @@ impl BuiltinTool {
         }
     }
 
-    fn spec(self) -> ToolSpec {
+    pub(crate) fn spec(self) -> ToolSpec {
         match self {
             Self::Exec => exec_spec(),
             Self::ReadFile => read_file_spec(),
@@ -60,22 +60,30 @@ impl ToolSet {
     }
 
     pub(crate) fn resolve(self, name: &str) -> Option<BuiltinTool> {
-        self.tools().iter().copied().find(|t| t.name() == name)
+        self.tools()
+            .iter()
+            .copied()
+            .find(|t| t.spec().matches_name(name))
     }
 }
 
 pub fn exec_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::Exec.name().into(),
-        description: "Run shell code in the current directory of the shared session. Returns output and exit code."
+        description: "Run shell code in the shared session's current directory. Shell state persists. Returns stdout, stderr and exit code."
             .into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Shell code to execute."},
-                "timeout_sec": {"type": "integer", "description": "Timeout in seconds (1-600; default: configured timeout)."}
+                "command": {"type": "string", "minLength": 1, "x-aliases": ["cmd", "code", "script", "shell_command"], "description": "Shell code to run."},
+                "timeout_sec": {"type": "number", "x-aliases": ["timeout_seconds", "timeout_s"], "description": "Seconds, clamped to 1-600. Omit for the configured timeout."},
+                "timeout_ms": {"type": "number", "x-compatibility-only": true},
+                "cwd": {"type": "string", "x-aliases": ["workdir", "working_directory"], "x-compatibility-only": true}
             },
-            "required": ["command"]
+            "required": ["command"],
+            "additionalProperties": false,
+            "x-name-aliases": ["run_command", "exec_command", "run_shell_command", "bash"],
+            "x-ignored-parameters": ["reason", "explanation"]
         }),
     }
 }
@@ -83,15 +91,19 @@ pub fn exec_spec() -> ToolSpec {
 pub fn read_file_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::ReadFile.name().into(),
-        description: "Read a text file with line numbers.".into(),
+        description:
+            "Read up to 400 numbered lines from a text file. Long output may be truncated.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path."},
-                "start_line": {"type": "integer", "description": "First line (1-based; default: 1)."},
-                "end_line": {"type": "integer", "description": "Last line, inclusive. Omit for up to 400 lines from start_line."}
+                "path": {"type": "string", "minLength": 1, "x-aliases": ["file", "file_path", "filename"], "description": "File path, relative to the current directory or absolute."},
+                "start_line": {"type": "integer", "x-aliases": ["start", "line_start", "from_line"], "description": "First line, 1-based (minimum/default: 1)."},
+                "end_line": {"type": "integer", "x-aliases": ["end", "line_end", "to_line"], "description": "Last line, inclusive (minimum: 1). Omit to read up to 400 lines."}
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false,
+            "x-name-aliases": ["read_text_file"],
+            "x-ignored-parameters": ["reason", "explanation"]
         }),
     }
 }
@@ -100,16 +112,21 @@ pub fn grep_spec() -> ToolSpec {
     ToolSpec {
         name: BuiltinTool::Grep.name().into(),
         description:
-            "Search file contents recursively. Directory searches skip ignored and hidden files."
+            "Search file contents. Directory searches recurse and skip ignored/hidden files. Returns path:line:text."
                 .into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Regular expression."},
-                "path": {"type": "string", "description": "File or directory (default: current directory)."},
-                "glob": {"type": "string", "description": "File filter, e.g. *.rs."}
+                "pattern": {"type": "string", "x-aliases": ["regex"], "description": "Case-sensitive regular expression; prefix (?i) to ignore case."},
+                "path": {"type": "string", "minLength": 1, "x-aliases": ["directory", "dir", "file_path"], "description": "File or directory path (default: current directory)."},
+                "glob": {"type": "string", "x-aliases": ["file_glob"], "description": "File glob, e.g. *.rs."},
+                "ignore_case": {"type": "boolean", "x-compatibility-only": true},
+                "case_sensitive": {"type": "boolean", "x-compatibility-only": true}
             },
-            "required": ["pattern"]
+            "required": ["pattern"],
+            "additionalProperties": false,
+            "x-name-aliases": ["search_text", "rg"],
+            "x-ignored-parameters": ["reason", "explanation"]
         }),
     }
 }
@@ -425,15 +442,26 @@ pub(crate) fn prepare_read(
     call: &ToolCall,
     ctx: &nosh_permissions::Context,
 ) -> Result<ToolCall, String> {
+    let tool = ToolSet::ReadOnly
+        .resolve(&call.name)
+        .ok_or_else(|| format!("unknown read tool '{}'", call.name))?;
+    let call = tool
+        .spec()
+        .prepare_call(call)
+        .map_err(|error| error.to_string())?;
+    if tool == BuiltinTool::Grep {
+        grep_ignore_case(&call)?;
+    }
     let path = match call.args.get("path") {
         Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
         None if call.name == "grep" => ".",
         _ => return Err("missing or invalid parameter 'path'".into()),
     };
-    let mut prepared = call.clone();
+    let path = ctx.resolve(path);
+    let mut prepared = call;
     prepared
         .args
-        .insert("path".into(), json!(ctx.resolve(path).to_string_lossy()));
+        .insert("path".into(), json!(path.to_string_lossy()));
     Ok(prepared)
 }
 
@@ -521,12 +549,17 @@ fn grep_with_budget(
     if !scan.check()? {
         return Ok(format_grep_result(0, "", scan.truncated));
     }
+    let call = grep_spec()
+        .prepare_call(call)
+        .map_err(|error| error.to_string())?;
     let pattern = call
         .str_arg("pattern")
         .ok_or("missing required parameter 'pattern'")?;
-    let matcher =
-        grep_regex::RegexMatcher::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
-    let root = tool_path(call, cwd);
+    let matcher = grep_regex::RegexMatcherBuilder::new()
+        .case_insensitive(grep_ignore_case(&call)?)
+        .build(pattern)
+        .map_err(|e| format!("invalid regex: {e}"))?;
+    let root = tool_path(&call, cwd);
     let meta = std::fs::metadata(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     if !meta.is_file() && !meta.is_dir() {
         return Err(format!(
@@ -740,6 +773,23 @@ fn grep_with_budget(
     Ok(format_grep_result(count, &output, scan.truncated))
 }
 
+fn grep_ignore_case(call: &ToolCall) -> Result<bool, String> {
+    let ignore = call
+        .args
+        .get("ignore_case")
+        .and_then(serde_json::Value::as_bool);
+    let sensitive = call
+        .args
+        .get("case_sensitive")
+        .and_then(serde_json::Value::as_bool);
+    if let (Some(ignore), Some(sensitive)) = (ignore, sensitive)
+        && ignore == sensitive
+    {
+        return Err("conflicting ignore_case and case_sensitive values".into());
+    }
+    Ok(ignore.or(sensitive.map(|value| !value)).unwrap_or(false))
+}
+
 fn format_grep_result(count: usize, output: &str, truncated: Option<&str>) -> String {
     let mut result = format!(
         "[{count} matching lines; truncated={}]\n",
@@ -777,7 +827,10 @@ const COUNT_BUDGET: u64 = 64 * 1024 * 1024;
 /// returned lines (bounded in count, per-line bytes and total characters),
 /// then counts the remaining lines within `count_budget` bytes.
 fn read_file_with(call: &ToolCall, cwd: &Path, count_budget: u64) -> Result<String, String> {
-    let path = tool_path(call, cwd);
+    let call = read_file_spec()
+        .prepare_call(call)
+        .map_err(|error| error.to_string())?;
+    let path = tool_path(&call, cwd);
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
     let meta = std::fs::metadata(&path).map_err(err)?;
     if meta.is_dir() {
