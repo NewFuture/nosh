@@ -158,35 +158,7 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
-        run: |
-          cargo_pid_file="$RUNNER_TEMP/nosh-test-cargo.pid"
-          (
-            sleep 120
-            cargo_pid=$(cat "$cargo_pid_file")
-            for pid in $(pgrep -P "$cargo_pid" || true); do
-              case "$(ps -p "$pid" -o comm=)" in
-                *theme-*)
-                  sleep 30
-                  if [ "$(ps -p "$pid" -o ppid= | tr -d ' ')" != "$cargo_pid" ]; then
-                    continue
-                  fi
-                  echo "::group::Stalled theme test process $pid"
-                  sample "$pid" 1 -file "$RUNNER_TEMP/theme-$pid.sample.txt" || true
-                  cat "$RUNNER_TEMP/theme-$pid.sample.txt" || true
-                  for child in $(pgrep -P "$pid" || true); do
-                    sample "$child" 1 -file "$RUNNER_TEMP/theme-child-$child.sample.txt" || true
-                    cat "$RUNNER_TEMP/theme-child-$child.sample.txt" || true
-                  done
-                  echo "::endgroup::"
-                  kill -KILL "$pid" "$cargo_pid"
-                  exit
-                  ;;
-              esac
-            done
-          ) &
-          monitor_pid=$!
-          trap 'kill "$monitor_pid" 2>/dev/null || true; rm -f "$cargo_pid_file"' EXIT
-          bash -c 'echo $$ > "$1"; exec cargo test --workspace --locked --no-fail-fast' -- "$cargo_pid_file"
+        run: cargo test --workspace --locked
       - name: cpu features and kernel paths
         if: success() || failure()
         run: cargo test --workspace --locked --test prepack -- --nocapture --test-threads 1

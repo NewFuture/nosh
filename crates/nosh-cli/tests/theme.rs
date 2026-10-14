@@ -136,8 +136,12 @@ struct Shell {
 
 impl Drop for Shell {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = self.stop() {
+            eprintln!("theme PTY cleanup failed: {error}");
+            if !std::thread::panicking() {
+                panic!("theme PTY cleanup failed: {error}");
+            }
+        }
     }
 }
 
@@ -231,6 +235,43 @@ impl Shell {
         self.terminal.write_all(bytes).unwrap();
     }
 
+    fn stop(&mut self) -> std::io::Result<()> {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if let Err(error) = self.child.kill() {
+            return if self.child.try_wait()?.is_some() {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut bytes = [0; 8192];
+        loop {
+            // Keep draining while the killed child closes its terminal descriptors.
+            match self.terminal.read(&mut bytes) {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) || error.raw_os_error() == Some(libc::EIO) => {}
+                Err(error) => return Err(error),
+            }
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("child {} did not exit after SIGKILL", self.child.id()),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn pump(&mut self, milliseconds: i32) {
         let mut poll = libc::pollfd {
             fd: self.terminal.as_raw_fd(),
@@ -290,6 +331,18 @@ fn theme_pty_master_is_nonblocking() {
     let flags = unsafe { libc::fcntl(shell.terminal.as_raw_fd(), libc::F_GETFL) };
     assert_ne!(flags, -1);
     assert_ne!(flags & libc::O_NONBLOCK, 0);
+}
+
+#[test]
+fn theme_pty_cleanup_reaps_a_child_with_pending_output() {
+    let home = tempfile::tempdir().unwrap();
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf 'OUTPUT_READY\\n'; exec yes pending-output"]);
+    let mut shell = Shell::start(home.path(), command);
+    shell.wait(0, "OUTPUT_READY");
+    std::thread::sleep(Duration::from_millis(50));
+    shell.stop().unwrap();
+    assert!(shell.child.try_wait().unwrap().is_some());
 }
 
 #[test]
