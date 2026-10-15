@@ -232,14 +232,9 @@ impl Server {
             });
         }
         if context.index == 0 && !context.word.contains('/') && !context.word.starts_with('~') {
-            native::commands(
-                query,
-                context,
-                snapshot,
-                &mut self.cache,
-                progress,
-                deadline,
-            )
+            native::commands(query, context, snapshot, &mut self.cache, progress, || {
+                Instant::now() >= deadline
+            })
         } else if let Some(answer) =
             providers::generate(query.clone(), context, snapshot, &mut self.cache)
         {
@@ -414,7 +409,7 @@ impl Server {
                         snapshot,
                         &mut self.cache,
                         progress,
-                        deadline,
+                        || Instant::now() >= deadline,
                     )
                 }
                 .map_err(|error| error.to_string())?;

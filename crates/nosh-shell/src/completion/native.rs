@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::cache::{Cache, Entry, Set};
 use super::context::Context;
@@ -275,7 +275,7 @@ pub(crate) fn commands(
     snapshot: &NativeSnapshot,
     cache: &mut Cache,
     progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
-    deadline: Instant,
+    mut expired: impl FnMut() -> bool,
 ) -> std::io::Result<Answer> {
     let names: BTreeSet<_> = snapshot
         .context
@@ -300,7 +300,7 @@ pub(crate) fn commands(
     };
     let mut early_answer = select(query.clone(), context, &local, Source::Command, true, false);
     abbreviations(&mut early_answer, context, snapshot);
-    progress(Outcome::Progress(early_answer.clone()))?;
+    progress(Outcome::Progress(early_answer))?;
     let key = format!(
         "commands\0{}\0{:?}",
         snapshot.context.cwd.display(),
@@ -342,24 +342,17 @@ pub(crate) fn commands(
             .clone()
             .map_or(State::Complete, State::Partial),
     };
+    let mut timed_out = false;
     for (_, entry, indices) in ranked(entries, &context.word, true, false) {
-        if Instant::now() >= deadline {
-            let message = "command verification time limit reached";
-            answer.state = State::Partial(match &answer.state {
-                State::Partial(reason) => format!("{reason}; {message}"),
-                _ => message.into(),
-            });
-            if answer.candidates.is_empty() {
-                early_answer.state = answer.state;
-                return Ok(early_answer);
-            }
-            break;
-        }
         if answer.candidates.len() == MAX_RESULTS {
             if answer.state.is_complete() {
                 answer.state = State::Partial("command verification/result limit reached".into());
             }
             break;
+        }
+        if known(snapshot, &entry.value).is_none() && (timed_out || expired()) {
+            timed_out = true;
+            continue;
         }
         match executable(snapshot, context, &entry.value) {
             Ok(true) => {
@@ -371,6 +364,13 @@ pub(crate) fn commands(
             Err(error) if answer.state.is_complete() => answer.state = State::Partial(error),
             Err(_) => {}
         }
+    }
+    if timed_out {
+        let message = "command verification time limit reached";
+        answer.state = State::Partial(match &answer.state {
+            State::Partial(reason) => format!("{reason}; {message}"),
+            _ => message.into(),
+        });
     }
     abbreviations(&mut answer, context, snapshot);
     Ok(answer)
