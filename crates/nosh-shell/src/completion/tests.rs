@@ -56,6 +56,40 @@ fn write_executable(path: impl AsRef<std::path::Path>, contents: &str) {
 }
 
 #[test]
+fn command_verification_deadline_preserves_known_local_candidates() {
+    let (directory, _, mut snapshot) = fixture();
+    write_executable(directory.path().join("l_external"), "#!/bin/sh\nexit 0\n");
+    let native = Arc::make_mut(&mut snapshot.native);
+    native.context.path = Some(directory.path().display().to_string());
+    native.context.functions.insert("l_fixture".into());
+    let request = query("l");
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    let mut progress = Vec::new();
+    let result = super::native::commands(
+        request,
+        &context,
+        &snapshot.native,
+        &mut super::cache::Cache::default(),
+        &mut |outcome| {
+            progress.push(outcome);
+            Ok(())
+        },
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert!(
+        matches!(&result.state, State::Partial(reason) if reason.contains("verification time limit"))
+    );
+    assert!(candidate_values(&result).contains(&"l_fixture"));
+    assert!(!candidate_values(&result).contains(&"l_external"));
+    assert_eq!(progress.len(), 1);
+    let Outcome::Progress(early) = &progress[0] else {
+        panic!("missing provisional candidates");
+    };
+    assert_eq!(early.candidates, result.candidates);
+}
+
+#[test]
 fn completion_context_uses_active_command_and_byte_ranges() {
     let (_, _, mut snapshot) = fixture();
     for operator in [";", "|", "|&", "||", "&&", "&"] {

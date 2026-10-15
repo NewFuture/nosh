@@ -320,7 +320,27 @@ fn fail(shared: &Shared, slot: &mut Slot, query: Query, error: impl std::fmt::Di
     let message = short_error(error);
     slot.fault = Some(message.clone());
     slot.query = Some(query.clone());
-    shared.publish(Answer::failed(query, message));
+    let retained = shared
+        .publication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .answer
+        .as_ref()
+        .filter(|answer| {
+            !slot.executing_script
+                && answer.query == query
+                && matches!(answer.state, State::Partial(_))
+                && !answer.candidates.is_empty()
+        })
+        .map(|answer| answer.candidates.clone());
+    shared.publish(match retained {
+        Some(candidates) => Answer {
+            query,
+            candidates,
+            state: State::Partial(message),
+        },
+        None => Answer::failed(query, message),
+    });
     slot.stop(shared);
 }
 
@@ -742,6 +762,77 @@ mod tests {
         service.available = true;
         service.prepare(Ok(snapshot.clone()));
         service
+    }
+
+    #[test]
+    fn native_failure_retains_only_current_partial_candidates() {
+        let fixture = Fixture::new(":");
+        for (script, populated) in [(false, true), (false, false), (true, true)] {
+            let service = isolated_service(&fixture.snapshot());
+            let query = service.request("l", 1, Trigger::Explicit);
+            let candidates = if populated {
+                vec![Candidate {
+                    source: Source::Command,
+                    value: "local_fixture".into(),
+                    kind: super::super::types::Kind::Command,
+                    description: None,
+                    span: 0..1,
+                    noquote: false,
+                    nospace: false,
+                    matches: vec![0],
+                    display: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            service.shared.publish_with(
+                Answer {
+                    query: query.clone(),
+                    candidates: candidates.clone(),
+                    state: State::Partial("querying command index".into()),
+                },
+                true,
+            );
+            let mut slot = Slot {
+                executing_script: script,
+                ..Default::default()
+            };
+            fail(
+                &service.shared,
+                &mut slot,
+                query.clone(),
+                "injected completion timeout",
+            );
+            let (_, answer, ongoing) = service.result(&query).unwrap();
+            assert!(!ongoing);
+            if populated && !script {
+                assert_eq!(answer.candidates, candidates);
+                assert_eq!(
+                    answer.state,
+                    State::Partial("injected completion timeout".into())
+                );
+                let newest = service.request("lo", 2, Trigger::Explicit);
+                service.shared.publish_with(
+                    Answer {
+                        query: newest.clone(),
+                        candidates: Vec::new(),
+                        state: State::Partial("new request".into()),
+                    },
+                    true,
+                );
+                fail(&service.shared, &mut slot, query, "late failure");
+                assert_eq!(
+                    service.result(&newest).unwrap().1.state,
+                    State::Partial("new request".into())
+                );
+            } else {
+                assert!(answer.candidates.is_empty());
+                assert_eq!(
+                    answer.state,
+                    State::Failed("injected completion timeout".into())
+                );
+            }
+        }
     }
 
     #[test]
