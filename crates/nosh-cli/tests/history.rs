@@ -236,7 +236,7 @@ fn visible_history_hint_prioritizes_right_without_executing_the_preview() {
     terminal.send(b"l");
     let frame = wait_raw_frame(&mut terminal, |frame| {
         before_cursor(frame).ends_with("history-test> l")
-            && (frame.contains("→ complete") || frame.contains("Right complete"))
+            && (frame.contains("→ accept") || frame.contains("Right accept"))
     });
     let hint = frame
         .rsplit_once("\x1b7")

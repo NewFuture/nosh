@@ -111,6 +111,7 @@ pub(super) fn probe(mode: &str) {
         shell.configure_project_env(Ok(nosh_shell::project_env::Provider::Direnv));
     }
     let config = nosh_shell::ReplConfig {
+        abbreviations: nosh_shell::abbreviations::Config::disabled(),
         terminal_integration: if mode.ends_with("-off") {
             nosh_shell::terminal_integration::Mode::Off
         } else {
@@ -220,6 +221,7 @@ fn integration_cancelling_a_submitted_environment_wait_never_executes_the_draft(
 fn integration_ready_environment_preserves_draft_and_updates_completion_without_enter() {
     let (out, err) = Probe {
         mode: "repl-integration-ready-environment",
+        terminal: Some("xterm-256color"),
         stdout_tty: true,
         stderr_tty: true,
         steps: &[
@@ -233,6 +235,30 @@ fn integration_ready_environment_preserves_draft_and_updates_completion_without_
     .run();
     assert!(out.contains("ENV-TOOL-EXEC"), "{out:?}");
     assert_eq!(exit_codes(&err), ["0", "0"]);
+}
+
+#[test]
+fn integration_context_refresh_reuses_the_prompt_anchor_and_keeps_cancellation() {
+    let (out, _) = Probe {
+        mode: "repl-integration-ready-environment",
+        terminal: Some("xterm-256color"),
+        stdout_tty: true,
+        stderr_tty: true,
+        steps: &[
+            ("integration> ", b"provided-c"),
+            ("environment ready", b"\x03"),
+            ("integration> ", b""),
+            ("environment ready", b"exit 0\r"),
+        ],
+        ..Default::default()
+    }
+    .run();
+    assert_eq!(
+        out.matches("\x1b[6n").count(),
+        2,
+        "context-only refresh must retain the existing prompt anchor: {out:?}"
+    );
+    assert!(!out.contains("ENV-TOOL-EXEC"), "{out:?}");
 }
 
 #[test]

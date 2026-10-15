@@ -1654,7 +1654,10 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
             {
                 if let Some(history) = shell.history_store() {
                     let errors = history.take_errors();
-                    if !errors.is_empty() && editor.is_some() {
+                    if !errors.is_empty()
+                        && let Some(editor) = &mut editor
+                    {
+                        editor.prepare_external_output();
                         eprintln!();
                     }
                     for error in errors {
@@ -1686,7 +1689,8 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                         .is_subset(&approved.applicable);
                     pipeline.cfg.input_abbreviations = approved;
                     if let Some(error) = abbreviations.take_error() {
-                        if editor.is_some() {
+                        if let Some(editor) = &mut editor {
+                            editor.prepare_external_output();
                             eprint!("\r\n");
                         }
                         ui.notice(&format!("nosh: {}", style::visible_text(&error)));
@@ -1697,6 +1701,7 @@ pub fn run(shell: &mut EmbeddedShell, ai: &mut dyn AiHandler, cfg: ReplConfig) -
                         editor.cancel_completions();
                         if withdrawn && !editor.current_buffer_contents().is_empty() {
                             editor.preserve_literal_input();
+                            editor.prepare_external_output();
                             eprint!("\r\n");
                             ui.notice(tr!(
                                 "nosh: 缩写已失效；保留本条原文",

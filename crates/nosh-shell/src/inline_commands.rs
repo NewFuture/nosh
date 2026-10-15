@@ -638,25 +638,25 @@ mod tests {
         assert!(is_command("#unknown", "#", true));
         assert!(!is_command("#help", "#", false));
     }
-}
-#[test]
-fn assist_is_local_and_approval_auto_keeps_its_original_meaning() {
-    for prefix in ["#", "?"] {
-        assert_eq!(
-            parse(&format!("{prefix}assist on"), prefix, true),
-            Input::Command(Command::Assist(Some(true)))
-        );
-        assert_eq!(
-            parse(&format!("{prefix}mode auto"), prefix, true),
-            Input::Command(Command::Manage(ManagementCommand::Mode(Some(
-                ApprovalMode::Auto
-            ))))
-        );
-        assert!(matches!(
-            parse(&format!("{prefix}auto off"), prefix, true),
-            Input::Error(_)
-        ));
-        assert!(help(prefix).contains(&format!("{prefix}assist")));
-        assert!(!help(prefix).contains(&format!("{prefix}auto")));
+    #[test]
+    fn assist_is_local_and_approval_auto_keeps_its_original_meaning() {
+        for prefix in ["#", "?"] {
+            assert_eq!(
+                parse(&format!("{prefix}assist on"), prefix, true),
+                Input::Command(Command::Assist(Some(true)))
+            );
+            assert_eq!(
+                parse(&format!("{prefix}mode auto"), prefix, true),
+                Input::Command(Command::Manage(ManagementCommand::Mode(Some(
+                    ApprovalMode::Auto
+                ))))
+            );
+            assert!(matches!(
+                parse(&format!("{prefix}auto off"), prefix, true),
+                Input::Error(_)
+            ));
+            assert!(help(prefix).contains(&format!("{prefix}assist")));
+            assert!(!help(prefix).contains(&format!("{prefix}auto")));
+        }
     }
 }

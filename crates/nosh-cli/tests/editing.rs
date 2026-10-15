@@ -229,7 +229,7 @@ fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
         let (failure, status) = if invalid_path {
             launch
                 .arg("--model-path")
-                .arg(home.path().join("missing.gguf"));
+                .arg(home.path().join("nested-".repeat(20)).join("missing.gguf"));
             ("does not exist", "model: load failed:")
         } else {
             ("model not installed", "model: not ready:")
@@ -238,7 +238,8 @@ fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
             launch,
             &[
                 ("loading-pause> ", b"true\r"),
-                (failure, b"xqzvw_nosuch --help\r"),
+                ("AI:", b"#status\r"),
+                (status, b"xqzvw_nosuch --help\r"),
                 ("exit 127", b"printf unused; )\r"),
                 ("exit 2", b"xqzvw_nosuch --help\r"),
                 ("exit 127", b"printf unused; )\r"),
@@ -247,6 +248,10 @@ fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
                 ("assist: on", b"#status\r"),
                 ("not loaded (loads on first use)", b"exit 0\r"),
             ],
+        );
+        assert!(
+            output.split_once(status).unwrap().1.contains(failure),
+            "{output}"
         );
         assert!(
             !output.contains("Downloading") && !output.contains("loading "),

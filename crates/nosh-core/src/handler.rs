@@ -260,14 +260,12 @@ impl AiHandler for ShellAi {
                 exit_code: 130,
             };
         }
-        let (Some(agent), approval) = (
-            self.foreground
-                .as_mut()
-                .and_then(|state| state.agent.as_mut()),
-            self.approval.as_mut(),
-        ) else {
-            return AiOutcome::default();
-        };
+        let agent = self
+            .foreground
+            .as_mut()
+            .and_then(|state| state.agent.as_mut())
+            .expect("agent loaded above");
+        let approval = self.approval.as_mut();
         let mut ui = TermUi::with_theme(false, self.theme.clone());
         ui.show_think = show_think;
         let input = TaskInput {
@@ -975,7 +973,6 @@ mod tests {
     #[test]
     fn automatic_loading_cannot_fall_back_to_the_foreground_policy() {
         use std::sync::{Arc, Mutex};
-        use std::time::{Duration, Instant};
         let modes = Arc::new(Mutex::new(Vec::new()));
         let observed = modes.clone();
         let mut ai = ShellAi::new(
@@ -993,14 +990,7 @@ mod tests {
             shell.recent_commands().last().unwrap().clone(),
             None,
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while matches!(
-            ai.display.result(),
-            None | Some(nosh_shell::Assistance::Pending)
-        ) && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_for_assistance(&ai);
         assert!(
             matches!(ai.display.result(), Some(nosh_shell::Assistance::Failure(text)) if text.contains("model not installed"))
         );

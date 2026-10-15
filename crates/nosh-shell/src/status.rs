@@ -241,8 +241,6 @@ impl Bindings {
             format!("{key} {}", tr!("采用", "use"))
         } else if action == Action::Complete {
             format!("{key} {}", tr!("补全", "menu"))
-        } else if action == Action::Hint {
-            format!("{key} {}", tr!("补全", "complete"))
         } else if action == Action::History {
             format!("{key} {}", tr!("历史", "find"))
         } else {
@@ -828,7 +826,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                     true,
                 );
             } else if hint.is_some() {
-                add_action(&mut fields, Action::Hint, tr!("补全", "complete"), 98, true);
+                add_action(&mut fields, Action::Hint, tr!("填入", "accept"), 98, true);
             } else if candidate.is_some() {
                 add_action(
                     &mut fields,
@@ -1507,7 +1505,7 @@ mod tests {
                 missing_command: missing,
                 correction: None,
             };
-            for (unicode, expected) in [(true, "→ complete"), (false, "Right complete")] {
+            for (unicode, expected) in [(true, "→ accept"), (false, "Right accept")] {
                 let mut data = context(&editor, &keys);
                 data.feedback = Some(&feedback);
                 data.unicode = unicode;
@@ -1540,7 +1538,7 @@ mod tests {
         let mut data = context(&editor, &bindings);
         data.feedback = Some(&feedback);
         let text = style::strip_ansi(&compose(data).text);
-        assert!(text.contains("End complete"), "{text}");
+        assert!(text.contains("End accept"), "{text}");
         assert!(!text.contains("→"), "{text}");
 
         for (modifiers, key) in [
@@ -1559,7 +1557,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            !text.contains("End complete") && !text.contains("→ complete"),
+            !text.contains("End accept") && !text.contains("→ accept"),
             "{text}"
         );
     }
