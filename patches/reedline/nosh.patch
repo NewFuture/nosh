@@ -1421,7 +1421,7 @@ index 79dd9beb22d76020b8e5bd2e9b2762ca4303d6bb..f8c7006a2aa2308b9b9fc4cca5895331
  }
  
 diff --git a/src/engine.rs b/src/engine.rs
-index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6c9396b74 100644
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..1118f621db41c69adf41577f55fdb94d225eded6 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -37,7 +37,8 @@ use {
@@ -3140,11 +3140,11 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
              self.editor.prepare_append_at_buffer_end();
              self.run_edit_commands(&[EditCommand::InsertString(hint)]);
              EventStatus::Handled
-@@ -2375,11 +3339,57 @@ impl Reedline {
+@@ -2375,11 +3339,68 @@ impl Reedline {
          }
      }
  
-+    fn update_prompt_context(&self, prompt: &dyn Prompt) {
++    fn update_prompt_context(&self, prompt: &dyn Prompt, hint: Option<&str>) {
 +        let navigation = (self.input_mode == InputMode::HistorySearch)
 +            .then(|| self.history_cursor.get_navigation());
 +        let interaction = if let Some(panel) = self
@@ -3177,6 +3177,17 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +        };
 +        prompt.update_context(PromptContext {
 +            buffer: self.editor.get_buffer(),
++            hint: hint.filter(|hint| {
++                !crate::painting::strip_ansi(hint).is_empty()
++                    && self.hints_active()
++                    && self.editor.is_cursor_at_buffer_end()
++                    && self.editor.get_selection().is_none()
++                    && !self.menus.iter().any(|menu| menu.is_active())
++                    && self
++                        .history_panel
++                        .as_ref()
++                        .is_none_or(|panel| !panel.is_active())
++            }),
 +            cursor: self.editor.insertion_point(),
 +            completion_cursor: self.editor.completion_point(),
 +            selection: self.editor.get_selection(),
@@ -3198,7 +3209,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          let buffer = self.editor.get_buffer();
          let cursor_position_in_buffer = self.editor.insertion_point();
          if cursor_position_in_buffer == 0 {
-@@ -2421,6 +3431,15 @@ impl Reedline {
+@@ -2421,6 +3442,15 @@ impl Reedline {
              return None;
          }
  
@@ -3214,7 +3225,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          if !self.highlighter.should_expand_abbr(
              buffer,
              word_start,
-@@ -2658,6 +3677,15 @@ impl Reedline {
+@@ -2658,6 +3688,15 @@ impl Reedline {
      /// Overwrites the prompt indicator and highlights the search string
      /// separately from the result buffer.
      fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -3226,11 +3237,11 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +            return self.buffer_paint(prompt);
 +        }
 +        prompt.begin_paint();
-+        self.update_prompt_context(prompt);
++        self.update_prompt_context(prompt, None);
          let use_ansi_coloring = self.effective_ansi_coloring();
          let navigation = self.history_cursor.get_navigation();
  
-@@ -2708,13 +3736,30 @@ impl Reedline {
+@@ -2708,13 +3747,30 @@ impl Reedline {
      ///
      /// Includes the highlighting and hinting calls.
      fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -3264,15 +3275,15 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          if let Some((from, to)) = self.editor.get_selection() {
              // With a cursor-cell style configured, the head cell gets it and
              // the selection style covers the rest of the range.
-@@ -2735,6 +3780,7 @@ impl Reedline {
+@@ -2735,6 +3791,7 @@ impl Reedline {
              }
          }
  
-+        self.update_prompt_context(prompt);
++        self.update_prompt_context(prompt, None);
          let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
              cursor_position_in_buffer,
              prompt,
-@@ -2742,6 +3788,8 @@ impl Reedline {
+@@ -2742,6 +3799,8 @@ impl Reedline {
              self.painter.semantic_markers(),
          );
  
@@ -3281,14 +3292,16 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          let hint: String = if self.hints_active() {
              self.hinter.as_mut().map_or_else(String::new, |hinter| {
                  hinter.handle(
-@@ -2804,7 +3852,87 @@ impl Reedline {
+@@ -2804,7 +3863,89 @@ impl Reedline {
              }
          }
  
 -        let menu = self.menus.iter().find(|menu| menu.is_visible());
 +        // A synchronous provider can change menu facts during working-detail
 +        // updates. Compose all prompt components from those final facts.
-+        self.update_prompt_context(prompt);
++        let current_hint = (hint_origin == (self.editor.revision(), self.editor.insertion_point()))
++            .then_some(hint.as_str());
++        self.update_prompt_context(prompt, current_hint);
 +        lines = PromptLines::new(
 +            prompt,
 +            self.prompt_edit_mode(),
@@ -3370,7 +3383,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
  
          self.painter.repaint_buffer(
              prompt,
-@@ -2819,10 +3947,14 @@ impl Reedline {
+@@ -2819,10 +3960,14 @@ impl Reedline {
              if let Some(layout) = &self.painter.last_layout {
                  let buffer = self.editor.get_buffer();
                  let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
@@ -3389,7 +3402,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
              }
          } else {
              self.last_render_snapshot = None;
-@@ -2917,10 +4049,15 @@ impl Reedline {
+@@ -2917,10 +4062,15 @@ impl Reedline {
      /// Offer an open menu first refusal on a keypress that would otherwise
      /// submit, and report whether it took it.
      fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
@@ -3407,7 +3420,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
      }
  
      /// Close an active menu when a typed character ends the word it was opened
-@@ -2945,7 +4082,7 @@ impl Reedline {
+@@ -2945,7 +4095,7 @@ impl Reedline {
              _ => false,
          });
          if word_ended {
@@ -3416,7 +3429,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          }
      }
  
-@@ -2953,7 +4090,9 @@ impl Reedline {
+@@ -2953,7 +4103,9 @@ impl Reedline {
          // A menu that let the submit through (no suggestions to accept) must
          // not stay active into the next line's editing.
          self.deactivate_menus();
@@ -3426,7 +3439,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          self.hide_hints = true;
          // Additional repaint to show the content without hints etc.
          if let Some(transient_prompt) = self.transient_prompt.take() {
-@@ -3004,6 +4143,17 @@ impl Reedline {
+@@ -3004,6 +4156,17 @@ impl Reedline {
      }
  }
  
@@ -3444,7 +3457,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -3795,8 +4945,11 @@ mod tests {
+@@ -3795,8 +4958,11 @@ mod tests {
          let mut rl = auto_pair_engine(&[('(', ')')]);
          rl.enter_history_search();
  
@@ -3458,7 +3471,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
  
          assert_eq!(rl.input_mode, InputMode::HistorySearch);
          assert_eq!(rl.editor.get_buffer(), "");
-@@ -4310,6 +5463,8 @@ mod tests {
+@@ -4310,6 +5476,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -3467,7 +3480,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
          });
  
          let result = reedline.handle_event(
-@@ -5437,6 +6592,22 @@ mod tests {
+@@ -5437,6 +6605,22 @@ mod tests {
          assert!(!reedline.take_repaint_request());
      }
  
@@ -3490,7 +3503,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
      #[test]
      fn repaint_signal_switches_input_loop_to_polling() {
          let mut reedline = Reedline::create();
-@@ -6144,6 +7315,22 @@ mod tests {
+@@ -6144,6 +7328,22 @@ mod tests {
          buffer: &str,
          quick: bool,
          partial: bool,
@@ -3513,7 +3526,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
      ) -> (Reedline, EventStatus) {
          let completion_menu = ReedlineMenu::EngineCompleter(Box::new(
              ColumnarMenu::default().with_name("completion_menu"),
-@@ -6161,10 +7348,7 @@ mod tests {
+@@ -6161,10 +7361,7 @@ mod tests {
  
          reedline.run_edit_commands(&[EditCommand::InsertString(buffer.to_string())]);
          let status = reedline
@@ -3525,7 +3538,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
              .unwrap();
  
          (reedline, status)
-@@ -6176,6 +7360,557 @@ mod tests {
+@@ -6176,6 +7373,557 @@ mod tests {
              .unwrap();
      }
  
@@ -4083,7 +4096,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
      /// The regression: a lone suggestion that arrives after the menu opened must still be
      /// accepted, exactly as a synchronous completer's would have been.
      #[test]
-@@ -6467,6 +8202,120 @@ mod tests {
+@@ -6467,6 +8215,143 @@ mod tests {
          );
      }
  
@@ -4131,7 +4144,13 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +
 +    #[test]
 +    fn prompt_context_reports_actual_menu_and_editing_without_painting() {
-+        type Snapshot = (String, usize, String, Option<(usize, usize)>);
++        type Snapshot = (
++            String,
++            usize,
++            String,
++            Option<(usize, usize)>,
++            Option<String>,
++        );
 +        #[derive(Default)]
 +        struct Observe(std::sync::Mutex<Vec<Snapshot>>);
 +        impl Prompt for Observe {
@@ -4154,6 +4173,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +                    context.cursor,
 +                    interaction,
 +                    context.selection,
++                    context.hint.map(str::to_owned),
 +                ));
 +            }
 +            fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
@@ -4178,9 +4198,9 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +        let mut editor = engine_with_active_menu(false, false);
 +        apply_menu_maintenance(&mut editor);
 +        let prompt = Observe::default();
-+        editor.update_prompt_context(&prompt);
++        editor.update_prompt_context(&prompt, Some("at"));
 +        editor.handle_event(&prompt, ReedlineEvent::Esc).unwrap();
-+        editor.update_prompt_context(&prompt);
++        editor.update_prompt_context(&prompt, None);
 +        editor.run_edit_commands(&[
 +            EditCommand::MoveToPosition {
 +                position: 0,
@@ -4191,14 +4211,30 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6
 +                select: true,
 +            },
 +        ]);
-+        editor.update_prompt_context(&prompt);
++        editor.update_prompt_context(&prompt, None);
++        editor.run_edit_commands(&[EditCommand::MoveToEnd { select: false }]);
++        editor.update_prompt_context(&prompt, Some("at"));
++        editor.run_edit_commands(&[EditCommand::MoveLeft { select: false }]);
++        editor.update_prompt_context(&prompt, Some("at"));
++        editor.run_edit_commands(&[EditCommand::MoveToEnd { select: true }]);
++        editor.update_prompt_context(&prompt, Some("at"));
++        editor.run_edit_commands(&[EditCommand::MoveToEnd { select: false }]);
++        editor.update_prompt_context(&prompt, Some(""));
++        editor.update_prompt_context(&prompt, Some("\x1b[90m\x1b[0m"));
++        editor.hide_hints = true;
++        editor.update_prompt_context(&prompt, Some("at"));
 +        let values = prompt.0.lock().unwrap();
 +        assert_eq!(
 +            values[0],
-+            ("th".into(), 2, "completion_menu:2:false".into(), None)
++            ("th".into(), 2, "completion_menu:2:false".into(), None, None)
 +        );
-+        assert_eq!(values[1], ("th".into(), 2, "editing".into(), None));
-+        assert_eq!(values[2], ("th".into(), 2, "editing".into(), Some((0, 2))));
++        assert_eq!(values[1], ("th".into(), 2, "editing".into(), None, None));
++        assert_eq!(
++            values[2],
++            ("th".into(), 2, "editing".into(), Some((0, 2)), None)
++        );
++        assert_eq!(values[3].4.as_deref(), Some("at"));
++        assert!(values[4..].iter().all(|value| value.4.is_none()));
 +    }
 +
      /// A menu whose filtered suggestions are empty has nothing to accept:
@@ -8959,7 +8995,7 @@ index 0000000000000000000000000000000000000000..515cfed7f6adb67371c4b358eaf3166b
 +    }
 +}
 diff --git a/src/painting/mod.rs b/src/painting/mod.rs
-index 18f5d97769db082bdee6083c761e6483f30785f0..a29dadeed55a91dc12e5fa03874aeaae55147954 100644
+index 18f5d97769db082bdee6083c761e6483f30785f0..0307552f491699cf2554ffae7cbc22e62d17cb39 100644
 --- a/src/painting/mod.rs
 +++ b/src/painting/mod.rs
 @@ -1,3 +1,4 @@
@@ -8967,6 +9003,12 @@ index 18f5d97769db082bdee6083c761e6483f30785f0..a29dadeed55a91dc12e5fa03874aeaae
  mod painter;
  mod prompt_lines;
  mod styled_text;
+@@ -6,4 +7,4 @@ mod utils;
+ pub use painter::{Painter, PainterSuspendedState, RenderSnapshot, W};
+ pub(crate) use prompt_lines::PromptLines;
+ pub use styled_text::StyledText;
+-pub(crate) use utils::estimate_single_line_wraps;
++pub(crate) use utils::{estimate_single_line_wraps, strip_ansi};
 diff --git a/src/painting/painter.rs b/src/painting/painter.rs
 index 5f87e8196ace097e81aee9d0e0b61678e0c68e80..e8595db1c756686f0848a2284261a41c98ae5f36 100644
 --- a/src/painting/painter.rs
@@ -10304,10 +10346,10 @@ index bac952d5152c7cb70c014e427b36bdc3ce949462..dec0ee5a9d3b31782162ab5d5d0f31c4
      #[case("sentence\nsentence", "sentence\r\nsentence")]
      #[case("sentence\r\nsentence", "sentence\r\nsentence")]
 diff --git a/src/prompt/base.rs b/src/prompt/base.rs
-index 7a480103f101f3e06b112f9a51f4690abb8a4dda..3a6f987e523814a966a5b63bf62f77bee3346182 100644
+index 7a480103f101f3e06b112f9a51f4690abb8a4dda..82442ee8fac2546b0778e3b678cc9cff06868569 100644
 --- a/src/prompt/base.rs
 +++ b/src/prompt/base.rs
-@@ -261,11 +261,91 @@ impl IntoDiscriminant for PromptEditMode {
+@@ -261,11 +261,93 @@ impl IntoDiscriminant for PromptEditMode {
      }
  }
  
@@ -10367,6 +10409,8 @@ index 7a480103f101f3e06b112f9a51f4690abb8a4dda..3a6f987e523814a966a5b63bf62f77be
 +pub struct PromptContext<'a> {
 +    /// Full editable buffer, excluding hints.
 +    pub buffer: &'a str,
++    /// Visible trailing hint that can be adopted at the current caret.
++    pub hint: Option<&'a str>,
 +    /// Byte offset of the insertion point.
 +    pub cursor: usize,
 +    /// Byte offset used for completion; a Vi block caret completes its word.
@@ -10399,7 +10443,7 @@ index 7a480103f101f3e06b112f9a51f4690abb8a4dda..3a6f987e523814a966a5b63bf62f77be
      /// Provide content of the left full prompt
      fn render_prompt_left(&self) -> Cow<'_, str>;
      /// Provide content of the right full prompt
-@@ -274,6 +354,30 @@ pub trait Prompt: Send {
+@@ -274,6 +356,30 @@ pub trait Prompt: Send {
      fn render_prompt_indicator(&self, prompt_mode: PromptEditMode) -> Cow<'_, str>;
      /// Indicator to show before explicit new lines
      fn render_prompt_multiline_indicator(&self) -> Cow<'_, str>;

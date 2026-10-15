@@ -219,6 +219,59 @@ fn wait_frame(terminal: &mut Terminal, accepts: impl Fn(&str) -> bool) -> String
 }
 
 #[test]
+fn visible_history_hint_prioritizes_right_without_executing_the_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    setup_with_status(&home, true);
+    let config = home.join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        config,
+        text.replace("input_assist = false", "input_assist = true"),
+    )
+    .unwrap();
+    let mut terminal = launch(&home, root.path());
+    submit_to_prompt(&mut terminal, "ls");
+    wait_outcome(&home, "ls", 0);
+    terminal.send(b"l");
+    let frame = wait_raw_frame(&mut terminal, |frame| {
+        before_cursor(frame).ends_with("history-test> l")
+            && (frame.contains("→ complete") || frame.contains("Right complete"))
+    });
+    let hint = frame
+        .rsplit_once("\x1b7")
+        .unwrap()
+        .1
+        .split_once("\x1b8")
+        .unwrap()
+        .0;
+    assert_eq!(nosh_shell::style::strip_ansi(hint).trim(), "s");
+    let settled = Instant::now() + Duration::from_millis(1400);
+    while Instant::now() < settled {
+        assert!(terminal.poll().is_none());
+    }
+    let frame = last_frame(&terminal);
+    assert!(
+        !frame.contains("No executable command") && !frame.contains("No cmd"),
+        "{frame}"
+    );
+    assert!(!frame.contains("Tab complete"), "{frame}");
+    terminal.send(b"\x1b[C");
+    wait_raw_frame(&mut terminal, |frame| {
+        before_cursor(frame).ends_with("history-test> ls")
+    });
+    let count: i64 = sql(&home)
+        .query_row(
+            "SELECT count(*) FROM commands WHERE command='ls'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "adopting a hint must not execute the command");
+    finish(&mut terminal);
+}
+
+#[test]
 fn arrow_entries_open_filterable_history_with_tab_adoption_and_enter_compatibility() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");

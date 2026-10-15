@@ -93,6 +93,7 @@ pub(crate) enum Action {
     Previous,
     Newline,
     Correct,
+    Hint,
 }
 
 #[derive(Clone, Default)]
@@ -190,6 +191,7 @@ impl Bindings {
             ReedlineEvent::AcceptHistorySearch => Action::AcceptSearch,
             ReedlineEvent::CancelHistorySearch => Action::RestoreSearch,
             ReedlineEvent::CompleteOrHostCommand { .. } => Action::Complete,
+            ReedlineEvent::HistoryHintComplete => Action::Hint,
             ReedlineEvent::Esc => Action::Close,
             ReedlineEvent::MenuNext => Action::Next,
             ReedlineEvent::MenuPrevious => Action::Previous,
@@ -206,7 +208,11 @@ impl Bindings {
             }
             _ => return,
         };
-        self.0.entry(action).or_insert_with(|| key.into());
+        if action == Action::Hint && key == "Right" {
+            self.0.insert(action, key.into());
+        } else {
+            self.0.entry(action).or_insert_with(|| key.into());
+        }
     }
 
     fn field(
@@ -218,7 +224,9 @@ impl Bindings {
         unicode: bool,
     ) -> Option<Field> {
         let key = self.0.get(&action)?;
-        let key = if action == Action::Correct && unicode {
+        let key = if unicode
+            && (action == Action::Correct || (action == Action::Hint && key == "Right"))
+        {
             "→"
         } else {
             key
@@ -233,6 +241,8 @@ impl Bindings {
             format!("{key} {}", tr!("采用", "use"))
         } else if action == Action::Complete {
             format!("{key} {}", tr!("补全", "menu"))
+        } else if action == Action::Hint {
+            format!("{key} {}", tr!("补全", "complete"))
         } else if action == Action::History {
             format!("{key} {}", tr!("历史", "find"))
         } else {
@@ -691,8 +701,23 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 completion.input == editor.buffer && completion.cursor == editor.completion_cursor
             });
             let blank = editor.buffer.trim().is_empty();
-            let correction = context
-                .feedback
+            let hint = editor
+                .hint
+                .filter(|_| !blank && context.bindings.0.contains_key(&Action::Hint));
+            let continues_word = hint.is_some_and(|hint| {
+                style::strip_ansi(hint)
+                    .chars()
+                    .next()
+                    .is_some_and(|first| !first.is_whitespace() && !";|&()<>".contains(first))
+            });
+            let feedback = context.feedback.filter(|feedback| {
+                !(continues_word
+                    && feedback
+                        .missing_command
+                        .as_ref()
+                        .is_some_and(|range| range.end == editor.buffer.len()))
+            });
+            let correction = feedback
                 .and_then(|feedback| feedback.correction.as_ref())
                 .filter(|proposal| {
                     context.bindings.0.contains_key(&Action::Correct)
@@ -711,7 +736,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 }
                 _ => None,
             });
-            if let Some(feedback) = context.feedback {
+            if let Some(feedback) = feedback {
                 let tone = if feedback.correction.is_some() {
                     Tone::Advice
                 } else {
@@ -784,9 +809,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
             let has_state = fields.iter().any(|field| field.zone == 1);
             let needs_cancel = has_state
                 && candidate.is_none()
-                && context
-                    .feedback
-                    .is_none_or(|feedback| feedback.state != input_assist::State::Known);
+                && feedback.is_none_or(|feedback| feedback.state != input_assist::State::Known);
             if needs_cancel {
                 add_action(
                     &mut fields,
@@ -804,6 +827,8 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                     98,
                     true,
                 );
+            } else if hint.is_some() {
+                add_action(&mut fields, Action::Hint, tr!("补全", "complete"), 98, true);
             } else if candidate.is_some() {
                 add_action(
                     &mut fields,
@@ -830,8 +855,7 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
                 );
             }
             if (!blank && editor.buffer.contains('\n'))
-                || context
-                    .feedback
+                || feedback
                     .is_some_and(|feedback| feedback.state == input_assist::State::Incomplete)
             {
                 add_action(
@@ -1339,6 +1363,7 @@ mod tests {
             text: "Unknown gti; try git".into(),
             compact: "gti -> git".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: Some(input_assist::Correction {
                 version: Default::default(),
                 range: 0..3,
@@ -1422,6 +1447,7 @@ mod tests {
     fn editor(buffer: &str) -> PromptContext<'_> {
         PromptContext {
             buffer,
+            hint: None,
             cursor: buffer.len(),
             completion_cursor: buffer.len(),
             selection: None,
@@ -1462,6 +1488,83 @@ mod tests {
     }
 
     #[test]
+    fn history_hint_is_the_primary_action_without_hiding_unrelated_errors() {
+        let keys = bindings();
+        for (buffer, hint, missing, hidden) in [
+            ("l", Some("s"), Some(0..1), true),
+            ("l", Some("\x1b[90ms\x1b[0m"), Some(0..1), true),
+            ("l", None, Some(0..1), false),
+            ("l", Some(" --help"), Some(0..1), false),
+            ("bad; l", Some("s"), Some(0..3), false),
+            ("l", Some("s"), None, false),
+        ] {
+            let mut editor = editor(buffer);
+            editor.hint = hint;
+            let feedback = input_assist::Feedback {
+                text: "diagnostic".into(),
+                compact: "diagnostic".into(),
+                state: input_assist::State::Error,
+                missing_command: missing,
+                correction: None,
+            };
+            for (unicode, expected) in [(true, "→ complete"), (false, "Right complete")] {
+                let mut data = context(&editor, &keys);
+                data.feedback = Some(&feedback);
+                data.unicode = unicode;
+                let text = style::strip_ansi(&compose(data).text);
+                assert_eq!(text.contains("diagnostic"), !hidden, "{buffer}: {text}");
+                if hint.is_some() {
+                    assert!(text.contains(expected), "{buffer}: {text}");
+                    assert!(!text.contains("Tab complete"), "{buffer}: {text}");
+                } else {
+                    assert!(text.contains("Tab complete"), "{buffer}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_hint_uses_only_an_actual_acceptance_binding() {
+        let mut editor = editor("l");
+        editor.hint = Some("s");
+        let feedback = input_assist::Feedback {
+            text: "No executable command: l".into(),
+            compact: "No cmd".into(),
+            state: input_assist::State::Error,
+            missing_command: Some(0..1),
+            correction: None,
+        };
+        let mut keys = reedline::default_emacs_keybindings();
+        keys.add_binding(KeyModifiers::NONE, KeyCode::Right, ReedlineEvent::Repaint);
+        let bindings = Bindings::from_editor(&keys);
+        let mut data = context(&editor, &bindings);
+        data.feedback = Some(&feedback);
+        let text = style::strip_ansi(&compose(data).text);
+        assert!(text.contains("End complete"), "{text}");
+        assert!(!text.contains("→"), "{text}");
+
+        for (modifiers, key) in [
+            (KeyModifiers::NONE, KeyCode::End),
+            (KeyModifiers::CONTROL, KeyCode::Char('e')),
+            (KeyModifiers::CONTROL, KeyCode::Char('f')),
+        ] {
+            keys.add_binding(modifiers, key, ReedlineEvent::Repaint);
+        }
+        let bindings = Bindings::from_editor(&keys);
+        let mut data = context(&editor, &bindings);
+        data.feedback = Some(&feedback);
+        let text = style::strip_ansi(&compose(data).text);
+        assert!(
+            text.contains("No executable command") || text.contains("No cmd"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("End complete") && !text.contains("→ complete"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn compact_segments_preserve_order_without_empty_status_blocks() {
         let keys = bindings();
         let editor = editor("echo ok");
@@ -1469,6 +1572,7 @@ mod tests {
             text: "example diagnostic".into(),
             compact: "diagnostic".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut data = context(&editor, &keys);
@@ -1687,6 +1791,7 @@ mod tests {
             text: "No executable command".into(),
             compact: "No executable command".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut data = context(&editor, &keys);
@@ -1711,6 +1816,7 @@ mod tests {
             text: "STALE DRAFT".into(),
             compact: "STALE".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut editor = editor("query");
@@ -1834,6 +1940,7 @@ mod tests {
             text: "Input error".into(),
             compact: "Error".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut data = context(&editor, &keys);
@@ -1932,6 +2039,7 @@ mod tests {
             text: "Input: new output target; writability not checked".into(),
             compact: "Output unchecked".into(),
             state: input_assist::State::Known,
+            missing_command: None,
             correction: None,
         };
         let mut data = context(&editor, &keys);
@@ -2029,6 +2137,7 @@ mod tests {
             text: "Unknown gti; try git".into(),
             compact: "gti -> git".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: Some(input_assist::Correction {
                 version: Default::default(),
                 range: 0..3,
@@ -2077,6 +2186,7 @@ mod tests {
             text: "Unknown gti; try git".into(),
             compact: "gti -> git".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: Some(input_assist::Correction {
                 version: Default::default(),
                 range: 0..3,
@@ -2131,6 +2241,7 @@ mod tests {
                 text: "clear reason".into(),
                 compact: "reason".into(),
                 state,
+                missing_command: None,
                 correction: None,
             };
             let mut data = context(&editor, &keys);
@@ -2175,6 +2286,7 @@ mod tests {
             text: text.into(),
             compact: compact.into(),
             state,
+            missing_command: None,
             correction,
         };
         let samples = [
@@ -2312,6 +2424,7 @@ mod tests {
                 text: "clear reason".into(),
                 compact: "reason".into(),
                 state,
+                missing_command: None,
                 correction: None,
             };
             let mut data = context(&editor, &keys);
@@ -2352,6 +2465,7 @@ mod tests {
             text: "display issue".into(),
             compact: "issue".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut editor = editor("missing");
@@ -2397,6 +2511,7 @@ mod tests {
             text: "display issue".into(),
             compact: "issue".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: None,
         };
         let mut editor = editor("missing");
@@ -2603,6 +2718,7 @@ mod tests {
             text: "Unknown gti; try git".into(),
             compact: "gti -> git".into(),
             state: input_assist::State::Error,
+            missing_command: None,
             correction: Some(input_assist::Correction {
                 version: Default::default(),
                 range: 0..3,
@@ -2649,6 +2765,7 @@ mod tests {
             text: "No executable command: unknown".into(),
             compact: "No cmd".into(),
             state: input_assist::State::Error,
+            missing_command: Some(0..editor.buffer.len()),
             correction: None,
         };
         let mut data = context(&editor, &keys);
@@ -2679,6 +2796,7 @@ mod tests {
                     text: "Unknown gti; try git".into(),
                     compact: "gti -> git".into(),
                     state: input_assist::State::Error,
+                    missing_command: None,
                     correction: Some(input_assist::Correction {
                         version: Default::default(),
                         range: 0..3,
@@ -2692,6 +2810,7 @@ mod tests {
                     text: "No executable command: not_a_known_command".into(),
                     compact: "No executable command".into(),
                     state: input_assist::State::Error,
+                    missing_command: Some(0..buffer.len()),
                     correction: None,
                 })
             } else {

@@ -2401,6 +2401,7 @@ mod tests {
             themes.replace(crate::status::Theme::default());
             let snapshot = || PromptContext {
                 buffer: draft,
+                hint: None,
                 cursor,
                 completion_cursor: cursor,
                 selection,
@@ -2477,6 +2478,7 @@ mod tests {
     fn prompt_context(columns: u16, rows: u16) -> PromptContext<'static> {
         PromptContext {
             buffer: "echo ok",
+            hint: None,
             cursor: 7,
             completion_cursor: 7,
             selection: None,
