@@ -397,6 +397,7 @@ struct RecordingAi {
     completed: Vec<nosh_shell::UserCommand>,
     reply_prefill: Option<String>,
     display: Option<nosh_shell::AssistDisplay>,
+    automatic_paused: bool,
 }
 
 impl AiHandler for RecordingAi {
@@ -420,6 +421,9 @@ impl AiHandler for RecordingAi {
     fn assistance(&self) -> Option<nosh_shell::AssistDisplay> {
         self.display.clone()
     }
+    fn automatic_requests_available(&self) -> bool {
+        !self.automatic_paused
+    }
     fn after_command(
         &mut self,
         _: &EmbeddedShell,
@@ -442,6 +446,42 @@ impl ReplUi for ScriptUi {
     fn notice(&mut self, msg: &str) {
         self.notices.push(msg.to_string());
     }
+}
+
+#[test]
+fn unavailable_automatic_requests_keep_shell_errors_and_explicit_recovery() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ai = RecordingAi {
+        automatic_paused: true,
+        ..Default::default()
+    };
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Ai,
+        notices: Vec::new(),
+    };
+    let mut pipeline = Pipeline::new(ReplConfig {
+        command_assist: false,
+        on_failure: nosh_shell::repl::OnFailure::Auto,
+        ..Default::default()
+    });
+    for line in ["xqzvw_nosuch --help", "cd /definitely/not/here"] {
+        assert_eq!(
+            pipeline.process(&mut sh, &mut ai, &mut ui, line),
+            LineOutcome::Continue(None)
+        );
+        let command = sh.recent_commands().last().unwrap();
+        assert_eq!(command.line, line);
+        assert_ne!(command.exit, 0);
+        assert!(ai.requests.is_empty());
+    }
+    for line in ["#fix", "# explain this", "rm all the temp files"] {
+        pipeline.process(&mut sh, &mut ai, &mut ui, line);
+    }
+    assert_eq!(ai.requests.len(), 3, "{:?}", ai.requests);
+    assert_eq!(ai.requests[0].trigger, Trigger::Failed { exit: 1 });
+    assert_eq!(ai.requests[1].trigger, Trigger::Hash);
+    assert_eq!(ai.requests[2].trigger, Trigger::Hash);
 }
 
 #[test]

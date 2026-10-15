@@ -75,6 +75,109 @@ fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
 }
 
 #[test]
+fn failed_loading_pauses_implicit_routing_but_preserves_explicit_recovery() {
+    use nosh_core::{EngineLoadError, LoadMode, LoadedEngine, ModelAvailability};
+    use nosh_shell::{AiHandler, Assistance, SuggestionOutcome};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let _guard = setup();
+    for failure in [
+        EngineLoadError::NotReady("model missing".into()),
+        EngineLoadError::Failed("invalid model".into()),
+    ] {
+        for recovery in [
+            Some("# explain this"),
+            Some("#fix"),
+            Some("rm all the temp files"),
+            None,
+        ] {
+            let directory = tmpdir("loading-pause");
+            let mut sh = EmbeddedShell::new(ShellOptions {
+                interactive: true,
+                working_dir: Some(directory.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            let modes = Arc::new(Mutex::new(Vec::new()));
+            let observed = modes.clone();
+            let failure = failure.clone();
+            let mut model = Some(MockChatEngine::with_responder(|_| {
+                vec![text("touch suggested")]
+            }));
+            let mut ai = ShellAi::new(
+                Box::new(move |mode| {
+                    observed.lock().unwrap().push(mode);
+                    if mode == LoadMode::Background {
+                        return Err(failure.clone());
+                    }
+                    Ok(LoadedEngine {
+                        engine: Box::new(model.take().expect("one shared engine")),
+                        description: "mock".into(),
+                    })
+                }),
+                AgentConfig::default(),
+                Box::new(Scripted::new([])),
+            );
+            let display = ai.assistance().unwrap();
+            let wait = || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while matches!(display.result(), Some(Assistance::Pending)) {
+                    assert!(Instant::now() < deadline, "assistance did not settle");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            };
+            let mut pipeline = Pipeline::new(ReplConfig::default());
+            pipeline.process(&mut sh, &mut ai, &mut Ui, "true");
+            wait();
+            assert!(!ai.automatic_requests_available());
+            for _ in 0..2 {
+                for line in [
+                    "xqzvw_nosuch --help",
+                    "printf unused; )",
+                    "what's using port 8080",
+                ] {
+                    assert_eq!(
+                        pipeline.process(&mut sh, &mut ai, &mut Ui, line),
+                        LineOutcome::Continue(None)
+                    );
+                    let command = sh.recent_commands().last().unwrap();
+                    assert_eq!(command.line, line);
+                    assert_ne!(command.exit, 0);
+                    assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
+                }
+            }
+            assert_eq!(
+                pipeline.process(&mut sh, &mut ai, &mut Ui, "ech hello"),
+                LineOutcome::Continue(Some("echo hello".into()))
+            );
+            assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
+            match recovery {
+                Some(line) => {
+                    pipeline.process(&mut sh, &mut ai, &mut Ui, line);
+                }
+                None => assert_eq!(
+                    ai.suggest(&mut sh, "create a file"),
+                    SuggestionOutcome::Command("touch suggested".into())
+                ),
+            }
+            assert_eq!(
+                *modes.lock().unwrap(),
+                [LoadMode::Background, LoadMode::Foreground]
+            );
+            assert_eq!(ai.availability(), ModelAvailability::Ready("mock".into()));
+            pipeline.process(&mut sh, &mut ai, &mut Ui, "true");
+            wait();
+            assert!(matches!(display.result(), Some(Assistance::Command { .. })));
+            assert_eq!(modes.lock().unwrap().len(), 2);
+            assert!(!directory.join("suggested").exists());
+            drop(ai);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+}
+
+#[test]
 fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
     use nosh_shell::{AiHandler, Assistance};
     use std::time::{Duration, Instant};

@@ -152,6 +152,53 @@ fn foreground_loading_failure_preserves_the_draft_without_a_no_suggestion_fallba
 }
 
 #[test]
+fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
+    for invalid_path in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[shell]\ncapture_output = 'off'\ninput_assist = false\n\
+             status_bar = true\ncommand_assist = true\ncompletion = false\n\
+             terminal_integration = 'off'\n",
+        )
+        .unwrap();
+        let mut launch = command(home.path());
+        launch
+            .env("PS1", "loading-pause> ")
+            .env_remove("NOSH_DISABLE_AI")
+            .args(["--offline", "--no-download", "--norc", "-i"]);
+        let (failure, status) = if invalid_path {
+            launch
+                .arg("--model-path")
+                .arg(home.path().join("missing.gguf"));
+            ("does not exist", "model: load failed:")
+        } else {
+            ("model not installed", "model: not ready:")
+        };
+        let output = interactive(
+            launch,
+            &[
+                ("loading-pause> ", b"true\r"),
+                (failure, b"xqzvw_nosuch --help\r"),
+                ("exit 127", b"printf unused; )\r"),
+                ("exit 2", b"xqzvw_nosuch --help\r"),
+                ("exit 127", b"printf unused; )\r"),
+                ("exit 2", b"#status\r"),
+                (status, b"#assist on\r"),
+                ("assist: on", b"#status\r"),
+                ("not loaded (loads on first use)", b"exit 0\r"),
+            ],
+        );
+        assert!(
+            !output.contains("Downloading") && !output.contains("loading "),
+            "{output}"
+        );
+        assert!(!output.contains("nosh: model not installed"), "{output}");
+        assert!(!output.contains("no suggestion"), "{output}");
+    }
+}
+
+#[test]
 fn invalid_whitespace_prefix_warns_and_keeps_default_commands_available() {
     for prefix in [" ?", "\u{3000}?"] {
         let home = tempfile::tempdir().unwrap();

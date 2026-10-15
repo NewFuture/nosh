@@ -156,8 +156,15 @@ impl ShellAi {
         Ok(())
     }
 
-    fn agent(&mut self, shell: &EmbeddedShell) -> Result<&mut Agent, EngineLoadError> {
+    fn agent(
+        &mut self,
+        shell: &EmbeddedShell,
+        retry_loading: bool,
+    ) -> Result<&mut Agent, EngineLoadError> {
         self.reclaim()?;
+        if !retry_loading && let Some(error) = self.availability().loading_error() {
+            return Err(error);
+        }
         let state = self
             .foreground
             .as_mut()
@@ -221,7 +228,11 @@ impl AiHandler for ShellAi {
         }
         let show_think = self.cfg.thinking;
         let ints = shell.interrupts().count();
-        if let Err(error) = self.agent(shell) {
+        let retry_loading = !matches!(
+            req.trigger,
+            nosh_shell::Trigger::ParseError | nosh_shell::Trigger::NotFound
+        );
+        if let Err(error) = self.agent(shell, retry_loading) {
             let cancelled = shell.interrupts().count() != ints;
             eprintln!(
                 "{}",
@@ -384,7 +395,7 @@ impl AiHandler for ShellAi {
                 }
             };
         let interrupts = shell.interrupts().count();
-        let loaded = self.agent(shell);
+        let loaded = self.agent(shell, true);
         if shell.interrupts().count() != interrupts {
             return SuggestionOutcome::Cancelled;
         }
@@ -462,6 +473,10 @@ impl AiHandler for ShellAi {
         Some(self.display.clone())
     }
 
+    fn automatic_requests_available(&self) -> bool {
+        self.availability().loading_error().is_none()
+    }
+
     fn retry_assistance(&mut self) -> Result<(), String> {
         if self.background.as_ref().is_some_and(Worker::is_finished) {
             self.reclaim()?;
@@ -488,7 +503,7 @@ impl AiHandler for ShellAi {
         output: Option<nosh_shell::UserOutput>,
     ) {
         use crate::command_assist::{AssistRequest, Intent};
-        if self.availability().loading_error().is_some() {
+        if !self.automatic_requests_available() {
             return;
         }
         let intent = if command.exit == 0 {
@@ -728,6 +743,7 @@ mod tests {
             );
             wait_for_assistance(&ai);
             assert!(ai.availability().loading_error().is_some());
+            assert!(!ai.automatic_requests_available());
             let version = ai.display.invalidate();
             for _ in 0..4 {
                 shell.run_user_line("true");
@@ -745,6 +761,7 @@ mod tests {
             );
             ai.retry_assistance().unwrap();
             assert_eq!(ai.availability(), ModelAvailability::NotLoaded);
+            assert!(ai.automatic_requests_available());
             ai.after_command(
                 &shell,
                 shell.recent_commands().last().unwrap().clone(),
@@ -761,6 +778,63 @@ mod tests {
                 SuggestionOutcome::Command("echo ready".into())
             );
             assert_eq!(loads.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn implicit_requests_cannot_retry_a_failure_discovered_during_reclaim() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for (error, trigger) in [
+            (
+                EngineLoadError::NotReady("model missing".into()),
+                Trigger::NotFound,
+            ),
+            (
+                EngineLoadError::Failed("invalid model".into()),
+                Trigger::ParseError,
+            ),
+        ] {
+            let (started, loading) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let modes = Arc::new(Mutex::new(Vec::new()));
+            let observed = modes.clone();
+            let failure = error.clone();
+            let mut ai = ShellAi::new(
+                Box::new(move |mode| {
+                    observed.lock().unwrap().push(mode);
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(3)).unwrap();
+                    Err(failure.clone())
+                }),
+                AgentConfig::default(),
+                Box::new(crate::NoTerminal),
+            );
+            let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+            shell.run_user_line("true");
+            ai.after_command(
+                &shell,
+                shell.recent_commands().last().unwrap().clone(),
+                None,
+            );
+            loading.recv_timeout(Duration::from_secs(3)).unwrap();
+            let version = ai.display.invalidate();
+            ai.display
+                .on_cancel(version, Arc::new(move || release.send(()).unwrap()));
+            assert!(ai.automatic_requests_available());
+
+            let request = AiRequest {
+                trigger,
+                text: "ordinary input".into(),
+                failed: None,
+                user_output: None,
+            };
+            for _ in 0..2 {
+                assert_eq!(ai.handle(&mut shell, request.clone()).exit_code, 2);
+                assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
+                assert_eq!(ai.availability().loading_error(), Some(error.clone()));
+            }
         }
     }
 
@@ -931,7 +1005,7 @@ mod tests {
             matches!(ai.display.result(), Some(nosh_shell::Assistance::Failure(text)) if text.contains("model not installed"))
         );
         assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
-        assert!(ai.agent(&shell).is_err());
+        assert!(ai.agent(&shell, true).is_err());
         assert_eq!(
             *modes.lock().unwrap(),
             [LoadMode::Background, LoadMode::Foreground]

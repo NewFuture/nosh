@@ -115,6 +115,10 @@ pub trait AiHandler {
     fn assistance(&self) -> Option<crate::AssistDisplay> {
         None
     }
+    /// Whether implicit AI requests can proceed without retrying a cached loading failure.
+    fn automatic_requests_available(&self) -> bool {
+        true
+    }
     /// Permit a new automatic loading attempt after a previous failure.
     fn retry_assistance(&mut self) -> Result<(), String> {
         Ok(())
@@ -364,6 +368,12 @@ impl Pipeline {
         match action {
             Action::Empty => LineOutcome::Continue(None),
             Action::Execute => self.execute(shell, ai, ui, line),
+            Action::Ai { ref trigger, .. }
+                if matches!(trigger, Trigger::ParseError | Trigger::NotFound)
+                    && !ai.automatic_requests_available() =>
+            {
+                self.execute(shell, ai, ui, line)
+            }
             Action::Ai { trigger, text } => {
                 shell.record_question(line, false);
                 ask(&self.terminal, shell, ai, trigger, text, None)
@@ -590,6 +600,7 @@ impl Pipeline {
             }
         }
         let auto = ai.assistance().is_none()
+            && ai.automatic_requests_available()
             && !self.assist_paused
             && (self.cfg.on_failure == OnFailure::Auto || trigger::contains_cjk(line));
         match self.cfg.on_failure {

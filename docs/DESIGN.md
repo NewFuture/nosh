@@ -116,6 +116,8 @@ brush 提供 shell 解析和执行，Reedline 提供行编辑。修补源准备�
 
 `#assist off` 不是全局禁用 AI，也不是审批模式。默认自然语言安全网只在破坏性命令的参数满足本地启发式时介入；带选项、显式路径等可能不触发，不构成危险命令过滤器。
 
+模型加载未就绪或失败时，自动错误路由与 Next/Fix 共用加载暂停；普通输入保留本地纠错和 shell 错误，显式 AI 入口及用户确认的安全网仍可重试。恢复契约见 [CommandAssist](COMMAND-ASSIST.md#调度与用户输入)。
+
 失败求助忽略 130、141、148；名单内的 `grep`、`rg`、`diff`、`test` 等只在退出码 1 时按无结果处理。完整实现入口为 [trigger.rs](../crates/nosh-shell/src/trigger.rs)。
 
 ### 4.3 共享状态与输出
