@@ -165,6 +165,9 @@ pub(super) fn probe(mode: &str) {
         assert!(!directory.path().join("cancelled-command").exists());
     }
     drop(shell);
+    if slow_environment {
+        eprintln!("{REPL_EXIT}");
+    }
     if ready_environment {
         let calls =
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("environment-calls");
@@ -175,13 +178,16 @@ pub(super) fn probe(mode: &str) {
         );
     }
     if slow_environment {
+        let until = Instant::now() + Duration::from_secs(3);
         for pid in std::fs::read_to_string(process_file).unwrap().lines() {
             let pid: i32 = pid.parse().unwrap();
-            assert_eq!(
-                unsafe { libc::kill(pid, 0) },
-                -1,
-                "environment process {pid} survived exit"
-            );
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                assert!(
+                    Instant::now() < until,
+                    "environment process {pid} survived cleanup"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(
                 std::io::Error::last_os_error().raw_os_error(),
                 Some(libc::ESRCH)
@@ -389,10 +395,11 @@ fn integration_slow_environment_does_not_block_edit_cancel_or_exit() {
         ..Default::default()
     }
     .run_with_timings();
+    let repl_exit = timings.repl_exit.expect("probe must report REPL shutdown");
     assert!(
-        timings.exit < Duration::from_millis(500),
-        "{:?}",
-        timings.exit
+        repl_exit < Duration::from_millis(500),
+        "{repl_exit:?}; complete fixture exit: {:?}",
+        timings.exit,
     );
     assert!(
         timings.input[1] < Duration::from_millis(500),
