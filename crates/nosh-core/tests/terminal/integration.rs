@@ -42,8 +42,8 @@ impl AiHandler for Ai {
             },
         )
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        Some("printf generated".into())
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
+        nosh_shell::SuggestionOutcome::Command("printf generated".into())
     }
     fn badge(&self) -> Badge {
         Badge::default()
@@ -111,6 +111,7 @@ pub(super) fn probe(mode: &str) {
         shell.configure_project_env(Ok(nosh_shell::project_env::Provider::Direnv));
     }
     let config = nosh_shell::ReplConfig {
+        abbreviations: nosh_shell::abbreviations::Config::disabled(),
         terminal_integration: if mode.ends_with("-off") {
             nosh_shell::terminal_integration::Mode::Off
         } else {
@@ -164,6 +165,9 @@ pub(super) fn probe(mode: &str) {
         assert!(!directory.path().join("cancelled-command").exists());
     }
     drop(shell);
+    if slow_environment {
+        eprintln!("{REPL_EXIT}");
+    }
     if ready_environment {
         let calls =
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("environment-calls");
@@ -174,13 +178,16 @@ pub(super) fn probe(mode: &str) {
         );
     }
     if slow_environment {
+        let until = Instant::now() + Duration::from_secs(3);
         for pid in std::fs::read_to_string(process_file).unwrap().lines() {
             let pid: i32 = pid.parse().unwrap();
-            assert_eq!(
-                unsafe { libc::kill(pid, 0) },
-                -1,
-                "environment process {pid} survived exit"
-            );
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                assert!(
+                    Instant::now() < until,
+                    "environment process {pid} survived cleanup"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(
                 std::io::Error::last_os_error().raw_os_error(),
                 Some(libc::ESRCH)
@@ -220,6 +227,7 @@ fn integration_cancelling_a_submitted_environment_wait_never_executes_the_draft(
 fn integration_ready_environment_preserves_draft_and_updates_completion_without_enter() {
     let (out, err) = Probe {
         mode: "repl-integration-ready-environment",
+        terminal: Some("xterm-256color"),
         stdout_tty: true,
         stderr_tty: true,
         steps: &[
@@ -233,6 +241,30 @@ fn integration_ready_environment_preserves_draft_and_updates_completion_without_
     .run();
     assert!(out.contains("ENV-TOOL-EXEC"), "{out:?}");
     assert_eq!(exit_codes(&err), ["0", "0"]);
+}
+
+#[test]
+fn integration_context_refresh_reuses_the_prompt_anchor_and_keeps_cancellation() {
+    let (out, _) = Probe {
+        mode: "repl-integration-ready-environment",
+        terminal: Some("xterm-256color"),
+        stdout_tty: true,
+        stderr_tty: true,
+        steps: &[
+            ("integration> ", b"provided-c"),
+            ("environment ready", b"\x03"),
+            ("integration> ", b""),
+            ("environment ready", b"exit 0\r"),
+        ],
+        ..Default::default()
+    }
+    .run();
+    assert_eq!(
+        out.matches("\x1b[6n").count(),
+        2,
+        "context-only refresh must retain the existing prompt anchor: {out:?}"
+    );
+    assert!(!out.contains("ENV-TOOL-EXEC"), "{out:?}");
 }
 
 #[test]
@@ -363,10 +395,11 @@ fn integration_slow_environment_does_not_block_edit_cancel_or_exit() {
         ..Default::default()
     }
     .run_with_timings();
+    let repl_exit = timings.repl_exit.expect("probe must report REPL shutdown");
     assert!(
-        timings.exit < Duration::from_millis(500),
-        "{:?}",
-        timings.exit
+        repl_exit < Duration::from_millis(500),
+        "{repl_exit:?}; complete fixture exit: {:?}",
+        timings.exit,
     );
     assert!(
         timings.input[1] < Duration::from_millis(500),

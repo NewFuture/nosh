@@ -133,6 +133,13 @@ while a search, selection, menu or pending modal operation owns input.
 The separate `input_changed` notification tracks scope exits after edits or
 cursor moves; it never opens a menu, including after deletion or undo.
 
+`CompleteOrHostCommand` retains its host action alongside the existing deferred
+completion transaction. A current final empty result can hand off once; queued
+input, changed drafts, provisional results and cancellation cannot acquire that
+permission. The completer's `host_completion_allowed` hook excludes nosh management
+inputs without a model call. `ColumnarMenu::with_empty_message` lets the host hide
+empty result rows; the upstream default text and menu submit protection remain intact.
+
 The abbreviation policy receives bounded replacement requests, not shell execution
 requests. Draft intent and expanded ranges travel with `LineBuffer` through the
 native undo history. Paste/history/host replacements protect imported text;
@@ -146,10 +153,12 @@ when their context actually changed. nosh consumes both pending environment and
 abbreviation state on either notification, since the signal coalesces updates.
 
 Context-only notifications also retain raw input and keyboard/paste protocol
-guards across the host update. A queued Ctrl+C cannot turn into a canonical-mode
-SIGINT or echoed `^C` in the notification gap. Normal host commands still restore
-the terminal before running interactive host work; final cleanup and Drop restore
-the retained input state.
+guards and the live prompt anchor across the host update, without suspending or
+querying the cursor again. A queued Ctrl+C cannot turn into a canonical-mode SIGINT
+or echoed `^C` in the notification gap. A host that needs to print a notification
+calls `prepare_external_output` before writing, so output still gets the normal
+anchor recovery. Normal host commands restore the terminal before running
+interactive host work; final cleanup and Drop restore the retained input state.
 
 Edit nosh normally and the library under `.nosh/reedline`; root Cargo already
 uses this copy. Unexported library edits are allowed for local compilation, but

@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use brush_core::completion::CompleteAction;
 use brush_core::{CommandArg, ExecutionContext, ExecutionResult};
@@ -105,6 +106,9 @@ impl Server {
         install: Option<Snapshot>,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
     ) -> std::io::Result<Outcome> {
+        // Leave the lookup budget for snapshot handling and reply transport.
+        let deadline = Instant::now()
+            + (crate::input_assist::INDEX_TIMEOUT - crate::input_assist::LOOKUP_TIMEOUT);
         if let Some(install) = install {
             if query.session != self.session {
                 self.cache = Cache::default();
@@ -124,7 +128,7 @@ impl Server {
             ));
         }
         if !context.requires_execution {
-            let answer = self.basic(query, context, native, progress)?;
+            let answer = self.basic(query, context, native, progress, deadline)?;
             return Ok(ready(answer));
         }
         progress(Outcome::Progress(Answer {
@@ -137,7 +141,7 @@ impl Server {
         }
         UNSUPPORTED.store(false, Ordering::Release);
         let mut loaded = false;
-        let answer = match self.script(&query, context, native, &mut loaded, progress) {
+        let answer = match self.script(&query, context, native, &mut loaded, progress, deadline) {
             Ok(answer) => answer,
             Err(error) => Answer::failed(query.clone(), error),
         };
@@ -179,6 +183,7 @@ impl Server {
         context: &Context,
         snapshot: &NativeSnapshot,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
+        deadline: Instant,
     ) -> std::io::Result<Answer> {
         if context.is_variable() {
             let brace = context.word.starts_with("${");
@@ -227,7 +232,9 @@ impl Server {
             });
         }
         if context.index == 0 && !context.word.contains('/') && !context.word.starts_with('~') {
-            native::commands(query, context, snapshot, &mut self.cache, progress)
+            native::commands(query, context, snapshot, &mut self.cache, progress, || {
+                Instant::now() >= deadline
+            })
         } else if let Some(answer) =
             providers::generate(query.clone(), context, snapshot, &mut self.cache)
         {
@@ -250,6 +257,7 @@ impl Server {
         snapshot: &NativeSnapshot,
         loaded: &mut bool,
         progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
+        deadline: Instant,
     ) -> Result<Answer, String> {
         let words = context.script_words(query, snapshot)?;
         let tokens = words.tokens();
@@ -298,7 +306,7 @@ impl Server {
                     ));
                 }
                 return self
-                    .basic(query.clone(), context, snapshot, progress)
+                    .basic(query.clone(), context, snapshot, progress, deadline)
                     .map_err(|error| error.to_string());
             };
             if spec
@@ -393,9 +401,16 @@ impl Server {
                 && (context.is_variable() || context.index == 0)
             {
                 answer = if context.is_variable() {
-                    self.basic(query.clone(), context, snapshot, progress)
+                    self.basic(query.clone(), context, snapshot, progress, deadline)
                 } else {
-                    native::commands(query.clone(), context, snapshot, &mut self.cache, progress)
+                    native::commands(
+                        query.clone(),
+                        context,
+                        snapshot,
+                        &mut self.cache,
+                        progress,
+                        || Instant::now() >= deadline,
+                    )
                 }
                 .map_err(|error| error.to_string())?;
             }

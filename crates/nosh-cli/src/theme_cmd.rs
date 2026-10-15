@@ -122,7 +122,7 @@ fn execute(command: ThemeCmd) -> Result<(), String> {
             });
             let mode_name = match mode.as_str() {
                 "confirm" => tr!("审批: 询问", "Approval: Confirm"),
-                "yolo" => "YOLO",
+                "yolo" => tr!("审批: YOLO", "Approval: YOLO"),
                 "off" => "",
                 _ => tr!("审批: 自动", "Approval: Auto"),
             };

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use nosh_core::{LoadMode, LoadedEngine};
+use nosh_core::{EngineLoadError, LoadMode, LoadedEngine};
 use nosh_engine::SamplingParams;
 use nosh_hub::{BarProgress, HubError, ModelHub, PullOptions, ResolvedModel, SourceSelection, net};
 use nosh_llm::{LocalChatEngine, LocalEngineOptions, ModelSource};
@@ -60,17 +60,26 @@ pub(crate) fn model_source(model: &ResolvedModel) -> ModelSource<'_> {
     }
 }
 
+fn load_error(error: HubError) -> EngineLoadError {
+    let reason = error.to_string();
+    match error {
+        HubError::Cancelled => EngineLoadError::Cancelled(reason),
+        HubError::NotInstalled(_) | HubError::Offline => EngineLoadError::NotReady(reason),
+        _ => EngineLoadError::Failed(reason),
+    }
+}
+
 /// Asks (default yes) and downloads the model in the foreground.
 /// `ask`: prompt on the terminal; otherwise announce and proceed.
-pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String> {
+pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineLoadError> {
     let hub = ModelHub::new();
     let entry = hub
         .registry()
         .lookup(setup.model_id.as_deref())
-        .map_err(|e| e.to_string())?
+        .map_err(load_error)?
         .clone();
     if setup.no_download {
-        return Err(tr!(
+        return Err(EngineLoadError::NotReady(tr!(
             format!(
                 "模型 {} 未安装；运行 `nosh model pull` 或 `nosh model import <gguf>`",
                 entry.display
@@ -79,10 +88,10 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
                 "model {} is not installed; run `nosh model pull` or `nosh model import <gguf>`",
                 entry.display
             )
-        ));
+        )));
     }
     if net::is_offline() {
-        return Err(tr!(
+        return Err(EngineLoadError::NotReady(tr!(
             format!(
                 "模型 {} 未安装，且处于离线模式；在联网机器上 `nosh model pull` 后用 `nosh model import` 导入",
                 entry.display
@@ -91,7 +100,7 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
                 "model {} is not installed and offline mode is on; pull it elsewhere and `nosh model import` it",
                 entry.display
             )
-        ));
+        )));
     }
     let question = tr!(
         format!(
@@ -114,11 +123,13 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
                 let _ =
                     nosh_platform::paths::ensure_private_dir(&nosh_platform::paths::state_dir());
                 let _ = std::fs::write(declined_marker(), "");
-                return Err(tr!(
-                    "已取消下载；之后可以运行 `nosh model pull`",
-                    "download declined; run `nosh model pull` later"
-                )
-                .to_string());
+                return Err(EngineLoadError::Cancelled(
+                    tr!(
+                        "已取消下载；之后可以运行 `nosh model pull`",
+                        "download declined; run `nosh model pull` later"
+                    )
+                    .to_string(),
+                ));
             }
         }
     } else {
@@ -144,7 +155,7 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, String>
     };
     let r = hub
         .pull(Some(&entry.id), &opts, &BarProgress::new())
-        .map_err(|e| e.to_string())?;
+        .map_err(load_error)?;
     let _ = std::fs::remove_file(declined_marker());
     eprintln!(
         "{} {}",
@@ -182,7 +193,7 @@ fn first_download_needed(setup: &EngineSetup) -> Result<bool, HubError> {
 }
 
 /// Background loading uses installed models only, without terminal interaction.
-pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String> {
+pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, EngineLoadError> {
     let (engine, description, metadata) = if let Some(path) = std::env::var_os("NOSH_EVAL_WORKER") {
         crate::eval_worker::connect(std::path::Path::new(&path), setup)?
     } else {
@@ -206,13 +217,19 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, String>
 pub(crate) fn load_local(
     setup: &EngineSetup,
     mode: LoadMode,
-) -> Result<(LocalChatEngine, String, serde_json::Value), String> {
+) -> Result<(LocalChatEngine, String, serde_json::Value), EngineLoadError> {
     let device = setup.device.clone()?;
     let background = mode == LoadMode::Background;
-    let resolved = match locate(setup).map_err(|e| e.to_string())? {
+    let resolved = match locate(setup).map_err(load_error)? {
         Some(r) => r,
         None if background => {
-            return Err("model unavailable for automatic assistance; run `nosh model pull`".into());
+            return Err(EngineLoadError::NotReady(
+                tr!(
+                    "模型未安装；运行 `nosh model pull`",
+                    "model not installed; run `nosh model pull`"
+                )
+                .into(),
+            ));
         }
         None => download(setup, true)?,
     };
@@ -349,4 +366,22 @@ mod tests {
         assert!(err.to_string().contains("a.gguf, b.gguf"), "{err}");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+#[test]
+fn loader_error_categories_do_not_depend_on_error_text() {
+    assert_eq!(
+        load_error(HubError::Cancelled),
+        EngineLoadError::Cancelled("download cancelled".into())
+    );
+    assert!(matches!(
+        load_error(HubError::NotInstalled("fixture".into())),
+        EngineLoadError::NotReady(_)
+    ));
+    assert!(matches!(
+        load_error(HubError::UnknownModel("fixture".into())),
+        EngineLoadError::Failed(_)
+    ));
+    assert_eq!(EngineLoadError::Cancelled("stop".into()).exit_code(), 130);
+    assert_eq!(EngineLoadError::NotReady("missing".into()).exit_code(), 2);
+    assert_eq!(EngineLoadError::Failed("bad".into()).exit_code(), 2);
 }

@@ -71,7 +71,8 @@ fn inline_menu_search_and_acceptance_keep_one_input_owner() {
     .run();
     assert_normal_flow(&err);
     let text = style::strip_ansi(&err);
-    assert!(text.contains("Esc") && text.contains("Enter"), "{text}");
+    assert!(text.contains("Esc") && text.contains("Tab edit"), "{text}");
+    assert!(!text.contains("Enter edit"), "{text}");
 }
 
 #[test]
@@ -102,7 +103,7 @@ fn inline_background_suggestion_is_explicitly_accepted_but_not_executed() {
         input_assist: false,
         steps: &[
             ("probe> ", b"true\r"),
-            ("next: touch accepted", b"\x1bOQ"),
+            ("Next: touch accepted", b"\x1bOQ"),
             ("touch accepted", b"\x15exit\r"),
         ],
         ..Default::default()

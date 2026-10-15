@@ -110,7 +110,7 @@ pub fn run_agent(
             return if shell.interrupts().count() > 0 {
                 130
             } else {
-                2
+                e.exit_code()
             };
         }
     };
@@ -185,7 +185,7 @@ pub fn run_suggest(words: &[String], cfg: &Config, setup: &EngineSetup, seed: Op
             return if shell.interrupts().count() > 0 {
                 130
             } else {
-                2
+                e.exit_code()
             };
         }
     };

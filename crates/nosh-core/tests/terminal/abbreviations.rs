@@ -17,9 +17,9 @@ impl AiHandler for AbbreviationAi {
         self.requests += 1;
         AiOutcome::default()
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
         self.suggestions += 1;
-        Some("echo EXPLICIT_AI".into())
+        nosh_shell::SuggestionOutcome::Command("echo EXPLICIT_AI".into())
     }
     fn badge(&self) -> Badge {
         Badge::default()

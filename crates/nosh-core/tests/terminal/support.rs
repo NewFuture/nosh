@@ -35,6 +35,7 @@ pub(super) fn assert_no_styles(text: &str) {
 
 pub(super) const BEGIN: &str = "nosh-terminal-probe-begin\n";
 pub(super) const END: &str = "nosh-terminal-probe-end";
+pub(super) const REPL_EXIT: &str = "nosh-terminal-repl-exit";
 pub(super) const TOOL_LABELS: [(Risk, &str); 4] = [
     (Risk::Safe, "SAFE \u{b7} auto"),
     (Risk::Mutating, "MUTATING \u{b7} approved"),
@@ -113,6 +114,7 @@ struct ScreenTracking {
 struct ScreenObservation {
     frames: Vec<super::screen::Frame>,
     printed: Vec<super::screen::Printed>,
+    repl_exit: Option<Instant>,
 }
 
 fn read_output(
@@ -121,6 +123,7 @@ fn read_output(
     tracking: Option<ScreenTracking>,
 ) -> (String, ScreenObservation) {
     let mut bytes = Vec::new();
+    let mut repl_exit = None;
     let mut chunk = [0; 8192];
     let mut screen = tracking.as_ref().map(|tracking| {
         super::screen::Screen::new(
@@ -137,7 +140,15 @@ fn read_output(
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
+                let previous_len = bytes.len();
                 bytes.extend_from_slice(&chunk[..n]);
+                if repl_exit.is_none()
+                    && bytes[previous_len.saturating_sub(REPL_EXIT.len() - 1)..]
+                        .windows(REPL_EXIT.len())
+                        .any(|window| window == REPL_EXIT.as_bytes())
+                {
+                    repl_exit = Some(Instant::now());
+                }
                 if let (Some(screen), Some(tracking)) = (&mut screen, &tracking) {
                     let current = tracking.columns.load(Ordering::Acquire);
                     if current != columns {
@@ -161,14 +172,43 @@ fn read_output(
             }
         }
     }
-    let observation = screen.map_or_else(ScreenObservation::default, |screen| ScreenObservation {
-        frames: screen.frames,
-        printed: screen.printed,
-    });
+    let mut observation =
+        screen.map_or_else(ScreenObservation::default, |screen| ScreenObservation {
+            frames: screen.frames,
+            printed: screen.printed,
+            repl_exit: None,
+        });
+    observation.repl_exit = repl_exit;
     (
         String::from_utf8(bytes).unwrap().replace("\r\n", "\n"),
         observation,
     )
+}
+
+#[test]
+fn repl_exit_timing_precedes_fixture_teardown_across_read_boundaries() {
+    struct Teardown(Arc<Mutex<Option<Instant>>>);
+    impl Read for Teardown {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            *self.0.lock().unwrap() = Some(Instant::now());
+            thread::sleep(Duration::from_millis(5));
+            Ok(0)
+        }
+    }
+    for split in 0..=REPL_EXIT.len() {
+        let teardown = Arc::new(Mutex::new(None));
+        let reader = std::io::Cursor::new(format!("prefix{}", &REPL_EXIT[..split]))
+            .chain(std::io::Cursor::new(format!(
+                "{}suffix",
+                &REPL_EXIT[split..]
+            )))
+            .chain(Teardown(teardown.clone()));
+        let (_, observation) = read_output(reader, Arc::new(Mutex::new(Vec::new())), None);
+        assert!(
+            observation.repl_exit.expect("missing REPL exit marker")
+                <= teardown.lock().unwrap().expect("missing fixture teardown")
+        );
+    }
 }
 
 pub(super) fn framed(output: &str) -> String {
@@ -231,6 +271,7 @@ pub(super) struct ProbeTimings {
     pub(super) startup: Duration,
     pub(super) input: Vec<Duration>,
     pub(super) exit: Duration,
+    pub(super) repl_exit: Option<Duration>,
     pub(super) frames: Vec<super::screen::Frame>,
     pub(super) printed: Vec<super::screen::Printed>,
 }
@@ -472,9 +513,13 @@ impl Probe<'_> {
             if (keys.is_some() || next.is_some()) && (!needs_cursor_reply || cursor_replies > 0) {
                 let input = input.as_mut().unwrap();
                 let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+                let foreground_interrupt = next.is_some_and(|(needle, bytes)| {
+                    needle.starts_with("@interrupt:") && *bytes == b"\x03"
+                });
                 // SAFETY: tcgetattr writes to valid storage, read only on success.
                 if unsafe { libc::tcgetattr(input.as_raw_fd(), attrs.as_mut_ptr()) } == 0
-                    && unsafe { attrs.assume_init() }.c_lflag & libc::ICANON == 0
+                    && (foreground_interrupt
+                        || unsafe { attrs.assume_init() }.c_lflag & libc::ICANON == 0)
                 {
                     startup.get_or_insert_with(|| launched.elapsed());
                     if let Some(bytes) = keys.take() {
@@ -493,7 +538,9 @@ impl Probe<'_> {
                         } else {
                             let observed = observed.lock().unwrap();
                             let output = String::from_utf8_lossy(&observed[observed_start..]);
-                            if let Some(expected) = needle.strip_prefix("@frame:") {
+                            if let Some(expected) = needle.strip_prefix("@interrupt:") {
+                                style::strip_ansi(&output).contains(expected)
+                            } else if let Some(expected) = needle.strip_prefix("@frame:") {
                                 frame_matches(&output, expected)
                             } else {
                                 output.contains(needle)
@@ -591,6 +638,7 @@ impl Probe<'_> {
                 startup: startup.unwrap_or_default(),
                 input: timings,
                 exit: exited.duration_since(sent),
+                repl_exit: observation.repl_exit.map(|exit| exit.duration_since(sent)),
                 frames: observation.frames,
                 printed: observation.printed,
             },

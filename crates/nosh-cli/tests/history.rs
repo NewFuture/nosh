@@ -219,7 +219,60 @@ fn wait_frame(terminal: &mut Terminal, accepts: impl Fn(&str) -> bool) -> String
 }
 
 #[test]
-fn arrow_entries_open_filterable_history_without_restoring_tab_navigation() {
+fn visible_history_hint_prioritizes_right_without_executing_the_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    setup_with_status(&home, true);
+    let config = home.join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        config,
+        text.replace("input_assist = false", "input_assist = true"),
+    )
+    .unwrap();
+    let mut terminal = launch(&home, root.path());
+    submit_to_prompt(&mut terminal, "ls");
+    wait_outcome(&home, "ls", 0);
+    terminal.send(b"l");
+    let frame = wait_raw_frame(&mut terminal, |frame| {
+        before_cursor(frame).ends_with("history-test> l")
+            && (frame.contains("→ accept") || frame.contains("Right accept"))
+    });
+    let hint = frame
+        .rsplit_once("\x1b7")
+        .unwrap()
+        .1
+        .split_once("\x1b8")
+        .unwrap()
+        .0;
+    assert_eq!(nosh_shell::style::strip_ansi(hint).trim(), "s");
+    let settled = Instant::now() + Duration::from_millis(1400);
+    while Instant::now() < settled {
+        assert!(terminal.poll().is_none());
+    }
+    let frame = last_frame(&terminal);
+    assert!(
+        !frame.contains("No executable command") && !frame.contains("No cmd"),
+        "{frame}"
+    );
+    assert!(!frame.contains("Tab complete"), "{frame}");
+    terminal.send(b"\x1b[C");
+    wait_raw_frame(&mut terminal, |frame| {
+        before_cursor(frame).ends_with("history-test> ls")
+    });
+    let count: i64 = sql(&home)
+        .query_row(
+            "SELECT count(*) FROM commands WHERE command='ls'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "adopting a hint must not execute the command");
+    finish(&mut terminal);
+}
+
+#[test]
+fn arrow_entries_open_filterable_history_with_tab_adoption_and_enter_compatibility() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     setup(&home);
@@ -248,7 +301,7 @@ fn arrow_entries_open_filterable_history_without_restoring_tab_navigation() {
     wait_frame(&mut terminal, |frame| !frame.contains("History [all]"));
     terminal.send(b"\x1b[BMENU_");
     wait_frame(&mut terminal, |frame| frame.contains("History [all]"));
-    terminal.send(b"\t\t\x1b[Z\t\r");
+    terminal.send(b"\x1b[Z\t");
     let frame = wait_frame(&mut terminal, |frame| {
         frame.contains("printf 'MENU_B\\n'") && !frame.contains("History [all]")
     });
@@ -259,7 +312,8 @@ fn arrow_entries_open_filterable_history_without_restoring_tab_navigation() {
         frame.contains("Down newer") && frame.contains("Up older"),
         "{frame:?}"
     );
-    assert!(!frame.contains("Tab"), "{frame:?}");
+    assert!(frame.contains("Tab edit"), "{frame:?}");
+    assert!(!frame.contains("Enter edit"), "{frame:?}");
     terminal.send(b"\x1b[A\x1b[A\x1b[B\x1b[A\r");
     let frame = wait_frame(&mut terminal, |frame| {
         frame.contains("printf 'MENU_A\\n'") && !frame.contains("History [all]")
@@ -658,7 +712,7 @@ fn history_status_bar_owns_scope_progress_and_keys_without_repeated_menu_caption
         "History [all]",
         "Input directory:",
         "Ctrl+R scope",
-        "Enter edit",
+        "Tab edit",
         "Esc cancel",
     ] {
         assert_eq!(frame.matches(text).count(), 1, "{text}: {frame:?}");
@@ -675,24 +729,29 @@ fn history_status_bar_owns_scope_progress_and_keys_without_repeated_menu_caption
         !frame.contains("Enter edit") && !frame.contains("Enter submit"),
         "{frame:?}"
     );
-    assert_eq!(frame.matches("Enter close").count(), 1, "{frame:?}");
+    assert_eq!(frame.matches("Tab close").count(), 1, "{frame:?}");
     finish(&mut terminal);
 }
 
 #[test]
-fn enter_on_no_matches_closes_history_keeps_input_and_does_not_execute_it() {
+fn tab_and_enter_on_no_matches_close_history_keep_input_and_do_not_execute_it() {
     const COMMAND: &str = "printf 'NO_MATCH_ACCEPT_READY\\n'";
-    for status_bar in [false, true] {
+    for (status_bar, accept) in [
+        (false, b"\t".as_slice()),
+        (false, b"\r".as_slice()),
+        (true, b"\t".as_slice()),
+        (true, b"\r".as_slice()),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         setup_with_status(&home, status_bar);
         let mut terminal = launch_with_columns(&home, root.path(), 219);
         terminal.send(format!("printf ORIGINAL_UNSENT\x1b[A\x15{COMMAND}").as_bytes());
         let frame = wait_frame(&mut terminal, |frame| {
-            frame.contains("No matches") && frame.contains(COMMAND) && frame.contains("Enter close")
+            frame.contains("No matches") && frame.contains(COMMAND) && frame.contains("Tab close")
         });
         assert!(!frame.contains("Enter submit"), "{frame:?}");
-        terminal.send(b"\r");
+        terminal.send(accept);
         wait_frame(&mut terminal, |frame| {
             frame.contains(COMMAND)
                 && !frame.contains("History [all]")
@@ -793,7 +852,7 @@ fn default_shell_keeps_its_environment_bar_and_restores_input_feedback_after_his
     let frame = wait_frame(&mut terminal, |frame| {
         frame.contains("History [all]")
             && frame.contains("No matches")
-            && frame.contains("Enter close")
+            && frame.contains("Tab close")
     });
     assert!(
         !frame.contains("Incomplete") && !frame.contains("unterminated"),

@@ -16,7 +16,7 @@
 | `[agent] approval` | 可显式选择 `confirm` / `auto` / `yolo` |
 | `--auto` / `--yolo` | 覆盖用户配置；两者不能同时使用 |
 | `#mode confirm\|auto\|yolo` | 切换审批模式，选择跨任务保留；不每轮重置 |
-| `#auto on/off`、`NOSH_DISABLE_AI`、`--safe` | 控制 AI 路由或是否启用 AI，与审批 Auto 独立 |
+| `#assist on/off`、`NOSH_DISABLE_AI`、`--safe` | 控制自动辅助或是否启用 AI，与审批 Auto 独立 |
 | `nosh -s` / F2 / 适用的 Tab 兜底 | CommandAssist 仅通过受限查询提出建议，不执行目标；不进入 Agent 执行权限 |
 | 管道附件 | 仍仅提供只读工具；任何模式或白名单都不能增加 `exec` |
 

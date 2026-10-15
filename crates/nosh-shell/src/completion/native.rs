@@ -275,6 +275,7 @@ pub(crate) fn commands(
     snapshot: &NativeSnapshot,
     cache: &mut Cache,
     progress: &mut impl FnMut(Outcome) -> std::io::Result<()>,
+    mut expired: impl FnMut() -> bool,
 ) -> std::io::Result<Answer> {
     let names: BTreeSet<_> = snapshot
         .context
@@ -341,12 +342,17 @@ pub(crate) fn commands(
             .clone()
             .map_or(State::Complete, State::Partial),
     };
+    let mut timed_out = false;
     for (_, entry, indices) in ranked(entries, &context.word, true, false) {
         if answer.candidates.len() == MAX_RESULTS {
             if answer.state.is_complete() {
                 answer.state = State::Partial("command verification/result limit reached".into());
             }
             break;
+        }
+        if known(snapshot, &entry.value).is_none() && (timed_out || expired()) {
+            timed_out = true;
+            continue;
         }
         match executable(snapshot, context, &entry.value) {
             Ok(true) => {
@@ -358,6 +364,13 @@ pub(crate) fn commands(
             Err(error) if answer.state.is_complete() => answer.state = State::Partial(error),
             Err(_) => {}
         }
+    }
+    if timed_out {
+        let message = "command verification time limit reached";
+        answer.state = State::Partial(match &answer.state {
+            State::Partial(reason) => format!("{reason}; {message}"),
+            _ => message.into(),
+        });
     }
     abbreviations(&mut answer, context, snapshot);
     Ok(answer)

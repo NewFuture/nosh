@@ -226,6 +226,33 @@ impl TermUi {
         }
     }
 
+    pub(crate) fn assistance(&mut self) {
+        if !self.stderr.tty {
+            return;
+        }
+        self.clear_status();
+        self.end_text_line();
+        self.show_status(&format!(
+            "{} {}",
+            self.stderr.glyph("│", "|"),
+            tr!(
+                "正在生成命令 · Ctrl+C 取消",
+                "Generating command · Ctrl+C cancel"
+            )
+        ));
+    }
+
+    fn show_status(&mut self, text: &str) {
+        let status = style::clip_line(text, self.columns().unwrap_or(80).saturating_sub(1), 0, "");
+        if self.stderr.ansi {
+            eprint!("\r\x1b[K{}", self.styles().dim(&status));
+            self.status_shown = true;
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{}", self.styles().dim(&status));
+        }
+    }
+
     fn end_text_line(&mut self) {
         let prefix = self.text_prefix();
         let out = self.text.finish(&prefix);
@@ -366,15 +393,7 @@ impl AgentUi for TermUi {
             self.stderr.glyph("│", "|"),
             self.stderr.glyph("…", "...")
         );
-        let status = style::clip_line(
-            &status,
-            self.columns().unwrap_or(100).saturating_sub(1),
-            0,
-            "",
-        );
-        eprint!("\r\x1b[K{}", self.styles().dim(&status));
-        let _ = std::io::stderr().flush();
-        self.status_shown = true;
+        self.show_status(&status);
     }
 
     fn text(&mut self, s: &str) {

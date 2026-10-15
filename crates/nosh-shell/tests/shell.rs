@@ -397,6 +397,7 @@ struct RecordingAi {
     completed: Vec<nosh_shell::UserCommand>,
     reply_prefill: Option<String>,
     display: Option<nosh_shell::AssistDisplay>,
+    automatic_paused: bool,
 }
 
 impl AiHandler for RecordingAi {
@@ -411,14 +412,17 @@ impl AiHandler for RecordingAi {
         self.commands.push(command);
         AiOutcome::default()
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        None
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
+        nosh_shell::SuggestionOutcome::NoSuggestion
     }
     fn badge(&self) -> Badge {
         Badge::default()
     }
     fn assistance(&self) -> Option<nosh_shell::AssistDisplay> {
         self.display.clone()
+    }
+    fn automatic_requests_available(&self) -> bool {
+        !self.automatic_paused
     }
     fn after_command(
         &mut self,
@@ -442,6 +446,42 @@ impl ReplUi for ScriptUi {
     fn notice(&mut self, msg: &str) {
         self.notices.push(msg.to_string());
     }
+}
+
+#[test]
+fn unavailable_automatic_requests_keep_shell_errors_and_explicit_recovery() {
+    let _g = serial();
+    let mut sh = shell();
+    let mut ai = RecordingAi {
+        automatic_paused: true,
+        ..Default::default()
+    };
+    let mut ui = ScriptUi {
+        guard: GuardChoice::Ai,
+        notices: Vec::new(),
+    };
+    let mut pipeline = Pipeline::new(ReplConfig {
+        command_assist: false,
+        on_failure: nosh_shell::repl::OnFailure::Auto,
+        ..Default::default()
+    });
+    for line in ["xqzvw_nosuch --help", "cd /definitely/not/here"] {
+        assert_eq!(
+            pipeline.process(&mut sh, &mut ai, &mut ui, line),
+            LineOutcome::Continue(None)
+        );
+        let command = sh.recent_commands().last().unwrap();
+        assert_eq!(command.line, line);
+        assert_ne!(command.exit, 0);
+        assert!(ai.requests.is_empty());
+    }
+    for line in ["#fix", "# explain this", "rm all the temp files"] {
+        pipeline.process(&mut sh, &mut ai, &mut ui, line);
+    }
+    assert_eq!(ai.requests.len(), 3, "{:?}", ai.requests);
+    assert_eq!(ai.requests[0].trigger, Trigger::Failed { exit: 1 });
+    assert_eq!(ai.requests[1].trigger, Trigger::Hash);
+    assert_eq!(ai.requests[2].trigger, Trigger::Hash);
 }
 
 #[test]
@@ -554,7 +594,7 @@ fn pipeline_next_requires_enabled_automatic_assistance_and_success() {
             ..Default::default()
         });
         if paused {
-            pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
+            pipeline.process(&mut sh, &mut ai, &mut ui, "#assist off");
         }
         pipeline.process(&mut sh, &mut ai, &mut ui, line);
         assert_eq!(ai.completed.len(), expected);
@@ -719,7 +759,7 @@ fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
         "#theme soft-light extra",
         "#theme $(touch marker)",
         "#think maybe",
-        "#auto on extra",
+        "#assist on extra",
         "#clear extra",
         "#out invalid",
         "#找文件",
@@ -735,12 +775,12 @@ fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
     assert_eq!(sh.var("ORDINARY_AI").as_deref(), Some("mode auto"));
     assert!(ai.commands.is_empty() && ai.requests.is_empty());
 
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto invalid");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist off");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist invalid");
     let before = ai.completed.len();
     pipeline.process(&mut sh, &mut ai, &mut ui, "true");
     assert_eq!(ai.completed.len(), before);
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto on");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist on");
     pipeline.process(&mut sh, &mut ai, &mut ui, "true");
     assert_eq!(ai.completed.len(), before + 1);
 }

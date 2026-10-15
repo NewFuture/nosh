@@ -15,7 +15,7 @@ nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行�
 | 纠错与诊断 | 未知命令先尝试本地拼写纠错；用 `#fix` 让 Agent 根据上次失败命令及可用输出诊断，也可补充要求 |
 | [输入编辑](docs/INPUT-EDITING.md) | Emacs／Vi 编辑、自定义快捷键；[语法高亮和实时提示](docs/INPUT-ASSIST.md)无需模型 |
 | [上下文补全](docs/COMPLETION.md) | 模糊补全命令与路径，补全 `git switch` 分支、GNU Make 目标和 npm／Yarn 项目脚本 |
-| [上下文历史](docs/HISTORY.md) | 用上下键或 Ctrl+R 搜索历史，按工作树筛选，选中后回填编辑 |
+| [上下文历史](docs/HISTORY.md) | 用上下键或 Ctrl+R 搜索历史，按工作树筛选，Tab 回填编辑；Enter 兼容，回填不执行 |
 | [可见缩写](docs/ABBREVIATIONS.md) | 用短名称展开常用命令，展开后可检查、修改和撤销；支持自定义规则 |
 | [主题](docs/THEMES.md) | 内置深浅主题，提示符显示环境与操作状态；可选 Starship 和 Powerline |
 | [项目环境与终端集成](docs/SHELL-INTEGRATION.md) | 可选接入已授权的 direnv／mise 环境，并向兼容终端报告目录和命令区域 |
@@ -45,6 +45,8 @@ git status
 ```
 
 单独键入 `#` 可浏览管理命令。命令失败后，输入 `#fix` 请求诊断，或用 `#fix 只分析原因，不修改文件` 补充要求。
+
+`#assist off/on` 暂停或恢复自动错误路由与后台建议，显式 AI 入口仍可使用；审批模式单独由 `#mode` 控制。模型加载未就绪或失败后，普通命令不会反复触发加载，显式 AI 请求成功或再次 `#assist on` 可恢复检查；`#status` 查看当前开关和模型状态。
 
 也可以从原有 shell 一次性调用：
 

@@ -138,6 +138,7 @@ pub fn samples(
         }
         let context = PromptContext {
             buffer,
+            hint: None,
             cursor: buffer.len(),
             completion_cursor: buffer.len(),
             selection: None,
@@ -156,6 +157,7 @@ pub fn samples(
             }
             .into(),
             state,
+            missing_command: None,
             correction: None,
         });
         let row = status::compose(status::Context {

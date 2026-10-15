@@ -265,29 +265,37 @@ fn process(script: &str) -> Command {
 }
 
 #[test]
-fn nonzero_stderr_usage_is_evidence_not_success_or_an_automatic_retry() {
-    let output = capture(
-        &mut process("printf 'usage: tool [options]\\n  -c  Create\\n' >&2; exit 1"),
-        Duration::from_secs(1),
-        &CancelHandle::default(),
-    )
-    .unwrap();
-    let (meta, body) = split(
-        &help::render(
-            &HelpCommand::parse("tool").unwrap(),
-            Path::new("/bin/tool"),
-            Path::new("/real/tool"),
-            &output,
-            Some("-c"),
+fn help_preserves_success_and_nonzero_usage_exit_codes_and_output_streams() {
+    for (code, stream, redirect) in [
+        (0, "stdout", ""),
+        (1, "stderr", ">&2"),
+        (129, "stderr", ">&2"),
+    ] {
+        let output = capture(
+            &mut process(&format!(
+                "printf 'usage: tool [options]\\n  -c  Create\\n' {redirect}; exit {code}"
+            )),
+            Duration::from_secs(1),
+            &CancelHandle::default(),
         )
-        .unwrap(),
-    );
-    assert_eq!(meta["exit_code"], 1);
-    assert_eq!(meta["capture_complete"], true);
-    assert_eq!(meta["program"], "/bin/tool");
-    assert_eq!(meta["executable"], "/real/tool");
-    assert_eq!(meta["argument"], "--help");
-    assert!(body.contains("[stderr]\n  -c  Create"));
+        .unwrap();
+        let (meta, body) = split(
+            &help::render(
+                &HelpCommand::parse("tool").unwrap(),
+                Path::new("/bin/tool"),
+                Path::new("/real/tool"),
+                &output,
+                Some("-c"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(meta["exit_code"], code);
+        assert_eq!(meta["capture_complete"], true);
+        assert_eq!(meta["program"], "/bin/tool");
+        assert_eq!(meta["executable"], "/real/tool");
+        assert_eq!(meta["argument"], "--help");
+        assert!(body.contains(&format!("[{stream}]\n  -c  Create")));
+    }
 }
 
 #[test]
@@ -787,7 +795,11 @@ fn git_commit_and_nested_help_return_targeted_usage_without_repository_changes()
         assert_eq!(meta["name"], name);
         assert_eq!(meta["subcommands"], json!(subcommands));
         assert_eq!(meta["argument"], "-h");
-        assert_eq!(meta["exit_code"], 129, "{result}");
+        // Git versions report successful -h output with either 0 or usage status 129.
+        assert!(
+            matches!(meta["exit_code"].as_i64(), Some(0 | 129)),
+            "{result}"
+        );
         assert_eq!(meta["capture_complete"], true);
         if filter.is_some() {
             assert!(body.contains("amend previous commit"), "{result}");

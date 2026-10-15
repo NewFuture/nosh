@@ -583,6 +583,11 @@ fn preset(mode: EditorMode, context: Context, caps: Capabilities) -> HashMap<Key
             false,
         );
         bind(
+            Key::new(KeyModifiers::NONE, KeyCode::Tab),
+            Action::Accept,
+            false,
+        );
+        bind(
             Key::new(KeyModifiers::NONE, KeyCode::Esc),
             Action::Cancel,
             false,
@@ -1237,7 +1242,11 @@ mod tests {
                 KeyModifiers::CONTROL,
                 ReedlineEvent::SearchHistory,
             ),
-            (KeyCode::Tab, KeyModifiers::NONE, ReedlineEvent::None),
+            (
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+                ReedlineEvent::AcceptHistorySearch,
+            ),
             (KeyCode::BackTab, KeyModifiers::SHIFT, ReedlineEvent::None),
             (KeyCode::Down, KeyModifiers::NONE, ReedlineEvent::MenuNext),
             (KeyCode::Up, KeyModifiers::NONE, ReedlineEvent::MenuPrevious),
@@ -1256,6 +1265,25 @@ mod tests {
                 editor.parse_event_with_context(key(code, modifiers), EditContext::HistorySearch),
                 expected
             );
+        }
+        for mode in [
+            PromptEditMode::Emacs,
+            PromptEditMode::Vi(PromptViMode::Insert),
+            PromptEditMode::Vi(PromptViMode::Normal),
+        ] {
+            let status = reedline::HistorySearchStatus::default();
+            let help = compiled
+                .hints(
+                    &mode,
+                    PromptInteraction::HistorySearch {
+                        term: "",
+                        has_match: true,
+                        status: Some(status),
+                    },
+                )
+                .history_help(true, status, &std::collections::BTreeSet::new());
+            assert!(help.contains("Tab"), "{mode:?}: {help}");
+            assert!(!help.contains("Enter"), "{mode:?}: {help}");
         }
     }
 
@@ -1288,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn history_tabs_are_inactive_in_every_mode_without_changing_completion_tabs() {
+    fn history_tab_adopts_in_every_mode_without_changing_completion_tabs() {
         for enhanced in [false, true] {
             for (mode, prompt_mode) in [
                 (Mode::Emacs, PromptEditMode::Emacs),
@@ -1311,12 +1339,20 @@ mod tests {
                     (KeyCode::BackTab, KeyModifiers::SHIFT),
                     (KeyCode::Char('i'), KeyModifiers::CONTROL),
                 ] {
+                    let expected = if Key::new(modifiers, code)
+                        .normalized(Capabilities { enhanced })
+                        == Key::new(KeyModifiers::NONE, KeyCode::Tab)
+                    {
+                        ReedlineEvent::AcceptHistorySearch
+                    } else {
+                        ReedlineEvent::None
+                    };
                     assert_eq!(
                         editor.parse_event_with_context(
                             key(code, modifiers),
                             EditContext::HistorySearch
                         ),
-                        ReedlineEvent::None,
+                        expected,
                         "{prompt_mode:?}: {modifiers:?} {code:?}",
                     );
                 }

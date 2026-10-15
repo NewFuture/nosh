@@ -18,7 +18,9 @@ pub use agent::{Agent, AgentConfig, TaskOutcome, TaskStatus};
 pub use approval::{
     ApprovalChannel, ApprovalRequest, ApprovalResponse, NoTerminal, Scripted, TerminalApproval,
 };
-pub use handler::{EngineLoader, LoadMode, LoadedEngine, ShellAi};
+pub use handler::{
+    EngineLoadError, EngineLoader, LoadMode, LoadedEngine, ModelAvailability, ShellAi,
+};
 pub use prompt::{Attachment, Environment, TaskInput};
 pub use tools::{NoRedact, Redactor, ToolSet};
 pub use ui::{AgentUi, JsonUi, RecordUi, TaskSummary, TermUi};

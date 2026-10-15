@@ -457,6 +457,15 @@ impl Completer for Completion {
         self.automatic
     }
 
+    fn host_completion_allowed(&self, line: &str, _: usize) -> bool {
+        !line.trim().is_empty()
+            && !self
+                .config
+                .inline_prefix
+                .as_ref()
+                .is_some_and(|prefix| crate::inline_commands::is_command(line, prefix, true))
+    }
+
     fn menu_on_edit(&self, line: &str, cursor: usize, active_menu: Option<&str>) -> MenuUpdate<'_> {
         if active_menu.is_some_and(|name| name != super::INLINE_MENU) {
             return MenuUpdate::Unchanged;
@@ -828,7 +837,7 @@ mod tests {
             ("#theme ", 2),
             ("#theme soft-l", 1),
             ("#think ", 2),
-            ("#auto ", 2),
+            ("#assist ", 2),
             ("#mode au", 1),
             ("#out", 0),
             ("#out 1", 0),

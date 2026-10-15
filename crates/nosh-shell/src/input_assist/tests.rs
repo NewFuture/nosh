@@ -249,7 +249,7 @@ fn inline_command_feedback_is_local_and_uses_the_configured_prefix() {
         "#help",
         "#mode auto",
         "#think off",
-        "#auto on",
+        "#assist on",
         "#clear",
         "#ctx",
         "#status",

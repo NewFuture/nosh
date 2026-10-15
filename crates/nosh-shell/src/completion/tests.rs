@@ -56,6 +56,122 @@ fn write_executable(path: impl AsRef<std::path::Path>, contents: &str) {
 }
 
 #[test]
+fn command_verification_deadline_preserves_known_local_candidates() {
+    let (directory, _, mut snapshot) = fixture();
+    write_executable(directory.path().join("l_external"), "#!/bin/sh\nexit 0\n");
+    let native = Arc::make_mut(&mut snapshot.native);
+    native.context.path = Some(directory.path().display().to_string());
+    native.context.functions.insert("l_fixture".into());
+    let request = query("l");
+    let context = Context::parse(&request, &snapshot.native).unwrap();
+    let mut progress = Vec::new();
+    let result = super::native::commands(
+        request,
+        &context,
+        &snapshot.native,
+        &mut super::cache::Cache::default(),
+        &mut |outcome| {
+            progress.push(outcome);
+            Ok(())
+        },
+        || true,
+    )
+    .unwrap();
+    assert!(
+        matches!(&result.state, State::Partial(reason) if reason.contains("verification time limit"))
+    );
+    assert!(candidate_values(&result).contains(&"l_fixture"));
+    assert!(!candidate_values(&result).contains(&"l_external"));
+    assert_eq!(progress.len(), 1);
+    let Outcome::Progress(early) = &progress[0] else {
+        panic!("missing provisional candidates");
+    };
+    assert_eq!(early.candidates, result.candidates);
+}
+
+#[test]
+fn deadline_after_external_progress_keeps_ranked_locals_and_abbreviations_within_limit() {
+    for extra_functions in [0, MAX_RESULTS + 1] {
+        let (directory, _, mut snapshot) = fixture();
+        for name in ["la", "lb", "lc"] {
+            write_executable(directory.path().join(name), "#!/bin/sh\nexit 0\n");
+        }
+        let native = Arc::make_mut(&mut snapshot.native);
+        native.context.path = Some(directory.path().display().to_string());
+        native.context.builtins = ["let".into(), "local".into()].into();
+        native.context.aliases = ["list_alias".into()].into();
+        native.context.functions = ["long_function".into()].into();
+        native
+            .context
+            .functions
+            .extend((0..extra_functions).map(|index| format!("local_fixture_{index:03}")));
+        native.context.hashed_commands.clear();
+        native.abbreviations = crate::input_assist::Abbreviations {
+            revision: 7,
+            applicable: ["ll".into()].into(),
+            definitions: [(
+                "ll".into(),
+                crate::input_assist::Abbreviation {
+                    expansion: "ls -lh".into(),
+                    source: "fixture".into(),
+                },
+            )]
+            .into(),
+        };
+        let request = query("l");
+        let context = Context::parse(&request, &snapshot.native).unwrap();
+        let mut progress = Vec::new();
+        let mut checks = 0;
+        let result = super::native::commands(
+            request,
+            &context,
+            &snapshot.native,
+            &mut super::cache::Cache::default(),
+            &mut |outcome| {
+                progress.push(outcome);
+                Ok(())
+            },
+            || {
+                checks += 1;
+                checks > 1
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            checks, 2,
+            "expired requests must stop checking external candidates"
+        );
+        assert!(matches!(result.state, State::Partial(_)), "{result:?}");
+        let mut expected: Vec<_> = [
+            "la",
+            "ls -lh",
+            "let",
+            "local",
+            "list_alias",
+            "long_function",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        expected.extend((0..extra_functions).map(|index| format!("local_fixture_{index:03}")));
+        expected.truncate(MAX_RESULTS);
+        assert_eq!(
+            candidate_values(&result),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .filter(|candidate| matches!(candidate.source, Source::Abbreviation { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(progress.len(), 1);
+    }
+}
+
+#[test]
 fn completion_context_uses_active_command_and_byte_ranges() {
     let (_, _, mut snapshot) = fixture();
     for operator in [";", "|", "|&", "||", "&&", "&"] {

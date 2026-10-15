@@ -27,10 +27,13 @@ impl AiHandler for DraftAi {
         AiOutcome::default()
     }
 
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
         self.requests += 1;
         eprintln!("editing-suggest-request-{}", self.requests);
-        self.answer.clone()
+        self.answer.clone().map_or(
+            nosh_shell::SuggestionOutcome::NoSuggestion,
+            nosh_shell::SuggestionOutcome::Command,
+        )
     }
 
     fn badge(&self) -> Badge {
@@ -206,11 +209,12 @@ fn inline_prefix_help_completion_and_editor_actions_do_not_request_ai() {
             ("editing> ", b"#help\r"),
             ("mode [confirm|auto|yolo]", b"#mo\t"),
             ("#mode ", b"au\t"),
+            ("#mode au", b"\r"),
             ("#mode auto", b"\r"),
             ("editing-management-1", b"#unknown"),
             ("#unknown", F2),
             ("inline commands do not use AI", b"\t"),
-            ("inline commands do not use AI", b"\x03"),
+            ("#unknown", b"\x03"),
             ("editing> ", b"#ctx\r"),
             ("editing-management-2", b"exit 0\r"),
         ],
@@ -446,7 +450,6 @@ fn tab_only_requests_ai_when_completion_is_definitively_exhausted() {
         "xterm-256color",
         &[
             ("editing> ", b"nosh_no_completion_match_fixture\t"),
-            ("NO RECORDS FOUND", b"\t"),
             ("touch generated", b"\x15exit 0\r"),
         ],
     );
@@ -474,7 +477,7 @@ fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
         &[
             ("editing> ", b"\x12history_executed"),
             (
-                "@frame:editing> history_executed\nEnter edit\ntouch history_executed",
+                "@frame:editing> history_executed\nTab edit\ntouch history_executed",
                 b"\r",
             ),
             (
@@ -492,7 +495,7 @@ fn history_enter_adopts_before_submission_and_cancel_restores_the_draft() {
             ("editing> ", b"printf original"),
             ("original", b"\x12\x15history_executed"),
             (
-                "@frame:editing> history_executed\nEnter edit\ntouch history_executed",
+                "@frame:editing> history_executed\nTab edit\ntouch history_executed",
                 F2,
             ),
             ("exit or cancel", b"\x1b"),

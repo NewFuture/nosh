@@ -24,6 +24,7 @@ pub(crate) struct Feedback {
     pub text: String,
     pub compact: String,
     pub state: State,
+    pub missing_command: Option<std::ops::Range<usize>>,
     pub correction: Option<Correction>,
 }
 
@@ -433,6 +434,7 @@ impl InputAssist {
                 .into(),
                 compact: tr!("诊断忙", "Diag busy").into(),
                 state: State::Unavailable,
+                missing_command: None,
                 correction: None,
             });
         };
@@ -474,6 +476,7 @@ impl InputAssist {
                     style::clip_line(&crate::status::plain(text), 28, 0, "...")
                 },
                 state,
+                missing_command: None,
                 correction: None,
             }),
         );
@@ -978,6 +981,7 @@ fn finding_feedback(
                 proposal.to
             ),
             state: State::Error,
+            missing_command: None,
             correction: Some(proposal.clone()),
         };
     }
@@ -1040,6 +1044,8 @@ fn finding_feedback(
         text,
         compact,
         state: finding.state,
+        missing_command: matches!(finding.reason, Reason::MissingCommand)
+            .then(|| finding.range.clone()),
         correction: None,
     }
 }
@@ -1667,6 +1673,7 @@ mod tests {
     fn correction_context(buffer: &str) -> PromptContext<'_> {
         PromptContext {
             buffer,
+            hint: None,
             cursor: buffer.len(),
             completion_cursor: buffer.len(),
             selection: None,
