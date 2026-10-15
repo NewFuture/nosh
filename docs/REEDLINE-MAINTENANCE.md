@@ -133,6 +133,13 @@ while a search, selection, menu or pending modal operation owns input.
 The separate `input_changed` notification tracks scope exits after edits or
 cursor moves; it never opens a menu, including after deletion or undo.
 
+`CompleteOrHostCommand` retains its host action alongside the existing deferred
+completion transaction. A current final empty result can hand off once; queued
+input, changed drafts, provisional results and cancellation cannot acquire that
+permission. The completer's `host_completion_allowed` hook excludes nosh management
+inputs without a model call. `ColumnarMenu::with_empty_message` lets the host hide
+empty result rows; the upstream default text and menu submit protection remain intact.
+
 The abbreviation policy receives bounded replacement requests, not shell execution
 requests. Draft intent and expanded ranges travel with `LineBuffer` through the
 native undo history. Paste/history/host replacements protect imported text;

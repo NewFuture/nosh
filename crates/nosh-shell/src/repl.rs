@@ -77,6 +77,15 @@ pub struct AiOutcome {
     pub exit_code: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuggestionOutcome {
+    Command(String),
+    NoSuggestion,
+    Cancelled,
+    NotReady(String),
+    Failed(String),
+}
+
 /// Right-hand prompt information.
 #[derive(Debug, Clone, Default)]
 pub struct Badge {
@@ -101,10 +110,14 @@ pub trait AiHandler {
         command: crate::ManagementCommand,
     ) -> AiOutcome;
     /// Rewrite the input into a command draft, never submit it.
-    fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> Option<String>;
+    fn suggest(&mut self, shell: &mut EmbeddedShell, line: &str) -> SuggestionOutcome;
     fn badge(&self) -> Badge;
     fn assistance(&self) -> Option<crate::AssistDisplay> {
         None
+    }
+    /// Permit a new automatic loading attempt after a previous failure.
+    fn retry_assistance(&mut self) -> Result<(), String> {
+        Ok(())
     }
     fn after_command(
         &mut self,
@@ -139,8 +152,8 @@ impl AiHandler for NoAi {
         )
     }
 
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        None
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> SuggestionOutcome {
+        SuggestionOutcome::NotReady(tr!("AI 已禁用", "AI is disabled").into())
     }
 
     fn badge(&self) -> Badge {
@@ -278,7 +291,7 @@ pub enum LineOutcome {
 pub struct Pipeline {
     pub cfg: ReplConfig,
     terminal: crate::terminal_integration::Session,
-    auto_paused: bool,
+    assist_paused: bool,
     last_failure: Option<UserCommand>,
     literal_input: bool,
     abbreviations: Option<crate::abbreviations::Session>,
@@ -293,7 +306,7 @@ impl Pipeline {
         Self {
             cfg,
             terminal: Default::default(),
-            auto_paused: false,
+            assist_paused: false,
             last_failure: None,
             literal_input: false,
             abbreviations: None,
@@ -306,7 +319,7 @@ impl Pipeline {
 
     fn trigger_cfg(&self) -> TriggerConfig {
         let mut t = self.cfg.trigger.clone();
-        if self.auto_paused {
+        if self.assist_paused {
             t.trigger_on_error = false;
         }
         t
@@ -472,17 +485,34 @@ impl Pipeline {
                 LineOutcome::Continue(None)
             }
             Command::Fix(text) => self.fix_with_text(shell, ai, ui, text),
-            Command::Auto(enabled) => {
+            Command::Assist(enabled) => {
+                if enabled == Some(true)
+                    && let Err(error) = ai.retry_assistance()
+                {
+                    ui.notice(&format!("nosh: {}", style::visible_text(&error)));
+                    return LineOutcome::Continue(None);
+                }
                 if let Some(enabled) = enabled {
-                    self.auto_paused = !enabled;
+                    self.assist_paused = !enabled;
+                    if !enabled && let Some(display) = ai.assistance() {
+                        display.invalidate();
+                    }
                 }
                 ui.notice(&format!(
-                    "auto: {}",
-                    if self.auto_paused { "off" } else { "on" }
+                    "{}: {}",
+                    tr!("自动辅助", "assist"),
+                    if self.assist_paused { "off" } else { "on" }
                 ));
                 LineOutcome::Continue(None)
             }
             Command::Manage(command) => {
+                if matches!(command, crate::ManagementCommand::Status) {
+                    ui.notice(&format!(
+                        "{}: {}",
+                        tr!("自动辅助", "assist"),
+                        if self.assist_paused { "off" } else { "on" }
+                    ));
+                }
                 let _region = self.terminal.begin();
                 let out = isolate(|| ai.command(shell, command)).unwrap_or_default();
                 LineOutcome::Continue(out.prefill)
@@ -510,7 +540,7 @@ impl Pipeline {
             if self.cfg.command_assist
                 && !self.literal_input
                 && self.cfg.trigger.ai_enabled
-                && !self.auto_paused
+                && !self.assist_paused
                 && let Some(command) = shell.recent_commands().last().cloned()
             {
                 let _ = isolate(|| ai.after_command(shell, command, None));
@@ -546,7 +576,7 @@ impl Pipeline {
         );
         if self.cfg.command_assist
             && self.cfg.on_failure != OnFailure::Off
-            && !self.auto_paused
+            && !self.assist_paused
             && let Some(command) = cmd.clone()
         {
             let output = shell
@@ -560,7 +590,7 @@ impl Pipeline {
             }
         }
         let auto = ai.assistance().is_none()
-            && !self.auto_paused
+            && !self.assist_paused
             && (self.cfg.on_failure == OnFailure::Auto || trigger::contains_cjk(line));
         match self.cfg.on_failure {
             OnFailure::Off => LineOutcome::Continue(None),
@@ -1884,12 +1914,27 @@ fn suggest_draft(
         display.invalidate();
     }
     shell.record_question(draft, true);
-    let Some(program) = isolate(|| ai.suggest(shell, request)).flatten() else {
-        ui.notice(tr!(
-            "nosh: 没有建议；保留原输入",
-            "nosh: no suggestion; draft unchanged"
-        ));
-        return None;
+    let outcome = isolate(|| ai.suggest(shell, request))?;
+    let program = match outcome {
+        SuggestionOutcome::Command(program) => program,
+        SuggestionOutcome::NoSuggestion => {
+            ui.notice(tr!(
+                "nosh: 没有建议；保留原输入",
+                "nosh: no suggestion; draft unchanged"
+            ));
+            return None;
+        }
+        SuggestionOutcome::Cancelled => {
+            ui.notice(tr!(
+                "nosh: 已取消；保留原输入",
+                "nosh: cancelled; draft unchanged"
+            ));
+            return None;
+        }
+        SuggestionOutcome::NotReady(reason) | SuggestionOutcome::Failed(reason) => {
+            ui.notice(&format!("nosh: {}", style::visible_text(&reason)));
+            return None;
+        }
     };
     if !crate::trigger::is_suggestion_program(&program, shell) {
         ui.notice(tr!(
@@ -1907,6 +1952,137 @@ mod tests {
     use reedline::{EditCommand, KeyModifiers, ReedlineEvent};
 
     #[test]
+    fn suggestion_outcomes_report_once_without_turning_errors_into_no_suggestion() {
+        struct ResultAi(SuggestionOutcome);
+        impl AiHandler for ResultAi {
+            fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
+                AiOutcome::default()
+            }
+            fn command(&mut self, _: &mut EmbeddedShell, _: crate::ManagementCommand) -> AiOutcome {
+                AiOutcome::default()
+            }
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> SuggestionOutcome {
+                self.0.clone()
+            }
+            fn badge(&self) -> Badge {
+                Badge::default()
+            }
+        }
+        struct Notices(Vec<String>);
+        impl ReplUi for Notices {
+            fn guard(&mut self, _: &str) -> GuardChoice {
+                GuardChoice::Cancel
+            }
+            fn notice(&mut self, message: &str) {
+                self.0.push(message.into());
+            }
+        }
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        let config = ReplConfig::default();
+        for outcome in [
+            SuggestionOutcome::NoSuggestion,
+            SuggestionOutcome::Cancelled,
+            SuggestionOutcome::NotReady("model missing".into()),
+            SuggestionOutcome::Failed("query failed".into()),
+        ] {
+            let mut ai = ResultAi(outcome.clone());
+            let mut notices = Notices(Vec::new());
+            assert!(
+                suggest_draft(&mut shell, &mut ai, &config, &mut notices, "describe task")
+                    .is_none()
+            );
+            assert_eq!(notices.0.len(), 1, "{outcome:?}: {:?}", notices.0);
+            if let SuggestionOutcome::NotReady(reason) | SuggestionOutcome::Failed(reason) = outcome
+            {
+                assert_eq!(notices.0[0], format!("nosh: {reason}"));
+            }
+        }
+        let mut ai = ResultAi(SuggestionOutcome::Command("echo ready".into()));
+        let mut notices = Notices(Vec::new());
+        assert_eq!(
+            suggest_draft(&mut shell, &mut ai, &config, &mut notices, "describe task"),
+            Some("echo ready".into())
+        );
+        assert!(notices.0.is_empty());
+        assert!(shell.recent_commands().is_empty());
+    }
+
+    #[test]
+    fn assist_pause_withdraws_candidates_and_on_requests_an_explicit_retry() {
+        #[derive(Default)]
+        struct RetryAi {
+            display: crate::AssistDisplay,
+            retries: usize,
+            managed: Vec<crate::ManagementCommand>,
+        }
+        impl AiHandler for RetryAi {
+            fn handle(&mut self, _: &mut EmbeddedShell, _: AiRequest) -> AiOutcome {
+                panic!("management must remain local")
+            }
+            fn command(
+                &mut self,
+                _: &mut EmbeddedShell,
+                command: crate::ManagementCommand,
+            ) -> AiOutcome {
+                self.managed.push(command);
+                AiOutcome::default()
+            }
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> SuggestionOutcome {
+                panic!("management must not generate")
+            }
+            fn badge(&self) -> Badge {
+                Badge::default()
+            }
+            fn assistance(&self) -> Option<crate::AssistDisplay> {
+                Some(self.display.clone())
+            }
+            fn retry_assistance(&mut self) -> Result<(), String> {
+                self.retries += 1;
+                Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct Notices(Vec<String>);
+        impl ReplUi for Notices {
+            fn guard(&mut self, _: &str) -> GuardChoice {
+                panic!("management must remain local")
+            }
+            fn notice(&mut self, message: &str) {
+                self.0.push(message.into());
+            }
+        }
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        let mut ai = RetryAi::default();
+        let version = ai.display.invalidate();
+        ai.display.publish(
+            version,
+            Some(crate::Assistance::Command {
+                command_id: 1,
+                intent: "next".into(),
+                program: "echo ready".into(),
+            }),
+        );
+        let mut pipeline = Pipeline::new(Default::default());
+        let mut notices = Notices::default();
+        pipeline.process(&mut shell, &mut ai, &mut notices, "#assist off");
+        assert!(pipeline.assist_paused);
+        assert!(ai.display.result().is_none());
+        pipeline.process(&mut shell, &mut ai, &mut notices, "#assist invalid");
+        assert!(pipeline.assist_paused);
+        assert_eq!(ai.retries, 0);
+        pipeline.process(&mut shell, &mut ai, &mut notices, "#status");
+        assert!(notices.0.last().unwrap().ends_with("off"));
+        assert_eq!(ai.managed, [crate::ManagementCommand::Status]);
+        pipeline.process(&mut shell, &mut ai, &mut notices, "#assist on");
+        assert!(!pipeline.assist_paused);
+        assert_eq!(ai.retries, 1);
+        pipeline.process(&mut shell, &mut ai, &mut notices, "#auto off");
+        assert!(!pipeline.assist_paused);
+        assert_eq!(ai.retries, 1);
+        assert!(shell.recent_commands().is_empty());
+    }
+
+    #[test]
     fn abbreviation_literal_submission_bypasses_implicit_routes_but_not_explicit_ai() {
         #[derive(Default)]
         struct Ai(usize);
@@ -1919,9 +2095,9 @@ mod tests {
                 self.0 += 1;
                 AiOutcome::default()
             }
-            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+            fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> SuggestionOutcome {
                 self.0 += 1;
-                None
+                SuggestionOutcome::NoSuggestion
             }
             fn badge(&self) -> Badge {
                 Badge::default()
@@ -1971,10 +2147,10 @@ mod tests {
                 self.requests += 1;
                 AiOutcome::default()
             }
-            fn suggest(&mut self, _: &mut EmbeddedShell, text: &str) -> Option<String> {
+            fn suggest(&mut self, _: &mut EmbeddedShell, text: &str) -> SuggestionOutcome {
                 self.requests += 1;
                 self.suggestion = Some(text.into());
-                None
+                SuggestionOutcome::NoSuggestion
             }
             fn badge(&self) -> Badge {
                 Badge::default()
@@ -2335,13 +2511,13 @@ mod tests {
             "Ctrl+R",
             "Down",
             "Up",
-            "Enter",
+            "Tab",
             "Esc",
         ] {
             assert!(bar.contains(text), "{text}: {bar}");
         }
         assert!(
-            !bar.contains("Right") && !bar.contains("submit") && !bar.contains("Tab"),
+            !bar.contains("Right") && !bar.contains("submit") && !bar.contains("Enter"),
             "{bar}"
         );
         assert!(!bar.contains("FILTER_ONLY_IN_INPUT"), "{bar}");
@@ -2356,7 +2532,8 @@ mod tests {
         assert!(
             fallback.contains(status.title) && fallback.contains("Down") && fallback.contains("Up")
         );
-        assert!(!fallback.contains("Tab"), "{fallback}");
+        assert!(fallback.contains("Tab edit"), "{fallback}");
+        assert!(!fallback.contains("Enter"), "{fallback}");
     }
 
     #[test]
@@ -2514,9 +2691,9 @@ mod tests {
                         (
                             Action::AcceptSearch,
                             if status.no_matches {
-                                "Enter close"
+                                "Tab close"
                             } else {
-                                "Enter edit"
+                                "Tab edit"
                             },
                         ),
                         (Action::Next, "Down newer"),
@@ -2628,7 +2805,7 @@ mod tests {
         prompt.update_context(context);
         let left = prompt.render_prompt_left();
         assert!(
-            left.contains("next: printf safe") && left.contains("F2"),
+            left.contains("Next: printf safe") && left.contains("F2"),
             "{left}"
         );
         assert_eq!(left.matches('\n').count(), 1);

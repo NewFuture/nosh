@@ -624,7 +624,7 @@ index 0000000000000000000000000000000000000000..1094dfc04887d1930bab04041b4d71df
 +    }
 +}
 diff --git a/src/completion/base.rs b/src/completion/base.rs
-index 571df96c69f3c53b67724ab5addb9e203ea40306..b54e95a4a297c23aed1ef2262ac91382b6704888 100644
+index 571df96c69f3c53b67724ab5addb9e203ea40306..3a3098a88ddd2054452155832e2b7143e00fae6d 100644
 --- a/src/completion/base.rs
 +++ b/src/completion/base.rs
 @@ -71,9 +71,40 @@ pub struct Partial {
@@ -712,7 +712,7 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..b54e95a4a297c23aed1ef2262ac91382
          }
      }
  
-@@ -182,9 +217,64 @@ pub enum CompletionStatus {
+@@ -182,9 +217,69 @@ pub enum CompletionStatus {
      Ready,
  }
  
@@ -758,6 +758,11 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..b54e95a4a297c23aed1ef2262ac91382
 +        true
 +    }
 +
++    /// Whether a final empty completion may hand off to the host.
++    fn host_completion_allowed(&self, _line: &str, _pos: usize) -> bool {
++        true
++    }
++
 +    /// Observe completed edits or cursor moves without opening a menu.
 +    fn input_changed(&mut self, _line: &str, _pos: usize) {}
 +
@@ -777,7 +782,7 @@ index 571df96c69f3c53b67724ab5addb9e203ea40306..b54e95a4a297c23aed1ef2262ac91382
      /// the action that will take the line and position and convert it to a vector of completions, which include the
      /// span to replace and the contents of that replacement
      fn complete(&mut self, line: &str, pos: usize) -> CompletionResult;
-@@ -242,6 +332,8 @@ pub trait Completer {
+@@ -242,6 +337,8 @@ pub trait Completer {
  /// Suggestion returned by the Completer
  #[derive(Debug, Default, Clone, PartialEq, Eq)]
  pub struct Suggestion {
@@ -1416,7 +1421,7 @@ index 79dd9beb22d76020b8e5bd2e9b2762ca4303d6bb..f8c7006a2aa2308b9b9fc4cca5895331
  }
  
 diff --git a/src/engine.rs b/src/engine.rs
-index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099cef601e6 100644
+index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..34a62001b633740e2b181d84c0ef4ca6c9396b74 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -37,7 +37,8 @@ use {
@@ -1482,13 +1487,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  
      // Text editor used to open the line buffer for editing
      buffer_editor: Option<BufferEditor>,
-@@ -260,20 +273,29 @@ struct DeferredMenuCompletion {
+@@ -260,20 +273,31 @@ struct DeferredMenuCompletion {
      menu: String,
      /// The line this was armed on, stamped as a completer stamps its own results.
      origin: CompletionOrigin,
 +    revision: u64,
 +    selection: Option<(usize, usize)>,
 +    mode: PromptEditMode,
++    host_command: Option<String>,
  }
  
  impl DeferredMenuCompletion {
@@ -1500,6 +1506,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
 +            revision: editor.revision(),
 +            selection: editor.get_selection(),
 +            mode,
++            host_command: None,
          }
      }
  
@@ -1514,7 +1521,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              && self
                  .origin
                  .matches(editor.get_buffer(), editor.insertion_point())
-@@ -286,9 +308,24 @@ impl DeferredMenuCompletion {
+@@ -286,9 +310,24 @@ impl DeferredMenuCompletion {
  #[derive(Clone, Debug, Default)]
  pub struct RepaintSignal {
      flag: Arc<AtomicBool>,
@@ -1539,7 +1546,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Request that the prompt is re-evaluated and repainted in place.
      pub fn request_repaint(&self) {
          self.flag.store(true, Ordering::Relaxed);
-@@ -302,6 +339,9 @@ impl RepaintSignal {
+@@ -302,6 +341,9 @@ impl RepaintSignal {
  
  impl Drop for Reedline {
      fn drop(&mut self) {
@@ -1549,7 +1556,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          if self.cursor_shapes.is_some() {
              let _ignore = terminal::enable_raw_mode();
              let mut stdout = std::io::stdout();
-@@ -366,7 +406,13 @@ impl Reedline {
+@@ -366,7 +408,13 @@ impl Reedline {
              history_cursor_on_excluded: false,
              history_save_error: None,
              input_mode: InputMode::Regular,
@@ -1563,7 +1570,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              last_render_snapshot: None,
              painter,
              transient_prompt: None,
-@@ -374,6 +420,7 @@ impl Reedline {
+@@ -374,6 +422,7 @@ impl Reedline {
              standby_edit_modes: Vec::new(),
              completer,
              quick_completions: false,
@@ -1571,7 +1578,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              partial_completions: false,
              persistent_menus: false,
              deferred_menu_completion: None,
-@@ -382,6 +429,7 @@ impl Reedline {
+@@ -382,6 +431,7 @@ impl Reedline {
              visual_selection_cursor_style: None,
              hinter,
              hide_hints: false,
@@ -1579,7 +1586,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              validator,
              use_ansi_coloring: true,
              auto_pairs: None,
-@@ -389,6 +437,10 @@ impl Reedline {
+@@ -389,6 +439,10 @@ impl Reedline {
              cwd: None,
              menus: Vec::new(),
              abbreviations: HashMap::new(),
@@ -1590,7 +1597,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              buffer_editor: None,
              cursor_shapes: None,
              bracketed_paste: BracketedPasteGuard::default(),
-@@ -472,6 +524,7 @@ impl Reedline {
+@@ -472,6 +526,7 @@ impl Reedline {
      #[must_use]
      pub fn with_hinter(mut self, hinter: Box<dyn Hinter>) -> Self {
          self.hinter = Some(hinter);
@@ -1598,7 +1605,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          self
      }
  
-@@ -513,6 +566,22 @@ impl Reedline {
+@@ -513,6 +568,22 @@ impl Reedline {
          self
      }
  
@@ -1621,7 +1628,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Control whether the cursor crosses line boundaries on left/right motions
      /// in a block caret (vi normal/visual mode). When `true` (the default), `l`
      /// at the end of a line moves to the next line's first character and `h` at
-@@ -693,6 +762,18 @@ impl Reedline {
+@@ -693,6 +764,18 @@ impl Reedline {
          self
      }
  
@@ -1640,7 +1647,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// A builder which configures history exclusion for your instance of the Reedline engine
      /// # Example
      /// ```rust,no_run
-@@ -845,6 +926,128 @@ impl Reedline {
+@@ -845,6 +928,128 @@ impl Reedline {
          self
      }
  
@@ -1769,7 +1776,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// A builder that adds the history item id
      #[must_use]
      pub fn with_history_session_id(mut self, session: Option<HistorySessionId>) -> Self {
-@@ -892,6 +1095,18 @@ impl Reedline {
+@@ -892,6 +1097,18 @@ impl Reedline {
          self.edit_mode.edit_mode()
      }
  
@@ -1788,7 +1795,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Output the complete [`History`] chronologically with numbering to the terminal
      pub fn print_history(&mut self) -> Result<()> {
          let history: Vec<_> = self
-@@ -990,16 +1205,48 @@ impl Reedline {
+@@ -990,16 +1207,48 @@ impl Reedline {
      /// Returns a [`std::io::Result`] in which the `Err` type is [`std::io::Result`]
      /// and the `Ok` variant wraps a [`Signal`] which handles user inputs.
      pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
@@ -1844,7 +1851,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      }
  
      /// Returns the current insertion point of the input buffer.
-@@ -1007,6 +1254,11 @@ impl Reedline {
+@@ -1007,6 +1256,11 @@ impl Reedline {
          self.editor.insertion_point()
      }
  
@@ -1856,7 +1863,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Returns the current contents of the input buffer.
      pub fn current_buffer_contents(&self) -> &str {
          self.editor.get_buffer()
-@@ -1017,6 +1269,17 @@ impl Reedline {
+@@ -1017,6 +1271,17 @@ impl Reedline {
          self.editor.get_selection()
      }
  
@@ -1874,7 +1881,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Writes `msg` to the terminal with a following carriage return and newline
      fn print_line(&mut self, msg: &str) -> Result<()> {
          self.painter.paint_line(msg)
-@@ -1045,6 +1308,23 @@ impl Reedline {
+@@ -1045,6 +1310,23 @@ impl Reedline {
              .is_some_and(RepaintSignal::take)
      }
  
@@ -1898,7 +1905,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Whether the input loop must poll with a timeout instead of blocking
      /// indefinitely, so external triggers (break signal, repaint signal,
      /// external printer, idle callback) are noticed while waiting for input.
-@@ -1086,6 +1366,9 @@ impl Reedline {
+@@ -1086,6 +1368,9 @@ impl Reedline {
  
          loop {
              // Call idle callback if set (for processing external events like GUI updates)
@@ -1908,7 +1915,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              if let Some(ref mut callback) = self.idle_callback {
                  callback();
                  // The callback owns stdout while it runs and may have
-@@ -1097,6 +1380,7 @@ impl Reedline {
+@@ -1097,6 +1382,7 @@ impl Reedline {
              if let Some(ref signal) = self.break_signal {
                  if signal.swap(false, std::sync::atomic::Ordering::Relaxed) {
                      let buffer = self.editor.get_buffer().to_string();
@@ -1916,7 +1923,25 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                      self.input_mode = InputMode::Regular;
                      self.last_render_snapshot = None;
                      self.suspended_state = Some(self.painter.state_before_suspension());
-@@ -1154,7 +1438,10 @@ impl Reedline {
+@@ -1132,7 +1418,16 @@ impl Reedline {
+             let completer_pending = status != CompletionStatus::Idle;
+ 
+             if status == CompletionStatus::Ready {
+-                self.settle_completions(prompt)?;
++                let input_pending = self
++                    .deferred_menu_completion
++                    .as_ref()
++                    .is_some_and(|deferred| deferred.host_command.is_some())
++                    && (!self.pending_input.is_empty() || event::poll(Duration::ZERO)?);
++                if !input_pending {
++                    if let EventStatus::Exits(signal) = self.settle_completions(prompt)? {
++                        return Ok(signal);
++                    }
++                }
+             }
+ 
+             // Helper function that returns true if the input is complete and
+@@ -1154,7 +1449,10 @@ impl Reedline {
  
              let mut events: Vec<Event> = vec![];
  
@@ -1928,7 +1953,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  if self.input_needs_polling() || completer_pending {
                      if event::poll(self.poll_interval)? {
                          events.push(crossterm::event::read()?);
-@@ -1166,7 +1453,10 @@ impl Reedline {
+@@ -1166,7 +1464,10 @@ impl Reedline {
  
                  // Receive all events in the queue without blocking. Will stop when
                  // a line of input is completed.
@@ -1940,7 +1965,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                      events.push(crossterm::event::read()?);
                  }
  
-@@ -1175,7 +1465,10 @@ impl Reedline {
+@@ -1175,7 +1476,10 @@ impl Reedline {
                  if events.len() > EVENTS_THRESHOLD
                      || events.iter().any(|e| matches!(e, Event::Resize(_, _)))
                  {
@@ -1952,7 +1977,27 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                          events.push(crossterm::event::read()?);
                      }
                  }
-@@ -1222,7 +1515,10 @@ impl Reedline {
+@@ -1196,11 +1500,11 @@ impl Reedline {
+     ///
+     /// Called when the completer reports [`CompletionStatus::Ready`]. Kept out of the
+     /// input loop so it is reachable from tests, which cannot drive the loop itself.
+-    fn settle_completions(&mut self, prompt: &dyn Prompt) -> Result<()> {
++    fn settle_completions(&mut self, prompt: &dyn Prompt) -> Result<EventStatus> {
+         let Some(menu_index) = self.menus.iter().position(|menu| menu.is_active()) else {
+             // No menu to answer to, so nothing can still be owed.
+             self.deferred_menu_completion = None;
+-            return Ok(());
++            return Ok(EventStatus::Inapplicable);
+         };
+ 
+         // The request that just finished was host code, which may have scrolled the
+@@ -1218,15 +1522,30 @@ impl Reedline {
+             self.history.as_ref(),
+         );
+         let still_provisional = menu.results_are_provisional();
++        let final_empty =
++            !still_provisional && menu.results_can_be_accepted() && menu.get_values().is_empty();
+ 
          let owed = self
              .deferred_menu_completion
              .as_ref()
@@ -1964,7 +2009,44 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  
          // Values were just refreshed above, so the menu must not re-fetch them.
          let accept_lone_value =
-@@ -1256,7 +1552,10 @@ impl Reedline {
+             owed && !still_provisional && self.decide_menu_completion(menu_index, true);
++        let host_command = self
++            .deferred_menu_completion
++            .as_ref()
++            .filter(|_| {
++                owed && final_empty
++                    && self.pending_input.is_empty()
++                    && self.completer.automatic_completion_allowed()
++                    && self.host_completion_allowed()
++            })
++            .and_then(|deferred| deferred.host_command.clone());
+ 
+         // Spent once a final answer had its say, so it cannot act on a later one.
+         // Provisional results decided nothing, so the arm outlives them.
+@@ -1234,6 +1553,12 @@ impl Reedline {
+             self.deferred_menu_completion = None;
+         }
+ 
++        if let Some(command) = host_command {
++            self.deactivate_menus();
++            self.repaint(prompt)?;
++            return self.handle_editor_event(prompt, ReedlineEvent::ExecuteHostCommand(command));
++        }
++
+         if accept_lone_value {
+             // With a menu active this replaces in the buffer and deactivates, rather than
+             // submitting the line.
+@@ -1242,7 +1567,8 @@ impl Reedline {
+ 
+         // One paint for every outcome, since painting the menu and then the accepted or
+         // extended line would flicker on each completion.
+-        self.repaint(prompt)
++        self.repaint(prompt)?;
++        Ok(EventStatus::Handled)
+     }
+ 
+     /// The completion an opening menu applies to the line: a lone suggestion is accepted
+@@ -1256,7 +1582,10 @@ impl Reedline {
      fn decide_menu_completion(&mut self, menu_index: usize, values_updated: bool) -> bool {
          let menu = &mut self.menus[menu_index];
  
@@ -1976,7 +2058,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              if !values_updated {
                  menu.update_values(
                      &mut self.editor,
-@@ -1267,12 +1566,17 @@ impl Reedline {
+@@ -1267,12 +1596,17 @@ impl Reedline {
              // Accepting a lone *stale* value is refused downstream, since its span
              // belongs to another line, so the menu would close over a completion that
              // never happened.
@@ -1996,7 +2078,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              menu.can_partially_complete(
                  values_updated || self.quick_completions,
                  &mut self.editor,
-@@ -1289,6 +1593,9 @@ impl Reedline {
+@@ -1289,6 +1623,9 @@ impl Reedline {
          prompt: &dyn Prompt,
          events: Vec<Event>,
      ) -> Result<ControlFlow<Signal>> {
@@ -2006,7 +2088,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          // Convert `Event` into `ReedlineEvent`. Also, fuse consecutive
          // `ReedlineEvent::EditCommand` into one. Also, if there're multiple
          // `ReedlineEvent::Resize`, only keep the last one.
-@@ -1297,7 +1604,16 @@ impl Reedline {
+@@ -1297,7 +1634,16 @@ impl Reedline {
          let mut resize = None;
          for event in events {
              if let Ok(event) = ReedlineRawEvent::try_from(event) {
@@ -2024,7 +2106,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                      ReedlineEvent::Edit(edit) => edits.extend(edit),
                      ReedlineEvent::Resize(x, y) => resize = Some((x, y)),
                      event => {
-@@ -1369,19 +1685,304 @@ impl Reedline {
+@@ -1369,19 +1715,304 @@ impl Reedline {
          Ok(ControlFlow::Continue(()))
      }
  
@@ -2332,7 +2414,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                          EventStatus::Inapplicable => {
                              // Try again with the next event handler
                          }
-@@ -1406,6 +2007,11 @@ impl Reedline {
+@@ -1406,6 +2037,11 @@ impl Reedline {
              }
              ReedlineEvent::CtrlC => {
                  self.input_mode = InputMode::Regular;
@@ -2344,7 +2426,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  Ok(EventStatus::Exits(Signal::CtrlC))
              }
              ReedlineEvent::ClearScreen => {
-@@ -1429,6 +2035,7 @@ impl Reedline {
+@@ -1429,6 +2065,7 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -2352,7 +2434,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.last_render_snapshot = None;
                  self.suspended_state = Some(self.painter.state_before_suspension());
                  Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
-@@ -1492,6 +2099,10 @@ impl Reedline {
+@@ -1492,6 +2129,10 @@ impl Reedline {
              | ReedlineEvent::MenuPageNext
              | ReedlineEvent::MenuPagePrevious
              | ReedlineEvent::SwitchMode(_) => Ok(EventStatus::Inapplicable),
@@ -2363,10 +2445,32 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          }
      }
  
-@@ -1501,34 +2112,81 @@ impl Reedline {
+@@ -1501,35 +2142,89 @@ impl Reedline {
          event: ReedlineEvent,
      ) -> io::Result<EventStatus> {
          match event {
+-            ReedlineEvent::Menu(name) => {
+-                if self.active_menu().is_none() {
+-                    if let Some(index) = self.menus.iter().position(|menu| menu.name() == name) {
+-                        self.menus[index].menu_event(MenuEvent::Activate(self.quick_completions));
+-                        invalidate_anchor_if_host_completer_runs(
+-                            &self.menus[index],
+-                            &mut self.painter,
+-                        );
+-
+-                        if self.decide_menu_completion(index, false) {
+-                            return self.handle_editor_event(prompt, ReedlineEvent::Enter);
+-                        }
+-
+-                        // A final answer already had its say above, so only a
+-                        // provisional one leaves anything owed. With neither option set
+-                        // nothing queried the completer, so this reads the default
+-                        // `false` and the menu paints as it always has.
+-                        if self.menus[index].results_are_provisional() {
+-                            self.deferred_menu_completion = Some(DeferredMenuCompletion::new(
+-                                &self.menus[index],
+-                                &self.editor,
+-                            ));
 +            ReedlineEvent::LiteralSpace => {
 +                if self.active_menu().is_some() || self.editor.get_selection().is_some() {
 +                    return Ok(EventStatus::Inapplicable);
@@ -2391,32 +2495,30 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
 +                    menu.is_active()
 +                        && menu.get_values().is_empty()
 +                        && !menu.results_are_provisional()
++                        && menu.results_can_be_accepted()
 +                });
-+                if exhausted && self.input_intent() != crate::InputIntent::Literal {
++                let allowed = self.host_completion_allowed();
++                if exhausted && allowed {
 +                    self.deactivate_menus();
 +                    self.handle_editor_event(
 +                        prompt,
 +                        ReedlineEvent::ExecuteHostCommand(host_command),
 +                    )
 +                } else {
++                    if allowed {
++                        if let Some(deferred) = &mut self.deferred_menu_completion {
++                            deferred.host_command = Some(host_command);
+                         }
+-
+-                        return Ok(EventStatus::Handled);
+                     }
 +                    Ok(status)
-+                }
+                 }
 +            }
 +            ReedlineEvent::AcceptHistorySearch | ReedlineEvent::CancelHistorySearch => {
-+                Ok(EventStatus::Inapplicable)
-+            }
-             ReedlineEvent::Menu(name) => {
--                if self.active_menu().is_none() {
--                    if let Some(index) = self.menus.iter().position(|menu| menu.name() == name) {
--                        self.menus[index].menu_event(MenuEvent::Activate(self.quick_completions));
--                        invalidate_anchor_if_host_completer_runs(
--                            &self.menus[index],
--                            &mut self.painter,
--                        );
--
--                        if self.decide_menu_completion(index, false) {
--                            return self.handle_editor_event(prompt, ReedlineEvent::Enter);
--                        }
+                 Ok(EventStatus::Inapplicable)
+             }
++            ReedlineEvent::Menu(name) => {
 +                let Some(index) = self.menus.iter().position(|menu| menu.name() == name) else {
 +                    return Ok(EventStatus::Inapplicable);
 +                };
@@ -2438,23 +2540,11 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
 +                self.completer.completion_requested();
 +                self.menus[index].menu_event(MenuEvent::Activate(self.quick_completions));
 +                invalidate_anchor_if_host_completer_runs(&self.menus[index], &mut self.painter);
- 
--                        // A final answer already had its say above, so only a
--                        // provisional one leaves anything owed. With neither option set
--                        // nothing queried the completer, so this reads the default
--                        // `false` and the menu paints as it always has.
--                        if self.menus[index].results_are_provisional() {
--                            self.deferred_menu_completion = Some(DeferredMenuCompletion::new(
--                                &self.menus[index],
--                                &self.editor,
--                            ));
--                        }
++
 +                if self.decide_menu_completion(index, false) {
 +                    return self.handle_editor_event(prompt, ReedlineEvent::Enter);
 +                }
- 
--                        return Ok(EventStatus::Handled);
--                    }
++
 +                // Only a provisional answer leaves automatic insertion owed.
 +                if self.menus[index].results_are_provisional() {
 +                    self.deferred_menu_completion = Some(DeferredMenuCompletion::new(
@@ -2462,14 +2552,14 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
 +                        &self.editor,
 +                        self.edit_mode.edit_mode(),
 +                    ));
-                 }
--                Ok(EventStatus::Inapplicable)
++                }
 +
 +                Ok(EventStatus::Handled)
-             }
++            }
              ReedlineEvent::MenuAccept => {
                  // Where a menu's claim on a keypress is decided, for the submit
-@@ -1541,16 +2199,32 @@ impl Reedline {
+                 // events that offer it one as much as for a binding that wants
+@@ -1541,16 +2236,32 @@ impl Reedline {
                  // leaves the key to reach the line instead of appearing dead.
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu)
@@ -2505,7 +2595,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  if let Some(menu) = self.menus.iter_mut().find(|menu| menu.is_active()) {
                      // The second route to the lone-value accept, so it carries the same
                      // provisional guard as `decide_menu_completion`: accepting a lone
-@@ -1560,10 +2234,13 @@ impl Reedline {
+@@ -1560,10 +2271,13 @@ impl Reedline {
                      if menu.get_values().len() == 1
                          && menu.can_quick_complete()
                          && !menu.results_are_provisional()
@@ -2520,7 +2610,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                              menu.can_partially_complete(
                                  self.quick_completions,
                                  &mut self.editor,
-@@ -1580,6 +2257,7 @@ impl Reedline {
+@@ -1580,6 +2294,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPrevious => {
@@ -2528,7 +2618,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::PreviousElement);
-@@ -1587,6 +2265,7 @@ impl Reedline {
+@@ -1587,6 +2302,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuUp => {
@@ -2536,7 +2626,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveUp);
-@@ -1594,6 +2273,7 @@ impl Reedline {
+@@ -1594,6 +2310,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuDown => {
@@ -2544,7 +2634,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveDown);
-@@ -1601,6 +2281,7 @@ impl Reedline {
+@@ -1601,6 +2318,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuLeft => {
@@ -2552,7 +2642,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveLeft);
-@@ -1608,6 +2289,7 @@ impl Reedline {
+@@ -1608,6 +2326,7 @@ impl Reedline {
                      })
              }
              ReedlineEvent::MenuRight => {
@@ -2560,7 +2650,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  self.active_menu()
                      .map_or(Ok(EventStatus::Inapplicable), |menu| {
                          menu.menu_event(MenuEvent::MoveRight);
-@@ -1617,6 +2299,7 @@ impl Reedline {
+@@ -1617,6 +2336,7 @@ impl Reedline {
              // These two spell out `active_menu()`, since that borrows all of `self` and
              // the painter has to stay reachable alongside the menu.
              ReedlineEvent::MenuPageNext => {
@@ -2568,7 +2658,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::NextPage);
-@@ -1627,6 +2310,7 @@ impl Reedline {
+@@ -1627,6 +2347,7 @@ impl Reedline {
                  }
              }
              ReedlineEvent::MenuPagePrevious => {
@@ -2576,7 +2666,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  match self.menus.iter_mut().find(|menu| menu.is_active()) {
                      Some(menu) => {
                          menu.menu_event(MenuEvent::PreviousPage);
-@@ -1645,12 +2329,16 @@ impl Reedline {
+@@ -1645,12 +2366,16 @@ impl Reedline {
                  Ok(self.accept_history_hint(hint))
              }
              ReedlineEvent::Esc => {
@@ -2594,7 +2684,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                      self.editor.reset_undo_stack();
                      Ok(EventStatus::Exits(Signal::CtrlD))
                  } else {
-@@ -1675,9 +2363,16 @@ impl Reedline {
+@@ -1675,9 +2400,16 @@ impl Reedline {
                  Ok(EventStatus::Handled)
              }
              ReedlineEvent::Enter => {
@@ -2611,7 +2701,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1697,9 +2392,16 @@ impl Reedline {
+@@ -1697,9 +2429,16 @@ impl Reedline {
                  }
              }
              ReedlineEvent::Submit => {
@@ -2628,7 +2718,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1711,9 +2413,16 @@ impl Reedline {
+@@ -1711,9 +2450,16 @@ impl Reedline {
                  Ok(self.submit_buffer(prompt)?)
              }
              ReedlineEvent::SubmitOrNewline => {
@@ -2645,7 +2735,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  #[cfg(feature = "bashisms")]
                  if let Some(event) = self.parse_bang_command() {
                      return self.handle_editor_event(prompt, event);
-@@ -1738,19 +2447,30 @@ impl Reedline {
+@@ -1738,19 +2484,30 @@ impl Reedline {
                  }
              }
              ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -2678,7 +2768,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  
                  // Check if a space was just inserted and try to expand abbreviations
                  if status == EditCommandStatus::Applied
-@@ -1766,6 +2486,7 @@ impl Reedline {
+@@ -1766,6 +2523,7 @@ impl Reedline {
                      // Dismissing a menu handles the event even when the cursor didn't move.
                      if quick_complete
                          && !self.persistent_menus
@@ -2686,7 +2776,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                          && matches!(
                              commands.first(),
                              Some(EditCommand::Backspace)
-@@ -1773,12 +2494,16 @@ impl Reedline {
+@@ -1773,12 +2531,16 @@ impl Reedline {
                                  | Some(EditCommand::MoveToLineStart { select: false })
                          )
                      {
@@ -2704,7 +2794,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                      if quick_complete {
                          menu.menu_event(MenuEvent::Edit(self.quick_completions));
                          invalidate_anchor_if_host_completer_runs(menu, &mut self.painter);
-@@ -1788,9 +2513,14 @@ impl Reedline {
+@@ -1788,9 +2550,14 @@ impl Reedline {
                              self.history.as_ref(),
                          );
                          if let Some(&EditCommand::Complete) = commands.first() {
@@ -2720,7 +2810,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                                  && menu.can_partially_complete(
                                      self.quick_completions,
                                      &mut self.editor,
-@@ -1803,15 +2533,29 @@ impl Reedline {
+@@ -1803,15 +2570,29 @@ impl Reedline {
                          }
                      }
                      if !self.persistent_menus && self.editor.line_buffer().get_buffer().is_empty() {
@@ -2752,7 +2842,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              ReedlineEvent::Resize(width, height) => {
                  self.last_render_snapshot = None;
                  self.painter.handle_resize(width, height);
-@@ -1837,7 +2581,7 @@ impl Reedline {
+@@ -1837,7 +2618,7 @@ impl Reedline {
                  } else {
                      EditCommand::MoveRight { select: false }
                  };
@@ -2761,7 +2851,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              }
              ReedlineEvent::ToStart | ReedlineEvent::ToEnd => {
                  let initial_cursor = self.editor.line_buffer().cursor();
-@@ -1851,6 +2595,9 @@ impl Reedline {
+@@ -1851,6 +2632,9 @@ impl Reedline {
                  // Compare after settling under the rest policy, including vi's
                  // block caret resting on the last grapheme rather than past it.
                  self.editor.commit_cursor();
@@ -2771,7 +2861,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  Ok(if self.editor.line_buffer().cursor() == initial_cursor {
                      EventStatus::Inapplicable
                  } else {
-@@ -1957,6 +2704,9 @@ impl Reedline {
+@@ -1957,6 +2741,9 @@ impl Reedline {
          }
  
          let after = self.edit_mode.edit_mode();
@@ -2781,12 +2871,19 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          if matches!(status, EventStatus::Handled) && !after.rest_policy().is_block() {
              // Collapse first, while the editor still holds the mode being left
              // and so knows where its caret shows. Adopting the new policy
-@@ -1992,15 +2742,116 @@ impl Reedline {
+@@ -1992,15 +2779,123 @@ impl Reedline {
          self.menus.iter_mut().find(|menu| menu.is_active())
      }
  
 -    fn deactivate_menus(&mut self) {
 -        // Nothing is left to complete into.
++    fn host_completion_allowed(&self) -> bool {
++        self.input_intent() != crate::InputIntent::Literal
++            && self
++                .completer
++                .host_completion_allowed(self.editor.get_buffer(), self.editor.completion_point())
++    }
++
 +    fn open_automatic_menu(&mut self) {
 +        if !self.contextual_input
 +            || self.input_mode != InputMode::Regular
@@ -2900,7 +2997,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          self.history_cursor_on_excluded = false;
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
-@@ -2030,6 +2881,14 @@ impl Reedline {
+@@ -2030,6 +2925,14 @@ impl Reedline {
      }
  
      fn next_history(&mut self) -> io::Result<()> {
@@ -2915,7 +3012,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          if self.input_mode != InputMode::HistoryTraversal {
              self.input_mode = InputMode::HistoryTraversal;
              self.history_cursor = HistoryCursor::new(
-@@ -2064,6 +2923,13 @@ impl Reedline {
+@@ -2064,6 +2967,13 @@ impl Reedline {
          Ok(())
      }
  
@@ -2929,7 +3026,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// Enable the search and navigation through the history from the line buffer prompt
      ///
      /// Enables either prefix search with output in the line buffer or simple traversal
-@@ -2089,11 +2955,21 @@ impl Reedline {
+@@ -2089,11 +2999,21 @@ impl Reedline {
      ///
      /// This mode uses a separate prompt and handles keybindings slightly differently!
      fn enter_history_search(&mut self) {
@@ -2951,7 +3048,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      }
  
      /// Dispatches the applicable [`EditCommand`] actions for editing the history search string.
-@@ -2102,6 +2978,19 @@ impl Reedline {
+@@ -2102,6 +3022,19 @@ impl Reedline {
      fn run_history_commands(&mut self, commands: &[EditCommand]) -> io::Result<()> {
          for command in commands {
              match command {
@@ -2971,7 +3068,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
                  EditCommand::InsertChar(c) => {
                      let navigation = self.history_cursor.get_navigation();
                      if let HistoryNavigationQuery::SubstringSearch(mut substring) = navigation {
-@@ -2174,7 +3063,12 @@ impl Reedline {
+@@ -2174,7 +3107,12 @@ impl Reedline {
  
      /// Executes [`EditCommand`] actions by modifying the internal state appropriately. Does not output itself.
      pub fn run_edit_commands(&mut self, commands: &[EditCommand]) {
@@ -2985,7 +3082,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      }
  
      fn run_edit_commands_with_status(&mut self, commands: &[EditCommand]) -> EditCommandStatus {
-@@ -2202,6 +3096,14 @@ impl Reedline {
+@@ -2202,6 +3140,14 @@ impl Reedline {
          let mut status = EditCommandStatus::Inapplicable;
  
          for command in commands {
@@ -3000,7 +3097,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              if let Some(command) = self.auto_pair_command(command) {
                  if self.editor.run_edit_command(&command) == EditCommandStatus::Applied {
                      status = EditCommandStatus::Applied;
-@@ -2214,6 +3116,15 @@ impl Reedline {
+@@ -2214,6 +3160,15 @@ impl Reedline {
              }
          }
  
@@ -3016,7 +3113,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          status
      }
  
-@@ -2329,6 +3240,13 @@ impl Reedline {
+@@ -2329,6 +3284,13 @@ impl Reedline {
          let text_before = self.editor.get_buffer().to_string();
          let cursor_before = self.editor.insertion_point();
          walk(self)?;
@@ -3030,7 +3127,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          let unmoved = self.editor.get_buffer() == text_before
              && self.editor.insertion_point() == cursor_before;
          Ok(if unmoved {
-@@ -2353,10 +3271,12 @@ impl Reedline {
+@@ -2353,10 +3315,12 @@ impl Reedline {
              return EventStatus::Inapplicable;
          };
          if self.hints_active()
@@ -3043,7 +3140,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              self.editor.prepare_append_at_buffer_end();
              self.run_edit_commands(&[EditCommand::InsertString(hint)]);
              EventStatus::Handled
-@@ -2375,11 +3295,57 @@ impl Reedline {
+@@ -2375,11 +3339,57 @@ impl Reedline {
          }
      }
  
@@ -3101,7 +3198,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          let buffer = self.editor.get_buffer();
          let cursor_position_in_buffer = self.editor.insertion_point();
          if cursor_position_in_buffer == 0 {
-@@ -2421,6 +3387,15 @@ impl Reedline {
+@@ -2421,6 +3431,15 @@ impl Reedline {
              return None;
          }
  
@@ -3117,7 +3214,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          if !self.highlighter.should_expand_abbr(
              buffer,
              word_start,
-@@ -2658,6 +3633,15 @@ impl Reedline {
+@@ -2658,6 +3677,15 @@ impl Reedline {
      /// Overwrites the prompt indicator and highlights the search string
      /// separately from the result buffer.
      fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -3133,7 +3230,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          let use_ansi_coloring = self.effective_ansi_coloring();
          let navigation = self.history_cursor.get_navigation();
  
-@@ -2708,13 +3692,30 @@ impl Reedline {
+@@ -2708,13 +3736,30 @@ impl Reedline {
      ///
      /// Includes the highlighting and hinting calls.
      fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
@@ -3167,7 +3264,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          if let Some((from, to)) = self.editor.get_selection() {
              // With a cursor-cell style configured, the head cell gets it and
              // the selection style covers the rest of the range.
-@@ -2735,6 +3736,7 @@ impl Reedline {
+@@ -2735,6 +3780,7 @@ impl Reedline {
              }
          }
  
@@ -3175,7 +3272,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(
              cursor_position_in_buffer,
              prompt,
-@@ -2742,6 +3744,8 @@ impl Reedline {
+@@ -2742,6 +3788,8 @@ impl Reedline {
              self.painter.semantic_markers(),
          );
  
@@ -3184,7 +3281,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          let hint: String = if self.hints_active() {
              self.hinter.as_mut().map_or_else(String::new, |hinter| {
                  hinter.handle(
-@@ -2804,7 +3808,87 @@ impl Reedline {
+@@ -2804,7 +3852,87 @@ impl Reedline {
              }
          }
  
@@ -3273,7 +3370,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  
          self.painter.repaint_buffer(
              prompt,
-@@ -2819,10 +3903,14 @@ impl Reedline {
+@@ -2819,10 +3947,14 @@ impl Reedline {
              if let Some(layout) = &self.painter.last_layout {
                  let buffer = self.editor.get_buffer();
                  let (raw_before, raw_after) = buffer.split_at(cursor_position_in_buffer);
@@ -3292,7 +3389,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
              }
          } else {
              self.last_render_snapshot = None;
-@@ -2917,10 +4005,15 @@ impl Reedline {
+@@ -2917,10 +4049,15 @@ impl Reedline {
      /// Offer an open menu first refusal on a keypress that would otherwise
      /// submit, and report whether it took it.
      fn menu_took_the_key(&mut self, prompt: &dyn Prompt) -> io::Result<bool> {
@@ -3310,7 +3407,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      }
  
      /// Close an active menu when a typed character ends the word it was opened
-@@ -2945,7 +4038,7 @@ impl Reedline {
+@@ -2945,7 +4082,7 @@ impl Reedline {
              _ => false,
          });
          if word_ended {
@@ -3319,7 +3416,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          }
      }
  
-@@ -2953,7 +4046,9 @@ impl Reedline {
+@@ -2953,7 +4090,9 @@ impl Reedline {
          // A menu that let the submit through (no suggestions to accept) must
          // not stay active into the next line's editing.
          self.deactivate_menus();
@@ -3329,7 +3426,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          self.hide_hints = true;
          // Additional repaint to show the content without hints etc.
          if let Some(transient_prompt) = self.transient_prompt.take() {
-@@ -3004,6 +4099,17 @@ impl Reedline {
+@@ -3004,6 +4143,17 @@ impl Reedline {
      }
  }
  
@@ -3347,7 +3444,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -3795,8 +4901,11 @@ mod tests {
+@@ -3795,8 +4945,11 @@ mod tests {
          let mut rl = auto_pair_engine(&[('(', ')')]);
          rl.enter_history_search();
  
@@ -3361,7 +3458,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
  
          assert_eq!(rl.input_mode, InputMode::HistorySearch);
          assert_eq!(rl.editor.get_buffer(), "");
-@@ -4310,6 +5419,8 @@ mod tests {
+@@ -4310,6 +5463,8 @@ mod tests {
              large_buffer_extra_rows_after_prompt: None,
              large_buffer_offset: None,
              right_prompt: None,
@@ -3370,7 +3467,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
          });
  
          let result = reedline.handle_event(
-@@ -5437,6 +6548,22 @@ mod tests {
+@@ -5437,6 +6592,22 @@ mod tests {
          assert!(!reedline.take_repaint_request());
      }
  
@@ -3393,10 +3490,132 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      #[test]
      fn repaint_signal_switches_input_loop_to_polling() {
          let mut reedline = Reedline::create();
-@@ -6176,6 +7303,470 @@ mod tests {
+@@ -6144,6 +7315,22 @@ mod tests {
+         buffer: &str,
+         quick: bool,
+         partial: bool,
++    ) -> (Reedline, EventStatus) {
++        activate_menu_request(
++            completer,
++            buffer,
++            quick,
++            partial,
++            ReedlineEvent::Menu("completion_menu".into()),
++        )
++    }
++
++    fn activate_menu_request(
++        completer: Box<dyn Completer + Send>,
++        buffer: &str,
++        quick: bool,
++        partial: bool,
++        event: ReedlineEvent,
+     ) -> (Reedline, EventStatus) {
+         let completion_menu = ReedlineMenu::EngineCompleter(Box::new(
+             ColumnarMenu::default().with_name("completion_menu"),
+@@ -6161,10 +7348,7 @@ mod tests {
+ 
+         reedline.run_edit_commands(&[EditCommand::InsertString(buffer.to_string())]);
+         let status = reedline
+-            .handle_event(
+-                &DefaultPrompt::default(),
+-                ReedlineEvent::Menu(String::from("completion_menu")),
+-            )
++            .handle_event(&DefaultPrompt::default(), event)
+             .unwrap();
+ 
+         (reedline, status)
+@@ -6176,6 +7360,557 @@ mod tests {
              .unwrap();
      }
  
++    fn deferred_host_request(values: &[&str]) -> Reedline {
++        let (engine, status) = activate_menu_request(
++            Box::new(DeferredCompleter::pending(values)),
++            "request",
++            true,
++            false,
++            ReedlineEvent::CompleteOrHostCommand {
++                menu: "completion_menu".into(),
++                host_command: "assist".into(),
++            },
++        );
++        assert!(matches!(status, EventStatus::Handled));
++        engine
++    }
++
++    #[test]
++    fn final_empty_async_completion_hands_off_once_without_submitting() {
++        let mut engine = deferred_host_request(&[]);
++        assert!(matches!(
++            engine.settle_completions(&DefaultPrompt::default()).unwrap(),
++            EventStatus::Exits(Signal::HostCommand(command)) if command == "assist"
++        ));
++        assert_eq!(engine.current_buffer_contents(), "request");
++        assert!(!menu_is_active(&engine));
++        assert!(matches!(
++            engine
++                .settle_completions(&DefaultPrompt::default())
++                .unwrap(),
++            EventStatus::Inapplicable
++        ));
++    }
++
++    #[test]
++    fn late_host_fallback_does_not_replace_valid_completion_or_user_changes() {
++        let mut engine = deferred_host_request(&["requested"]);
++        settle(&mut engine);
++        assert_eq!(engine.current_buffer_contents(), "requested");
++        assert!(engine.suspended_state.is_none());
++        for edit in [
++            EditCommand::InsertChar('x'),
++            EditCommand::MoveLeft { select: false },
++            EditCommand::MoveLeft { select: true },
++        ] {
++            let mut engine = deferred_host_request(&[]);
++            send_edit(&mut engine, edit);
++            assert!(!matches!(
++                engine
++                    .settle_completions(&DefaultPrompt::default())
++                    .unwrap(),
++                EventStatus::Exits(_)
++            ));
++        }
++    }
++
++    #[test]
++    fn literal_cancelled_and_buffered_input_revoke_delayed_host_fallback() {
++        let mut engine = deferred_host_request(&[]);
++        engine.editor.line_buffer_mut().abbreviations.intent = crate::InputIntent::Literal;
++        assert!(!matches!(
++            engine
++                .settle_completions(&DefaultPrompt::default())
++                .unwrap(),
++            EventStatus::Exits(_)
++        ));
++        let mut engine = deferred_host_request(&[]);
++        engine
++            .handle_event(&DefaultPrompt::default(), ReedlineEvent::Esc)
++            .unwrap();
++        assert!(matches!(
++            engine
++                .settle_completions(&DefaultPrompt::default())
++                .unwrap(),
++            EventStatus::Inapplicable
++        ));
++        let mut engine = deferred_host_request(&[]);
++        engine.pending_input.push_back(Event::Key(KeyEvent::new(
++            KeyCode::Enter,
++            KeyModifiers::NONE,
++        )));
++        assert!(!matches!(
++            engine
++                .settle_completions(&DefaultPrompt::default())
++                .unwrap(),
++            EventStatus::Exits(_)
++        ));
++    }
++
 +    struct AutomaticMenuCompleter(Arc<std::sync::atomic::AtomicUsize>);
 +
 +    impl Completer for AutomaticMenuCompleter {
@@ -3864,7 +4083,7 @@ index eb82cfb4e1ed49eed9e35afc2d16a2dd875a1522..eb91a341cd25e763e03a44a52cf50099
      /// The regression: a lone suggestion that arrives after the menu opened must still be
      /// accepted, exactly as a synchronous completer's would have been.
      #[test]
-@@ -6467,6 +8058,120 @@ mod tests {
+@@ -6467,6 +8202,120 @@ mod tests {
          );
      }
  
@@ -7066,7 +7285,7 @@ index 2cb3662efdf8a8a764d0213a664db8120469e339..c94e84a4a07587ea60b91a66cc6de013
  
  mod hinter;
 diff --git a/src/menu/columnar_menu.rs b/src/menu/columnar_menu.rs
-index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd27d159738 100644
+index bdff005f82108888f71623eb082eb37632fc6431..f7c1a50e5f96d2a29d3cd9cf45d64664f3f202c0 100644
 --- a/src/menu/columnar_menu.rs
 +++ b/src/menu/columnar_menu.rs
 @@ -10,6 +10,9 @@ use crate::{
@@ -7088,7 +7307,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      /// Working column details keep changing based on the collected values
      working_details: ColumnDetails,
      /// Suggestions currently displayed and their derived display metrics
-@@ -87,6 +92,14 @@ pub struct ColumnarMenu {
+@@ -87,6 +92,15 @@ pub struct ColumnarMenu {
      event: Option<MenuEvent>,
      /// String collected after the menu is activated
      input: Option<String>,
@@ -7100,10 +7319,11 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
 +    input_version: Option<(u64, usize)>,
 +    preserve_case: bool,
 +    style_provider: Option<Box<dyn Fn() -> super::MenuTextStyle + Send>>,
++    empty_message: String,
  }
  
  impl Default for ColumnarMenu {
-@@ -96,6 +109,8 @@ impl Default for ColumnarMenu {
+@@ -96,6 +110,8 @@ impl Default for ColumnarMenu {
              active: false,
              default_details: DefaultColumnDetails::default(),
              min_rows: 3,
@@ -7112,7 +7332,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
              working_details: ColumnDetails::default(),
              completions: CompletionDisplay::default(),
              phase: CompletionPhase::Unasked,
-@@ -104,6 +119,12 @@ impl Default for ColumnarMenu {
+@@ -104,6 +120,13 @@ impl Default for ColumnarMenu {
              skip_rows: 0,
              event: None,
              input: None,
@@ -7122,10 +7342,11 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
 +            input_version: None,
 +            preserve_case: false,
 +            style_provider: None,
++            empty_message: "NO RECORDS FOUND".into(),
          }
      }
  }
-@@ -117,6 +138,33 @@ impl MenuBuilder for ColumnarMenu {
+@@ -117,6 +140,40 @@ impl MenuBuilder for ColumnarMenu {
  
  // Menu specific configuration functions
  impl ColumnarMenu {
@@ -7156,10 +7377,17 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
 +        self
 +    }
 +
++    /// Replace the empty-result text; an empty string reserves no result rows.
++    #[must_use]
++    pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
++        self.empty_message = message.into();
++        self
++    }
++
      /// Menu builder with new columns value
      #[must_use]
      pub fn with_columns(mut self, columns: u16) -> Self {
-@@ -148,6 +196,92 @@ impl ColumnarMenu {
+@@ -148,6 +205,92 @@ impl ColumnarMenu {
  
  // Menu functionality
  impl ColumnarMenu {
@@ -7252,7 +7480,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      /// Move menu cursor to the next element
      fn move_next(&mut self) {
          let new_index = self.index() + 1;
-@@ -308,9 +442,12 @@ impl ColumnarMenu {
+@@ -308,9 +451,12 @@ impl ColumnarMenu {
      /// The *layout* answer, so it may be 0 while a completion is still in
      /// flight; grid arithmetic asks [`grid_rows`](Self::grid_rows) instead.
      fn get_rows(&self) -> u16 {
@@ -7263,12 +7491,20 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
 +            if self.message.is_some() || self.message_override.is_some() {
 +                self.message_rows()
 +            } else {
-+                u16::from(!self.phase.awaiting_results())
++                u16::from(!self.phase.awaiting_results() && !self.empty_message.is_empty())
 +            }
          } else {
              self.grid_rows().get()
          }
-@@ -352,7 +489,13 @@ impl ColumnarMenu {
+@@ -348,11 +494,20 @@ impl ColumnarMenu {
+     }
+ 
+     fn no_records_msg(&self, use_ansi_coloring: bool) -> String {
+-        let msg = "NO RECORDS FOUND";
++        let msg = &self.empty_message;
++        if msg.is_empty() {
++            return String::new();
++        }
          if use_ansi_coloring {
              format!(
                  "{}{}{}",
@@ -7283,7 +7519,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
                  msg,
                  RESET
              )
-@@ -405,37 +548,24 @@ impl ColumnarMenu {
+@@ -405,37 +560,24 @@ impl ColumnarMenu {
  
      /// Handles plain-text formatting.
      fn format_plain(&self, suggestion: &Suggestion, index: usize) -> String {
@@ -7334,7 +7570,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
              // Modifies in-place. Prevents unicode edge cases as well.
              formatted_line.make_ascii_uppercase();
          }
-@@ -445,11 +575,12 @@ impl ColumnarMenu {
+@@ -445,11 +587,12 @@ impl ColumnarMenu {
  
      /// Handles ANSI-colored formatting.
      fn format_ansi(&self, suggestion: &Suggestion, index: usize) -> String {
@@ -7349,7 +7585,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
  
          // TODO(ysthakur): let the user strip quotes, rather than doing it here
          // Natively trim standard quote characters using a character array match.
-@@ -464,10 +595,18 @@ impl ColumnarMenu {
+@@ -464,10 +607,18 @@ impl ColumnarMenu {
          let (left_text_size, description_size) = self.column_split(terminal_width);
  
          // Resolve ANSI styles based on selection state.
@@ -7372,7 +7608,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
          let match_style = if is_selected {
              &color_settings.selected_match_style
          } else {
-@@ -535,9 +674,19 @@ impl ColumnarMenu {
+@@ -535,9 +686,19 @@ impl ColumnarMenu {
              MenuEvent::Activate(updated) | MenuEvent::Edit(updated) => {
                  self.reload(updated, editor, completer)
              }
@@ -7393,7 +7629,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
              MenuEvent::NextElement => self.move_next(),
              MenuEvent::PreviousElement => self.move_previous(),
              MenuEvent::MoveUp => self.move_up(),
-@@ -553,7 +702,32 @@ impl ColumnarMenu {
+@@ -553,7 +714,32 @@ impl ColumnarMenu {
      /// Recompute the completion box geometry from the current suggestions,
      /// selection, and terminal size. Runs on every repaint.
      pub fn recompute_layout(&mut self, painter: &Painter) {
@@ -7427,7 +7663,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
  
          // If there is at least one suggestion that contains a description, then the layout
          // is changed to one column to fit the description
-@@ -591,8 +765,48 @@ impl ColumnarMenu {
+@@ -591,8 +777,48 @@ impl ColumnarMenu {
                  possible_columns.min(self.default_details.columns).max(1);
          }
  
@@ -7478,7 +7714,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      }
  }
  
-@@ -627,7 +841,10 @@ impl Menu for ColumnarMenu {
+@@ -627,7 +853,10 @@ impl Menu for ColumnarMenu {
          }
  
          // Stale results can't splice wrong span
@@ -7490,7 +7726,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
              // Recalculate spans after replacement
              self.update_values(editor, completer);
  
-@@ -649,12 +866,23 @@ impl Menu for ColumnarMenu {
+@@ -649,12 +878,23 @@ impl Menu for ColumnarMenu {
          // Reset completions on activation
          self.completions = CompletionDisplay::default();
          self.phase.on_activate();
@@ -7515,7 +7751,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      }
  
      /// Updates menu values
-@@ -667,10 +895,25 @@ impl Menu for ColumnarMenu {
+@@ -667,10 +907,25 @@ impl Menu for ColumnarMenu {
          let (input, pos) = resolve_completer_input(editor, &mut self.input, &self.settings);
  
          let (result, base_ranges) = completer.complete_with_base_ranges(&input, pos);
@@ -7545,7 +7781,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
          }
      }
  
-@@ -691,13 +934,29 @@ impl Menu for ColumnarMenu {
+@@ -691,13 +946,29 @@ impl Menu for ColumnarMenu {
  
      /// Replace buffer at span via completion display
      fn replace_in_buffer(&self, editor: &mut Editor) {
@@ -7578,7 +7814,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      }
  
      /// Gets values from filler that will be displayed in the menu
-@@ -709,17 +968,33 @@ impl Menu for ColumnarMenu {
+@@ -709,17 +980,33 @@ impl Menu for ColumnarMenu {
          self.phase.provisional()
      }
  
@@ -7614,7 +7850,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
                  // A background completion is still running; draw nothing rather
                  // than flashing "NO RECORDS FOUND" before the results land.
                  String::new()
-@@ -727,10 +1002,19 @@ impl Menu for ColumnarMenu {
+@@ -727,10 +1014,19 @@ impl Menu for ColumnarMenu {
                  self.no_records_msg(use_ansi_coloring)
              }
          } else {
@@ -7635,7 +7871,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
                  TraversalDirection::Vertical => {
                      // `grid_rows`, since `step_by(0)` panics: the type proves
                      // what the enclosing non-empty branch implies.
-@@ -786,11 +1070,43 @@ impl Menu for ColumnarMenu {
+@@ -786,11 +1082,43 @@ impl Menu for ColumnarMenu {
                          })
                          .collect()
                  }
@@ -7679,7 +7915,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
  #[cfg(test)]
  mod tests {
      use crate::painting::W;
-@@ -799,6 +1115,99 @@ mod tests {
+@@ -799,6 +1127,99 @@ mod tests {
  
      use super::*;
  
@@ -7779,7 +8015,7 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      macro_rules! partial_completion_tests {
          (name: $test_group_name:ident, completions: $completions:expr, test_cases: $($name:ident: $value:expr,)*) => {
              mod $test_group_name {
-@@ -974,6 +1383,252 @@ mod tests {
+@@ -974,6 +1395,252 @@ mod tests {
          );
      }
  
@@ -8032,7 +8268,28 @@ index bdff005f82108888f71623eb082eb37632fc6431..d3bd48d64c6274cf53e168b2dbabefd2
      #[test]
      fn test_menu_replace_backtick() {
          // https://github.com/nushell/nushell/issues/7885
-@@ -1340,6 +1995,20 @@ mod tests {
+@@ -1124,6 +1791,20 @@ mod tests {
+         assert!(menu.menu_string(10, false).is_empty());
+     }
+ 
++    #[test]
++    fn host_empty_messages_can_be_localized_or_hidden_without_changing_acceptance() {
++        let mut editor = Editor::default();
++        let mut empty = FakeCompleter::new(&[]);
++        for message in ["No completions", ""] {
++            let mut menu = ColumnarMenu::default().with_empty_message(message);
++            setup_menu(&mut menu, &mut editor, &mut empty, (80, 24));
++            assert_eq!(menu.menu_string(10, false), message);
++            assert_eq!(menu.menu_required_lines(80), u16::from(!message.is_empty()));
++            assert!(menu.get_values().is_empty());
++            assert!(!menu.results_are_provisional());
++        }
++    }
++
+     /// Completer with fixed value and span
+     struct SpanCompleter {
+         value: String,
+@@ -1340,6 +2021,20 @@ mod tests {
          );
      }
  

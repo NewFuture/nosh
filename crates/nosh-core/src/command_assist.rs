@@ -345,6 +345,11 @@ pub(crate) fn run(
         max_new_tokens: 512,
     })?;
     let result = run_session(engine, sid, request, cfg, cancel, messages);
+    let result = if cancel.is_cancelled() {
+        Err(AssistError::Cancelled)
+    } else {
+        result
+    };
     let result = if deliver(&result) {
         result
     } else {

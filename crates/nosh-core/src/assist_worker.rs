@@ -6,15 +6,94 @@ use std::thread::JoinHandle;
 use nosh_engine::CancelHandle;
 use nosh_shell::{AssistDisplay, Assistance};
 
-use crate::command_assist::{self, AssistError, AssistOutcome, AssistRequest, AssistResult};
-use crate::handler::{EngineLoader, LoadMode};
+use crate::command_assist::{self, AssistError, AssistRequest, AssistResult};
+use crate::handler::{EngineLoadError, EngineLoader, LoadMode, ModelAvailability};
 use crate::{Agent, AgentConfig, Environment, ToolSet};
 
 pub(crate) struct EngineState {
     pub theme: nosh_shell::theme::ThemeHandle,
     pub loader: EngineLoader,
     pub agent: Option<Agent>,
-    pub description: Option<String>,
+    pub availability: Arc<Mutex<ModelAvailability>>,
+}
+
+impl EngineState {
+    pub fn load(
+        &mut self,
+        mode: LoadMode,
+        config: &AgentConfig,
+        environment: impl FnOnce() -> Environment,
+    ) -> Result<(), EngineLoadError> {
+        if mode == LoadMode::Background {
+            let availability = self
+                .availability
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(error) = availability.loading_error() {
+                return Err(error);
+            }
+        }
+        let loaded = match (self.loader)(mode) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                *self
+                    .availability
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = match &error {
+                    EngineLoadError::NotReady(reason) => {
+                        ModelAvailability::NotReady(reason.clone())
+                    }
+                    EngineLoadError::Failed(reason) => ModelAvailability::Failed(reason.clone()),
+                    EngineLoadError::Cancelled(_) => ModelAvailability::NotLoaded,
+                };
+                return Err(error);
+            }
+        };
+        self.agent = Some(
+            Agent::new(loaded.engine, config.clone(), environment(), ToolSet::Full)
+                .with_user_input(Box::new(
+                    crate::user_input::TerminalUserInput.with_theme(self.theme.clone()),
+                )),
+        );
+        *self
+            .availability
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            ModelAvailability::Ready(loaded.description);
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WorkerError {
+    #[error(transparent)]
+    Load(#[from] EngineLoadError),
+    #[error(transparent)]
+    Assist(#[from] AssistError),
+}
+
+impl WorkerError {
+    fn presentation(&self) -> Option<Assistance> {
+        let reason = match self {
+            Self::Assist(error) => return assist_failure(error),
+            Self::Load(EngineLoadError::Cancelled(_)) => return None,
+            Self::Load(EngineLoadError::NotReady(reason) | EngineLoadError::Failed(reason)) => {
+                reason
+            }
+        };
+        Some(Assistance::Failure(format!("AI: {reason}")))
+    }
+}
+
+pub(crate) fn assist_failure(error: &AssistError) -> Option<Assistance> {
+    if matches!(error, AssistError::Cancelled) {
+        return None;
+    }
+    let reason = match error {
+        AssistError::Protocol(reason) => reason.clone(),
+        error => error.to_string(),
+    };
+    Some(Assistance::Failure(format!("AI: {reason}")))
 }
 
 struct Job {
@@ -58,11 +137,7 @@ impl Worker {
         let flag = cancel.clone();
         self.display
             .on_cancel(version, Arc::new(move || flag.cancel()));
-        self.display.pending(
-            version,
-            request.command.as_ref().expect("completion request").id,
-            request.intent.name().into(),
-        );
+        self.display.pending(version);
         let mut mailbox = self.mailbox.0.lock().unwrap_or_else(|e| e.into_inner());
         mailbox.job = Some(Job {
             request,
@@ -75,6 +150,10 @@ impl Worker {
 
     pub fn context_usage(&self) -> Option<(usize, usize)> {
         self.context
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
     pub fn reclaim(mut self) -> Result<EngineState, String> {
@@ -123,11 +202,7 @@ fn serve(
             queued.job.take().expect("queued assistance")
         };
         if let Err(error) = run_job(&mut state, &job, &display) {
-            let result = match error {
-                AssistError::Cancelled => None,
-                error => Some(Assistance::Message(format!("nosh: {error}"))),
-            };
-            display.publish(job.version, result);
+            display.publish(job.version, error.presentation());
         }
     }
 
@@ -135,27 +210,17 @@ fn serve(
         state: &mut EngineState,
         job: &Job,
         display: &AssistDisplay,
-    ) -> Result<AssistOutcome, AssistError> {
+    ) -> Result<(), WorkerError> {
         if job.cancel.is_cancelled() {
-            return Err(AssistError::Cancelled);
+            return Err(AssistError::Cancelled.into());
         }
         if state.agent.is_none() {
-            let loaded = (state.loader)(LoadMode::Background).map_err(AssistError::Protocol)?;
-            state.description = Some(loaded.description);
-            state.agent = Some(
-                Agent::new(
-                    loaded.engine,
-                    job.cfg.clone(),
-                    Environment::from_snapshot(&job.request.commands, &job.request.context),
-                    ToolSet::Full,
-                )
-                .with_user_input(Box::new(
-                    crate::user_input::TerminalUserInput.with_theme(state.theme.clone()),
-                )),
-            );
+            state.load(LoadMode::Background, &job.cfg, || {
+                Environment::from_snapshot(&job.request.commands, &job.request.context)
+            })?;
         }
         if job.cancel.is_cancelled() {
-            return Err(AssistError::Cancelled);
+            return Err(AssistError::Cancelled.into());
         }
         let agent = state.agent.as_mut().expect("loaded agent");
         let engine_cancel = agent.engine_mut().cancel_handle();
@@ -175,19 +240,21 @@ fn serve(
             &job.cfg,
             &job.cancel,
             |result| {
-                let presentation = result
-                    .as_ref()
-                    .ok()
-                    .and_then(|outcome| match &outcome.result {
+                let presentation = match result {
+                    Ok(outcome) => match &outcome.result {
                         AssistResult::Command(program) => Some(Assistance::Command {
                             command_id,
                             intent: job.request.intent.name().into(),
                             program: program.clone(),
                         }),
                         AssistResult::NoSuggestion => None,
-                    });
+                    },
+                    Err(error) => assist_failure(error),
+                };
                 display.publish(job.version, presentation)
             },
         )
+        .map(|_| ())
+        .map_err(WorkerError::Assist)
     }
 }

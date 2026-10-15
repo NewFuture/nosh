@@ -416,7 +416,7 @@ class ProductionProxyTests(unittest.TestCase):
         return root, home, trace, env, argv
 
     def test_typing_prefix_opens_local_completion_before_submission(self):
-        names = {"auto", "clear", "ctx", "fix", "help", "mode", "status", "think"}
+        names = {"assist", "clear", "ctx", "fix", "help", "mode", "status", "think"}
         for number, mode in enumerate(("emacs", "vi")):
             with self.subTest(mode=mode), ScriptedWorker(
                     self.socket, [{"text": "PREFIX_TASK_DONE"}]) as server:
@@ -527,6 +527,33 @@ class ProductionProxyTests(unittest.TestCase):
                 finally:
                     child.close()
             self.socket.unlink()
+
+    def test_one_tab_hands_off_a_final_empty_completion_without_execution(self):
+        program = "printf 'TAB_ASSIST_ACCEPTED\\n'"
+        with ScriptedWorker(self.socket, [{"text": program}]) as server:
+            root, _, _, env, argv = self.case(0, 0)
+            child = driver.Child(
+                argv, root, dict(env, PATH="/usr/bin:/bin", PS1=driver.PROMPT), True)
+            deadline = child.start + 20
+            try:
+                child.until(child.screen.at_prompt, deadline, "initial prompt")
+                child.send("查看当前目录\t".encode())
+                child.until(
+                    lambda: driver.prompt_matches(child.screen.line(), program),
+                    deadline, "one-Tab suggestion adopted")
+                self.assertNotIn("NO RECORDS FOUND", child.result.transcript)
+                self.assertNotIn("\nTAB_ASSIST_ACCEPTED\n", driver.plain(child.result.transcript))
+                specs = [request["spec"] for request in server.requests if request["op"] == "open"]
+                self.assertEqual([spec["label"] for spec in specs], ["command_assist.generate.foreground"])
+                self.assertFalse(any(
+                    call.get("name") == "exec"
+                    for request in server.requests if request["op"] == "open"
+                    for call in request["spec"]["tools"]))
+                child.send(b"\x15exit 0\r")
+                child.until(lambda: child.result.exit_code is not None, deadline, "shell exit")
+                self.assertEqual(child.result.exit_code, 0)
+            finally:
+                child.close()
 
     def test_fresh_shell_home_cwd_environment_approvals_and_seed(self):
         commands = [

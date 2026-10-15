@@ -97,7 +97,11 @@ fn inline_prefix_configuration_reaches_interactive_commands_without_a_model() {
             ("invalid arguments; usage: ?mode", b"?mode\r"),
             ("Confirm", b"?think on\r"),
             ("think: on", b"?status\r"),
-            ("not loaded (loads on first use)", b"?out invalid\r"),
+            ("not loaded (loads on first use)", b"?assist off\r"),
+            ("assist: off", b"?status\r"),
+            ("assist: off", b"?assist on\r"),
+            ("assist: on", b"?auto off\r"),
+            ("unknown command ?auto", b"?out invalid\r"),
             ("unknown command ?out", b"?unknown\r"),
             (
                 "unknown command ?unknown",
@@ -107,11 +111,42 @@ fn inline_prefix_configuration_reaches_interactive_commands_without_a_model() {
         ],
     );
     assert!(
-        output.contains("?help") && output.contains("?fix"),
+        output.contains("?help") && output.contains("?fix") && output.contains("?assist"),
         "{output}"
     );
     assert!(
         !output.contains("not installed") && !output.contains("Downloading"),
+        "{output}"
+    );
+}
+
+#[test]
+fn foreground_loading_failure_preserves_the_draft_without_a_no_suggestion_fallback() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[shell]\ncapture_output = 'off'\ninput_assist = false\n\
+         status_bar = false\ncommand_assist = false\ncompletion = false\n",
+    )
+    .unwrap();
+    let mut launch = command(home.path());
+    launch
+        .env("PS1", "load-result> ")
+        .env_remove("NOSH_DISABLE_AI")
+        .args(["--offline", "--no-download", "--norc", "-i", "--model-path"])
+        .arg(home.path().join("missing.gguf"));
+    let output = interactive(
+        launch,
+        &[
+            ("load-result> ", b"describe a task\x1bOQ"),
+            ("does not exist", b"\x15#status\r"),
+            ("model: load failed:", b"exit 0\r"),
+        ],
+    );
+    assert!(output.contains("describe a task"), "{output}");
+    assert!(!output.contains("no suggestion"), "{output}");
+    assert!(
+        !output.contains("not loaded (loads on first use)"),
         "{output}"
     );
 }

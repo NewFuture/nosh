@@ -34,8 +34,7 @@ fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
     let command = sh.recent_commands().last().unwrap().clone();
     let display = ai.assistance().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while matches!(display.result(), None | Some(Assistance::Pending { .. }))
-        && Instant::now() < deadline
+    while matches!(display.result(), None | Some(Assistance::Pending)) && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -111,8 +110,7 @@ fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
     let command = sh.recent_commands().last().unwrap().clone();
     let display = ai.assistance().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while matches!(display.result(), None | Some(Assistance::Pending { .. }))
-        && Instant::now() < deadline
+    while matches!(display.result(), None | Some(Assistance::Pending)) && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -122,7 +120,7 @@ fn manual_fix_uses_agent_separately_from_automatic_fix_suggestions() {
     );
     assert!(!directory.join("suggested").exists());
 
-    pipeline.process(&mut sh, &mut ai, &mut Ui, "#auto off");
+    pipeline.process(&mut sh, &mut ai, &mut Ui, "#assist off");
     let additional = "REGION should be eu-west-1; do not change files.";
     for context in ["", additional, " \t"] {
         assert_eq!(
@@ -249,7 +247,7 @@ fn completion_assistance_is_latest_only_and_reuses_the_agent_engine() {
     ai.after_command(&sh, current.clone(), None);
     while matches!(
         ai.assistance().unwrap().result(),
-        None | Some(Assistance::Pending { .. })
+        None | Some(Assistance::Pending)
     ) && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
@@ -322,8 +320,8 @@ fn generate_and_suggest_use_direct_final_without_target_execution() {
         Box::new(Scripted::new([])),
     );
     assert_eq!(
-        ai.suggest(&mut sh, "create suggested").as_deref(),
-        Some(response)
+        ai.suggest(&mut sh, "create suggested"),
+        nosh_shell::SuggestionOutcome::Command(response.into())
     );
     assert!(!dir.join("suggested").exists());
     assert!(!dir.join("substitution-suggested").exists());

@@ -37,8 +37,8 @@ impl AiHandler for RecordingAi {
     fn command(&mut self, _: &mut EmbeddedShell, _: nosh_shell::ManagementCommand) -> AiOutcome {
         AiOutcome::default()
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        None
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
+        nosh_shell::SuggestionOutcome::NoSuggestion
     }
     fn badge(&self) -> Badge {
         Badge::default()

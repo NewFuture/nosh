@@ -746,22 +746,17 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
             } else if let Some((intent, program)) = candidate {
                 state(
                     &mut fields,
-                    &format!("{intent}: {program}"),
+                    &format!("{}: {program}", crate::assist_display::intent_label(intent)),
                     tr!("有建议", "Advice"),
                     Tone::Advice,
                 );
-            } else if let Some(Assistance::Pending { command_id, intent }) =
-                context.assistance.filter(|_| blank)
-                && context.latest_command == Some(*command_id)
+            } else if let Some(Assistance::Failure(message)) = context.assistance.filter(|_| blank)
             {
                 state(
                     &mut fields,
-                    &format!(
-                        "AI {intent}: {}",
-                        tr!("生成建议中", "generating suggestion")
-                    ),
-                    &format!("AI {intent}"),
-                    Tone::Pending,
+                    message,
+                    &style::clip_line(&plain(message), 28, 0, "..."),
+                    Tone::Error,
                 );
             } else if let Some(Assistance::Message(message)) = context.assistance.filter(|_| blank)
             {
@@ -863,12 +858,14 @@ pub(crate) fn compose(context: Context<'_>) -> Layout {
         fields.push(Field::new(3, &edit_mode, &edit_mode, &edit_mode, 10, false));
     }
     if !context.approval.is_empty() {
-        let compact = context
-            .approval
-            .strip_prefix("Approval: ")
-            .or_else(|| context.approval.strip_prefix("审批: "))
-            .unwrap_or(context.approval);
-        fields.push(Field::new(3, compact, compact, compact, 20, false));
+        fields.push(Field::new(
+            3,
+            context.approval,
+            context.approval,
+            context.approval,
+            20,
+            false,
+        ));
     }
     if context.external_environment.is_none()
         && let Some((exit, duration)) = context.last_result
@@ -1502,7 +1499,7 @@ mod tests {
         let text = style::strip_ansi(&text);
         assert_eq!(style::width(&text), 179);
         assert!(!text.contains("READY"));
-        assert!(text.ends_with("Tab complete  Auto"));
+        assert!(text.ends_with("Tab complete  Approval: Auto"));
     }
 
     #[test]
@@ -1566,23 +1563,17 @@ mod tests {
     }
 
     #[test]
-    fn pending_ai_state_requires_a_matching_command_and_never_offers_acceptance() {
+    fn pending_ai_state_is_quiet_and_never_offers_acceptance() {
         let keys = bindings();
-        let pending = Assistance::Pending {
-            command_id: 4,
-            intent: "Next".into(),
-        };
-        for (buffer, latest, shown) in [
-            ("", Some(4), true),
-            ("", Some(5), false),
-            ("echo", Some(4), false),
-        ] {
+        let pending = Assistance::Pending;
+        for (buffer, latest) in [("", Some(4)), ("", Some(5)), ("echo", Some(4))] {
             let editor = editor(buffer);
             let mut data = context(&editor, &keys);
             data.assistance = Some(&pending);
             data.latest_command = latest;
             let text = compose(data).text;
-            assert_eq!(text.contains("generating suggestion"), shown, "{text}");
+            assert!(!text.contains("generating suggestion"), "{text}");
+            assert!(!text.contains("AI Next"), "{text}");
             assert!(!text.contains("F2"), "{text}");
         }
     }
@@ -1764,8 +1755,7 @@ mod tests {
 
     #[test]
     fn contextual_search_hints_remain_independent_when_one_action_is_unbound() {
-        for (action, expected, missing) in [("accept", "Esc", "Enter"), ("cancel", "Enter", "Esc")]
-        {
+        for (action, expected, missing) in [("accept", "Esc", "Tab"), ("cancel", "Tab", "Esc")] {
             let mut config = crate::editing::Config {
                 mode: crate::editing::Mode::Emacs,
                 ..Default::default()
@@ -1786,8 +1776,8 @@ mod tests {
                 };
                 let keys = compiled.hints(&editor.edit_mode, editor.interaction);
                 let text = compose(context(&editor, keys)).text;
-                if expected == "Enter" && !has_match {
-                    assert!(!text.contains("Enter"), "{action}: {text}");
+                if expected == "Tab" && !has_match {
+                    assert!(!text.contains("Tab"), "{action}: {text}");
                 } else {
                     assert!(
                         text.contains(expected)
@@ -1820,7 +1810,7 @@ mod tests {
             data.latest_command = Some(9);
             let text = compose(data).text;
             assert!(
-                text.contains("next: printf safe") && text.contains("F2"),
+                text.contains("Next: printf safe") && text.contains("F2"),
                 "{text}"
             );
             let mut data = context(&editor, &keys);
@@ -2530,7 +2520,7 @@ mod tests {
                     .count(),
                 21
             );
-            assert!(style::strip_ansi(&text).ends_with("Tab complete  Auto"));
+            assert!(style::strip_ansi(&text).ends_with("Tab complete  Approval: Auto"));
         }
     }
 
@@ -2556,7 +2546,7 @@ mod tests {
                         assert!(!text.contains(['\u{e0b6}', '\u{e0b4}', '\u{e0b0}']));
                     }
                     if width >= 80 {
-                        assert!(text.ends_with("Tab complete  Auto"));
+                        assert!(text.ends_with("Tab complete  Approval: Auto"));
                     }
                 }
             }
@@ -2581,7 +2571,7 @@ mod tests {
             assert_eq!(text.matches('\u{e0b6}').count(), 1);
             assert_eq!(text.matches('\u{e0b4}').count(), 1);
             assert!(after.text.contains("38;2;80;160;220"));
-            assert!(text.ends_with("Tab complete  Auto"));
+            assert!(text.ends_with("Tab complete  Approval: Auto"));
             assert!(background_cells(&after.text).iter().all(Option::is_none));
         }
     }

@@ -24,10 +24,10 @@ impl AiHandler for CompletionAi {
         AiOutcome::default()
     }
 
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
         self.requests += 1;
         eprintln!("completion-ai-request-{}", self.requests);
-        Some("echo generated".into())
+        nosh_shell::SuggestionOutcome::Command("echo generated".into())
     }
 
     fn badge(&self) -> Badge {
@@ -546,7 +546,6 @@ fn completion_failure_and_empty_results() {
         "repl-completion",
         &[
             ("completion> ", b"fixture_empty q\t"),
-            ("NO RECORDS FOUND", b"\t"),
             ("completion> echo generated", b"\x15exit 0\r"),
         ],
     );

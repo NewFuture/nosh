@@ -35,6 +35,8 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 
 引擎通用错误 `EngineError` 保留上下文已满、未知会话、配置和 I/O 分类；模型与分词失败作为带原始错误的 `Backend` 传递。`nosh-llm::LlmError` 只描述本地实现，不再成为 Agent、Mock、trace 或评测代理的接口要求。消息序列化、取消、会话生命周期与失败恢复语义保持一致。
 
+REPL 装配使用 core 的 `EngineLoadError` 区分加载未就绪、取消与失败，`ModelAvailability` 保存前后台共享的可用性快照；模型查找与具体错误映射仍归 CLI。shell 的 `SuggestionOutcome` 只表达回填结果与诊断，不依赖引擎或下载实现。加载恢复及自动请求暂停契约见 [CommandAssist](COMMAND-ASSIST.md#调度与用户输入)。
+
 Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：token 与 prefill/decode 耗时累加，TTFT 保留首步实际值（包括零），context 保留末步快照。不把零当作尚未记录，也不累加 context 或把后续首 token 延迟替换首步测量。
 
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。

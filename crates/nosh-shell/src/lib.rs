@@ -34,6 +34,6 @@ pub use backend::{
 };
 pub use command_snapshot::CommandSnapshot;
 pub use inline_commands::ManagementCommand;
-pub use repl::{AiHandler, AiOutcome, AiRequest, Badge, OnFailure, ReplConfig};
+pub use repl::{AiHandler, AiOutcome, AiRequest, Badge, OnFailure, ReplConfig, SuggestionOutcome};
 pub use trigger::{Trigger, TriggerConfig};
 pub use user_output::{CaptureOutput, OutputState, OutputUnavailable, UserOutput};

@@ -230,7 +230,10 @@ fn agent_protects_project_metadata_and_suggestions_do_not_load_it() {
         cfg,
         Box::new(Scripted::new([])),
     );
-    assert_eq!(ai.suggest(&mut sh, "suggest").as_deref(), Some("echo ok"));
+    assert_eq!(
+        ai.suggest(&mut sh, "suggest"),
+        nosh_shell::SuggestionOutcome::Command("echo ok".into())
+    );
     check(&received.lock().unwrap(), false);
     std::fs::remove_dir_all(root).unwrap();
 }

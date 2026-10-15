@@ -472,9 +472,13 @@ impl Probe<'_> {
             if (keys.is_some() || next.is_some()) && (!needs_cursor_reply || cursor_replies > 0) {
                 let input = input.as_mut().unwrap();
                 let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+                let foreground_interrupt = next.is_some_and(|(needle, bytes)| {
+                    needle.starts_with("@interrupt:") && *bytes == b"\x03"
+                });
                 // SAFETY: tcgetattr writes to valid storage, read only on success.
                 if unsafe { libc::tcgetattr(input.as_raw_fd(), attrs.as_mut_ptr()) } == 0
-                    && unsafe { attrs.assume_init() }.c_lflag & libc::ICANON == 0
+                    && (foreground_interrupt
+                        || unsafe { attrs.assume_init() }.c_lflag & libc::ICANON == 0)
                 {
                     startup.get_or_insert_with(|| launched.elapsed());
                     if let Some(bytes) = keys.take() {
@@ -493,7 +497,9 @@ impl Probe<'_> {
                         } else {
                             let observed = observed.lock().unwrap();
                             let output = String::from_utf8_lossy(&observed[observed_start..]);
-                            if let Some(expected) = needle.strip_prefix("@frame:") {
+                            if let Some(expected) = needle.strip_prefix("@interrupt:") {
+                                style::strip_ansi(&output).contains(expected)
+                            } else if let Some(expected) = needle.strip_prefix("@frame:") {
                                 frame_matches(&output, expected)
                             } else {
                                 output.contains(needle)

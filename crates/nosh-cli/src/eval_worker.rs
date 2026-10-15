@@ -594,7 +594,8 @@ pub fn run(path: &Path, setup: &crate::engine::EngineSetup) -> Result<(), String
     }
     let config = configuration(setup)?;
     let (mut engine, description, info) =
-        crate::engine::load_local(setup, nosh_core::LoadMode::Background)?;
+        crate::engine::load_local(setup, nosh_core::LoadMode::Background)
+            .map_err(|error| error.to_string())?;
     let listener = UnixListener::bind(path).map_err(|e| e.to_string())?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;

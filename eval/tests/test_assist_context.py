@@ -106,8 +106,8 @@ class AssistContextTests(unittest.TestCase):
 
     def test_prefix_management_turns_are_not_next_execution_history(self):
         scenario, result, evidence = self.reference("next-retry-after-prerequisite")
-        self.assertEqual(scenario["inputs"][0], "#auto off")
-        self.assertEqual(scenario["inputs"][2], "#auto on")
+        self.assertEqual(scenario["inputs"][0], "#assist off")
+        self.assertEqual(scenario["inputs"][2], "#assist on")
         self.assertEqual(self.reasons(scenario, result, evidence), [])
         self.assertEqual(
             [item["command"] for item in evidence["assistance"][0]["recent_executions"]],

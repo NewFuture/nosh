@@ -47,6 +47,7 @@ pub(crate) fn completion_menu(name: &str, frame: FrameTheme) -> ColumnarMenu {
         .with_preserve_case(true)
         .with_input_mode(reedline::InputMode::FullBuffer)
         .with_marker("")
+        .with_empty_message("")
         .with_columns(10)
         .with_style_provider(move || {
             let styles = frame.styles();

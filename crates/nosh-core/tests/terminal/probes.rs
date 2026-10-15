@@ -173,7 +173,7 @@ pub(super) fn terminal_probe() {
                 ui.tool_start("exec", "echo \u{4e2d}\u{6587}", Some(risk), label);
             }
         }
-        "repl-assist" | "repl-inline-assist" | "repl-generate" => {
+        "repl-assist" | "repl-inline-assist" | "repl-generate" | "repl-generate-slow" => {
             let directory = tempfile::tempdir().unwrap();
             let mut shell = nosh_shell::EmbeddedShell::new(nosh_shell::ShellOptions {
                 interactive: true,
@@ -182,10 +182,14 @@ pub(super) fn terminal_probe() {
             })
             .unwrap();
             shell.run_user_line("PATH=/usr/bin:/bin; PS1='probe> '");
+            let slow = mode == "repl-generate-slow";
             let mut ai = nosh_core::ShellAi::new(
                 Box::new(move |_| {
                     Ok(nosh_core::LoadedEngine {
-                        engine: Box::new(nosh_engine::MockChatEngine::with_responder(|_| {
+                        engine: Box::new(nosh_engine::MockChatEngine::with_responder(move |_| {
+                            if slow {
+                                thread::sleep(Duration::from_millis(400));
+                            }
                             vec![nosh_engine::mock::text("touch accepted")]
                         })),
                         description: "mock".into(),

@@ -42,8 +42,8 @@ impl AiHandler for Ai {
             },
         )
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        Some("printf generated".into())
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
+        nosh_shell::SuggestionOutcome::Command("printf generated".into())
     }
     fn badge(&self) -> Badge {
         Badge::default()

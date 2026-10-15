@@ -411,8 +411,8 @@ impl AiHandler for RecordingAi {
         self.commands.push(command);
         AiOutcome::default()
     }
-    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> Option<String> {
-        None
+    fn suggest(&mut self, _: &mut EmbeddedShell, _: &str) -> nosh_shell::SuggestionOutcome {
+        nosh_shell::SuggestionOutcome::NoSuggestion
     }
     fn badge(&self) -> Badge {
         Badge::default()
@@ -554,7 +554,7 @@ fn pipeline_next_requires_enabled_automatic_assistance_and_success() {
             ..Default::default()
         });
         if paused {
-            pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
+            pipeline.process(&mut sh, &mut ai, &mut ui, "#assist off");
         }
         pipeline.process(&mut sh, &mut ai, &mut ui, line);
         assert_eq!(ai.completed.len(), expected);
@@ -719,7 +719,7 @@ fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
         "#theme soft-light extra",
         "#theme $(touch marker)",
         "#think maybe",
-        "#auto on extra",
+        "#assist on extra",
         "#clear extra",
         "#out invalid",
         "#找文件",
@@ -735,12 +735,12 @@ fn pipeline_inline_errors_and_removed_ai_entry_do_not_dispatch() {
     assert_eq!(sh.var("ORDINARY_AI").as_deref(), Some("mode auto"));
     assert!(ai.commands.is_empty() && ai.requests.is_empty());
 
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto off");
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto invalid");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist off");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist invalid");
     let before = ai.completed.len();
     pipeline.process(&mut sh, &mut ai, &mut ui, "true");
     assert_eq!(ai.completed.len(), before);
-    pipeline.process(&mut sh, &mut ai, &mut ui, "#auto on");
+    pipeline.process(&mut sh, &mut ai, &mut ui, "#assist on");
     pipeline.process(&mut sh, &mut ai, &mut ui, "true");
     assert_eq!(ai.completed.len(), before + 1);
 }

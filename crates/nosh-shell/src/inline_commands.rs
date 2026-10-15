@@ -47,7 +47,7 @@ pub enum Command {
     Help,
     Abbr(crate::abbreviations::Operation),
     Theme(Option<String>),
-    Auto(Option<bool>),
+    Assist(Option<bool>),
     Fix(String),
     Manage(ManagementCommand),
 }
@@ -108,7 +108,7 @@ enum Kind {
     Theme,
     Mode,
     Think,
-    Auto,
+    Assist,
     Fix,
     Clear,
     Ctx,
@@ -160,11 +160,11 @@ const COMMANDS: &[Definition] = &[
         kind: Kind::Think,
     },
     Definition {
-        name: "auto",
-        syntax: "auto [on|off]",
+        name: "assist",
+        syntax: "assist [on|off]",
         zh: "查看或暂停自动路由与自动建议",
         en: "show or pause automatic routing and suggestions",
-        kind: Kind::Auto,
+        kind: Kind::Assist,
     },
     Definition {
         name: "fix",
@@ -231,7 +231,7 @@ impl Definition {
                     (*name, Some(description))
                 })
                 .collect(),
-            Kind::Think | Kind::Auto => SWITCHES.iter().map(|(name, _)| (*name, None)).collect(),
+            Kind::Think | Kind::Assist => SWITCHES.iter().map(|(name, _)| (*name, None)).collect(),
             _ => Vec::new(),
         }
     }
@@ -293,7 +293,7 @@ impl Definition {
                 Some(Command::Manage(ManagementCommand::Mode(mode)))
             }
             Kind::Think => Some(Command::Manage(ManagementCommand::Think(switch()?))),
-            Kind::Auto => Some(Command::Auto(switch()?)),
+            Kind::Assist => Some(Command::Assist(switch()?)),
             _ if arg.is_some() => None,
             Kind::Help => Some(Command::Help),
             Kind::Clear => Some(Command::Manage(ManagementCommand::Clear)),
@@ -506,8 +506,8 @@ mod tests {
             }
         }
         assert_eq!(
-            parse("#auto off", "#", true),
-            Input::Command(Command::Auto(Some(false)))
+            parse("#assist off", "#", true),
+            Input::Command(Command::Assist(Some(false)))
         );
         assert_eq!(
             parse("#fix 部署环境是 Ubuntu 24.04\n不要修改文件", "#", true),
@@ -557,7 +557,7 @@ mod tests {
             "#theme `touch marker`",
             "#theme \"$HOME/theme.toml\"",
             "#think maybe",
-            "#auto on extra",
+            "#assist on extra",
             "#help extra",
             "#clear extra",
             "#ctx extra",
@@ -637,5 +637,26 @@ mod tests {
         assert!(!is_command("# 任务", "#", true));
         assert!(is_command("#unknown", "#", true));
         assert!(!is_command("#help", "#", false));
+    }
+}
+#[test]
+fn assist_is_local_and_approval_auto_keeps_its_original_meaning() {
+    for prefix in ["#", "?"] {
+        assert_eq!(
+            parse(&format!("{prefix}assist on"), prefix, true),
+            Input::Command(Command::Assist(Some(true)))
+        );
+        assert_eq!(
+            parse(&format!("{prefix}mode auto"), prefix, true),
+            Input::Command(Command::Manage(ManagementCommand::Mode(Some(
+                ApprovalMode::Auto
+            ))))
+        );
+        assert!(matches!(
+            parse(&format!("{prefix}auto off"), prefix, true),
+            Input::Error(_)
+        ));
+        assert!(help(prefix).contains(&format!("{prefix}assist")));
+        assert!(!help(prefix).contains(&format!("{prefix}auto")));
     }
 }
