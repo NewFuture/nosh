@@ -36,12 +36,46 @@ fn success(result: Output) -> String {
     String::from_utf8(result.stdout).unwrap()
 }
 
+fn stubbed_probe_path(home: &Path) -> String {
+    let bin = home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o777)).unwrap();
+    for (name, version) in [
+        ("git", "git version 2.40.0"),
+        ("ls", "ls (GNU coreutils) 9.0"),
+    ] {
+        let program = bin.join(name);
+        fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf x >> {name}-probed\nprintf '{version}\\n'\n"),
+        )
+        .unwrap();
+        fs::set_permissions(program, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    format!("{}:/usr/bin:/bin", bin.display())
+}
+
 #[test]
 fn abbreviation_management_is_persistent_and_works_without_ai() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("config.toml");
-    let listing = success(abbr(home.path(), &["list"]));
+    let listing = success(
+        command(home.path())
+            .current_dir(home.path())
+            .env("PATH", stubbed_probe_path(home.path()))
+            .args(["abbr", "list"])
+            .output()
+            .unwrap(),
+    );
     assert!(listing.contains("parent-shell aliases/functions are not visible"));
+    assert!(
+        listing.contains("gst -> git status [builtin] available"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("ll -> ls -lh [builtin] available"),
+        "{listing}"
+    );
     for name in [
         "ll", "la", "..", "...", "gst", "gd", "gds", "gb", "glo", "glog",
     ] {
@@ -309,22 +343,7 @@ fn barrier(terminal: &mut Terminal) {
 #[test]
 fn default_probes_run_and_explicit_disable_blocks_inspection_and_startup() {
     let home = tempfile::tempdir().unwrap();
-    let bin = home.path().join("bin");
-    fs::create_dir(&bin).unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o777)).unwrap();
-    for (name, version) in [
-        ("git", "git version 2.40.0"),
-        ("ls", "ls (GNU coreutils) 9.0"),
-    ] {
-        let program = bin.join(name);
-        fs::write(
-            &program,
-            format!("#!/bin/sh\nprintf x >> {name}-probed\nprintf '{version}\\n'\n"),
-        )
-        .unwrap();
-        fs::set_permissions(program, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let path = stubbed_probe_path(home.path());
     let inspect = || {
         success(
             command(home.path())
