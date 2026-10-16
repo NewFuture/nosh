@@ -140,7 +140,7 @@ pub(super) fn probe_config() -> Config {
 }
 
 #[test]
-fn external_capability_probes_require_explicit_opt_in_even_with_cached_results() {
+fn explicitly_disabled_external_capability_probes_do_not_run_even_with_cached_results() {
     let (directory, mut shell) = fixture();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     for (name, version) in [
@@ -154,7 +154,10 @@ fn external_capability_probes_require_explicit_opt_in_even_with_cached_results()
         .unwrap();
     }
     shell.run_user_line("PATH=.");
-    let mut config = Config::default();
+    let mut config = Config {
+        probe_commands: false,
+        ..Default::default()
+    };
     config.rules.insert(
         "zzq".into(),
         Rule {
@@ -197,7 +200,7 @@ fn external_capability_probes_require_explicit_opt_in_even_with_cached_results()
 }
 
 #[test]
-fn abbreviation_probe_confirms_targets_and_rejects_conflicts() {
+fn default_abbreviation_probe_confirms_targets_and_rejects_conflicts() {
     let (_directory, mut shell) = fixture();
     let probe = |shell: &EmbeddedShell, config| Probe {
         serial: 1,
@@ -206,7 +209,7 @@ fn abbreviation_probe_confirms_targets_and_rejects_conflicts() {
             .input_context(&TriggerConfig::default(), &Default::default())
             .unwrap(),
     };
-    let registry = check(&probe(&shell, probe_config()));
+    let registry = check(&probe(&shell, Config::default()));
     assert!(
         registry.entries.iter().all(|entry| entry.available),
         "{registry:?}"
