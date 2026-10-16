@@ -64,11 +64,12 @@ def arguments(argv=None):
     parser.add_argument("--scenario", action="append", help="select a scenario (repeatable)")
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--repeat", type=int, default=1)
-    parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--threads", type=int,
+                        help="inference threads (default: available physical CPU cores, detected once per process)")
     parser.add_argument("--device", type=runtime.inference_device, default="cpu",
                         help="cpu (evaluation default), auto, cuda or cuda:N; written into every isolated trial config")
-    parser.add_argument("--execution-mode", choices=("cold", "resident"), default="cold",
-                        help="cold model process per trial, or one resident engine with isolated CLI processes")
+    parser.add_argument("--execution-mode", choices=("cold", "resident"), default="resident",
+                        help="one resident engine with isolated CLI processes (default), or an explicit cold model process per trial")
     parser.add_argument("--worker-start-timeout", type=float, default=120,
                         help="resident startup deadline, separate from each trial deadline")
     parser.add_argument("--timeout", type=float)
@@ -98,6 +99,8 @@ def main(argv=None) -> int:
     try:
         suite = load_suite(args.suite)
         positive_seconds(args.worker_start_timeout, "worker startup timeout")
+        if args.threads is None:
+            args.threads = runtime.physical_cpu_count()
         if args.threads < 1:
             raise ValueError("threads must be positive")
         if args.label is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.label):
@@ -123,7 +126,7 @@ def main(argv=None) -> int:
                 "scenarios": [scenario["id"] for scenario in suite["scenarios"]],
                 "seeds": selected_seeds, "repeat": args.repeat, "trials": planned,
                 "timeout_s": timeout, "maximum_trial_seconds": maximum,
-                "device": args.device,
+                "device": args.device, "threads": args.threads,
                 "execution_mode": args.execution_mode, "warmup_generations": 0,
                 "maximum_worker_seconds": worker_budget,
             }, ensure_ascii=False, indent=2, allow_nan=False))

@@ -553,6 +553,9 @@ pub struct StepOutcome {
 pub struct SamplingParams {
     pub temperature: f32,
     pub top_p: f32,
+    /// Number of highest-probability candidates; zero disables this filter.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
     pub min_p: f32,
     /// Applied only once repetition is detected (design §7.3).
     pub repetition_penalty: f32,
@@ -561,11 +564,16 @@ pub struct SamplingParams {
     pub seed: Option<u64>,
 }
 
+fn default_top_k() -> usize {
+    40
+}
+
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: 1.0,
             top_p: 0.95,
+            top_k: default_top_k(),
             min_p: 0.0,
             repetition_penalty: 1.05,
             tool_call_temperature: 0.3,
@@ -676,6 +684,31 @@ pub trait ChatEngine: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_k_default_and_explicit_disable_survive_serialization() {
+        let mut value = serde_json::to_value(SamplingParams::default()).unwrap();
+        assert_eq!(value["top_k"], 40);
+        value.as_object_mut().unwrap().remove("top_k");
+        assert_eq!(
+            serde_json::from_value::<SamplingParams>(value.clone())
+                .unwrap()
+                .top_k,
+            40
+        );
+        value["top_k"] = serde_json::json!(0);
+        let restored: SamplingParams = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.top_k, 0);
+        assert_eq!(serde_json::to_value(restored).unwrap()["top_k"], 0);
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            value["top_k"] = invalid;
+            assert!(serde_json::from_value::<SamplingParams>(value.clone()).is_err());
+        }
+    }
 
     #[test]
     fn integer_text_compatibility_does_not_round_away_fractional_or_large_values() {

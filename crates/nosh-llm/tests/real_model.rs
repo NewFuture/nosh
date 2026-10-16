@@ -33,6 +33,7 @@ fn model_source(model: &nosh_hub::ResolvedModel) -> ModelSource<'_> {
         sampling: SamplingParams {
             temperature: model.entry.sampling.temperature,
             top_p: model.entry.sampling.top_p,
+            top_k: model.entry.sampling.top_k,
             min_p: model.entry.sampling.min_p,
             ..SamplingParams::default()
         },

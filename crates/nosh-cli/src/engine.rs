@@ -54,6 +54,7 @@ pub(crate) fn model_source(model: &ResolvedModel) -> ModelSource<'_> {
         sampling: SamplingParams {
             temperature: sampling.temperature,
             top_p: sampling.top_p,
+            top_k: sampling.top_k,
             min_p: sampling.min_p,
             ..SamplingParams::default()
         },
@@ -314,6 +315,7 @@ mod tests {
         let mut entry = nosh_hub::Registry::builtin().default_model().clone();
         entry.sampling.temperature = 0.4;
         entry.sampling.top_p = 0.8;
+        entry.sampling.top_k = 12;
         entry.sampling.min_p = 0.1;
         let model = ResolvedModel {
             entry,
@@ -332,6 +334,7 @@ mod tests {
             SamplingParams {
                 temperature: 0.4,
                 top_p: 0.8,
+                top_k: 12,
                 min_p: 0.1,
                 ..SamplingParams::default()
             }

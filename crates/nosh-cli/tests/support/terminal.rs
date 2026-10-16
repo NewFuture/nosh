@@ -79,6 +79,12 @@ impl Terminal {
         self.master.write_all(bytes).unwrap();
     }
 
+    #[allow(dead_code, reason = "only some CLI tests send framed Escape keys")]
+    pub fn send_escape(&mut self) {
+        // CSI-u keeps Escape distinct from asynchronous cursor-position replies.
+        self.send(b"\x1b[27u");
+    }
+
     #[allow(dead_code, reason = "not every CLI test target polls for process exit")]
     pub fn poll(&mut self) -> Option<ExitStatus> {
         self.pump(0);

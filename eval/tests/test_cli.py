@@ -14,6 +14,66 @@ from eval import campaign, fixtures, report, runtime
 from eval.checks.experience import experience
 
 
+@unittest.skipUnless(sys.platform == "linux", "physical CPU topology requires Linux/WSL")
+class PhysicalCpuTests(unittest.TestCase):
+    def setUp(self):
+        runtime.physical_cpu_count.cache_clear()
+        self.addCleanup(runtime.physical_cpu_count.cache_clear)
+
+    def topology(self, siblings):
+        def read(path, *, encoding):
+            self.assertEqual(path.name, "thread_siblings_list")
+            self.assertEqual(path.parent.name, "topology")
+            self.assertEqual(encoding, "ascii")
+            return siblings[int(path.parent.parent.name.removeprefix("cpu"))]
+
+        affinity = self.enterContext(patch("eval.runtime.os.sched_getaffinity", return_value=set(siblings)))
+        reader = self.enterContext(patch("eval.runtime.Path.read_text", autospec=True, side_effect=read))
+        return affinity, reader
+
+    def test_smt_siblings_are_one_physical_core(self):
+        self.topology({0: "0-1\n", 1: "0-1\n", 2: "2-3\n", 3: "2-3\n"})
+        self.assertEqual(runtime.physical_cpu_count(), 2)
+
+    def test_only_cores_in_process_affinity_are_counted(self):
+        self.topology({1: "0-1\n", 5: "4-5\n"})
+        self.assertEqual(runtime.physical_cpu_count(), 2)
+
+    def test_non_smt_cores_are_not_halved(self):
+        self.topology({2: "2\n", 8: "8\n", 12: "12\n"})
+        self.assertEqual(runtime.physical_cpu_count(), 3)
+
+    def test_nonadjacent_siblings_remain_distinct(self):
+        self.topology({0: "0,2\n", 2: "0,2\n", 1: "1,3\n", 3: "1,3\n", 4: "4-5\n", 5: "4-5\n"})
+        self.assertEqual(runtime.physical_cpu_count(), 3)
+
+    def test_detected_count_is_cached_for_the_process(self):
+        affinity, reader = self.topology({0: "0-1\n", 1: "0-1\n"})
+        self.assertEqual(runtime.physical_cpu_count(), 1)
+        self.assertEqual(runtime.physical_cpu_count(), 1)
+        affinity.assert_called_once_with(0)
+        self.assertEqual(reader.call_count, 2)
+
+    def test_missing_or_invalid_topology_requires_an_explicit_override(self):
+        for siblings in ({}, {0: ""}, {0: "not a CPU list\n"}):
+            with self.subTest(siblings=siblings):
+                with patch("eval.runtime.os.sched_getaffinity", return_value=set(siblings)), \
+                        patch("eval.runtime.Path.read_text", return_value=siblings.get(0, "")), \
+                        patch("eval.runtime.os.cpu_count", return_value=16) as logical:
+                    with self.assertRaisesRegex(RuntimeError, "set --threads explicitly"):
+                        runtime.physical_cpu_count()
+                    logical.assert_not_called()
+                    self.assertEqual(runtime.physical_cpu_count.cache_info().currsize, 0)
+
+    def test_unreadable_topology_is_not_silently_replaced_by_logical_cpus(self):
+        for error in (FileNotFoundError("topology missing"), PermissionError("topology denied")):
+            with self.subTest(error=error), \
+                    patch("eval.runtime.os.sched_getaffinity", return_value={0}), \
+                    patch("eval.runtime.Path.read_text", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, "set --threads explicitly"):
+                    runtime.physical_cpu_count()
+
+
 @unittest.skipUnless(sys.platform == "linux", "evaluation CLI requires Linux/WSL")
 class PlanningTests(unittest.TestCase):
     def invoke(self, *arguments):
@@ -34,12 +94,40 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual((data["trials"], data["seeds"], data["repeat"]), (5, [0], 1))
             self.assertEqual(data["dataset_revision"], 35)
             self.assertEqual(data["maximum_trial_seconds"], 600)
+            self.assertEqual(data["execution_mode"], "resident")
+            self.assertGreater(data["maximum_worker_seconds"], 0)
             self.assertFalse(output.exists())
+
+    def test_default_threads_use_detected_physical_cores_in_both_execution_modes(self):
+        for options in ((), ("--execution-mode", "cold")):
+            with self.subTest(options=options), \
+                    patch("eval.runtime.physical_cpu_count", return_value=3) as detect:
+                status, stdout, stderr = self.invoke("--suite", "smoke", "--plan", *options)
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(json.loads(stdout)["threads"], 3)
+                detect.assert_called_once_with()
+
+    def test_explicit_threads_skip_detection_in_both_execution_modes(self):
+        for options in ((), ("--execution-mode", "cold")):
+            with self.subTest(options=options), \
+                    patch("eval.runtime.physical_cpu_count", side_effect=AssertionError("detected explicit threads")):
+                status, stdout, stderr = self.invoke("--suite", "smoke", "--plan", "--threads", "17", *options)
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(json.loads(stdout)["threads"], 17)
+
+    def test_failed_cpu_detection_is_a_planning_error(self):
+        with patch("eval.runtime.physical_cpu_count",
+                   side_effect=RuntimeError("CPU topology unavailable; set --threads explicitly")):
+            status, stdout, stderr = self.invoke("--suite", "smoke", "--plan")
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("eval: CPU topology unavailable; set --threads explicitly", stderr)
 
     def test_plan_uses_selected_scenarios_seeds_repeats_and_timeout(self):
         arguments = (
             "--suite", "regression", "--scenario", "zh-python-test", "--scenario", "largest-files",
             "--seeds", "2", "0", "--repeat", "2", "--timeout", "3", "--plan",
+            "--execution-mode", "cold",
         )
         status, stdout, stderr = self.invoke(*arguments, "--budget", "24")
         self.assertEqual(status, 0, stderr)
@@ -63,6 +151,7 @@ class PlanningTests(unittest.TestCase):
             ("--timeout", "1e308"),
             ("--repeat", "1" + "0" * 400),
             ("--threads", "0"),
+            ("--threads", "-1"),
         ):
             with self.subTest(arguments=arguments):
                 status, stdout, stderr = self.invoke("--plan", *arguments)
@@ -83,13 +172,16 @@ class PlanningTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["trials"], 5)
-        rejected = subprocess.run(
-            [sys.executable, "-B", "-m", "eval", "--unknown-option", "--plan"],
-            cwd=runtime.ROOT, capture_output=True, text=True, timeout=10,
-        )
-        self.assertEqual(rejected.returncode, 2)
-        self.assertEqual(rejected.stdout, "")
-        self.assertIn("unrecognized arguments: --unknown-option", rejected.stderr)
+        for options in (("--unknown-option",), ("--backend", "external"),
+                        ("--llama-server", "unused"), ("--llama-sampling", "{}")):
+            with self.subTest(options=options):
+                rejected = subprocess.run(
+                    [sys.executable, "-B", "-m", "eval", *options, "--plan"],
+                    cwd=runtime.ROOT, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertEqual(rejected.stdout, "")
+                self.assertIn(f"unrecognized arguments: {options[0]}", rejected.stderr)
 
     def test_campaign_exit_codes_preserve_the_plan_and_completed_trials(self):
         save = report.save
@@ -144,6 +236,7 @@ class PlanningTests(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
                     status = campaign.main([
                         "--scenario", "largest-files", "--seeds", "0", "1",
+                        "--execution-mode", "cold",
                         "--binary", sys.executable, "--model-path", str(weights),
                         "--output", str(output), "--work-dir", str(work),
                     ])

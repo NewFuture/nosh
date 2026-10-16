@@ -13,7 +13,7 @@ context_max = 131072
 min_memory_mb = 2600
 eog_ids = [1, 130073]
 license = "Apache-2.0"
-sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 40, min_p = 0.0 }
 
   [[model.files]]
   role = "weights"
@@ -44,7 +44,7 @@ context_max = 131072
 min_memory_mb = 3800
 eog_ids = [1, 130073]
 license = "Apache-2.0"
-sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 40, min_p = 0.0 }
 
   [[model.files]]
   role = "weights"
@@ -75,7 +75,7 @@ context_max = 131072
 min_memory_mb = 1400
 eog_ids = [1, 130073]
 license = "Apache-2.0"
-sampling = { temperature = 1.0, top_p = 0.95, min_p = 0.0 }
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 40, min_p = 0.0 }
 
   [[model.files]]
   role = "weights"

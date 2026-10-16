@@ -39,6 +39,9 @@ pub enum DebugCmd {
         ctx: usize,
         #[arg(long)]
         temp: Option<f32>,
+        /// Override the model's top-k default; zero disables the filter.
+        #[arg(long)]
+        top_k: Option<usize>,
         /// Run the same prompt this many times in one conversation (tests KV reuse).
         #[arg(long, default_value_t = 1)]
         repeat: usize,
@@ -75,6 +78,7 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
             think,
             ctx,
             temp,
+            top_k,
             repeat,
             kv,
             no_prepack,
@@ -135,6 +139,9 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
             let mut sampling = engine.default_sampling();
             if let Some(t) = temp {
                 sampling.temperature = t;
+            }
+            if let Some(k) = top_k {
+                sampling.top_k = k;
             }
             let tool_specs = if tools {
                 vec![nosh_core::tools::exec_spec()]

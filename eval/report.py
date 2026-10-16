@@ -33,6 +33,9 @@ def validate(report: dict) -> None:
         raise ValueError("invalid model execution mode")
     if meta.get("observation") != "native-v1":
         raise ValueError("report requires native-v1 observations")
+    backend = meta.get("backend", {"kind": "native"})
+    if not isinstance(backend, dict) or backend.get("kind") != "native":
+        raise ValueError("unsupported inference backend")
     if (not isinstance(meta.get("scenarios"), list) or not meta["scenarios"]
             or not isinstance(meta.get("seeds"), list) or not meta["seeds"]
             or type(meta.get("repeat")) is not int or meta["repeat"] < 1):
@@ -88,6 +91,8 @@ def validate(report: dict) -> None:
                 raise ValueError(f"invalid {name} for {key}")
         if engines:
             for engine in engines:
+                if engine.get("backend", "native") != "native":
+                    raise ValueError(f"unsupported inference backend: {key}")
                 if engine.get("execution_mode", "cold") != mode:
                     raise ValueError(f"mixed cold/resident engine observations: {key}")
                 if mode == "resident" and (engine.get("load_s") != 0
