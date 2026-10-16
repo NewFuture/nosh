@@ -5,7 +5,41 @@ use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 
+pub(super) fn non_equivalent_verbatim(path: &Path) -> bool {
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return false;
+    };
+    if !matches!(
+        prefix.kind(),
+        Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _)
+    ) {
+        return false;
+    }
+    path.components().any(|component| match component {
+        Component::Normal(name) => {
+            let bytes = name.as_encoded_bytes();
+            bytes
+                .last()
+                .is_some_and(|&byte| matches!(byte, b'.' | b' '))
+                || bytes.contains(&b'/')
+                || name.to_str().is_some_and(|name| {
+                    device(name)
+                        || name
+                            .split('.')
+                            .next()
+                            .is_some_and(|stem| stem.trim_end().eq_ignore_ascii_case("NUL"))
+                })
+        }
+        Component::CurDir | Component::ParentDir => true,
+        _ => false,
+    })
+}
+
 pub(super) fn normalize(path: &Path) -> Cow<'_, Path> {
+    // Verbatim spellings can name literal files that ordinary Win32 paths cannot.
+    if non_equivalent_verbatim(path) {
+        return Cow::Borrowed(path);
+    }
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -50,6 +84,9 @@ fn equal(left: &OsStr, right: &OsStr) -> bool {
 }
 
 pub(super) fn strip_scope(path: &Path, root: &Path) -> Option<PathBuf> {
+    if non_equivalent_verbatim(path) || non_equivalent_verbatim(root) {
+        return None;
+    }
     let path = normalize(path);
     let root = normalize(root);
     let mut components = path.components();
@@ -91,6 +128,7 @@ fn device(name: &str) -> bool {
 
 pub(super) fn ambiguous(path: &Path) -> bool {
     !path.is_absolute()
+        || non_equivalent_verbatim(path)
         || path.components().any(|component| match component {
             Component::Prefix(prefix) => !matches!(
                 prefix.kind(),

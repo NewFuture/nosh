@@ -45,6 +45,31 @@ pub(super) struct Words {
     pub span: Range<usize>,
 }
 
+fn unquote(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut quote = None;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (Some(delimiter), character) if character == delimiter => quote = None,
+            (None, delimiter @ ('\'' | '"')) => quote = Some(delimiter),
+            (_, '\\')
+                if quote.is_none()
+                    || (quote == Some('"')
+                        && matches!(characters.peek(), Some('$' | '`' | '"' | '\\' | '\n'))) =>
+            {
+                if let Some(next) = characters.next()
+                    && next != '\n'
+                {
+                    result.push(next);
+                }
+            }
+            (_, character) => result.push(character),
+        }
+    }
+    result
+}
+
 impl Words {
     fn parse(query: &Query, start: usize, end: usize, delimiters: &[char]) -> Result<Self, String> {
         let raw = brush_core::completion::simple_tokenize_by_delimiters(
@@ -75,10 +100,7 @@ impl Words {
         if fragment.len() > super::types::MAX_WORD {
             return Err("completion word limit".into());
         }
-        let mut values: Vec<_> = raw
-            .iter()
-            .map(|token| brush_parser::unquote_str(token.text))
-            .collect();
+        let mut values: Vec<_> = raw.iter().map(|token| unquote(token.text)).collect();
         let mut starts: Vec<_> = raw.iter().map(|token| token.start).collect();
         if current.is_none() {
             values.insert(index, String::new());
@@ -88,7 +110,7 @@ impl Words {
             values,
             starts,
             index,
-            word: brush_parser::unquote_str(fragment),
+            word: unquote(fragment),
             span,
         })
     }
@@ -238,7 +260,7 @@ impl Context {
                 if value.contains(['$', '`']) {
                     return Err("dynamic PATH assignment cannot be completed statically".into());
                 }
-                path = Some(brush_parser::unquote_str(value));
+                path = Some(unquote(value));
             }
             skipped += 1;
         }

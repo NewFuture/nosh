@@ -70,6 +70,10 @@ fn ambiguous_drive_paths_device_names_and_streams_are_not_workspace_files() {
         r"\\.\PhysicalDrive0",
         r"C:\work\CON",
         r"C:\work\COM1.txt",
+        r"\\?\C:\work \file",
+        r"\\?\C:\work.\file",
+        r"\\?\C:\work\NUL.txt",
+        r"\\?\C:\work\..\outside",
     ] {
         assert!(
             matches!(
@@ -83,6 +87,61 @@ fn ambiguous_drive_paths_device_names_and_streams_are_not_workspace_files() {
         classify_path(Path::new(r"C:\work\NUL"), &context),
         PathClass::Null
     );
+}
+
+#[test]
+fn verbatim_literal_directories_cannot_inherit_workspace_authority() {
+    let root = std::env::temp_dir().canonicalize().unwrap();
+    let directory = tempfile::tempdir_in(root).unwrap();
+    let workspace = directory.path().join("work");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("file"), "inside").unwrap();
+    let context = Context::new(&workspace, &workspace);
+    let rule = UserRule::compile(
+        RuleSpec {
+            tool: Some("read_file".into()),
+            path: Some("**".into()),
+            ..Default::default()
+        },
+        "workspace.allow",
+    )
+    .unwrap();
+    let rules = UserRules {
+        allow: vec![rule],
+        ..Default::default()
+    };
+    for name in ["work ", "work."] {
+        let outside = directory.path().join(name);
+        std::fs::create_dir(&outside).unwrap();
+        let target = outside.join("file");
+        std::fs::write(&target, "outside").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("file")).unwrap(),
+            "inside"
+        );
+        let resolved = context.resolve(target.to_str().unwrap());
+        assert_eq!(resolved, target);
+        for path in [&target, &target.canonicalize().unwrap()] {
+            assert!(
+                matches!(classify_path(path, &context), PathClass::Protected(_)),
+                "{path:?}"
+            );
+            assert!(matches!(
+                classify_path_real(path, &context, true).0,
+                PathClass::Protected(_)
+            ));
+            let report = assess_read("read_file", path, None, &context);
+            let policy = evaluate(
+                &report,
+                ApprovalMode::Confirm,
+                &rules,
+                &SessionAllowList::default(),
+            );
+            assert!(!matches!(policy.decision, Decision::Allow), "{policy:?}");
+        }
+        std::fs::remove_dir_all(outside).unwrap();
+    }
 }
 
 #[test]

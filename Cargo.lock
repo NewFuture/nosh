@@ -2096,6 +2096,7 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
+ "vte 0.15.0",
  "windows-sys 0.61.2",
 ]
 

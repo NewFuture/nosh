@@ -1124,14 +1124,6 @@ impl Worker {
             .has_descendants()
     }
 
-    #[cfg(all(test, unix))]
-    pub fn residual_children(&self) -> io::Result<Vec<crate::procs::Proc>> {
-        self.child
-            .try_lock()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .residual_children()
-    }
-
     fn take_response(&mut self) -> io::Result<Option<Response>> {
         let Some(header) = self.incoming.get(..4) else {
             return Ok(None);
@@ -1593,7 +1585,7 @@ mod tests {
         let marker = owner.marker().unwrap().to_owned();
         assert!(owner.helpers.is_empty());
         drop(owner);
-        let children = worker.residual_children().unwrap();
+        let children = worker.child.lock().unwrap().residual_children().unwrap();
         assert_eq!(children.len(), 1);
         let process = children[0];
         assert_ne!(process.pgid, leader);
@@ -1653,7 +1645,7 @@ mod tests {
         let mut syntax = Worker::spawn(&launch, Kind::Syntax).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let children = worker.residual_children().unwrap();
+            let children = worker.child.lock().unwrap().residual_children().unwrap();
             assert!(!children.iter().any(|p| p.pid == unrelated.id() as i32));
             assert!(
                 !children

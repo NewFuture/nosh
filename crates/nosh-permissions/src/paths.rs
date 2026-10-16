@@ -34,6 +34,10 @@ pub(crate) fn resolve_literal(p: &str, cwd: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     };
+    #[cfg(windows)]
+    if windows::non_equivalent_verbatim(&abs) {
+        return abs;
+    }
     let mut out = PathBuf::new();
     for c in abs.components() {
         match c {

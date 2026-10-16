@@ -21,7 +21,38 @@ use windows_sys::Win32::System::Threading::{
 #[derive(Default)]
 struct Output {
     bytes: Vec<u8>,
+    parser: vte::Parser<0>,
+    text: Text,
     error: Option<String>,
+}
+
+#[derive(Default)]
+struct Text(String);
+
+impl vte::Perform for Text {
+    fn print(&mut self, character: char) {
+        self.0.push(character);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        self.0.push(char::from(byte));
+    }
+}
+
+impl Output {
+    fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        self.parser.advance(&mut self.text, bytes);
+    }
+
+    fn consume(&self, needle: &str, observed: &mut usize) -> bool {
+        assert!(!needle.is_empty());
+        let Some(offset) = self.text.0[*observed..].find(needle) else {
+            return false;
+        };
+        *observed += offset + needle.len();
+        true
+    }
 }
 
 pub struct Terminal {
@@ -96,7 +127,7 @@ impl Terminal {
                             output.error = Some("ConPTY output exceeded 1 MiB".into());
                             break;
                         }
-                        output.bytes.extend_from_slice(&buffer[..size]);
+                        output.push(&buffer[..size]);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
@@ -239,7 +270,7 @@ impl Terminal {
     }
 
     pub fn send(&mut self, bytes: &[u8]) {
-        self.observed = self.output.lock().unwrap().bytes.len();
+        self.observed = self.output.lock().unwrap().text.0.len();
         self.input.write_all(bytes).unwrap();
     }
 
@@ -253,11 +284,7 @@ impl Terminal {
         loop {
             self.pump();
             let output = self.output.lock().unwrap();
-            let text = nosh_shell::style::strip_ansi(&String::from_utf8_lossy(
-                &output.bytes[self.observed..],
-            ));
-            if text.contains(needle) {
-                self.observed = output.bytes.len();
+            if output.consume(needle, &mut self.observed) {
                 return;
             }
             drop(output);
@@ -278,7 +305,7 @@ impl Terminal {
     }
 
     pub fn text(&self) -> String {
-        nosh_shell::style::strip_ansi(&String::from_utf8_lossy(&self.output.lock().unwrap().bytes))
+        self.output.lock().unwrap().text.0.clone()
     }
 
     pub fn finish(&mut self) {
@@ -322,5 +349,35 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Output;
+
+    #[test]
+    fn consecutive_markers_in_one_read_preserve_the_suffix() {
+        let mut output = Output::default();
+        output.push(b"\x1b[32mSETUP-DONE\x1b[0m\r\nNATIVE> ready");
+        let mut observed = 0;
+        assert!(output.consume("SETUP-DONE", &mut observed));
+        assert!(output.consume("NATIVE>", &mut observed));
+        assert!(output.consume("ready", &mut observed));
+        assert!(!output.consume("ready", &mut observed));
+    }
+
+    #[test]
+    fn marker_offsets_survive_split_ansi_and_utf8_sequences() {
+        let mut output = Output::default();
+        output.push(b"\x1b[31");
+        output.push(b"m\xe4\xb8");
+        assert!(output.text.0.is_empty());
+        output.push(b"\xad\x1b[0m DONE");
+        let mut observed = 0;
+        assert!(output.consume("\u{4e2d}", &mut observed));
+        assert!(output.consume("DONE", &mut observed));
+        output.push(b"\x1b[2KNEXT");
+        assert!(output.consume("NEXT", &mut observed));
     }
 }

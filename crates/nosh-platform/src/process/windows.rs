@@ -339,9 +339,7 @@ pub fn capture(
             std::thread::sleep(Duration::from_millis(5));
         }
     })();
-    let stopped = group.finish();
-    let waited = child.wait();
-    stopped?;
-    waited?;
+    group.finish()?;
+    child.wait()?;
     result
 }

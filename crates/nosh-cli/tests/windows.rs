@@ -590,6 +590,47 @@ fn real_console_edits_completes_executes_and_cancels_without_a_model() {
 }
 
 #[test]
+fn quoted_native_paths_complete_without_losing_backslash_directories() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("path space");
+    fs::create_dir(&folder).unwrap();
+    let file = folder.join("fixture.txt");
+    fs::write(&file, "").unwrap();
+    let mut command = nosh(home.path());
+    command
+        .args(["--safe", "--offline"])
+        .current_dir(home.path());
+    let mut terminal = console::Terminal::spawn(command);
+    terminal.wait_for_prompt();
+    for (prefix, expected) in [
+        (
+            r"path space\fi".to_string(),
+            r"path space\fixture.txt".to_string(),
+        ),
+        (
+            format!(r"{}\fi", folder.display()),
+            file.to_string_lossy().into_owned(),
+        ),
+    ] {
+        for delimiter in ['\'', '"'] {
+            let input = format!("printf '%s' {delimiter}{prefix}");
+            terminal.send(input.as_bytes());
+            terminal.send(b"\t");
+            terminal.expect("fixture.txt");
+            terminal.send(b" > completed.txt; printf 'COMPLETE-%s\\n' READY\r");
+            terminal.expect("COMPLETE-READY");
+            assert_eq!(
+                fs::read_to_string(home.path().join("completed.txt")).unwrap(),
+                expected
+            );
+            terminal.expect("NATIVE>");
+        }
+    }
+    terminal.send(b"exit 0\r");
+    terminal.finish();
+}
+
+#[test]
 fn scripted_completion_children_do_not_allocate_a_console() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("completion-console.json");
