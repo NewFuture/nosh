@@ -63,7 +63,7 @@ Fix 以解决输出所示错误原因为目标。部分完成场景允许只创�
 python3 -m eval --suite smoke --plan
 
 # 可选：检查串行双跑的试验期限是否落在预算内（秒）
-python3 -m eval --repeat 2 --timeout 60 --budget 16200 --plan
+python3 -m eval --execution-mode cold --repeat 2 --timeout 60 --budget 16200 --plan
 
 python3 -m eval --model-path MODEL_DIR
 
@@ -94,7 +94,7 @@ python3 -m eval --model-path MODEL_DIR --binary NOSH_BINARY \
 
 计划预览和执行共用同一套期限校验；即使未设置总预算，也拒绝溢出或非有限的总期限，不输出 `Infinity`／`NaN` 计划。输入行、构建来源等结构先校验类型，再进行路由或字段解析，非法输入统一报错。
 
-框架只支持当前协议：suite/report 为 schema v2，必须显式记录 `dataset_revision`，模型结果必须有原生 trace。原生 trace 与 build-info 各自使用 schema v1；它们与 suite/report 的版本号相互独立。`--compare` 只接受当前报告格式。
+框架只支持当前协议：suite/report 为 schema v2，必须显式记录 `dataset_revision`，模型结果必须有原生 trace。原生 trace 与 build-info 各自使用 schema v1；它们与 suite/report 的版本号相互独立。`--compare` 只接受当前报告格式。不支持的推理后端报告明确拒绝，不作为原生结果展示或对照。
 
 执行工具名为 `exec`，执行证据与相关事实检查按此识别，不接受其他名称作为执行别名。
 
@@ -106,7 +106,9 @@ Agent 执行证据来自 `observation` 中的 `workflow: agent`、`kind: tool_re
 
 模型步骤报错后，只有同一会话内明确观测到 `rewind → compact → 相同输入重试 → step_end` 才记为恢复，不按错误文字猜测成功。恢复信息单独保留，失败的请求尝试仍计入步数；缺少恢复步骤、重试失败或换成另一项输入均保留引擎错误。截止时间发生在已确认的恢复重试中时，仍按真实在途生成判超时，不补成功。失败尝试没有完整 usage，计时和 token 仅汇总成功返回的步骤，并标记计时不完整，不推算全量耗时余量。
 
-默认输出为 `eval/results/<run-id>/report.json` 和 `report.md`。`--output` 必须是尚不存在的目录；`--label` 只是名称，不证明构建来源。默认推理线程 8、Rayon 1；单次试验期限来自所选 suite：回归 240 秒，专项和 smoke 120 秒。可用 `--threads`、`--timeout` 调整。模型和工具不会自动安装。
+默认输出为 `eval/results/<run-id>/report.json` 和 `report.md`。`--output` 必须是尚不存在的目录；`--label` 只是名称，不证明构建来源。
+
+默认推理线程数为当前进程 CPU 亲和性允许的**物理核数**，通过 Linux/WSL CPU 拓扑合并同核的 SMT 线程；检测结果只在进程内缓存，不再固定为 8。无法读取有效拓扑时明确报错，可用 `--threads N` 显式覆盖并跳过检测。Rayon 仍为 1；计划 JSON 和报告记录实际推理线程数，cold/resident 共用该默认。单次试验期限来自所选 suite：回归 240 秒，专项和 smoke 120 秒，可用 `--timeout` 调整。模型和工具不会自动安装。
 
 场景、分组与采集分项表先按场景索引已有试验，不为每个场景重新扫描全表。表格仍按声明的计划顺序生成，缺失／失败试验保留原计划分母，统计口径与评分要求不变。
 
@@ -118,11 +120,12 @@ Agent 执行证据来自 `observation` 中的 `workflow: agent`、`kind: tool_re
 
 ## 冷进程与驻留引擎协议
 
-`--execution-mode cold`（默认）每个 trial 启动独立 CLI 并加载模型。
-`--execution-mode resident` 只加载一个评测专用引擎，通过私有 Unix socket 串行服务原生产
+默认 `--execution-mode resident` 只加载一个评测专用引擎，通过私有 Unix socket 串行服务原生产
 `ChatEngine` 调用；每个 trial **仍是新的 CLI/PTY、shell、cwd、环境、home、fixture、审批和对话**。
 Agent、CommandAssist、工具模板与工具执行宿主均未替换，不是 LLM replay。
 每个 SessionSpec 原样传递 seed 和采样参数；连接内 sid 从 1 开始，不能操作上一连接的 session。
+需要独立加载模型、隔离跨 trial 前缀缓存或测量冷进程成本时，显式使用
+`--execution-mode cold`。旧报告缺少生命周期字段时仍按旧的 cold 语义读取，不重写历史成绩。
 
 ```bash
 python3 -m eval --suite regression --scenario largest-files --seeds 0 --repeat 2 \
@@ -137,6 +140,12 @@ python3 -m eval --suite regression --scenario largest-files --seeds 0 --repeat 2
 因此是否热命中必须看原生 first-step new/cached tokens，而不是仅凭 repeat 编号。
 
 固定 seed 并不保证不同缓存历史下的生成相同：精确前缀复用仍可能改变预填充的分块与数值计算路径。隔离提示词或 context 改动的因果对照应使用 `cold`，或显式固定并记录相同的预置缓存历史；不能把不同驻留前序任务造成的输出变化全部归因于目标请求文案。cold 只隔离试验之间的缓存，每条任务内部仍正常复用前缀；真实命令输出中的耗时、时间戳等变化也需单独核对。
+
+CPU 吞吐调优以**完整套件总墙钟时间**为准，不把采样器或后端批处理微基准当作整套加速。
+逻辑 CPU 数不等于物理核数；独立并发模型会复制加载/KV 开销并争用计算和内存带宽，
+不能仅凭更多 worker 推断更快。默认保持单个 resident worker；降低线程数、绑定 CPU 或
+并发运行独立 campaign 都应先验证完整场景/seed 集合、资源占用与实际总耗时，
+并保留原始分片、失败/缺样分母和工作进程清理证据。
 
 客户端和 worker 核对模型/分词器路径、模型 ID、请求设备、CUDA mask、context、
 KV dtype、prefill chunk、预打包与线程配置。不匹配、不可用和断连都显式报错，

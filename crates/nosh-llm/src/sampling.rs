@@ -1,4 +1,4 @@
-//! Token sampling: temperature / top-p / min-p, a lower temperature inside tool
+//! Token sampling: temperature / top-k / top-p / min-p, a lower temperature inside tool
 //! calls, and a repetition penalty that switches on only once a loop is detected
 //! (the same 16-gram ≥ 3 times within the last 256 tokens).
 
@@ -117,6 +117,7 @@ impl Sampler {
             temp,
             self.params.top_p,
             self.params.min_p,
+            self.params.top_k,
             &mut self.rng,
             &mut self.candidates,
         )
@@ -140,6 +141,7 @@ fn sample_top(
     temp: f32,
     top_p: f32,
     min_p: f32,
+    top_k: usize,
     rng: &mut Rng,
     cand: &mut Vec<(u32, f32)>,
 ) -> u32 {
@@ -157,6 +159,13 @@ fn sample_top(
             .filter(|(_, l)| **l >= cutoff)
             .map(|(i, l)| (i as u32, ((l - max) / temp).exp())),
     );
+    if top_k > 0 && cand.len() > top_k {
+        let order =
+            |a: &(u32, f32), b: &(u32, f32)| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0));
+        cand.select_nth_unstable_by(top_k - 1, order);
+        cand.truncate(top_k);
+        cand.sort_unstable_by(order);
+    }
     let sum: f32 = cand.iter().map(|c| c.1).sum();
     for c in cand.iter_mut() {
         c.1 /= sum;
@@ -272,6 +281,7 @@ mod tests {
                 temperature,
                 top_p,
                 min_p,
+                top_k: 0,
                 seed: Some(7),
                 ..SamplingParams::default()
             });
@@ -344,7 +354,7 @@ mod tests {
         let mut candidates = Vec::new();
         for _ in 0..200 {
             let l = [2.0f32, 1.9, -3.0, -3.0];
-            let id = sample_top(&l, 1.0, 1.0, 0.1, &mut rng, &mut candidates);
+            let id = sample_top(&l, 1.0, 1.0, 0.1, 0, &mut rng, &mut candidates);
             assert!(id < 2);
         }
     }
@@ -362,6 +372,180 @@ mod tests {
         for _ in 0..100 {
             let mut l = vec![1.0, 1.2, 0.9];
             assert_eq!(s.sample(&mut l, true), 1);
+        }
+    }
+
+    #[test]
+    fn default_top_k_limits_support_in_text_and_tool_calls() {
+        assert_eq!(SamplingParams::default().top_k, 40);
+        let mut sampler = Sampler::new(SamplingParams {
+            top_p: 1.0,
+            tool_call_temperature: 1.0,
+            ..params(1.0, 7)
+        });
+        for in_tool_call in [false, true] {
+            for _ in 0..200 {
+                let mut logits: Vec<_> = (0..100).map(|i| i as f32 * 0.01).collect();
+                assert!(sampler.sample(&mut logits, in_tool_call) >= 60);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_top_k_preserves_unfiltered_support() {
+        let mut sampler = Sampler::new(SamplingParams {
+            top_k: 0,
+            top_p: 1.0,
+            ..params(1.0, 7)
+        });
+        let ids: HashSet<_> = (0..500)
+            .map(|_| sampler.sample(&mut vec![0.0; 100], false))
+            .collect();
+        assert!(ids.iter().any(|id| *id >= 40));
+    }
+
+    #[test]
+    fn top_k_is_renormalized_before_top_p() {
+        let mut sampler = Sampler::new(SamplingParams {
+            top_k: 2,
+            top_p: 0.5,
+            ..params(1.0, 7)
+        });
+        for _ in 0..100 {
+            let mut logits: Vec<_> = [0.4_f32, 0.3, 0.2, 0.1].into_iter().map(f32::ln).collect();
+            assert_eq!(sampler.sample(&mut logits, false), 0);
+        }
+    }
+
+    #[test]
+    fn top_k_ties_are_resolved_by_token_id() {
+        let mut sampler = Sampler::new(SamplingParams {
+            top_k: 3,
+            top_p: 1.0,
+            ..params(1.0, 7)
+        });
+        for _ in 0..100 {
+            assert!(sampler.sample(&mut vec![0.0; 100], false) < 3);
+        }
+    }
+
+    #[test]
+    fn top_k_selection_matches_full_sort_reference() {
+        fn reference(logits: &[f32], params: SamplingParams, rng: &mut Rng) -> u32 {
+            let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut candidates: Vec<_> = logits
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value >= max - 20.7 * params.temperature)
+                .map(|(id, value)| (id as u32, ((value - max) / params.temperature).exp()))
+                .collect();
+            if params.top_k > 0 && candidates.len() > params.top_k {
+                candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                candidates.truncate(params.top_k);
+            }
+            let sum: f32 = candidates.iter().map(|item| item.1).sum();
+            for item in &mut candidates {
+                item.1 /= sum;
+            }
+            candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            let pmax = candidates[0].1;
+            if params.min_p > 0.0 {
+                let keep = candidates
+                    .iter()
+                    .take_while(|item| item.1 >= params.min_p * pmax)
+                    .count()
+                    .max(1);
+                candidates.truncate(keep);
+            }
+            if params.top_p < 1.0 {
+                let mut probability = 0.0;
+                let keep = candidates
+                    .iter()
+                    .take_while(|item| {
+                        let keep = probability < params.top_p;
+                        probability += item.1;
+                        keep
+                    })
+                    .count()
+                    .max(1);
+                candidates.truncate(keep);
+            }
+            let mut target = rng.next_f32() * candidates.iter().map(|item| item.1).sum::<f32>();
+            for &(id, probability) in &candidates {
+                if target < probability {
+                    return id;
+                }
+                target -= probability;
+            }
+            candidates.last().unwrap().0
+        }
+
+        for vocabulary in [16, 257, 131_072] {
+            let logits: Vec<_> = (0..vocabulary)
+                .map(|id| {
+                    if id % 17 == 0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        (id % 29) as f32 * 0.031
+                    }
+                })
+                .collect();
+            for top_k in [0, 1, 3, 40, vocabulary + 1] {
+                for (temperature, top_p, min_p) in
+                    [(1.0, 0.95, 0.0), (0.3, 0.8, 0.1), (1.0, 1.0, 0.0)]
+                {
+                    let params = SamplingParams {
+                        temperature,
+                        top_p,
+                        top_k,
+                        min_p,
+                        ..params(temperature, 7)
+                    };
+                    let mut sampler = Sampler::new(params);
+                    let mut rng = Rng::new(7);
+                    let mut current = logits.clone();
+                    for _ in 0..16 {
+                        assert_eq!(
+                            sampler.sample(&mut current, false),
+                            reference(&logits, params, &mut rng),
+                            "vocabulary={vocabulary}, params={params:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual sampler throughput measurement"]
+    fn sampling_top_k_throughput() {
+        let logits: Vec<_> = (0..131_072)
+            .map(|i| ((i as f32 * 0.017).sin() + (i as f32 * 0.041).cos()) * 4.0)
+            .collect();
+        for (top_k, draws) in [(40, 256), (0, 64)] {
+            let mut samples = Vec::new();
+            let mut checksum = 0_u64;
+            for seed in 0..5 {
+                let mut sampler = Sampler::new(SamplingParams {
+                    top_k,
+                    ..params(1.0, seed)
+                });
+                let mut current = logits.clone();
+                let started = std::time::Instant::now();
+                for _ in 0..draws {
+                    checksum = checksum.wrapping_add(u64::from(
+                        sampler.sample(std::hint::black_box(&mut current), false),
+                    ));
+                }
+                samples.push(started.elapsed().as_secs_f64());
+            }
+            println!(
+                "SAMPLING_BENCHMARK {}",
+                serde_json::json!({
+                    "vocabulary": logits.len(), "top_k": top_k, "draws_per_sample": draws,
+                    "seconds": samples, "checksum": checksum,
+                })
+            );
         }
     }
 

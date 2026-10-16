@@ -23,6 +23,10 @@ from . import test_observations
 
 
 class AccountingTests(unittest.TestCase):
+    def test_default_is_resident_and_cold_remains_explicit(self):
+        self.assertEqual(campaign.arguments([]).execution_mode, "resident")
+        self.assertEqual(campaign.arguments(["--execution-mode", "cold"]).execution_mode, "cold")
+
     def test_native_timing_keeps_initialization_and_completed_step_costs_separate(self):
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "engine.jsonl"
@@ -558,6 +562,7 @@ class ProductionProxyTests(unittest.TestCase):
                 self.assertTrue(trace.is_file())
             specs = [r["spec"] for r in server.requests if r["op"] == "open"]
             self.assertEqual([s["sampling"]["seed"] for s in specs], [0, 1, 2])
+            self.assertEqual([s["sampling"]["top_k"] for s in specs], [40, 40, 40])
             starts = [r for r in server.requests if r["op"] == "step" and r["append"]
                       and "User" in r["append"][-1]]
             self.assertEqual(len(starts), 3)

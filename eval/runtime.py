@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import cache
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,27 @@ from . import fixtures
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+
+
+@cache
+def physical_cpu_count() -> int:
+    """Count available physical cores once per process, merging SMT siblings."""
+    try:
+        siblings = {
+            Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
+            .read_text(encoding="ascii").strip()
+            for cpu in os.sched_getaffinity(0)
+        }
+        if not siblings or any(
+            not re.fullmatch(r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*", group)
+            for group in siblings
+        ):
+            raise ValueError("missing or invalid CPU sibling topology")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"cannot determine available physical CPU cores: {exc}; set --threads explicitly"
+        ) from exc
+    return len(siblings)
 
 
 def inference_device(value: str) -> str:
@@ -249,6 +271,7 @@ def harness_sources() -> list[Path]:
 
 def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, toolchain: dict) -> dict:
     device = inference_device(getattr(args, "device", "cpu"))
+    mode = getattr(args, "execution_mode", "resident")
     binary_hash = fixtures.file_hash(binary)
     build = {"source_revision": None, "source_clean": None, "binary_sha256": binary_hash,
              "provenance": "unverified external binary"}
@@ -277,10 +300,10 @@ def metadata(args, suite: dict, binary: Path, weights: Path, tokenizer: Path, to
         "harness_content_sha256": fixtures.digest(content_hashes),
         "grading_content_sha256": fixtures.digest({name: value for name, value in content_hashes.items() if name.startswith("checks/")}),
         "settings": {"device": device, "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
-                     "execution_mode": getattr(args, "execution_mode", "cold"),
+                     "execution_mode": mode,
                      "warmup_generations": 0,
                      "worker_start_timeout_s": getattr(args, "worker_start_timeout", 120)
-                                                if getattr(args, "execution_mode", "cold") == "resident" else None,
+                                                if mode == "resident" else None,
                      "cuda_environment": {key: os.environ.get(key) for key in
                                           ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")}
                                          if device == "auto" or device.startswith("cuda:") else None,

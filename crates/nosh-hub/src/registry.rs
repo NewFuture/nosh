@@ -34,6 +34,8 @@ pub struct ModelEntry {
 pub struct Sampling {
     pub temperature: f32,
     pub top_p: f32,
+    #[serde(default)]
+    pub top_k: usize,
     pub min_p: f32,
 }
 
@@ -177,6 +179,8 @@ mod tests {
         let def = reg.default_model();
         assert_eq!(def.id, "minicpm5-2b:q4_k_m");
         assert_eq!(def.eog_ids, vec![1, 130073]);
+        assert_eq!(def.sampling.top_k, 40);
+        assert!(reg.models.iter().all(|model| model.sampling.top_k == 40));
         assert_eq!(def.weights().size, 1_561_318_368);
         assert_eq!(
             def.weights().sha256,
@@ -228,5 +232,15 @@ sampling = { temperature = 1.0, top_p = 1.0, min_p = 0.0 }
 files = []
 "#;
         assert!(Registry::parse(bad).is_err());
+    }
+
+    #[test]
+    fn sampling_keeps_explicit_zero_and_unfiltered_legacy_registries() {
+        for data in [
+            "temperature = 1.0\ntop_p = 0.95\nmin_p = 0.0",
+            "temperature = 1.0\ntop_p = 0.95\ntop_k = 0\nmin_p = 0.0",
+        ] {
+            assert_eq!(toml::from_str::<Sampling>(data).unwrap().top_k, 0);
+        }
     }
 }

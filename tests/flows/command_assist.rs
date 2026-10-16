@@ -52,6 +52,7 @@ fn automatic_next_is_bound_to_success_without_executing_the_suggestion() {
     assert!(!spec.thinking);
     assert_eq!(spec.max_new_tokens, 512);
     assert_eq!(spec.sampling.temperature, 1.0);
+    assert_eq!(spec.sampling.top_k, 40);
     assert_eq!(
         spec.tools
             .iter()

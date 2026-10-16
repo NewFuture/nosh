@@ -495,6 +495,12 @@ mod tests {
     use nosh_permissions::ApprovalMode;
 
     #[test]
+    fn debug_top_k_accepts_explicit_disable_and_rejects_negative_values() {
+        assert!(Cli::try_parse_from(["nosh", "debug", "gen", "hello", "--top-k", "0"]).is_ok());
+        assert!(Cli::try_parse_from(["nosh", "debug", "gen", "hello", "--top-k", "-1"]).is_err());
+    }
+
+    #[test]
     fn device_override_is_global_and_config_is_shared() {
         use nosh_llm::InferenceDevice;
         let cfg = config::Config::parse("[model]\ndevice = 'cuda:1'");

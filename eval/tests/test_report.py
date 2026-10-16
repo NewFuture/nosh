@@ -69,6 +69,19 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(overall["planned"], 80)
         self.assertNotIn("capture_components", tables)
 
+    def test_non_native_results_are_rejected_not_relabeled_as_native(self):
+        for backend in (None, [], {}, {"kind": "external"}):
+            data = self.sample()
+            data["metadata"]["backend"] = backend
+            with self.subTest(backend=backend), self.assertRaisesRegex(ValueError, "unsupported inference backend"):
+                report.validate(data)
+        data = self.sample()
+        data["metadata"]["backend"] = {"kind": "native"}
+        report.validate(data)
+        data["trials"][0]["engines"] = [{"device": "cpu", "backend": "external"}]
+        with self.assertRaisesRegex(ValueError, "unsupported inference backend"):
+            report.validate(data)
+
     def test_device_is_visible_and_cpu_gpu_comparisons_are_not_controlled(self):
         cpu = self.sample()
         cpu["metadata"]["settings"] = {"device": "cpu"}

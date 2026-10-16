@@ -120,7 +120,7 @@ impl<W: Write + Send> ChatEngine for TracedEngine<W> {
             "label": spec.label,
             "thinking": spec.thinking, "max_new_tokens": spec.max_new_tokens,
             "sampling": {
-                "seed": p.seed, "temperature": p.temperature, "top_p": p.top_p,
+                "seed": p.seed, "temperature": p.temperature, "top_p": p.top_p, "top_k": p.top_k,
                 "min_p": p.min_p, "repetition_penalty": p.repetition_penalty,
                 "tool_call_temperature": p.tool_call_temperature,
             },
@@ -282,6 +282,7 @@ mod tests {
         assert_eq!(out.text, "hello");
         assert_eq!(events.len(), 2);
         assert_eq!(specs.lock().unwrap()[0].sampling.seed, Some(42));
+        assert_eq!(specs.lock().unwrap()[0].sampling.top_k, 40);
         assert_eq!(received.lock().unwrap()[0], append);
         assert_eq!(engine.message_count(sid), 3);
         assert_eq!(engine.context_usage(sid).0, out.usage.context_used);

@@ -8,6 +8,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH
 cargo build --release --locked -p nosh-cli --features cuda
 ./target/release/nosh --offline doctor
 ./target/release/nosh debug gen "Explain a shell pipeline." --temp 0
+# 显式禁用 top-k，其他采样参数不变
+./target/release/nosh debug gen "Explain a shell pipeline." --top-k 0
 ./target/release/nosh -s "列出当前目录"
 # 显式覆盖自动选择
 CUDA_VISIBLE_DEVICES=0 ./target/release/nosh --device cuda -s "列出当前目录"
@@ -25,3 +27,5 @@ GPU f32 KV 不满足当前开放要求，不通过放宽数值门槛启用。CPU
 首次使用 CUDA 内核可能触发驱动 PTX/JIT 编译，首 token 明显更慢；后续新进程可能复用驱动缓存。测速必须区分首次 JIT 冷启动、驱动缓存已暖的新进程和同一进程的 KV 复用，不能统称“冷启动”。`NOSH_PROFILE` 的 CUDA 分算子计时仅反映异步提交开销；debug 的整体 prefill/decode 计时会等待 GPU 完成。
 
 评估器默认显式选择 CPU，不继承宿主的模型配置。GPU 评估传 `python3 -m eval --device cuda ...`；验证自动选择传 `--device auto`，逐 trial 记录实际设备和选择原因，见[评估说明](../eval/README.md)。测量结果保存为带构建、硬件和运行条件的独立产物，不在此维护旧构建吞吐表。
+
+采样器热点可单独测量：`cargo test --profile fastrel -p nosh-llm sampling::tests::sampling_top_k_throughput -- --ignored --exact --nocapture --test-threads=1`。这是固定词表与 logits 的微基准，不能当作模型推理或整轮 eval 的加速倍数；端到端对照仍需固定模型、输入、设备和生命周期。
