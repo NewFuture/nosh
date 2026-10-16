@@ -2,26 +2,26 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{EmbeddedShell, Resolution, backend, input_assist, suggestion};
+use crate::{EmbeddedShell, Resolution, backend, host, input_assist, suggestion};
 
 pub(crate) fn resolve_file(
     context: &input_assist::Context,
     path: Option<&str>,
     name: &str,
 ) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let fixed = if name.contains('/') {
+    let fixed = if host::contains_separator(name) {
         Some(Path::new(name))
     } else if path == context.path.as_deref() {
         context.hashed_commands.get(name).map(PathBuf::as_path)
     } else {
         None
     };
-    let search = path.filter(|_| fixed.is_none() || (context.check_hash && !name.contains('/')));
+    let search =
+        path.filter(|_| fixed.is_none() || (context.check_hash && !host::contains_separator(name)));
     let paths = fixed.into_iter().map(|p| context.cwd.join(p)).chain(
         search
             .into_iter()
-            .flat_map(|value| value.split(':'))
+            .flat_map(std::env::split_paths)
             .take(129)
             .map(|directory| context.cwd.join(directory).join(name)),
     );
@@ -30,20 +30,19 @@ pub(crate) fn resolve_file(
         if index >= 128 + usize::from(fixed.is_some()) {
             return Err("command lookup directory limit".into());
         }
+        let path = host::resolve_executable(&path).unwrap_or(path);
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => {
-                let encoded = std::ffi::CString::new(path.as_os_str().as_bytes())
-                    .map_err(|e| e.to_string())?;
-                // SAFETY: access only inspects the NUL-terminated candidate path.
-                if unsafe { libc::access(encoded.as_ptr(), libc::X_OK) } == 0 {
-                    return Ok(Some(path));
-                }
-                let error = std::io::Error::last_os_error();
-                if !matches!(
-                    error.raw_os_error(),
-                    Some(libc::EACCES | libc::ENOENT | libc::ENOTDIR)
-                ) {
-                    failure = Some(format!("{}: {error}", path.display()));
+                match host::check_access(&path, host::Access::Execute) {
+                    Ok(()) => return Ok(Some(path)),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(error) => failure = Some(format!("{}: {error}", path.display())),
                 }
             }
             Ok(_) => {}
@@ -78,13 +77,9 @@ impl CommandSnapshot {
         if self.0.builtins.contains(name) {
             return Resolution::Builtin;
         }
-        if name.contains('/') {
+        if host::contains_separator(name) {
             let path = self.0.cwd.join(name);
-            return if backend::is_executable(&path) {
-                Resolution::File(path)
-            } else {
-                Resolution::NotFound
-            };
+            return host::resolve_executable(&path).map_or(Resolution::NotFound, Resolution::File);
         }
         if let Some(path) = self.0.hashed_commands.get(name) {
             let path = self.0.cwd.join(path);
@@ -96,9 +91,9 @@ impl CommandSnapshot {
             .path
             .as_deref()
             .into_iter()
-            .flat_map(|path| path.split(':'))
+            .flat_map(std::env::split_paths)
             .map(|dir| self.0.cwd.join(dir).join(name))
-            .find(|path| backend::is_executable(path))
+            .find_map(|path| host::resolve_executable(&path))
             .map_or(Resolution::NotFound, Resolution::File)
     }
 

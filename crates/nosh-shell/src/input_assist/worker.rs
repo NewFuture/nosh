@@ -1,6 +1,9 @@
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Condvar, Mutex, OnceLock, TryLockError};
@@ -8,11 +11,18 @@ use std::time::Instant;
 
 use super::*;
 
+#[cfg(unix)]
+type WorkerStream = UnixStream;
+#[cfg(windows)]
+type WorkerStream = std::net::TcpStream;
+
+#[cfg(unix)]
 const SOCKET_FD: i32 = 3;
 #[cfg(target_os = "linux")]
 const HEAP_ALLOWANCE: u64 = 128 * 1024 * 1024;
 const TRANSFER_BUDGET: usize = 256 * 1024;
 const WORKER_ENV: &str = "NOSH_INPUT_WORKER";
+#[cfg(unix)]
 const MAX_DETACHED_HELPERS: usize = 256;
 
 #[derive(Serialize, Deserialize)]
@@ -60,6 +70,27 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+#[cfg(windows)]
+fn windows_stream() -> io::Result<WorkerStream> {
+    let address: std::net::SocketAddr = std::env::var("NOSH_WORKER_ADDRESS")
+        .map_err(io::Error::other)?
+        .parse()
+        .map_err(io::Error::other)?;
+    if !address.ip().is_loopback() {
+        return Err(invalid("worker transport must be loopback-only"));
+    }
+    let token = std::env::var("NOSH_WORKER_TOKEN").map_err(io::Error::other)?;
+    if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid("invalid worker authentication token"));
+    }
+    let mut stream = WorkerStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_nodelay(true)?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(token.as_bytes())?;
+    stream.set_write_timeout(None)?;
+    Ok(stream)
+}
+
 fn worker_main(kind: &str) -> io::Result<()> {
     let kind = match kind {
         "syntax" => Kind::Syntax,
@@ -68,34 +99,40 @@ fn worker_main(kind: &str) -> io::Result<()> {
         "abbreviations" => Kind::Abbreviations,
         _ => return Err(invalid("invalid worker kind")),
     };
-    // SAFETY: fcntl only inspects the descriptor; ownership is transferred below
-    // only if the descriptor exists and is a stream socket.
-    if unsafe { libc::fcntl(SOCKET_FD, libc::F_GETFD) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut socket_type: libc::c_int = 0;
-    let mut size = std::mem::size_of_val(&socket_type) as libc::socklen_t;
-    // SAFETY: the output pointers have the sizes described by `size`.
-    if unsafe {
-        libc::getsockopt(
-            SOCKET_FD,
-            libc::SOL_SOCKET,
-            libc::SO_TYPE,
-            (&raw mut socket_type).cast(),
-            &raw mut size,
-        )
-    } != 0
-        || socket_type != libc::SOCK_STREAM
-    {
-        return Err(invalid("missing worker socket"));
-    }
-    // SAFETY: this process's explicit worker entry owns the inherited descriptor.
-    let mut stream = unsafe { UnixStream::from_raw_fd(SOCKET_FD) };
-    // Do not expose the IPC channel to commands run by a completion provider.
-    if unsafe { libc::fcntl(SOCKET_FD, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    stream.set_nonblocking(false)?;
+    #[cfg(unix)]
+    let mut stream = {
+        // SAFETY: fcntl only inspects the descriptor; ownership is transferred below
+        // only if the descriptor exists and is a stream socket.
+        if unsafe { libc::fcntl(SOCKET_FD, libc::F_GETFD) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut socket_type: libc::c_int = 0;
+        let mut size = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+        // SAFETY: the output pointers have the sizes described by `size`.
+        if unsafe {
+            libc::getsockopt(
+                SOCKET_FD,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&raw mut socket_type).cast(),
+                &raw mut size,
+            )
+        } != 0
+            || socket_type != libc::SOCK_STREAM
+        {
+            return Err(invalid("missing worker socket"));
+        }
+        // SAFETY: this process's explicit worker entry owns the inherited descriptor.
+        let stream = unsafe { UnixStream::from_raw_fd(SOCKET_FD) };
+        // Do not expose the IPC channel to commands run by a completion provider.
+        if unsafe { libc::fcntl(SOCKET_FD, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        stream.set_nonblocking(false)?;
+        stream
+    };
+    #[cfg(windows)]
+    let mut stream = windows_stream()?;
     let result = serve(&mut stream, kind);
     if let Err(error) = &result {
         let report = Envelope {
@@ -111,12 +148,13 @@ fn worker_main(kind: &str) -> io::Result<()> {
     result
 }
 
-fn serve(stream: &mut UnixStream, kind: Kind) -> io::Result<()> {
+fn serve(stream: &mut WorkerStream, kind: Kind) -> io::Result<()> {
     limit_memory()?;
     let mut lookup = lookup::Lookup::default();
     let mut completion = crate::completion::worker::Server::default();
     let mut abbreviations = crate::abbreviations::Checker::default();
     while let Some(bytes) = read_frame(stream)? {
+        #[cfg(unix)]
         limit_cpu()?;
         let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         validate_request(&request)?;
@@ -280,6 +318,7 @@ fn read_frame(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(buffer))
 }
 
+#[cfg(unix)]
 fn set_limit(resource: Resource, maximum: u64) -> io::Result<()> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
@@ -298,7 +337,7 @@ fn set_limit(resource: Resource, maximum: u64) -> io::Result<()> {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 type Resource = libc::__rlimit_resource_t;
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
 type Resource = libc::c_int;
 
 #[cfg(target_os = "linux")]
@@ -358,7 +397,19 @@ fn limit_memory() -> io::Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn limit_memory() -> io::Result<()> {
+    if allocation::enable() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "worker allocator is required on Windows",
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn limit_memory() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -383,6 +434,7 @@ fn virtual_memory() -> io::Result<u64> {
     Ok(pages.saturating_mul(page_size as u64))
 }
 
+#[cfg(unix)]
 fn limit_cpu() -> io::Result<()> {
     // The CPU limit is cumulative, so renew its soft limit for each request.
     // The parent's independent wall-clock deadline is much shorter.
@@ -412,7 +464,7 @@ fn limit_cpu() -> io::Result<()> {
 
 pub(crate) struct Worker {
     child: ChildHandle,
-    stream: UnixStream,
+    stream: WorkerStream,
     outgoing: Vec<u8>,
     written: usize,
     incoming: Vec<u8>,
@@ -426,6 +478,7 @@ pub(crate) struct Worker {
     hold_reaping: bool,
 }
 
+#[cfg(unix)]
 pub(crate) struct OwnedChild {
     child: Child,
     reaped: bool,
@@ -435,6 +488,7 @@ pub(crate) struct OwnedChild {
     reported_cleanup_error: Option<String>,
 }
 
+#[cfg(unix)]
 impl OwnedChild {
     pub(crate) fn new(child: Child, marker: Option<String>) -> Self {
         Self {
@@ -541,6 +595,11 @@ impl OwnedChild {
         error.map_or(Ok(()), Err)
     }
 
+    fn has_descendants(&mut self) -> io::Result<bool> {
+        self.residual_children()
+            .map(|children| !children.is_empty())
+    }
+
     fn exited_without_reaping(&self) -> io::Result<bool> {
         if self.reaped {
             return Ok(true);
@@ -611,6 +670,64 @@ impl OwnedChild {
             return Ok(false);
         }
         self.reaped = self.child.try_wait()?.is_some();
+        Ok(self.reaped)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) struct OwnedChild {
+    child: Child,
+    group: nosh_platform::process::ProcessGroup,
+    reaped: bool,
+    reported_cleanup_error: Option<String>,
+}
+
+#[cfg(windows)]
+impl OwnedChild {
+    pub(crate) fn new(child: Child, group: nosh_platform::process::ProcessGroup) -> Self {
+        Self {
+            child,
+            group,
+            reaped: false,
+            reported_cleanup_error: None,
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.group.terminate()
+    }
+
+    fn stop(&mut self) -> io::Result<()> {
+        self.kill()
+    }
+
+    fn has_descendants(&mut self) -> io::Result<bool> {
+        let active = self.group.active()?;
+        if self.child.try_wait()?.is_some() {
+            // The leader may exit between the first count and the status query.
+            return self.group.active().map(|count| count != 0);
+        }
+        Ok(active > 1)
+    }
+
+    pub(crate) fn exit_code(&mut self) -> io::Result<Option<i32>> {
+        self.child
+            .try_wait()?
+            .map(|status| {
+                status
+                    .code()
+                    .ok_or_else(|| io::Error::other("Windows process has no exit code"))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn retire(&mut self) -> io::Result<bool> {
+        if !self.reaped {
+            self.group.terminate()?;
+            if self.group.active()? == 0 {
+                self.reaped = self.child.try_wait()?.is_some();
+            }
+        }
         Ok(self.reaped)
     }
 }
@@ -701,6 +818,7 @@ pub(super) fn reap_child_async(handle: ChildHandle) {
 }
 
 impl Worker {
+    #[cfg(unix)]
     pub fn spawn(launcher: &WorkerCommand, kind: Kind) -> io::Result<Self> {
         let (parent, child) = UnixStream::pair()?;
         parent.set_nonblocking(true)?;
@@ -772,30 +890,128 @@ impl Worker {
         })
     }
 
+    #[cfg(windows)]
+    pub fn spawn(launcher: &WorkerCommand, kind: Kind) -> io::Result<Self> {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let mut nonce = [0; 16];
+        nosh_platform::process::random_bytes(&mut nonce)?;
+        let token = format!("{:032x}", u128::from_ne_bytes(nonce));
+        let group = nosh_platform::process::ProcessGroup::new(Some(256 * 1024 * 1024))?;
+        let mut command = Command::new(&launcher.program);
+        command
+            .args(&launcher.args)
+            .env_clear()
+            .env(WORKER_ENV, kind.name())
+            .env("NOSH_WORKER_ADDRESS", listener.local_addr()?.to_string())
+            .env("NOSH_WORKER_TOKEN", &token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        nosh_platform::process::inherit_runtime_environment(&mut command)?;
+        let process = group.spawn(&mut command)?;
+        let mut child = OwnedChild::new(process, group);
+        let connection = (|| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "worker startup timed out",
+                    ));
+                }
+                if let Some(code) = child.exit_code()? {
+                    return Err(io::Error::other(format!(
+                        "worker exited during startup ({code})"
+                    )));
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+                        let mut received = [0; 32];
+                        match stream.read_exact(&mut received) {
+                            Ok(()) if received == token.as_bytes() => {
+                                stream.set_read_timeout(None)?;
+                                stream.set_nodelay(true)?;
+                                stream.set_nonblocking(true)?;
+                                return Ok(stream);
+                            }
+                            Ok(()) => continue,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::TimedOut
+                                        | io::ErrorKind::WouldBlock
+                                        | io::ErrorKind::UnexpectedEof
+                                ) =>
+                            {
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })();
+        let stream = match connection {
+            Ok(stream) => stream,
+            Err(error) => {
+                child.group.finish()?;
+                child.child.wait()?;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            child: Arc::new(Mutex::new(child)),
+            stream,
+            outgoing: Vec::new(),
+            written: 0,
+            incoming: Vec::new(),
+            started: Instant::now(),
+            timeout: SYNTAX_TIMEOUT,
+            busy: false,
+            stopping: false,
+            kind,
+            first_request: true,
+            #[cfg(test)]
+            hold_reaping: false,
+        })
+    }
+
     pub fn start(&mut self, request: &Request) -> io::Result<()> {
         if self.busy || self.stopping {
             return Err(invalid("worker already occupied"));
         }
         let mut byte = 0u8;
         // SAFETY: peek cannot consume a previous response or block this caller.
-        let pending = unsafe {
-            libc::recv(
-                self.stream.as_raw_fd(),
-                (&raw mut byte).cast(),
-                1,
-                libc::MSG_PEEK | libc::MSG_DONTWAIT,
-            )
-        };
-        if pending >= 0 {
-            return Err(invalid(if pending == 0 {
-                "worker exited before request"
+        #[cfg(unix)]
+        let pending = {
+            let count = unsafe {
+                libc::recv(
+                    self.stream.as_raw_fd(),
+                    (&raw mut byte).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            if count < 0 {
+                Err(io::Error::last_os_error())
             } else {
-                "unsolicited worker output"
-            }));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::WouldBlock {
-            return Err(error);
+                Ok(count as usize)
+            }
+        };
+        #[cfg(windows)]
+        let pending = self.stream.peek(std::slice::from_mut(&mut byte));
+        match pending {
+            Ok(0) => return Err(invalid("worker exited before request")),
+            Ok(_) => return Err(invalid("unsolicited worker output")),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
         }
         self.timeout = match request {
             Request::Abbreviations(_) if self.first_request => INDEX_TIMEOUT * 2,
@@ -901,6 +1117,14 @@ impl Worker {
         self.child.clone()
     }
 
+    pub fn has_descendants(&self) -> io::Result<bool> {
+        self.child
+            .try_lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .has_descendants()
+    }
+
+    #[cfg(all(test, unix))]
     pub fn residual_children(&self) -> io::Result<Vec<crate::procs::Proc>> {
         self.child
             .try_lock()
@@ -961,7 +1185,7 @@ impl Drop for Worker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

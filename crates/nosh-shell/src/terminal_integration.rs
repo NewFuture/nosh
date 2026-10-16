@@ -2,7 +2,6 @@
 
 use std::cell::Cell;
 use std::io::{IsTerminal, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::EmbeddedShell;
@@ -62,20 +61,35 @@ impl Session {
             eprintln!("nosh: terminal integration already loaded; not adding duplicate markers");
         }
         let host = if enabled {
-            let mut buffer = [0u8; 256];
-            // SAFETY: gethostname writes only into the supplied buffer.
-            if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-                eprintln!(
-                    "nosh: terminal cwd reporting unavailable: {}",
-                    std::io::Error::last_os_error()
-                );
-                return Self::default();
+            #[cfg(unix)]
+            {
+                let mut buffer = [0u8; 256];
+                // SAFETY: gethostname writes only into the supplied buffer.
+                if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+                    eprintln!(
+                        "nosh: terminal cwd reporting unavailable: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    return Self::default();
+                }
+                let length = buffer
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(buffer.len());
+                encode(&buffer[..length], false)
             }
-            let length = buffer
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(buffer.len());
-            encode(&buffer[..length], false)
+            #[cfg(windows)]
+            {
+                match std::env::var("COMPUTERNAME") {
+                    Ok(host) if !host.is_empty() => encode(host.as_bytes(), false),
+                    _ => {
+                        eprintln!(
+                            "nosh: terminal cwd reporting unavailable: COMPUTERNAME is not set"
+                        );
+                        return Self::default();
+                    }
+                }
+            }
         } else {
             String::new()
         };
@@ -181,10 +195,31 @@ fn finished_marker(code: Option<i32>) -> String {
 }
 
 fn cwd_marker(host: &str, cwd: &Path) -> String {
-    format!(
-        "\x1b]7;file://{host}{}\x1b\\",
-        encode(cwd.as_os_str().as_bytes(), true)
-    )
+    #[cfg(windows)]
+    {
+        let path = cwd.to_string_lossy().replace('\\', "/");
+        let path = path.strip_prefix("//?/").unwrap_or(&path);
+        if let Some(unc) = path
+            .strip_prefix("UNC/")
+            .or_else(|| path.strip_prefix("//"))
+            && let Some((server, rest)) = unc.split_once('/')
+        {
+            return format!(
+                "\x1b]7;file://{}/{}\x1b\\",
+                encode(server.as_bytes(), false),
+                encode(rest.as_bytes(), true)
+            );
+        }
+        let path = encode(path.as_bytes(), true).replacen("%3A", ":", 1);
+        format!("\x1b]7;file://{host}/{path}\x1b\\")
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "\x1b]7;file://{host}{}\x1b\\",
+            encode(cwd.as_os_str().as_encoded_bytes(), true)
+        )
+    }
 }
 
 fn encode(bytes: &[u8], path: bool) -> String {
@@ -206,7 +241,9 @@ fn encode(bytes: &[u8], path: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
     #[test]
@@ -227,6 +264,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn uri_encodes_control_unicode_and_non_utf8_without_sequence_injection() {
         let path = OsString::from_vec(b"/a b/\xe4\xb8\xad/%;#?\x1b\x07\n\xff".to_vec());
         assert_eq!(

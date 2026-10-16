@@ -267,7 +267,7 @@ impl Context {
             || (context.redirect != Some(Redirect::Other)
                 && context.quote != Some('\'')
                 && context.word.contains(['$', '`'])
-                && context.word.contains('/'));
+                && crate::host::contains_separator(&context.word));
         Ok(context)
     }
 
@@ -279,7 +279,9 @@ impl Context {
     }
 
     pub fn is_variable(&self) -> bool {
-        self.word.starts_with('$') && self.quote != Some('\'') && !self.word.contains('/')
+        self.word.starts_with('$')
+            && self.quote != Some('\'')
+            && !crate::host::contains_separator(&self.word)
     }
 
     pub fn needs_script(&self, snapshot: &NativeSnapshot) -> bool {

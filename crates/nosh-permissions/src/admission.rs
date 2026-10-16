@@ -372,7 +372,7 @@ struct GitProbe<'a> {
 impl GitProbe<'_> {
     fn run(&self, args: &[&str]) -> Result<Option<String>, String> {
         // Use the resolved Git for evidence, never a project-local lookalike.
-        let git = if self.program.contains('/') {
+        let git = if self.program.contains(std::path::is_separator) {
             PathBuf::from(self.program)
         } else {
             self.ctx
@@ -398,6 +398,11 @@ impl GitProbe<'_> {
             return Err("custom GIT_* environment needs explicit authorization".into());
         }
         let mut cmd = Command::new(&git);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS);
+        }
         cmd.arg("--no-optional-locks")
             .current_dir(self.cwd)
             .stdin(Stdio::null())
@@ -612,6 +617,37 @@ impl GitProbe<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn git_evidence_accepts_the_resolved_native_executable_path() {
+        let path = std::env::var_os("PATH").expect("Git is required by repository tests");
+        let git = std::env::split_paths(&path)
+            .map(|directory| directory.join("git.exe"))
+            .find(|candidate| candidate.is_file())
+            .expect("Git executable in PATH");
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = Context::new(directory.path(), directory.path());
+        for name in ["PATH", "SystemRoot"] {
+            context
+                .variables
+                .insert(name.into(), std::env::var(name).unwrap());
+            context.exported.insert(name.into());
+        }
+        let program = git.to_str().unwrap();
+        assert!(program.contains('\\'));
+        let probe = GitProbe {
+            cwd: directory.path(),
+            ctx: &context,
+            program,
+        };
+        let version = probe.run(&["--version"]).unwrap().unwrap();
+        assert!(version.starts_with("git version "), "{version}");
     }
 }
 

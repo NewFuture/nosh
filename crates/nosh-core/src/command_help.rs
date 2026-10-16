@@ -1,11 +1,18 @@
 //! Bounded help for literal command names and subcommands; never executes shell text.
 
+#[cfg(unix)]
 use std::io::{ErrorKind, Read};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::process::{Child, ExitStatus};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use nosh_engine::{CancelHandle, ToolCall, ToolSpec};
 use nosh_permissions::{
@@ -177,15 +184,15 @@ pub(crate) fn query(
         return Err("query cancelled".into());
     }
     let mut command = Command::new(&executable);
+    #[cfg(unix)]
+    command.arg0(&path).process_group(0);
     command
-        .arg0(&path)
         .args(target.arguments())
         .current_dir(commands.cwd())
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
     for name in &context.exported {
         if let Some(value) = context.variables.get(name) {
             command.env(name, value);
@@ -198,6 +205,10 @@ pub(crate) fn query(
     help::render(&target, &path, &executable, &output, query)
 }
 
+#[cfg(windows)]
+type Captured = nosh_platform::process::Captured;
+
+#[cfg(unix)]
 struct Captured {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -205,6 +216,7 @@ struct Captured {
     complete: bool,
 }
 
+#[cfg(unix)]
 fn capture(
     command: &mut Command,
     timeout: Duration,
@@ -269,6 +281,7 @@ fn capture(
     }
 }
 
+#[cfg(unix)]
 fn nonblocking(pipe: &impl AsRawFd) -> Result<(), String> {
     // SAFETY: the descriptor belongs to a live pipe owned by this query.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
@@ -280,6 +293,7 @@ fn nonblocking(pipe: &impl AsRawFd) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, remaining: &mut usize) -> Result<bool, String> {
     let mut buffer = [0; 4096];
     for _ in 0..4 {
@@ -301,11 +315,13 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, remaining: &mut usize) -> Re
     Ok(false)
 }
 
+#[cfg(unix)]
 struct OwnedQuery {
     child: Child,
     reaped: bool,
 }
 
+#[cfg(unix)]
 impl Drop for OwnedQuery {
     fn drop(&mut self) {
         if self.reaped {
@@ -321,5 +337,20 @@ impl Drop for OwnedQuery {
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn capture(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: &CancelHandle,
+) -> Result<Captured, String> {
+    nosh_platform::process::capture(
+        command,
+        timeout.min(Duration::from_secs(3)),
+        64 * 1024,
+        || cancel.is_cancelled(),
+    )
+    .map_err(|error| format!("help query: {error}"))
+}
+
+#[cfg(all(test, unix))]
 mod tests;

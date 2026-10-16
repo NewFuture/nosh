@@ -1,7 +1,7 @@
 # 最近用户命令输出采集设计
 
-> **状态**：当前实现，本地交互 shell 默认启用。
-> **配置**：`shell.capture_output = "last" | "off"`，默认 `last`。
+> **状态**：当前实现，Linux/macOS 本地交互 shell 默认启用。
+> **配置**：`shell.capture_output = "last" | "off"`，Linux/macOS 默认 `last`，原生 Windows 默认 `off`。
 > **范围**：Linux / WSL 与 macOS 的交互 shell。`-c`、脚本、stdin 非交互模式、`-a` 和 `-s` 不进入中转 PTY。
 > **关联**：[#18](https://github.com/NewFuture/nosh/issues/18)。#23 的建议键与空输入规则见[输入编辑](INPUT-EDITING.md)，不扩大这里的输出注入范围。
 
@@ -45,7 +45,9 @@ capture_output = "last"  # last（默认）| off
 3. 将实际流经 PTY 的字节原样转发给用户，同时在独立副本上做有界文本处理。
 4. 只保留最近一条已结束用户命令的快照。下一条用户命令会替换它，即使新命令成功或没有输出。
 
-`off` 不创建中转进程，交互 shell 沿用原执行路径。无效配置会警告并采用默认 `last`。
+`off` 不创建中转进程，交互 shell 沿用原执行路径。无效配置会警告并采用平台默认值。
+
+原生 Windows 首版不创建 ConPTY 中转。默认 `off`；显式设置 `last` 时先报告不可用，再沿用原生控制台，记录为 `Unavailable(NoPty)`，不把没有采集的数据当作成功空输出。Windows 的无效配置采用该平台默认 `off`。这不关闭 Agent 命令独立的 stdout/stderr 管道采集。
 
 状态显示不改变此选择。提示符上方信息条在 `B` 之前完成当前绘制并停止刷新，`E` 排空并确认结束后才建立新提示符；没有独立 footer 写入或额外保留行。已提交的快照属于提示符，不进入命令输出证据，也不靠事后过滤文本来排除。PTY 传播完整物理尺寸，`off` 不为信息条创建 PTY；真实 CLI 的 last/off 开关组合已有回归。字段、交接及宿主限制见 [状态行设计](STATUS-BAR.md)。
 

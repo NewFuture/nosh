@@ -1,0 +1,197 @@
+#![cfg(windows)]
+
+use std::path::{Path, PathBuf};
+
+use nosh_permissions::{
+    ApprovalMode, Context, Decision, PathClass, RuleSpec, SessionAllowList, UserRule, UserRules,
+    assess_read, classify_path, classify_path_real, evaluate,
+};
+
+#[test]
+fn normalization_keeps_drives_unc_roots_and_clamps_parents() {
+    let context = Context::new(r"C:\work\sub", r"C:\work").with_home(r"C:\Users\Alice");
+    assert_eq!(context.resolve(r"..\file"), PathBuf::from(r"C:\work\file"));
+    assert_eq!(
+        context.resolve(r"D:\other\..\file"),
+        PathBuf::from(r"D:\file")
+    );
+    assert_eq!(context.resolve(r"..\..\..\.."), PathBuf::from(r"C:\"));
+    assert_eq!(
+        context.resolve(r"\\server\share\dir\..\file"),
+        PathBuf::from(r"\\server\share\file")
+    );
+    assert_eq!(
+        context.resolve("~/.ssh/id"),
+        PathBuf::from(r"C:\Users\Alice\.ssh\id")
+    );
+}
+
+#[test]
+fn scopes_compare_windows_case_and_canonical_prefixes_without_crossing_drives() {
+    let context = Context::new(r"C:\work\sub", r"C:\work").with_home("C:\\Users\\\u{00c4}lice");
+    for path in [
+        "C:\\Users\\\u{00e4}LICE\\.SSH\\id_rsa",
+        "\\\\?\\C:\\Users\\\u{00c4}lice\\.ssh\\id_rsa",
+        "C:\\Users\\\u{00c4}lice\\.ssh. \\id_rsa",
+    ] {
+        assert!(
+            matches!(
+                classify_path(Path::new(path), &context),
+                PathClass::Protected(_)
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        classify_path(Path::new(r"c:\WORK\file"), &context),
+        PathClass::Workspace
+    );
+    assert_eq!(
+        classify_path(Path::new(r"D:\work\file"), &context),
+        PathClass::Outside
+    );
+    assert_eq!(
+        classify_path(Path::new(r"C:\work-other\file"), &context),
+        PathClass::Outside
+    );
+    assert_eq!(classify_path(Path::new(r"C:\"), &context), PathClass::Root);
+    assert!(matches!(
+        classify_path(Path::new(r"C:\work\.ENV"), &context),
+        PathClass::Protected(_)
+    ));
+}
+
+#[test]
+fn ambiguous_drive_paths_device_names_and_streams_are_not_workspace_files() {
+    let context = Context::new(r"C:\work", r"C:\work");
+    for path in [
+        r"C:relative",
+        r"C:\work\file:stream",
+        r"\\.\PhysicalDrive0",
+        r"C:\work\CON",
+        r"C:\work\COM1.txt",
+    ] {
+        assert!(
+            matches!(
+                classify_path(Path::new(path), &context),
+                PathClass::Protected(_)
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        classify_path(Path::new(r"C:\work\NUL"), &context),
+        PathClass::Null
+    );
+}
+
+#[test]
+fn existing_files_have_the_same_scope_after_windows_canonicalization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("file.txt");
+    std::fs::write(&path, "data").unwrap();
+    let context = Context::new(directory.path(), directory.path());
+    let canonical = path.canonicalize().unwrap();
+    assert_eq!(classify_path(&canonical, &context), PathClass::Workspace);
+    assert_eq!(
+        classify_path_real(&path, &context, true).0,
+        PathClass::Workspace
+    );
+}
+
+#[test]
+fn deny_rules_match_windows_case_and_native_separators() {
+    let directory = tempfile::tempdir().unwrap();
+    let sensitive = directory.path().join("Sensitive");
+    std::fs::create_dir(&sensitive).unwrap();
+    std::fs::write(sensitive.join("Secret.txt"), "private").unwrap();
+    let context = Context::new(directory.path(), directory.path());
+    let target = directory.path().join("SENSITIVE").join("SECRET.TXT");
+    let report = assess_read("read_file", &target, None, &context);
+    for pattern in [
+        "sensitive/**".to_string(),
+        r"Sensitive\**".to_string(),
+        format!(r"{}\Sensitive\**", directory.path().display()),
+    ] {
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("read_file".into()),
+                path: Some(pattern.clone()),
+                ..Default::default()
+            },
+            "test.deny",
+        )
+        .unwrap();
+        let policy = evaluate(
+            &report,
+            ApprovalMode::Yolo,
+            &UserRules {
+                deny: vec![rule],
+                ..Default::default()
+            },
+            &SessionAllowList::default(),
+        );
+        assert!(
+            matches!(policy.decision, Decision::Deny { .. }),
+            "{pattern}: {policy:?}"
+        );
+    }
+}
+
+#[test]
+fn home_rules_use_native_profile_when_home_is_unset() {
+    if let Some(home) = std::env::var_os("NOSH_RULE_HOME_PROBE") {
+        let home = PathBuf::from(home);
+        assert!(std::env::var_os("HOME").is_none());
+        let rule = UserRule::compile(
+            RuleSpec {
+                tool: Some("read_file".into()),
+                path: Some("~/sensitive/**".into()),
+                cwd: Some("~".into()),
+                ..Default::default()
+            },
+            "test.deny",
+        )
+        .unwrap();
+        let context = Context::new(&home, &home).with_home(&home);
+        let report = assess_read(
+            "read_file",
+            &home.join("sensitive").join("file"),
+            None,
+            &context,
+        );
+        let policy = evaluate(
+            &report,
+            ApprovalMode::Yolo,
+            &UserRules {
+                deny: vec![rule],
+                ..Default::default()
+            },
+            &SessionAllowList::default(),
+        );
+        assert!(
+            matches!(policy.decision, Decision::Deny { .. }),
+            "{policy:?}"
+        );
+        return;
+    }
+    use std::os::windows::process::CommandExt;
+    let directory = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "home_rules_use_native_profile_when_home_is_unset",
+            "--nocapture",
+        ])
+        .env_remove("HOME")
+        .env("USERPROFILE", directory.path())
+        .env("NOSH_RULE_HOME_PROBE", directory.path())
+        .creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

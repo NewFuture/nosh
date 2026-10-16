@@ -274,10 +274,23 @@ index ce891db08c6922308ca38ac3689dc2811d44b389..3e9c29c91741cb1e1a425eaf29eda05b
      for (i, item) in history.iter().skip(skip_count).enumerate() {
          let mut formatted_timestamp = String::new();
 diff --git a/brush-core/src/commands.rs b/brush-core/src/commands.rs
-index 077c4ac2c2a71670495192afa4892e682945bb82..f21d0fe6bf3ee29590b954dbfa7858fad3d409e6 100644
+index 077c4ac2c2a71670495192afa4892e682945bb82..44abb68e3a4b8f87d3c27710217791f28c333f0e 100644
 --- a/brush-core/src/commands.rs
 +++ b/brush-core/src/commands.rs
-@@ -754,6 +754,24 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
+@@ -630,7 +630,11 @@ pub(crate) fn execute_external_command(
+             .join(" ")
+     );
+ 
+-    match sys::process::spawn(cmd) {
++    let spawned = match &context.params.process_spawner {
++        Some(spawn) => spawn(cmd),
++        None => sys::process::spawn(cmd),
++    };
++    match spawned {
+         Ok(child) => {
+             // Retrieve the pid.
+             #[expect(clippy::cast_possible_wrap)]
+@@ -754,6 +758,24 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
      shell: &mut Shell<impl extensions::ShellExtensions>,
      params: &ExecutionParameters,
      s: String,
@@ -302,7 +315,7 @@ index 077c4ac2c2a71670495192afa4892e682945bb82..f21d0fe6bf3ee29590b954dbfa7858fa
  ) -> Result<String, error::Error> {
      // Instantiate a subshell to run the command in.
      let mut subshell = shell.clone();
-@@ -776,11 +794,30 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
+@@ -776,11 +798,30 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
  
      let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
  
@@ -1260,8 +1273,58 @@ index f5a6215f60ec5f0782efdd974eebf42e11d4485c..6d43023a498c22e5a7cc83e0260595d9
 +        history.finish_input_with_status(0).unwrap();
 +    }
 +}
+diff --git a/brush-core/src/interp.rs b/brush-core/src/interp.rs
+index 212e3059dded321473ce910216a4cad2f516f9d2..640b4e41fc5b51d9ee4e5826f958b43a3e1f0435 100644
+--- a/brush-core/src/interp.rs
++++ b/brush-core/src/interp.rs
+@@ -34,11 +34,19 @@ pub struct ExecutionParameters {
+     open_files: openfiles::OpenFiles,
+     /// Policy for how to manage spawned external processes.
+     pub process_group_policy: ProcessGroupPolicy,
++    /// Optional host-owned spawning, inherited by pipelines and nested execution.
++    pub process_spawner: Option<std::sync::Arc<ProcessSpawner>>,
++    /// Reject detached shell tasks when the host cannot retain their lifetime.
++    pub reject_background_jobs: bool,
+     /// Whether `errexit` (exit on error) behavior should be
+     /// suppressed in this execution context. Defaults to `false`.
+     pub suppress_errexit: bool,
+ }
+ 
++/// Lets the host retain process ownership before an external command starts.
++pub type ProcessSpawner =
++    dyn Fn(std::process::Command) -> std::io::Result<sys::process::Child> + Send + Sync;
++
+ impl ExecutionParameters {
+     /// Returns the standard input file; usable with `write!` et al.
+     ///
+@@ -248,6 +256,12 @@ impl Execute for ast::CompoundList {
+             let run_async = matches!(sep, ast::SeparatorOperator::Async);
+ 
+             if run_async {
++                if params.reject_background_jobs {
++                    return Err(error::ErrorKind::NotSupportedOnThisPlatform(
++                        "background execution in this host context",
++                    )
++                    .into());
++                }
+                 let job = spawn_async_ao_list_in_task(ao_list, shell, params);
+                 let job_formatted = job.to_pid_style_string();
+ 
+@@ -1916,6 +1930,12 @@ fn setup_process_substitution(
+     kind: &ast::ProcessSubstitutionKind,
+     subshell_cmd: &ast::SubshellCommand,
+ ) -> Result<(ShellFd, OpenFile), error::Error> {
++    if cfg!(windows) || params.reject_background_jobs {
++        return Err(error::ErrorKind::NotSupportedOnThisPlatform(
++            "process substitution in this host context",
++        )
++        .into());
++    }
+     // TODO(execute): Don't execute synchronously!
+     // Execute in a subshell.
+     let mut subshell = shell.clone();
 diff --git a/brush-core/src/lib.rs b/brush-core/src/lib.rs
-index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..7c386580971a44c8f4383bb4f8be6ec5309ca40b 100644
+index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..fa734fcbf80d064b4ce4e5add4cb42c970a9b2fc 100644
 --- a/brush-core/src/lib.rs
 +++ b/brush-core/src/lib.rs
 @@ -32,6 +32,8 @@ mod prompt;
@@ -1273,8 +1336,17 @@ index ee0cdfaa532f91b6f3abb37adf4e439cc570fe30..7c386580971a44c8f4383bb4f8be6ec5
  pub mod sourceinfo;
  pub mod sys;
  pub mod terminal;
+@@ -53,7 +55,7 @@ pub mod parser {
+ pub use commands::{CommandArg, ExecutionContext};
+ pub use error::{BuiltinError, Error, ErrorKind};
+ pub use extensions::ShellExtensions;
+-pub use interp::{ExecutionParameters, ProcessGroupPolicy};
++pub use interp::{ExecutionParameters, ProcessGroupPolicy, ProcessSpawner};
+ pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
+ pub use results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult};
+ pub use shell::{
 diff --git a/brush-core/src/shell.rs b/brush-core/src/shell.rs
-index 82dbca4601fd33e2d1b29de735be17b345ae08a6..8801078e450cff24dbffc88376671d3e44f2e5bc 100644
+index 82dbca4601fd33e2d1b29de735be17b345ae08a6..458f1de1787eabfa79531f15ca84457d1ad34ca2 100644
 --- a/brush-core/src/shell.rs
 +++ b/brush-core/src/shell.rs
 @@ -45,6 +45,8 @@ mod state;
@@ -1286,7 +1358,26 @@ index 82dbca4601fd33e2d1b29de735be17b345ae08a6..8801078e450cff24dbffc88376671d3e
  pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
  pub use state::ShellState;
  
-@@ -208,6 +210,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
+@@ -61,6 +63,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
+     #[cfg_attr(feature = "serde", serde(skip, default = "default_error_formatter"))]
+     error_formatter: SE::ErrorFormatter,
+ 
++    /// Host spawning inherited by default execution contexts and cloned subshells.
++    #[cfg_attr(feature = "serde", serde(skip))]
++    process_spawner: Option<Arc<crate::ProcessSpawner>>,
++
+     /// Trap handler configuration for the shell.
+     traps: crate::traps::TrapHandlerConfig,
+ 
+@@ -149,6 +155,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
+     fn clone(&self) -> Self {
+         Self {
+             error_formatter: self.error_formatter.clone(),
++            process_spawner: self.process_spawner.clone(),
+             traps: self.traps.clone(),
+             open_files: self.open_files.clone(),
+             working_dir: self.working_dir.clone(),
+@@ -208,6 +215,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
      pub(crate) fn new(options: CreateOptions<SE>) -> Result<Self, error::Error> {
          // Compute runtime options before moving fields out of `options`.
          let runtime_options = RuntimeOptions::defaults_from(&options);
@@ -1294,7 +1385,7 @@ index 82dbca4601fd33e2d1b29de735be17b345ae08a6..8801078e450cff24dbffc88376671d3e
  
          // Instantiate the shell with some defaults.
          let mut shell = Self {
-@@ -249,10 +252,14 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
+@@ -249,10 +257,14 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
  
          // Set up history, if relevant. Do NOT fail if we can't load history.
          if shell.options.enable_command_history {
@@ -1314,7 +1405,7 @@ index 82dbca4601fd33e2d1b29de735be17b345ae08a6..8801078e450cff24dbffc88376671d3e
  
          Ok(shell)
 diff --git a/brush-core/src/shell/builder.rs b/brush-core/src/shell/builder.rs
-index 3f99a9249646ab03586ab73c631a0e4583b8c814..1a355834bd7bc7c52b64deff7bff0a96864eb55e 100644
+index 3f99a9249646ab03586ab73c631a0e4583b8c814..5ce9f7dafebdf499f4a46f829928167adea3ac9e 100644
 --- a/brush-core/src/shell/builder.rs
 +++ b/brush-core/src/shell/builder.rs
 @@ -164,6 +164,9 @@ pub struct CreateOptions<SE: extensions::ShellExtensions = extensions::DefaultSh
@@ -1327,6 +1418,14 @@ index 3f99a9249646ab03586ab73c631a0e4583b8c814..1a355834bd7bc7c52b64deff7bff0a96
      /// System profile loading behavior.
      #[builder(default)]
      pub profile: ProfileLoadBehavior,
+@@ -233,6 +236,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
+     fn default() -> Self {
+         Self {
+             error_formatter: SE::ErrorFormatter::default(),
++            process_spawner: None,
+             traps: traps::TrapHandlerConfig::default(),
+             open_files: openfiles::OpenFiles::default(),
+             working_dir: PathBuf::default(),
 diff --git a/brush-core/src/shell/completion.rs b/brush-core/src/shell/completion.rs
 index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd58081068290 100644
 --- a/brush-core/src/shell/completion.rs
@@ -1453,6 +1552,26 @@ index 5c211f177df1c15f50eeab6150e179a2596a7a86..205d0cc64e96f8f2d973efcec31fd580
      /// Generates command completions for the shell.
      ///
      /// # Arguments
+diff --git a/brush-core/src/shell/execution.rs b/brush-core/src/shell/execution.rs
+index bea89e399378cb191180c6dc3e677cadd9494b1a..03112b7f53a07516945eaede0965de2c46bdd9b6 100644
+--- a/brush-core/src/shell/execution.rs
++++ b/brush-core/src/shell/execution.rs
+@@ -9,9 +9,15 @@ use crate::{
+ };
+ 
+ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
++    /// Sets host spawning for default execution, including completion and substitutions.
++    pub fn set_process_spawner(&mut self, spawner: std::sync::Arc<crate::ProcessSpawner>) {
++        self.process_spawner = Some(spawner);
++    }
++
+     /// Returns the default execution parameters for this shell.
+     pub fn default_exec_params(&self) -> ExecutionParameters {
+         let mut params = ExecutionParameters::default();
++        params.process_spawner = self.process_spawner.clone();
+ 
+         params.process_group_policy = if self.options.enable_job_control {
+             ProcessGroupPolicy::NewProcessGroup
 diff --git a/brush-core/src/shell/history.rs b/brush-core/src/shell/history.rs
 index 54be623bffac00010d9ea3b2b08306181dfc1743..4a0133bc63ec1c44e98c5b572fb2920b9dff1d58 100644
 --- a/brush-core/src/shell/history.rs

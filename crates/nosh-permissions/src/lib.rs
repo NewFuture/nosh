@@ -99,7 +99,18 @@ impl Context {
         let mut ctx = Self {
             cwd: cwd.into(),
             workspace: workspace.into(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: {
+                #[cfg(windows)]
+                {
+                    std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .map(PathBuf::from)
+                }
+                #[cfg(not(windows))]
+                {
+                    std::env::var_os("HOME").map(PathBuf::from)
+                }
+            },
             timeout: std::time::Duration::from_secs(60),
             ..Self::default()
         };

@@ -10,10 +10,19 @@ pub mod completion;
 pub mod editing;
 pub mod guard;
 pub mod history;
+mod host;
 pub mod inline_commands;
 pub mod input_assist;
+#[cfg(unix)]
+pub mod procs;
+#[cfg(windows)]
+#[path = "procs/windows.rs"]
 pub mod procs;
 pub mod project_env;
+#[cfg(unix)]
+pub mod pty;
+#[cfg(windows)]
+#[path = "pty/windows.rs"]
 pub mod pty;
 pub mod repl;
 pub mod spell;

@@ -506,10 +506,9 @@ fn poll(shared: &Shared, slot: &mut Slot, snapshot: &mut Option<Snapshot>) {
             return Err(message.clone());
         }
         if !ongoing
-            && !worker
-                .residual_children()
+            && worker
+                .has_descendants()
                 .map_err(|error| error.to_string())?
-                .is_empty()
         {
             return Err(
                 "provider left background processes; provider paused during cleanup".into(),

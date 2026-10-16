@@ -1,9 +1,11 @@
 //! Bounded, in-memory evidence from the user's terminal, separate from agent logs.
 
+#[cfg(any(unix, test))]
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::backend::UserCommand;
+#[cfg(any(unix, test))]
 use crate::style;
 
 pub const OUTPUT_BYTES: usize = 4096;
@@ -173,6 +175,7 @@ impl Utf8Decoder {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ControlState {
     #[default]
@@ -185,6 +188,7 @@ enum ControlState {
     StringEscape,
 }
 
+#[cfg(any(unix, test))]
 impl ControlState {
     fn advance(&mut self, bytes: &[u8]) {
         for &byte in bytes {
@@ -222,6 +226,7 @@ impl ControlState {
     }
 }
 
+#[cfg(any(unix, test))]
 pub(crate) struct OutputCollector {
     utf8: Utf8Decoder,
     parser: vte::Parser<0>,
@@ -231,6 +236,7 @@ pub(crate) struct OutputCollector {
     plain_ascii: bool,
 }
 
+#[cfg(any(unix, test))]
 impl Default for OutputCollector {
     fn default() -> Self {
         Self {
@@ -244,6 +250,7 @@ impl Default for OutputCollector {
     }
 }
 
+#[cfg(any(unix, test))]
 impl OutputCollector {
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         self.observed = self.observed.saturating_add(bytes.len() as u64);
@@ -276,6 +283,7 @@ impl OutputCollector {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Default)]
 struct TextTail {
     bytes: VecDeque<u8>,
@@ -286,6 +294,7 @@ struct TextTail {
     full_screen: bool,
 }
 
+#[cfg(any(unix, test))]
 impl TextTail {
     fn push_ascii(&mut self, bytes: &[u8]) {
         let keep = &bytes[bytes.len().saturating_sub(OUTPUT_BYTES)..];
@@ -321,6 +330,7 @@ impl TextTail {
     }
 }
 
+#[cfg(any(unix, test))]
 impl vte::Perform for TextTail {
     fn print(&mut self, ch: char) {
         let mut encoded = [0; 4];

@@ -173,6 +173,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.98.1'
+          components: clippy
       - name: prepare patched sources before Cargo metadata
         run: cargo run --manifest-path tools/source/Cargo.toml --locked -- prepare --offline
       - uses: Swatinem/rust-cache@v2.9.2
@@ -182,6 +183,14 @@ jobs:
             .nosh/reedline -> ../../target/reedline
       - name: engine and platform contracts
         run: cargo test -p nosh-engine -p nosh-platform --locked
+      - name: native Windows production lint
+        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
+      - name: native executable, shared session, ownership and ConPTY regressions
+        run: |
+          cargo test -p nosh-cli -p nosh-permissions --test windows --locked
+          cargo test -p nosh-permissions --lib windows_tests --locked
+      - name: native CPU executable
+        run: cargo build -p nosh-cli --release --locked
       - name: source lifecycle
         run: cargo test --manifest-path tools/source/Cargo.toml --locked
       - name: patched editor regressions
