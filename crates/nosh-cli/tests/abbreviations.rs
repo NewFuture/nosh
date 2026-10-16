@@ -188,13 +188,14 @@ fn first_management_inspection_allows_bounded_cold_tool_startup() {
     let git = bin.join("git");
     fs::write(
         &git,
-        "#!/bin/sh\n/bin/sleep 2\nprintf 'git version 2.40.0\\n'\n",
+        "#!/bin/sh\n/bin/sleep 2.5\nprintf 'git version 2.40.0\\n'\n",
     )
     .unwrap();
     fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
     let listing = success(
         command(home.path())
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("PATH", &path)
             .args(["abbr", "list"])
             .output()
             .unwrap(),
@@ -203,6 +204,17 @@ fn first_management_inspection_allows_bounded_cold_tool_startup() {
         listing.contains("gst -> git status [builtin] available"),
         "{listing}"
     );
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations]\nprobe_commands = true\n",
+    );
+    let mut terminal = launch_with_path(home.path(), true, &path);
+    wait_rule(
+        &mut terminal,
+        "gst",
+        "gst -> git status [builtin] available",
+    );
+    finish(&mut terminal);
 }
 
 #[test]
@@ -272,7 +284,9 @@ fn pump(terminal: &mut Terminal, duration: Duration) {
 }
 
 fn wait_rule(terminal: &mut Terminal, name: &str, expected: &str) {
-    for _ in 0..25 {
+    // Match the management inspection bound, including the first cold probe.
+    let deadline = Instant::now() + Duration::from_millis(4500);
+    while Instant::now() < deadline {
         let start = terminal.output.len();
         terminal.send(b"#abbr\r");
         terminal.wait_for(&format!("{name} ->"));

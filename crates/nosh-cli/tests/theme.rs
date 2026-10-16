@@ -386,7 +386,7 @@ fn parameter_menus_rearm_after_deleting_out_of_the_argument() {
     shell.wait(start, "Light theme");
 
     let start = shell.output.len();
-    shell.send(b"\x1b");
+    shell.send_escape();
     shell.wait(start, "Tab");
     let start = shell.output.len();
     shell.send(b"\x7f");
@@ -403,7 +403,7 @@ fn parameter_menus_rearm_after_deleting_out_of_the_argument() {
     shell.wait(start, "Light theme");
 
     let start = shell.output.len();
-    shell.send(b"\x1b");
+    shell.send_escape();
     shell.wait(start, "Tab");
     let start = shell.output.len();
     shell.send(b"soft-light");
