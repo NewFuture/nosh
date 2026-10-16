@@ -734,7 +734,11 @@ mod tests {
             assert!(session.approved().applicable.contains("la"));
             assert_eq!(session.shared.state.lock().unwrap().checked, Some(checked));
         }
-        session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+        let disabled = Config {
+            probe_commands: false,
+            ..config
+        };
+        session.begin_prompt(&shell, disabled, &crate::TriggerConfig::default());
         assert!(session.approved().applicable.is_empty());
         assert!(session.shared.state.lock().unwrap().checked.is_none());
     }

@@ -343,7 +343,7 @@ literal_space = ["Ctrl+Space"]
 [shell.abbreviations]
 enabled = true
 builtins = true
-probe_commands = false       # 仅可信 PATH 显式开启外部 Git / ls 能力探测
+probe_commands = true        # 默认探测 Git / ls；不可信 PATH 应设为 false
 disabled = []
 
 [shell.abbreviations.rules]

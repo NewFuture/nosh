@@ -769,6 +769,32 @@ on = true
     }
 
     #[test]
+    fn abbreviation_probes_are_enabled_by_default_and_have_a_real_boolean_switch() {
+        assert!(Config::default().abbreviations.probe_commands);
+        for source in [
+            "",
+            "[shell.abbreviations]\nbuiltins = true",
+            "[shell.abbreviations]\nprobe_commands = true",
+        ] {
+            let config = Config::parse(source);
+            assert!(config.abbreviations.probe_commands);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        }
+        let disabled = Config::parse("[shell.abbreviations]\nprobe_commands = false");
+        assert!(disabled.abbreviations.enabled && disabled.abbreviations.builtins);
+        assert!(!disabled.abbreviations.probe_commands);
+        assert!(disabled.warnings.is_empty());
+        let invalid = Config::parse("[shell.abbreviations]\nprobe_commands = \"on\"");
+        assert!(!invalid.abbreviations.enabled);
+        assert!(
+            invalid
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("shell.abbreviations"))
+        );
+    }
+
+    #[test]
     fn completion_switches_are_real_booleans_independent_of_input_assist() {
         let defaults = Config::default();
         assert!(defaults.completion && defaults.completion_scripts);
@@ -818,6 +844,7 @@ on = true
         assert!(missing.warnings.is_empty(), "{:?}", missing.warnings);
         assert_eq!(missing.approval, ApprovalMode::Auto);
         assert!(missing.safety_error.is_none());
+        assert!(missing.abbreviations.probe_commands);
         // A directory cannot be read as a file (like a permission or I/O error).
         let unreadable = Config::load_from(dir.clone());
         assert_eq!(unreadable.approval, Config::default().approval);

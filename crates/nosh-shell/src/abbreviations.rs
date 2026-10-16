@@ -59,7 +59,7 @@ impl Default for Config {
         Self {
             enabled: true,
             builtins: true,
-            probe_commands: false,
+            probe_commands: true,
             disabled: BTreeSet::new(),
             rules: BTreeMap::new(),
         }

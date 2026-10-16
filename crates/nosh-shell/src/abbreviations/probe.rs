@@ -112,7 +112,7 @@ fn capability(probe: &Probe, target: &str, cache: &mut Checker) -> Result<String
     }
     if !probe.config.probe_commands {
         return Err(
-            "external capability probes disabled; opt in with shell.abbreviations.probe_commands = true only for a trusted PATH"
+            "external capability probes disabled; set shell.abbreviations.probe_commands = true only for a trusted PATH"
                 .into(),
         );
     }
