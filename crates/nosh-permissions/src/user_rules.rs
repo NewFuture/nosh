@@ -41,11 +41,24 @@ struct PathPattern {
     absolute_root: Option<std::path::PathBuf>,
 }
 
+fn rule_home() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let home = home.or_else(|| std::env::var_os("USERPROFILE"));
+    home.map(std::path::PathBuf::from)
+}
+
 impl PathPattern {
     fn new(text: &str) -> Result<Self, String> {
         if text.is_empty() {
             return Err("path patterns must not be empty".into());
         }
+        #[cfg(windows)]
+        let normalized = crate::paths::short(Path::new(text))
+            .to_string_lossy()
+            .replace('\\', "/");
+        #[cfg(windows)]
+        let text = normalized.as_str();
         let absolute = Path::new(text).is_absolute();
         let mut pattern = text
             .strip_prefix("~/")
@@ -75,10 +88,11 @@ impl PathPattern {
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
             .backslash_escape(true)
+            .case_insensitive(cfg!(windows))
             .build()
             .map_err(|e| format!("invalid path pattern '{text}': {e}"))?
             .compile_matcher();
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let home = rule_home();
         if text.starts_with("~/") && home.is_none() {
             return Err("cannot expand a rule's home path without HOME".into());
         }
@@ -128,7 +142,7 @@ impl PathPattern {
         access
             .resolved
             .as_ref()
-            .is_some_and(|root| root.starts_with(base))
+            .is_some_and(|root| paths.relative_path(root, &base).is_some())
     }
 
     fn intersects(&self, access: &PathAccess, ctx: &Context, paths: &PathResolver) -> bool {
@@ -163,10 +177,10 @@ impl PathPattern {
         let base = crate::paths::resolve(prefix, &ctx.workspace, self.home.as_deref());
         let base = paths.resolved_path(&base, true);
         access.resolved.as_ref().is_some_and(|root| {
-            root.starts_with(&base)
-                || base
-                    .strip_prefix(root)
-                    .is_ok_and(|tail| tail.components().count() <= depth)
+            paths.relative_path(root, &base).is_some()
+                || paths
+                    .relative_path(&base, root)
+                    .is_some_and(|tail| tail.components().count() <= depth)
         })
     }
 }
@@ -276,6 +290,7 @@ fn command_matches(words: &[String], prefix: bool, op: &Operation, deny: bool) -
 impl UserRule {
     pub fn compile(spec: RuleSpec, source: impl Into<String>) -> Result<Self, String> {
         let source = source.into();
+        let home = rule_home();
         let fail = |why: &str| format!("{source}: {why}");
         let tool = spec.tool.as_deref().unwrap_or("exec");
         if !matches!(tool, "exec" | "read_file" | "grep") {
@@ -316,7 +331,7 @@ impl UserRule {
             .cwd
             .as_deref()
             .is_some_and(|cwd| cwd == "~" || cwd.starts_with("~/"))
-            && std::env::var_os("HOME").is_none()
+            && home.is_none()
         {
             return Err(fail("cannot expand cwd without HOME"));
         }
@@ -357,7 +372,7 @@ impl UserRule {
             reads,
             writes,
             hosts,
-            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            home,
         })
     }
 

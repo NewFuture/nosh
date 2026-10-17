@@ -59,7 +59,11 @@ impl Default for Config {
             ai_prefix: "#".into(),
             trigger_on_error: true,
             on_failure: OnFailure::Hint,
-            capture_output: CaptureOutput::Last,
+            capture_output: if cfg!(windows) {
+                CaptureOutput::Off
+            } else {
+                CaptureOutput::Last
+            },
             input_assist: true,
             completion: true,
             completion_scripts: true,
@@ -85,7 +89,12 @@ impl Default for Config {
             deny: Vec::new(),
             safety_error: None,
             protected_paths: Vec::new(),
-            fallback_shell: "/bin/bash".into(),
+            fallback_shell: if cfg!(windows) {
+                "cmd.exe"
+            } else {
+                "/bin/bash"
+            }
+            .into(),
             warnings: Vec::new(),
             path: None,
         }
@@ -138,13 +147,16 @@ const KNOWN: &[(&str, &[&str])] = &[
 ];
 
 fn expand_home(s: &str) -> PathBuf {
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let home = home.or_else(|| std::env::var_os("USERPROFILE"));
     if let Some(rest) = s.strip_prefix("~/")
-        && let Some(h) = std::env::var_os("HOME")
+        && let Some(h) = &home
     {
         return PathBuf::from(h).join(rest);
     }
     if s == "~"
-        && let Some(h) = std::env::var_os("HOME")
+        && let Some(h) = &home
     {
         return PathBuf::from(h);
     }

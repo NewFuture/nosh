@@ -39,7 +39,7 @@ impl From<&str> for AutoRejection {
 fn base(op: &Operation) -> &str {
     op.argv
         .first()
-        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .map(|name| crate::analyze::basename(name))
         .unwrap_or("")
 }
 
@@ -47,7 +47,7 @@ fn recognized_program(op: &Operation) -> bool {
     !op.local_program
         && !op.transparent
         && op.argv.first().is_some_and(|name| {
-            !name.contains('/')
+            !crate::analyze::is_explicit_program(name)
                 || crate::analyze::in_system_bin_dir(name)
                 || name == "./gradlew" && op.payload
         })
@@ -372,7 +372,7 @@ struct GitProbe<'a> {
 impl GitProbe<'_> {
     fn run(&self, args: &[&str]) -> Result<Option<String>, String> {
         // Use the resolved Git for evidence, never a project-local lookalike.
-        let git = if self.program.contains('/') {
+        let git = if crate::analyze::is_explicit_program(self.program) {
             PathBuf::from(self.program)
         } else {
             self.ctx
@@ -388,16 +388,23 @@ impl GitProbe<'_> {
         if !git.is_file() {
             return Err("resolved Git is unavailable for recovery evidence".into());
         }
-        if fs::canonicalize(&git)
-            .map_err(|e| format!("cannot resolve Git: {e}"))?
-            .starts_with(&self.ctx.workspace)
-        {
+        let real = fs::canonicalize(&git).map_err(|e| format!("cannot resolve Git: {e}"))?;
+        let paths = crate::paths::PathResolver::new(self.ctx);
+        if paths.relative_path(&real, &self.ctx.workspace).is_some() {
             return Err("the session resolves Git to a workspace-local program".into());
+        }
+        if matches!(paths.classify(&real), PathClass::Protected(_)) {
+            return Err("resolved Git is in a protected or ambiguous location".into());
         }
         if self.ctx.variables.keys().any(|k| k.starts_with("GIT_")) {
             return Err("custom GIT_* environment needs explicit authorization".into());
         }
         let mut cmd = Command::new(&git);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS);
+        }
         cmd.arg("--no-optional-locks")
             .current_dir(self.cwd)
             .stdin(Stdio::null())
@@ -612,6 +619,104 @@ impl GitProbe<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn git_evidence_rejects_ambiguous_verbatim_programs_without_starting_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let literal = directory.path().canonicalize().unwrap().join("literal ");
+        fs::create_dir(&literal).unwrap();
+        let marker = directory.path().join("started");
+        let git = literal.join("git.cmd");
+        fs::write(
+            &git,
+            format!(
+                "@echo off\r\n>\"{}\" echo started\r\necho workspace-fixture\r\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let context = Context::new(directory.path(), directory.path());
+        let result = GitProbe {
+            cwd: directory.path(),
+            ctx: &context,
+            program: git.to_str().unwrap(),
+        }
+        .run(&["--version"]);
+        fs::remove_dir_all(&literal).unwrap();
+        assert!(!marker.exists(), "ambiguous Git was started: {result:?}");
+        assert!(result.unwrap_err().contains("protected"));
+    }
+
+    #[test]
+    fn git_evidence_rejects_workspace_programs_without_starting_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("venv").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let marker = directory.path().join("started");
+        let git = bin.join("git.cmd");
+        fs::write(
+            &git,
+            format!(
+                "@echo off\r\n>\"{}\" echo started\r\necho workspace-fixture\r\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        for workspace in [
+            directory.path().to_owned(),
+            directory.path().canonicalize().unwrap(),
+            PathBuf::from(directory.path().to_string_lossy().to_uppercase()),
+        ] {
+            let mut context = Context::new(directory.path(), workspace);
+            context.variables.insert(
+                "VIRTUAL_ENV".into(),
+                directory.path().join("venv").to_string_lossy().into_owned(),
+            );
+            let probe = GitProbe {
+                cwd: directory.path(),
+                ctx: &context,
+                program: git.to_str().unwrap(),
+            };
+            let result = probe.run(&["--version"]);
+            assert!(!marker.exists(), "workspace Git was started: {result:?}");
+            assert!(
+                result.unwrap_err().contains("workspace-local"),
+                "{:?}",
+                context.workspace
+            );
+        }
+    }
+
+    #[test]
+    fn git_evidence_accepts_the_resolved_native_executable_path() {
+        let path = std::env::var_os("PATH").expect("Git is required by repository tests");
+        let git = std::env::split_paths(&path)
+            .map(|directory| directory.join("git.exe"))
+            .find(|candidate| candidate.is_file())
+            .expect("Git executable in PATH");
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = Context::new(directory.path(), directory.path());
+        for name in ["PATH", "SystemRoot"] {
+            context
+                .variables
+                .insert(name.into(), std::env::var(name).unwrap());
+            context.exported.insert(name.into());
+        }
+        let program = git.to_str().unwrap();
+        assert!(program.contains('\\'));
+        let probe = GitProbe {
+            cwd: directory.path(),
+            ctx: &context,
+            program,
+        };
+        let version = probe.run(&["--version"]).unwrap().unwrap();
+        assert!(version.starts_with("git version "), "{version}");
     }
 }
 

@@ -256,6 +256,22 @@ fn frame_steps_ignore_partial_redraws_and_old_menu_text() {
     assert!(!frame_matches("editing> query", "editing> query"));
 }
 
+#[test]
+fn abbreviation_acceptance_steps_ignore_feedback_and_menu_descriptions() {
+    let feedback = "\x1b[?25lzzq \u{2192} echo ABBR_DONE\nabbr> zzq\x1b7\x1b8\x1b[?25h";
+    let menu = "\x1b[?25labbr> zzq\x1b7Partial completions: querying command index\n>zzq echo ABBR_DONE [user]\r\x1b8\x1b[?25h";
+    let inserted = "\x1b[?25labbr> echo ABBR_DONE \x1b7\x1b8\x1b[?25h";
+    assert!(style::strip_ansi(menu).contains("echo ABBR_DONE "));
+    for output in [feedback, menu] {
+        assert!(!frame_matches(output, "abbr> echo ABBR_DONE "));
+    }
+    assert!(frame_matches(inserted, "abbr> echo ABBR_DONE "));
+    assert!(!frame_matches(
+        &format!("{inserted}{menu}"),
+        "abbr> echo ABBR_DONE "
+    ));
+}
+
 pub(super) fn input_worker_command() -> nosh_shell::input_assist::WorkerCommand {
     nosh_shell::input_assist::WorkerCommand {
         program: std::env::current_exe().unwrap(),

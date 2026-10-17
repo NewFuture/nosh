@@ -66,7 +66,7 @@ impl Scope {
         self.files_changed |= !pure_builtin;
         let can_change_resolution = opaque
             || sets_variable
-            || (!builtin && name.contains('/'))
+            || (!builtin && crate::host::contains_separator(name))
             || matches!(
                 name,
                 "." | "source"

@@ -565,8 +565,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
                         serial: received,
                         registry,
                     })) if received == serial => {
-                        match child.residual_children() {
-                            Ok(children) if children.is_empty() => {
+                        match child.has_descendants() {
+                            Ok(false) => {
                                 failures = 0;
                                 publish(&shared, serial, Ok(registry))
                             }

@@ -416,22 +416,7 @@ fn resolve(cwd: &Path, p: &str) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    let abs = if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    };
-    let mut out = PathBuf::from("/");
-    for c in abs.components() {
-        match c {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::Normal(n) => out.push(n),
-            _ => {}
-        }
-    }
-    out
+    nosh_permissions::resolve_literal_path(&expanded, cwd)
 }
 
 pub fn tool_path(call: &ToolCall, cwd: &Path) -> PathBuf {

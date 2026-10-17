@@ -1,12 +1,10 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::*;
+use crate::host::{self, Access};
 
 const MAX_CACHE: usize = 512;
 const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024;
@@ -70,7 +68,7 @@ impl Lookup {
                 Err(error) => FileState::Unreadable(short_error(error)),
             },
             Ok(metadata) if metadata.is_file() => {
-                if metadata.permissions().mode() & 0o111 == 0 {
+                if !crate::backend::is_executable(path) {
                     FileState::File { executable: false }
                 } else {
                     match execute_access(path) {
@@ -211,9 +209,9 @@ impl Lookup {
                         }
                         (FileState::Denied(error), _) => {
                             let mode = match use_ {
-                                PathUse::Read => Some(libc::R_OK),
-                                PathUse::Write => Some(libc::W_OK),
-                                PathUse::Directory => Some(libc::X_OK),
+                                PathUse::Read => Some(Access::Read),
+                                PathUse::Write => Some(Access::Write),
+                                PathUse::Directory => Some(Access::Execute),
                                 _ => None,
                             };
                             if mode.is_some_and(|mode| {
@@ -284,8 +282,9 @@ impl Lookup {
         path: Option<&str>,
         ai: bool,
     ) -> (Option<Role>, Option<(State, Reason)>) {
-        if name.contains('/') {
+        if host::contains_separator(name) {
             let target = absolute(&context.cwd, name);
+            let target = host::resolve_executable(&target).unwrap_or(target);
             return match self.stat(&target) {
                 FileState::File { executable: true } => (Some(Role::External), None),
                 FileState::Missing if ai => (Some(Role::Ai), Some((State::Known, Reason::Ai))),
@@ -342,9 +341,9 @@ impl Lookup {
             };
         };
         let mut unreadable = None;
-        let mut dirs = path.split(':');
+        let mut dirs = std::env::split_paths(path);
         for dir in dirs.by_ref().take(MAX_PATH_DIRS) {
-            let directory = absolute(&context.cwd, dir);
+            let directory = context.cwd.join(dir);
             if self
                 .cached(&directory)
                 .and_then(FileState::search_denial)
@@ -353,6 +352,7 @@ impl Lookup {
                 continue;
             }
             let candidate = directory.join(name);
+            let candidate = host::resolve_executable(&candidate).unwrap_or(candidate);
             match self.stat(&candidate) {
                 FileState::File { executable: true } => {
                     return (Some(Role::External), None);
@@ -394,18 +394,11 @@ fn path_error(path: &Path, error: &str) -> Reason {
 }
 
 fn execute_access(path: &Path) -> std::io::Result<()> {
-    check_access(path, libc::X_OK)
+    check_access(path, Access::Execute)
 }
 
-fn check_access(path: &Path, mode: libc::c_int) -> std::io::Result<()> {
-    let path = CString::new(path.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
-    // SAFETY: access reads a valid NUL-terminated path using the same real-user
-    // credentials as brush, retaining the errno rather than collapsing it.
-    if unsafe { libc::access(path.as_ptr(), mode) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+fn check_access(path: &Path, mode: Access) -> std::io::Result<()> {
+    host::check_access(path, mode)
 }
 
 fn absolute(cwd: &Path, word: &str) -> PathBuf {
@@ -431,9 +424,9 @@ pub(crate) fn scan_index(cwd: &Path, path: Option<&str>) -> Index {
             reason: None,
         };
     };
-    let mut directories = path.split(':');
+    let mut directories = std::env::split_paths(path);
     'directories: for directory in directories.by_ref().take(MAX_PATH_DIRS) {
-        let entries = match fs::read_dir(absolute(cwd, directory)) {
+        let entries = match fs::read_dir(cwd.join(directory)) {
             Ok(entries) => entries,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -490,6 +483,8 @@ mod tests {
     use super::*;
     use crate::input_assist::tests::Fixture;
     use brush_core::sys::fs::PathExt;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn metadata_cache_is_bounded_and_new_prompt_snapshots_invalidate_it() {

@@ -11,9 +11,9 @@ use brush_core::openfiles::{self, OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, ShellVariable, SourceInfo};
 
 use crate::input_assist;
-use crate::procs;
 use crate::user_output::Utf8Decoder;
 use crate::{CaptureOutput, OutputState, OutputUnavailable, UserOutput, pty};
+use crate::{host, procs};
 
 pub type BrushShell = brush_core::Shell;
 
@@ -410,7 +410,7 @@ impl EmbeddedShell {
             }
         }
         if opts.interactive || opts.catch_sigint {
-            me.install_signal_handlers(opts.interactive);
+            host::install_interrupts(&me.rt, me.interrupts.clone(), opts.interactive)?;
         }
         if opts.interactive {
             let file = me.lock().history_file_path();
@@ -824,34 +824,6 @@ impl EmbeddedShell {
         })
     }
 
-    /// SIGINT feeds [`Interrupts`]; interactive shells also shrug off
-    /// SIGTSTP/SIGQUIT/SIGTERM like bash. Handlers (unlike SIG_IGN) are reset
-    /// on exec, so child processes keep default dispositions.
-    fn install_signal_handlers(&self, interactive: bool) {
-        use tokio::signal::unix::{SignalKind, signal};
-        let ints = self.interrupts.clone();
-        let _guard = self.rt.enter();
-        if let Ok(mut s) = signal(SignalKind::interrupt()) {
-            self.rt.spawn(async move {
-                while s.recv().await.is_some() {
-                    ints.fire();
-                }
-            });
-        }
-        if interactive {
-            for kind in [
-                SignalKind::quit(),
-                SignalKind::terminate(),
-                SignalKind::from_raw(libc::SIGTSTP),
-            ] {
-                if let Ok(mut s) = signal(kind) {
-                    self.rt
-                        .spawn(async move { while s.recv().await.is_some() {} });
-                }
-            }
-        }
-    }
-
     pub fn parse(
         &self,
         line: &str,
@@ -922,10 +894,13 @@ impl EmbeddedShell {
     /// Non-interactive commands from stdin (`cmd | nosh`). Reads one byte at a
     /// time so commands that read stdin themselves see the rest, like bash.
     pub fn run_stdin(&mut self) -> i32 {
-        use std::os::fd::{AsFd, FromRawFd};
-        // SAFETY: fd 0 stays open for the life of the process; ManuallyDrop
-        // keeps it from being closed here.
-        let mut stdin = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+        let mut stdin = match host::stdin_file() {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("nosh: cannot open standard input: {error}");
+                return 2;
+            }
+        };
         let mut buf: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
         loop {
@@ -944,11 +919,13 @@ impl EmbeddedShell {
             if !text.trim().is_empty() {
                 // An unbuffered handle, so `read` and child processes consume
                 // exactly what they read and the rest stays for us.
-                let fd = std::io::stdin()
-                    .as_fd()
-                    .try_clone_to_owned()
-                    .ok()
-                    .map(|fd| OpenFile::File(std::fs::File::from(fd)));
+                let fd = match stdin.try_clone() {
+                    Ok(file) => Some(OpenFile::File(file)),
+                    Err(error) => {
+                        eprintln!("nosh: cannot retain standard input: {error}");
+                        return 2;
+                    }
+                };
                 let run = self.run_line(&text, fd);
                 if run.exit_shell {
                     return run.exit_code;
@@ -1343,10 +1320,9 @@ impl EmbeddedShell {
             }
             return shell.find_first_executable_in_path(name);
         }
-        path?
-            .split(':')
+        std::env::split_paths(path?)
             .map(|directory| cwd.join(directory).join(name))
-            .find(|candidate| is_executable(candidate))
+            .find_map(|candidate| host::resolve_executable(&candidate))
     }
 
     pub(crate) fn resolve_with_path(&self, name: &str, path: Option<&str>) -> Resolution {
@@ -1372,19 +1348,14 @@ impl EmbeddedShell {
         if sh.builtin_mut(name).is_some_and(|b| !b.disabled) {
             return Resolution::Builtin;
         }
-        if name.contains('/') {
+        if host::contains_separator(name) {
             let p = sh.absolute_path(Path::new(name));
-            return if is_executable(&p) {
-                Resolution::File(p)
-            } else {
-                Resolution::NotFound
-            };
+            return host::resolve_executable(&p).map_or(Resolution::NotFound, Resolution::File);
         }
         if let Some(path) = path {
-            return path
-                .split(':')
+            return std::env::split_paths(path)
                 .map(|directory| sh.working_dir().join(directory).join(name))
-                .find(|candidate| is_executable(candidate))
+                .find_map(|candidate| host::resolve_executable(&candidate))
                 .map_or(Resolution::NotFound, Resolution::File);
         }
         match sh.find_first_executable_in_path(name) {
@@ -1619,13 +1590,13 @@ impl EmbeddedShell {
         self.require_project_env()?;
         self.environment_generation = self.environment_generation.wrapping_add(1);
         let before = self.snapshot();
-        let before_children = procs::child_pids();
         static RUNS: AtomicU64 = AtomicU64::new(0);
         let run = format!(
             "{}.{}",
             std::process::id(),
             RUNS.fetch_add(1, Ordering::Relaxed)
         );
+        let execution = host::Execution::new(&run)?;
         let rt = self.rt.clone();
         let ints = self.interrupts.clone();
         let start = Instant::now();
@@ -1639,7 +1610,7 @@ impl EmbeddedShell {
         spawn_reader(err_r, true, tx);
         // The command is in the background, so Ctrl-Z would stop nosh itself
         // (and brush would take the command for stopped).
-        let _no_suspend = NoSuspend::new(self.interactive);
+        let _no_suspend = host::SuspendGuard::new(self.interactive);
 
         let mut cap = Capture::new(opts.capture_limit);
         let mut result = CommandResult::default();
@@ -1649,6 +1620,7 @@ impl EmbeddedShell {
             let scopes = scope_depth(sh.env());
             let saved = apply_agent_env(&mut sh, &run);
             let mut params = sh.default_exec_params();
+            execution.configure(&mut params);
             params.process_group_policy = brush_core::ProcessGroupPolicy::NewProcessGroup;
             params.set_fd(OpenFiles::STDIN_FD, openfiles::null()?);
             params.set_fd(OpenFiles::STDOUT_FD, OpenFile::PipeWriter(out_w));
@@ -1668,12 +1640,12 @@ impl EmbeddedShell {
                         _ = tick.tick() => {
                             if ints.count() > ints_start {
                                 result.interrupted = true;
-                                stop_signal = Some(libc::SIGINT);
+                                stop_signal = Some(host::Stop::Interrupt);
                                 break None;
                             }
                             if Instant::now() >= deadline {
                                 result.timed_out = true;
-                                stop_signal = Some(libc::SIGTERM);
+                                stop_signal = Some(host::Stop::Timeout);
                                 break None;
                             }
                         }
@@ -1687,15 +1659,11 @@ impl EmbeddedShell {
                 // command started (also what left nosh's process tree), and
                 // escalate to SIGKILL.
                 truncate_scopes(&mut sh, scopes);
-                let targets = procs::new_targets(&before_children, &run);
-                if let Some(sig) = stop_signal {
-                    procs::signal(&targets, sig);
-                }
-                if !targets.is_empty() {
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs(2));
-                        procs::signal(&targets, libc::SIGKILL);
-                    });
+                if let Some(reason) = stop_signal
+                    && let Err(error) = execution.stop(reason)
+                {
+                    restore_env(&mut sh, saved);
+                    return Err(error.into());
                 }
             }
             restore_env(&mut sh, saved);
@@ -1714,8 +1682,7 @@ impl EmbeddedShell {
             });
             if !stopped.is_empty() {
                 result.needed_terminal = true;
-                procs::signal_groups(&stopped, libc::SIGKILL);
-                procs::signal_groups(&stopped, libc::SIGCONT);
+                host::stop_groups(&stopped)?;
             }
             match res {
                 Some(Ok(r)) => {
@@ -1733,6 +1700,9 @@ impl EmbeddedShell {
                 None => 130,
             }
         };
+        if execution.finish()? {
+            cap.push(true, b"nosh: background descendants were stopped; Windows agent execution does not leave background processes running\n", out);
+        }
         // Drain what is left; background children may keep the pipes open.
         rt.block_on(async {
             let until = tokio::time::Instant::now() + Duration::from_millis(300);
@@ -1783,44 +1753,6 @@ fn spawn_reader(
         });
 }
 
-/// Disables the terminal's suspend character (Ctrl-Z) while alive.
-struct NoSuspend(Option<libc::termios>);
-
-impl NoSuspend {
-    fn new(active: bool) -> Self {
-        if !active {
-            return Self(None);
-        }
-        // SAFETY: termios calls on fd 0 with a struct they fill in.
-        unsafe {
-            if libc::isatty(0) != 1 {
-                return Self(None);
-            }
-            let mut t: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(0, &mut t) != 0 {
-                return Self(None);
-            }
-            let saved = t;
-            t.c_cc[libc::VSUSP] = 0; // _POSIX_VDISABLE
-            if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
-                return Self(None);
-            }
-            Self(Some(saved))
-        }
-    }
-}
-
-impl Drop for NoSuspend {
-    fn drop(&mut self) {
-        if let Some(t) = &self.0 {
-            // SAFETY: restores the attributes read in `new`.
-            unsafe {
-                libc::tcsetattr(0, libc::TCSANOW, t);
-            }
-        }
-    }
-}
-
 /// Number of variable scopes (global, function locals, per-command overrides).
 fn scope_depth(env: &brush_core::env::ShellEnvironment) -> usize {
     use brush_core::env::EnvironmentScope;
@@ -1857,10 +1789,7 @@ const BUILTIN_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn is_executable(p: &Path) -> bool {
-    use brush_core::sys::fs::PathExt;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0 && p.executable())
+    host::resolve_executable(p).is_some()
 }
 
 fn has_command_traps(sh: &BrushShell) -> bool {

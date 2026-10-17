@@ -25,7 +25,7 @@ nosh init bash                     # 只输出现有 Bash 的集成脚本
 
 ### 0.3 实现状态
 
-支持 Linux（含 WSL）和 macOS 的本地 shell、共享会话、Agent、命令辅助、模型下载与离线使用。默认 CPU 推理，可显式构建单卡 CUDA。原生 Windows shell、远程会话服务、跨进程共享模型、沙箱和自动回滚均不提供。
+支持 Linux（含 WSL）、macOS 和 Windows x64 的本地 shell、共享会话、Agent、命令辅助、模型下载与离线使用。默认 CPU 推理，Linux/WSL 可显式构建单卡 CUDA；Windows 首版范围见 §4.6。远程会话服务、跨进程共享模型、沙箱和自动回滚均不提供。
 
 现有 Bash 可通过 `eval "$(nosh init bash)"` 接入主动建议，要求 Bash 5.1+、交互 Readline 和可用终端；不替换宿主 shell。其它 shell 的初始化集成尚未提供。
 
@@ -142,7 +142,13 @@ Agent 命令改变的 cwd 和环境默认保留，可配置任务结束后恢复
 
 ### 4.6 平台
 
-支持 Linux / WSL 与 macOS。原生 Windows 只覆盖可独立运行的共享契约、源码维护工具和编辑器测试，不代表整个 shell 可运行。
+支持 Linux / WSL、macOS，以及 Windows 10/11 x64 的原生 MSVC CPU 版。Windows 不依赖 WSL、Git Bash 或 PowerShell 作为解释器：Bash 语法、目录、变量、函数和别名仍由同一 brush 会话持有；原生 `.exe` 通过 Windows PATH/PATHEXT 查找，管道和标准流重定向走原生句柄。Windows 的 `cmd` / PowerShell 内建命令需显式调用对应程序，例如 `cmd.exe /d /c dir`，不把 `dir` 等名称伪装成 Bash 内建。Bash 中的 Windows 路径仍需遵守引号/转义规则，例如 `cd 'C:\work tree'`。
+
+Windows Agent 与 Unix 共用审批、上下文和工具循环。每次执行的外部子进程不继承用户控制台，在恢复运行前加入独占 Job Object；超时或取消终止并等待回收该对象内的进程，不影响用户已有任务。首版不提供 Unix 式温和信号升级；Bash 异步后台列表和进程替换明确拒绝。外部程序留下的后台后代在本次调用结束时回收，并把此情况写入命令结果，不承诺维持后台服务。
+
+原生控制台支持编辑、历史、基础补全及输入辅助；后台 worker 使用有随机令牌的本机回环 IPC 和独占 Job Object，不继承交互终端。命令执行本身不会因为 worker 不可用而换后端。窗口与字体效果仍取决于宿主，建议 Windows Terminal。审批路径保留盘符/UNC 根，按 Windows 大小写及规范路径比较；设备路径、数据流和不明确的驱动器相对路径不作为普通工作区文件放行。
+
+Windows 首版不提供 POSIX 作业控制、进程替换、最近用户终端输出的 ConPTY 中转采集、GPU 构建保障或评测器的 Unix-socket 共享模型 worker。用户命令输出采集默认关闭，显式请求时报告不可用；Agent stdout/stderr 的管道采集不受影响。其余平台和相应默认值不变。
 
 ## 5. Agent 与命令辅助
 

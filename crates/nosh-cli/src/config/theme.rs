@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -165,9 +166,11 @@ fn theme_source(name: &str, config_path: &Path) -> Result<ThemeSource, String> {
             .unwrap_or_else(|| Path::new("."))
             .join(source_path)
     };
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = options
         .open(&path)
         .map_err(|e| format!("theme {}: {e}", path.display()))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {

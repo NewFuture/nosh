@@ -21,7 +21,7 @@ without submitting or clearing an unfinished draft.
 | `.nosh/reedline/.git/nosh` | Generated input snapshots and provenance, not another maintained source |
 | `.nosh/cache/reedline.git` | Optional official Git object cache when the submodule is absent |
 | `third_party/brush-upstream` | Clean official `reubeno/brush` gitlink at the brush-core 0.5.0 release |
-| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo; completion and host-managed history delta |
+| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo; completion, host-managed history, resolved executable lookup and host-owned process spawning delta |
 | `.nosh/brush` | Ignored editable monorepo; Cargo overrides core, parser and builtins to matching crate subdirectories |
 | `.nosh/cache/brush-core.git` | Per-checkout brush object cache |
 
@@ -57,17 +57,20 @@ cargo source prepare --offline
 ```
 
 For a Windows-hosted worktree, prepare sources with Windows Git/Rust in
-PowerShell. The source tool and standalone Reedline tests support Windows;
-the nosh application has **not** been ported to native Windows:
+PowerShell. The source tool, standalone Reedline tests and native x64 CPU
+application support Windows with the MSVC Rust/C++ toolchain:
 
 ```powershell
 git clone --recurse-submodules https://github.com/NewFuture/nosh.git
 Set-Location nosh
 cargo source prepare --offline
+cargo build --release --locked -p nosh-cli
+.\target\release\nosh.exe --version
 ```
 
-Run application builds in a **Linux/macOS terminal**. For the Windows checkout
-above, switch to WSL and enter its mounted directory first (for example,
+Linux/macOS builds and Unix regression checks run in a **Linux/macOS terminal**.
+For Unix checks against the Windows checkout above, switch to WSL, use a separate
+`CARGO_TARGET_DIR`, and enter its mounted directory first (for example,
 `cd /mnt/c/github/nosh` for `C:\github\nosh`):
 
 ```bash

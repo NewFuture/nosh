@@ -9,6 +9,10 @@ mod debug_cmd;
 mod doctor;
 mod engine;
 mod eval_trace;
+#[cfg(unix)]
+mod eval_worker;
+#[cfg(windows)]
+#[path = "eval_worker/windows.rs"]
 mod eval_worker;
 mod init_cmd;
 mod model_cmd;
@@ -18,7 +22,7 @@ mod theme_cmd;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[global_allocator]
 static INPUT_WORKER_ALLOCATOR: nosh_shell::input_assist::WorkerAllocator =
     nosh_shell::input_assist::WorkerAllocator;
@@ -210,8 +214,10 @@ fn main() {
             .is_some_and(|c| c.capture_output == nosh_shell::CaptureOutput::Last)
     {
         let relay = std::env::current_exe().and_then(|exe| {
+            #[cfg(unix)]
             use std::os::unix::process::CommandExt;
             let mut command = std::process::Command::new(exe);
+            #[cfg(unix)]
             if let Some(argv0) = std::env::args_os().next() {
                 command.arg0(argv0);
             }
@@ -481,10 +487,21 @@ fn run_shell(
 fn fall_back(login: bool, fallback: &str) -> i32 {
     eprintln!("nosh: internal error; please report it (run `nosh doctor` for details)");
     if login {
-        use std::os::unix::process::CommandExt;
-        eprintln!("nosh: starting {fallback} -l instead");
-        let err = std::process::Command::new(fallback).arg("-l").exec();
-        eprintln!("nosh: could not start {fallback}: {err}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            eprintln!("nosh: starting {fallback} -l instead");
+            let err = std::process::Command::new(fallback).arg("-l").exec();
+            eprintln!("nosh: could not start {fallback}: {err}");
+        }
+        #[cfg(windows)]
+        {
+            eprintln!("nosh: starting {fallback} instead");
+            match std::process::Command::new(fallback).status() {
+                Ok(status) => return status.code().unwrap_or(70),
+                Err(error) => eprintln!("nosh: could not start {fallback}: {error}"),
+            }
+        }
     }
     70
 }

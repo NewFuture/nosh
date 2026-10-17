@@ -2,7 +2,7 @@
 
 nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行，需要帮助时直接在终端里描述任务。
 
-默认使用本地 MiniCPM5-2B 模型，准备好模型后可离线推理，无需云端 API。支持 **Linux（含 WSL）和 macOS**，原生 Windows shell 尚未实现。
+默认使用本地 MiniCPM5-2B 模型，准备好模型后可离线推理，无需云端 API。支持 **Linux（含 WSL）、macOS，以及 Windows 10/11 x64 的原生 CPU 版 `nosh.exe`**。Windows 不需要 WSL 或 Git Bash；平台差异与首版限制见[系统设计](docs/DESIGN.md#46-平台)。
 
 ## 功能特性
 
