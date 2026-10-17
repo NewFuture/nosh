@@ -55,9 +55,16 @@ fn shell_command(home: &Path, cwd: &Path) -> Command {
         .env_remove("HISTSIZE")
         .env_remove("HISTFILESIZE")
         .env_remove("NOSH_DISABLE_AI")
+        .env_remove("NOSH_MODEL_PATH")
         .env_remove("VISUAL")
         .env_remove("EDITOR")
-        .args(["--offline", "--no-download", "-i"]);
+        .args([
+            "--offline",
+            "--no-download",
+            "--model",
+            "minicpm5-2b:q8_0",
+            "-i",
+        ]);
     command
 }
 

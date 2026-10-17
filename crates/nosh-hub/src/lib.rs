@@ -34,7 +34,7 @@ pub enum HubError {
     Cancelled,
     #[error("unknown model '{0}' (see `nosh model list`)")]
     UnknownModel(String),
-    #[error("model {0} is not installed; run `nosh model pull` or `nosh model import`")]
+    #[error("model {0} is not installed; run `nosh model pull {0}` or `nosh model import`")]
     NotInstalled(String),
     #[error("registry error: {0}")]
     Registry(String),
@@ -476,8 +476,8 @@ impl ModelHub {
         }
         self.find(Some(&entry.id))?.ok_or_else(|| {
             HubError::Import(format!(
-                "imported weights for {}, but tokenizer.json is missing; pass --tokenizer or run `nosh model pull`",
-                entry.id
+                "imported weights for {}, but tokenizer.json is missing; pass --tokenizer or run `nosh model pull {}`",
+                entry.id, entry.id
             ))
         })
     }
@@ -583,7 +583,13 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
         let root = tempdir("hub-pick");
         let dir = tempdir("hub-pick-dir");
         let hub = ModelHub::with_root(&root, Registry::builtin());
-        let q4 = hub.registry().lookup(None).unwrap().weights().name.clone();
+        let q4 = hub
+            .registry()
+            .lookup(Some("minicpm5-2b:q4_k_m"))
+            .unwrap()
+            .weights()
+            .name
+            .clone();
         let q8 = hub
             .registry()
             .lookup(Some("minicpm5-2b:q8_0"))
@@ -597,7 +603,13 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
         // The requested model's file, and the default model's without --model.
         let r = hub.resolve_path(&dir, Some("minicpm5-2b:q8_0")).unwrap();
         assert_eq!(r.weights, dir.join(&q8));
-        assert_eq!(hub.resolve_path(&dir, None).unwrap().weights, dir.join(&q4));
+        assert_eq!(hub.resolve_path(&dir, None).unwrap().weights, dir.join(&q8));
+        assert_eq!(
+            hub.resolve_path(&dir, Some("minicpm5-2b:q4_k_m"))
+                .unwrap()
+                .weights,
+            dir.join(&q4)
+        );
         // Several files, none named for the request: an error naming them.
         let err = hub
             .resolve_path(&dir, Some("minicpm5-1b:q4_k_m"))

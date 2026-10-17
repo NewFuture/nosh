@@ -117,12 +117,17 @@ impl Registry {
         self.models.iter().find(|m| m.id == id)
     }
 
-    /// Resolves `id` or the default model; accepts the id without the quantization suffix.
+    /// Resolves `id` or the default model; a short family ID prefers its default quantization.
     pub fn lookup(&self, id: Option<&str>) -> Result<&ModelEntry, HubError> {
         match id {
             None => Ok(self.default_model()),
             Some(id) => self
                 .get(id)
+                .or_else(|| {
+                    self.models
+                        .iter()
+                        .find(|m| m.default && m.id.split(':').next() == Some(id))
+                })
                 .or_else(|| {
                     self.models
                         .iter()
@@ -177,18 +182,18 @@ mod tests {
         let reg = Registry::builtin();
         assert_eq!(reg.schema, 1);
         let def = reg.default_model();
-        assert_eq!(def.id, "minicpm5-2b:q4_k_m");
+        assert_eq!(def.id, "minicpm5-2b:q8_0");
         assert_eq!(def.eog_ids, vec![1, 130073]);
         assert_eq!(def.sampling.top_k, 40);
         assert!(reg.models.iter().all(|model| model.sampling.top_k == 40));
-        assert_eq!(def.weights().size, 1_561_318_368);
+        assert_eq!(def.weights().size, 2_679_710_688);
         assert_eq!(
             def.weights().sha256,
-            "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
+            "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078"
         );
         assert_eq!(def.tokenizer().size, 9_894_271);
         assert_eq!(reg.models.len(), 3);
-        assert_eq!(def.dir_name(), "minicpm5-2b-q4_k_m");
+        assert_eq!(def.dir_name(), "minicpm5-2b-q8_0");
     }
 
     #[test]
@@ -203,7 +208,15 @@ mod tests {
             "minicpm5-2b:q8_0"
         );
         assert!(reg.lookup(Some("nope")).is_err());
-        assert_eq!(reg.lookup(None).unwrap().id, "minicpm5-2b:q4_k_m");
+        assert_eq!(reg.lookup(None).unwrap().id, "minicpm5-2b:q8_0");
+        assert_eq!(
+            reg.lookup(Some("minicpm5-2b")).unwrap().id,
+            "minicpm5-2b:q8_0"
+        );
+        assert_eq!(
+            reg.lookup(Some("minicpm5-2b:q4_k_m")).unwrap().id,
+            "minicpm5-2b:q4_k_m"
+        );
     }
 
     #[test]

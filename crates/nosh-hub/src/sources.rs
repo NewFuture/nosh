@@ -219,12 +219,12 @@ mod tests {
         assert_eq!(c.len(), 3);
         assert_eq!(
             c[0].url,
-            "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf"
+            "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q8_0.gguf"
         );
         assert_eq!(c[1].hub, Hub::HfMirror);
         assert_eq!(
             c[2].url,
-            "https://www.modelscope.cn/models/OpenBMB/MiniCPM5-2B-GGUF/resolve/master/MiniCPM5-2B-Q4_K_M.gguf"
+            "https://www.modelscope.cn/models/OpenBMB/MiniCPM5-2B-GGUF/resolve/master/MiniCPM5-2B-Q8_0.gguf"
         );
         let custom = Endpoints {
             hf: Some("http://127.0.0.1:8080".into()),

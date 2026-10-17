@@ -158,7 +158,7 @@ fn arm64_8k_rss_and_outputs() {
     let r = nosh_hub::ModelHub::new()
         .find(Some(MODEL))
         .expect("model store")
-        .expect("download the pinned model with `nosh model pull` first");
+        .expect("download the pinned model with `nosh model pull minicpm5-2b:q4_k_m` first");
     let dir = std::env::var_os("NOSH_MEMORY_ARTIFACTS").map_or_else(
         || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/arm64-memory"),
         std::path::PathBuf::from,
