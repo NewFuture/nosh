@@ -9,7 +9,7 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | Crate | 职责 | 允许依赖的项目 crate |
 |---|---|---|
 | `nosh-engine` | `ChatEngine`、消息、事件、取消、通用错误、脚本化 Mock | 无 |
-| `nosh-platform` | 语言、终端能力、应用路径、文件指纹、进程统计 | 无 |
+| `nosh-platform` | 语言、终端能力、应用路径、文件指纹、进程与可用内存统计 | 无 |
 | `nosh-permissions` | AST 风险分析、路径分类、审批策略、会话放行 | 无 |
 | `nosh-hub` | 模型清单、选源、下载、校验、安装与离线导入 | `nosh-platform` |
 | `nosh-llm` | Candle 模型、分词、模板、采样、对话 token 日志、KV、设备选择 | `nosh-engine` |

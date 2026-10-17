@@ -11,7 +11,7 @@ use nosh_shell::style;
 pub enum ModelCmd {
     /// Download (or resume) a model and its tokenizer, verifying SHA-256.
     Pull {
-        /// Model id (default: the registry default, minicpm5-2b:q4_k_m).
+        /// Model id (automatic: 2B Q8 at 7 GiB RAM/usable VRAM, 2B Q4 at 3.5 GiB; otherwise specify an ID).
         id: Option<String>,
         /// Source: auto | hf | hf-mirror | modelscope.
         #[arg(long, default_value = "auto")]
@@ -35,7 +35,17 @@ fn gb(bytes: u64) -> String {
     format!("{:.2} GB", bytes as f64 / 1e9)
 }
 
-pub fn run(cmd: ModelCmd) -> i32 {
+fn selected_id(id: Option<String>, device: nosh_llm::InferenceDevice) -> Option<String> {
+    match crate::model_defaults::select(id, false, device) {
+        Ok(id) => id,
+        Err(reason) => {
+            eprintln!("nosh: {reason}");
+            None
+        }
+    }
+}
+
+pub fn run(cmd: ModelCmd, device: nosh_llm::InferenceDevice) -> i32 {
     let hub = ModelHub::new();
     match cmd {
         ModelCmd::Pull { id, source } => {
@@ -43,7 +53,10 @@ pub fn run(cmd: ModelCmd) -> i32 {
                 eprintln!("nosh: unknown source '{source}' (auto|hf|hf-mirror|modelscope)");
                 return 2;
             };
-            let entry = match hub.registry().lookup(id.as_deref()) {
+            let Some(id) = selected_id(id, device) else {
+                return 1;
+            };
+            let entry = match hub.registry().lookup(Some(&id)) {
                 Ok(e) => e.clone(),
                 Err(e) => {
                     eprintln!("nosh: {e}");
@@ -106,7 +119,7 @@ pub fn run(cmd: ModelCmd) -> i32 {
             }
         }
         ModelCmd::List => {
-            let default_id = hub.registry().default_model().id.clone();
+            let default_id = selected_id(None, device);
             for m in &hub.registry().models {
                 let st = hub.status(m);
                 let state = if let Some(f) = &st.found {
@@ -125,13 +138,20 @@ pub fn run(cmd: ModelCmd) -> i32 {
                         _ => tr!("未安装", "not installed").to_string(),
                     }
                 };
-                let mark = if m.id == default_id { "*" } else { " " };
+                let mark = if default_id.as_deref() == Some(m.id.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
                 println!("{:<20}{mark} {:>8}  {state}", m.id, gb(m.total_size()));
             }
             0
         }
         ModelCmd::Verify { id } => {
-            let res = hub.verify(id.as_deref(), |f, r| match r {
+            let Some(id) = selected_id(id, device) else {
+                return 1;
+            };
+            let res = hub.verify(Some(&id), |f, r| match r {
                 Ok(()) => println!("{} {}", style::stdout().glyph("✔", "+"), f.name),
                 Err(e) => println!("{} {}: {e}", style::stdout().glyph("✗", "x"), f.name),
             });
@@ -173,22 +193,27 @@ pub fn run(cmd: ModelCmd) -> i32 {
                 }
             }
         }
-        ModelCmd::Path { id } => match hub.registry().lookup(id.as_deref()) {
-            Ok(entry) => {
-                let dir = hub
-                    .find(Some(&entry.id))
-                    .ok()
-                    .flatten()
-                    .map(|r| r.dir)
-                    .unwrap_or_else(|| hub.user_model_dir(entry));
-                println!("{}", dir.display());
-                0
+        ModelCmd::Path { id } => {
+            let Some(id) = selected_id(id, device) else {
+                return 1;
+            };
+            match hub.registry().lookup(Some(&id)) {
+                Ok(entry) => {
+                    let dir = hub
+                        .find(Some(&entry.id))
+                        .ok()
+                        .flatten()
+                        .map(|r| r.dir)
+                        .unwrap_or_else(|| hub.user_model_dir(entry));
+                    println!("{}", dir.display());
+                    0
+                }
+                Err(e) => {
+                    report(&e);
+                    1
+                }
             }
-            Err(e) => {
-                report(&e);
-                1
-            }
-        },
+        }
     }
 }
 

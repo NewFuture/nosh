@@ -2,7 +2,7 @@
 
 nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行，需要帮助时直接在终端里描述任务。
 
-默认使用本地 MiniCPM5-2B 模型，准备好模型后可离线推理，无需云端 API。支持 **Linux（含 WSL）和 macOS**，原生 Windows shell 尚未实现。
+默认使用本地 MiniCPM5-2B Q8_0，按可用内存／显存调整为 Q4_K_M；资源不足时不自动安装或加载模型，显式设置优先，详见[模型选择规则](docs/DESIGN.md#21-模型与格式)。准备好模型后可离线推理，无需云端 API。支持 **Linux（含 WSL）和 macOS**，原生 Windows shell 尚未实现。
 
 ## 功能特性
 
@@ -27,7 +27,7 @@ nosh 是用 Rust 编写的 **Bash 兼容 AI shell**：日常命令照常运行�
 取得 `nosh` 可执行文件后（[构建入口](docs/ARCHITECTURE.md#开发入口)），在终端运行：
 
 ```bash
-nosh model pull    # 提前下载并校验默认模型，约 1.57 GB
+nosh model pull    # 按资源选择并校验 2B Q8（约 2.69 GB）或 Q4（约 1.57 GB）
 nosh doctor        # 检查运行环境与模型
 nosh               # 进入 shell
 ```
