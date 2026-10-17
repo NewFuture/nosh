@@ -631,6 +631,32 @@ fn quoted_native_paths_complete_without_losing_backslash_directories() {
 }
 
 #[test]
+fn native_completion_providers_restore_the_required_runtime_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        bin.join("git.cmd"),
+        "@echo off\r\nif not defined SystemRoot exit /b 17\r\nif \"%~1\"==\"--version\" (\r\n echo git version 2.43.0\r\n) else (\r\n echo runtime-branch\r\n)\r\n",
+    )
+    .unwrap();
+    let mut command = nosh(home.path());
+    command
+        .args(["--safe", "--offline"])
+        .current_dir(home.path())
+        .env("PATH", &bin)
+        .env("PATHEXT", ".CMD;.EXE");
+    let mut terminal = console::Terminal::spawn(command);
+    terminal.wait_for_prompt();
+    terminal.send(b"git switch runtime-\t");
+    terminal.expect("runtime-branch");
+    terminal.control_c();
+    terminal.expect("NATIVE>");
+    terminal.send(b"exit 0\r");
+    terminal.finish();
+}
+
+#[test]
 fn scripted_completion_children_do_not_allocate_a_console() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("completion-console.json");

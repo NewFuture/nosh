@@ -3,9 +3,54 @@
 use std::path::{Path, PathBuf};
 
 use nosh_permissions::{
-    ApprovalMode, Context, Decision, PathClass, RuleSpec, SessionAllowList, UserRule, UserRules,
-    assess_read, classify_path, classify_path_real, evaluate,
+    ApprovalMode, Context, Decision, PathClass, Risk, RuleSpec, SessionAllowList, UserRule,
+    UserRules, assess_command, assess_read, classify_path, classify_path_real, evaluate,
 };
+
+#[test]
+fn explicit_native_programs_do_not_gain_help_or_version_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let outside = directory.path().join("outside");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let context = Context::new(&workspace, &workspace);
+    for name in ["tool.exe", "cargo", "cp"] {
+        let executable = outside.join(name);
+        std::fs::write(&executable, b"MZ\0native fixture").unwrap();
+        for path in [
+            executable.to_string_lossy().into_owned(),
+            executable.to_string_lossy().replace('\\', "/"),
+            format!(r"..\outside\{name}"),
+        ] {
+            for flag in ["--help", "--version"] {
+                let command = format!("'{path}' {flag}");
+                let report = assess_command(&command, &context);
+                assert!(report.syntax_error.is_none(), "{command}: {report:?}");
+                assert!(report.risk() >= Risk::Mutating, "{command}: {report:?}");
+                assert!(report.operations[0].opaque, "{command}: {report:?}");
+                for mode in [ApprovalMode::Confirm, ApprovalMode::Auto] {
+                    let policy = evaluate(
+                        &report,
+                        mode,
+                        &UserRules::default(),
+                        &SessionAllowList::default(),
+                    );
+                    assert!(
+                        matches!(policy.decision, Decision::Ask { .. }),
+                        "{command}: {mode:?}: {policy:?}"
+                    );
+                }
+            }
+        }
+    }
+    for flag in ["--help", "--version"] {
+        assert_eq!(
+            assess_command(&format!("tool {flag}"), &context).risk(),
+            Risk::Safe,
+        );
+    }
+}
 
 #[test]
 fn normalization_keeps_drives_unc_roots_and_clamps_parents() {

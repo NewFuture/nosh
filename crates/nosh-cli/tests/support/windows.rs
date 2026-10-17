@@ -99,7 +99,10 @@ impl Terminal {
         {
             command.env_remove("TERM");
         }
-        command.env("PS1", "NATIVE> ").env_remove("COLORTERM");
+        command
+            .env("PS1", "NATIVE> ")
+            .env("PROMPT_COMMAND", "printf 'NOSH-TEST-PROMPT\\n'")
+            .env_remove("COLORTERM");
         let (input_reader, input) = std::io::pipe().unwrap();
         let (mut output_reader, output_writer) = std::io::pipe().unwrap();
         let mut console = 0;
@@ -277,6 +280,8 @@ impl Terminal {
     pub fn control_c(&mut self) {
         // ConPTY requests Win32 input mode for ReadConsoleInput clients.
         self.send(b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_");
+        // A draft repaint can contain the old prompt before Ctrl+C is processed.
+        self.expect("NOSH-TEST-PROMPT");
     }
 
     pub fn expect(&mut self, needle: &str) {
@@ -301,6 +306,7 @@ impl Terminal {
     }
 
     pub fn wait_for_prompt(&mut self) {
+        self.expect("NOSH-TEST-PROMPT");
         self.expect("NATIVE>");
     }
 
@@ -379,5 +385,16 @@ mod tests {
         assert!(output.consume("DONE", &mut observed));
         output.push(b"\x1b[2KNEXT");
         assert!(output.consume("NEXT", &mut observed));
+    }
+
+    #[test]
+    fn cancellation_handshake_ignores_old_prompt_redraws() {
+        let mut output = Output::default();
+        let mut observed = 0;
+        output.push(b"NATIVE> draft\r\nNATIVE> draft");
+        assert!(!output.consume("NOSH-TEST-PROMPT", &mut observed));
+        output.push(b"\r\nNOSH-TEST-PROMPT\r\nNATIVE>");
+        assert!(output.consume("NOSH-TEST-PROMPT", &mut observed));
+        assert!(output.consume("NATIVE>", &mut observed));
     }
 }

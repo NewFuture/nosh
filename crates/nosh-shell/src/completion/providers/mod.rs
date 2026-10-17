@@ -109,6 +109,9 @@ fn output(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    nosh_platform::process::inherit_runtime_environment(&mut command)
+        .map_err(|error| error.to_string())?;
     if let Some(marker) = std::env::var_os(crate::procs::RUN_VAR) {
         command.env(crate::procs::RUN_VAR, marker);
     }

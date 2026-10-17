@@ -218,8 +218,8 @@ const SH_SYNTAX: &[&str] = &[
     "sh", "bash", "dash", "ksh", "ash", "mksh", "zsh", "posh", "yash",
 ];
 
-fn basename(name: &str) -> &str {
-    name.rsplit('/').next().unwrap_or(name)
+pub(crate) fn basename(name: &str) -> &str {
+    name.rsplit(std::path::is_separator).next().unwrap_or(name)
 }
 
 /// Directories whose programs are taken to be the ones the rule table knows
@@ -240,7 +240,7 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
 ];
 
 pub(crate) fn in_system_bin_dir(name: &str) -> bool {
-    name.rsplit_once('/')
+    name.rsplit_once(std::path::is_separator)
         .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
 }
 
@@ -1940,7 +1940,8 @@ impl Analyzer<'_> {
             })
             .collect();
 
-        if !name.contains('/') {
+        let explicit_path = name.contains(std::path::is_separator);
+        if !explicit_path {
             if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
                 let key = format!("alias:{name}");
                 if !self.expanding.contains(&key) {
@@ -1975,7 +1976,7 @@ impl Analyzer<'_> {
         }
 
         let base = basename(&name).to_string();
-        if !name.contains('/') {
+        if !explicit_path {
             let executable = (self.lookup)(
                 &name,
                 &self.cwd,
@@ -2009,7 +2010,7 @@ impl Analyzer<'_> {
                 }
             }
         }
-        if name.contains('/') && !in_system_bin_dir(&name) {
+        if explicit_path && !in_system_bin_dir(&name) {
             // `./x.sh`, `/path/x.sh`, `~/bin/x.sh`: a shell script is analyzed.
             let path = self.target_path(&name, true);
             if self.script(&name, &path, false, &args) {
@@ -2268,7 +2269,7 @@ impl Analyzer<'_> {
                 // a system bin directory) asked only for its version or usage.
                 // Local programs (`./x --help`, `/tmp/x --version`) stay unknown.
                 if v.unlisted
-                    && (!name.contains('/') || in_system_bin_dir(&name))
+                    && (!explicit_path || in_system_bin_dir(&name))
                     && rules::asks_version_or_help(&args)
                 {
                     self.add(Risk::Safe, "prints version or usage");

@@ -39,7 +39,7 @@ impl From<&str> for AutoRejection {
 fn base(op: &Operation) -> &str {
     op.argv
         .first()
-        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .map(|name| crate::analyze::basename(name))
         .unwrap_or("")
 }
 
@@ -47,7 +47,7 @@ fn recognized_program(op: &Operation) -> bool {
     !op.local_program
         && !op.transparent
         && op.argv.first().is_some_and(|name| {
-            !name.contains('/')
+            !name.contains(std::path::is_separator)
                 || crate::analyze::in_system_bin_dir(name)
                 || name == "./gradlew" && op.payload
         })
