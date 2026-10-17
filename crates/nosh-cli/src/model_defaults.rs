@@ -40,34 +40,26 @@ fn select_with(
         return (Ok(Some(Q8.into())), None);
     }
     let cuda = cuda_memory();
-    let observed = ram
-        .as_ref()
-        .ok()
-        .copied()
-        .unwrap_or(0)
-        .max(cuda.free_bytes.unwrap_or(0));
-    let uncertain = ram.is_err() || !cuda.warnings.is_empty();
-    if observed < Q4_AVAILABLE_BYTES && !uncertain {
-        return (
-            Err(tr!(
-                "可用内存和可用单卡显存均低于 3.5 GiB；不自动选择、安装或加载模型。可用 --model ID 或 --model-path PATH 显式覆盖。",
-                "available RAM and usable single-GPU VRAM are both below 3.5 GiB; automatic model selection, installation and loading are disabled. Use --model ID or --model-path PATH to override."
-            ).into()),
-            None,
-        );
-    }
-    let id = if observed >= Q8_AVAILABLE_BYTES {
-        Q8
-    } else {
-        Q4
-    };
     let mut warnings = cuda.warnings;
-    if let Err(error) = ram {
-        warnings.push(tr!(
-            format!("无法读取可用内存：{error}"),
-            format!("cannot read available RAM: {error}")
-        ));
-    }
+    let ram = match ram {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            warnings.push(tr!(
+                format!("无法读取可用内存：{error}"),
+                format!("cannot read available RAM: {error}")
+            ));
+            None
+        }
+    };
+    let id = match ram.into_iter().chain(cuda.free_bytes).max() {
+        Some(bytes) if bytes >= Q8_AVAILABLE_BYTES => Q8,
+        Some(bytes) if bytes >= Q4_AVAILABLE_BYTES => Q4,
+        _ if !warnings.is_empty() => Q4,
+        _ => return (Err(tr!(
+            "可用内存和可用单卡显存均低于 3.5 GiB；不自动选择、安装或加载模型。推理可用 --model ID 或 --model-path PATH；模型管理命令请提供位置 ID，例如 nosh model pull ID。",
+            "available RAM and usable single-GPU VRAM are both below 3.5 GiB; automatic model selection, installation and loading are disabled. For inference use --model ID or --model-path PATH; model commands require a positional ID, e.g. nosh model pull ID."
+        ).into()), None),
+    };
     let warning = (!warnings.is_empty()).then(|| tr!(
         format!("资源检测不完整（{}）；选择 {id}，可显式指定模型覆盖。", warnings.join("; ")),
         format!("resource observations are incomplete ({}); selecting {id}; specify a model explicitly to override", warnings.join("; "))
@@ -80,21 +72,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn available_ram_threshold_is_exactly_seven_gib() {
-        for (bytes, expected) in [
-            (Q8_AVAILABLE_BYTES - 1, Q4),
-            (Q8_AVAILABLE_BYTES, Q8),
-            (Q8_AVAILABLE_BYTES + 1, Q8),
-            (32 * 1024 * 1024 * 1024, Q8),
-        ] {
-            let (id, warning) = select_with(None, false, || Ok(bytes), CudaMemorySnapshot::default);
-            assert_eq!(id.unwrap().as_deref(), Some(expected), "{bytes}");
-            assert!(warning.is_none());
-        }
-    }
-
-    #[test]
-    fn both_resources_below_three_and_a_half_gib_disable_automatic_models() {
+    fn thresholds_use_available_ram_or_single_gpu_memory_without_adding_them() {
         for (ram, vram, expected) in [
             (0, 0, None),
             (Q4_AVAILABLE_BYTES - 1, Q4_AVAILABLE_BYTES - 1, None),
@@ -106,6 +84,10 @@ mod tests {
             (0, Q8_AVAILABLE_BYTES - 1, Some(Q4)),
             (Q8_AVAILABLE_BYTES, 0, Some(Q8)),
             (0, Q8_AVAILABLE_BYTES, Some(Q8)),
+            (Q8_AVAILABLE_BYTES + 1, 0, Some(Q8)),
+            (0, Q8_AVAILABLE_BYTES + 1, Some(Q8)),
+            (4 << 30, 4 << 30, Some(Q4)),
+            (Q8_AVAILABLE_BYTES - 1, Q8_AVAILABLE_BYTES - 1, Some(Q4)),
         ] {
             let (id, warning) = select_with(
                 None,
@@ -121,7 +103,9 @@ mod tests {
                 None => {
                     let reason = id.unwrap_err();
                     assert!(reason.contains("3.5 GiB"), "{reason}");
-                    assert!(reason.contains("--model"), "{reason}");
+                    for hint in ["--model ID", "--model-path PATH", "nosh model pull ID"] {
+                        assert!(reason.contains(hint), "{reason}");
+                    }
                 }
             }
             assert!(warning.is_none());
@@ -154,49 +138,43 @@ mod tests {
     }
 
     #[test]
-    fn observation_errors_choose_q4_with_an_explicit_warning() {
-        let (id, warning) = select_with(
-            None,
-            false,
-            || Err(io::Error::other("fixture RAM failure")),
-            CudaMemorySnapshot::default,
-        );
-        assert_eq!(id.unwrap().as_deref(), Some(Q4));
-        let warning = warning.expect("fallback must be visible");
-        assert!(warning.contains("fixture RAM failure"), "{warning}");
-        assert!(warning.contains(Q4), "{warning}");
-    }
-
-    #[test]
-    fn sufficient_vram_alone_selects_q8_without_adding_ram() {
-        for (ram, vram, expected) in [
-            (0, Q8_AVAILABLE_BYTES, Q8),
-            (Q8_AVAILABLE_BYTES - 1, Q8_AVAILABLE_BYTES - 1, Q4),
-            (4 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024, Q4),
+    fn incomplete_observations_warn_and_use_known_resources_or_the_q4_fallback() {
+        for (ram, vram, gpu_error, expected) in [
+            (Err("fixture RAM failure"), None, None, Q4),
+            (
+                Err("fixture RAM failure"),
+                Some(Q4_AVAILABLE_BYTES - 1),
+                None,
+                Q4,
+            ),
+            (
+                Err("fixture RAM failure"),
+                Some(Q8_AVAILABLE_BYTES),
+                None,
+                Q8,
+            ),
+            (Ok(0), None, Some("fixture GPU failure"), Q4),
+            (
+                Ok(0),
+                Some(Q8_AVAILABLE_BYTES),
+                Some("fixture GPU failure"),
+                Q8,
+            ),
         ] {
             let (id, warning) = select_with(
                 None,
                 false,
-                || Ok(ram),
+                || ram.map_err(io::Error::other),
                 || CudaMemorySnapshot {
-                    free_bytes: Some(vram),
-                    warnings: vec![],
+                    free_bytes: vram,
+                    warnings: gpu_error.into_iter().map(str::to_string).collect(),
                 },
             );
             assert_eq!(id.unwrap().as_deref(), Some(expected));
-            assert!(warning.is_none());
+            let warning = warning.expect("probe failures must remain visible");
+            assert!(warning.contains("fixture"), "{warning}");
+            assert!(warning.contains(expected), "{warning}");
         }
-        let (id, warning) = select_with(
-            None,
-            false,
-            || Err(io::Error::other("RAM unavailable")),
-            || CudaMemorySnapshot {
-                free_bytes: Some(Q8_AVAILABLE_BYTES),
-                warnings: vec![],
-            },
-        );
-        assert_eq!(id.unwrap().as_deref(), Some(Q8));
-        assert!(warning.unwrap().contains("RAM unavailable"));
     }
 
     #[test]
@@ -210,48 +188,6 @@ mod tests {
             ),
             (Ok(Some(Q8.into())), None)
         );
-    }
-
-    #[test]
-    fn cuda_probe_errors_remain_visible() {
-        let (id, warning) = select_with(
-            None,
-            false,
-            || Ok(0),
-            || CudaMemorySnapshot {
-                free_bytes: None,
-                warnings: vec!["fixture GPU failure".into()],
-            },
-        );
-        assert_eq!(id.unwrap().as_deref(), Some(Q4));
-        assert!(warning.unwrap().contains("fixture GPU failure"));
-    }
-
-    #[test]
-    fn an_unknown_resource_does_not_falsely_prove_both_are_below_the_low_threshold() {
-        let (id, warning) = select_with(
-            None,
-            false,
-            || Err(io::Error::other("RAM unavailable")),
-            || CudaMemorySnapshot {
-                free_bytes: Some(Q4_AVAILABLE_BYTES - 1),
-                warnings: vec![],
-            },
-        );
-        assert_eq!(id.unwrap().as_deref(), Some(Q4));
-        assert!(warning.unwrap().contains("RAM unavailable"));
-
-        let (id, warning) = select_with(
-            None,
-            false,
-            || Ok(0),
-            || CudaMemorySnapshot {
-                free_bytes: Some(Q8_AVAILABLE_BYTES),
-                warnings: vec!["another GPU could not be read".into()],
-            },
-        );
-        assert_eq!(id.unwrap().as_deref(), Some(Q8));
-        assert!(warning.unwrap().contains("another GPU"));
     }
 
     #[test]

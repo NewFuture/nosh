@@ -27,19 +27,23 @@ fn fixtures_do_not_inherit_a_real_model_path() {
 
 #[test]
 fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
-    let home = empty_home("model-defaults");
+    let home = tempfile::tempdir().unwrap();
     std::fs::write(
-        home.join("config.toml"),
+        home.path().join("config.toml"),
         "[model]\nid = 'minicpm5-1b:q4_k_m'\npath = 'must-not-use.gguf'\n",
     )
     .unwrap();
-    let output = nosh()
-        .env("NOSH_HOME", &home)
-        .env("NOSH_MODEL", "minicpm5-1b:q4_k_m")
-        .env("NOSH_MODEL_PATH", "must-not-use-env.gguf")
-        .args(["--offline", "model", "path"])
-        .output()
-        .unwrap();
+    let run = |arguments: &[&str]| {
+        nosh()
+            .env("NOSH_HOME", home.path())
+            .env("NOSH_MODEL", "minicpm5-1b:q4_k_m")
+            .env("NOSH_MODEL_PATH", "must-not-use-env.gguf")
+            .args(["--offline", "model"])
+            .args(arguments)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["path"]);
     let path = String::from_utf8(output.stdout).unwrap();
     if output.status.success() {
         assert!(
@@ -62,20 +66,12 @@ fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
         ("minicpm5-1b:q4_k_m", "minicpm5-1b-q4_k_m"),
         ("minicpm5-2b", "minicpm5-2b-q8_0"),
     ] {
-        let output = nosh()
-            .env("NOSH_HOME", &home)
-            .args(["--offline", "model", "path", id])
-            .output()
-            .unwrap();
+        let output = run(&["path", id]);
         assert!(output.status.success(), "{:?}", output.stderr);
         let path = String::from_utf8(output.stdout).unwrap();
         assert!(path.trim_end().ends_with(directory), "{id}: {path}");
     }
-    let output = nosh()
-        .env("NOSH_HOME", &home)
-        .args(["--offline", "model", "list"])
-        .output()
-        .unwrap();
+    let output = run(&["list"]);
     assert!(output.status.success(), "{:?}", output.stderr);
     let list = String::from_utf8(output.stdout).unwrap();
     let marked: Vec<_> = list.lines().filter(|line| line.contains('*')).collect();
@@ -91,15 +87,14 @@ fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
         ),
         _ => panic!("multiple automatic defaults: {list}"),
     }
-    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
 fn an_explicit_missing_model_path_does_not_trigger_automatic_selection_or_download() {
-    let home = empty_home("explicit-model-path");
-    let missing = home.join("must-not-download-instead.gguf");
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("must-not-download-instead.gguf");
     let output = nosh()
-        .env("NOSH_HOME", &home)
+        .env("NOSH_HOME", home.path())
         .env("NOSH_LANG", "en")
         .args([
             "--offline",
@@ -117,7 +112,6 @@ fn an_explicit_missing_model_path_does_not_trigger_automatic_selection_or_downlo
     assert!(stderr.contains("does not exist"), "{stderr}");
     assert!(!stderr.contains("downloading"), "{stderr}");
     assert!(!stderr.contains("cannot read available RAM"), "{stderr}");
-    std::fs::remove_dir_all(home).unwrap();
 }
 #[test]
 fn dash_c_prints_exactly() {

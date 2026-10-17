@@ -212,6 +212,8 @@ fn command_candidates_survive_the_deadline_with_the_inherited_path() {
 
 #[test]
 fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
+    let model = "minicpm5-2b:q8_0";
+    let missing = format!("model {model} is not installed");
     for invalid_path in [false, true] {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -225,14 +227,22 @@ fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
         launch
             .env("PS1", "loading-pause> ")
             .env_remove("NOSH_DISABLE_AI")
-            .args(["--offline", "--no-download", "--norc", "-i"]);
+            .env_remove("NOSH_MODEL_PATH")
+            .args([
+                "--offline",
+                "--no-download",
+                "--norc",
+                "--model",
+                model,
+                "-i",
+            ]);
         let (failure, status) = if invalid_path {
             launch
                 .arg("--model-path")
                 .arg(home.path().join("nested-".repeat(20)).join("missing.gguf"));
             ("does not exist", "model: load failed:")
         } else {
-            ("model not installed", "model: not ready:")
+            (missing.as_str(), "model: not ready:")
         };
         let output = interactive(
             launch,
@@ -257,7 +267,7 @@ fn cached_loading_failures_do_not_retry_for_ordinary_errors() {
             !output.contains("Downloading") && !output.contains("loading "),
             "{output}"
         );
-        assert!(!output.contains("nosh: model not installed"), "{output}");
+        assert!(!output.contains(&format!("nosh: {missing}")), "{output}");
         assert!(!output.contains("no suggestion"), "{output}");
     }
 }
