@@ -635,6 +635,7 @@ fn native_completion_providers_restore_the_required_runtime_environment() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), bin.join("git.exe")).unwrap();
     fs::write(
         bin.join("git.cmd"),
         "@echo off\r\nif not defined SystemRoot exit /b 17\r\nif \"%~1\"==\"--version\" (\r\n echo git version 2.43.0\r\n) else (\r\n echo runtime-branch\r\n)\r\n",
@@ -651,6 +652,9 @@ fn native_completion_providers_restore_the_required_runtime_environment() {
     terminal.send(b"git switch runtime-\t");
     terminal.expect("runtime-branch");
     terminal.control_c();
+    terminal.expect("NATIVE>");
+    terminal.send(b"git --version\r");
+    terminal.expect("git version 2.43.0");
     terminal.expect("NATIVE>");
     terminal.send(b"exit 0\r");
     terminal.finish();

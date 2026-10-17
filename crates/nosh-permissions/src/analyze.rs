@@ -222,6 +222,14 @@ pub(crate) fn basename(name: &str) -> &str {
     name.rsplit(std::path::is_separator).next().unwrap_or(name)
 }
 
+pub(crate) fn is_explicit_program(name: &str) -> bool {
+    name.contains(std::path::is_separator)
+        || matches!(
+            Path::new(name).components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+}
+
 /// Directories whose programs are taken to be the ones the rule table knows
 /// by name; scripts there are not analyzed.
 const SYSTEM_BIN_DIRS: &[&str] = &[
@@ -240,8 +248,10 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
 ];
 
 pub(crate) fn in_system_bin_dir(name: &str) -> bool {
-    name.rsplit_once(std::path::is_separator)
-        .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
+    cfg!(unix)
+        && name
+            .rsplit_once(std::path::is_separator)
+            .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
 }
 
 /// The text of a readable shell script at `path`, if small enough to
@@ -1940,7 +1950,7 @@ impl Analyzer<'_> {
             })
             .collect();
 
-        let explicit_path = name.contains(std::path::is_separator);
+        let explicit_path = is_explicit_program(&name);
         if !explicit_path {
             if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
                 let key = format!("alias:{name}");
@@ -1990,7 +2000,7 @@ impl Analyzer<'_> {
                     .vars
                     .get("VIRTUAL_ENV")
                     .map(|root| self.target_path(root, true).join("bin"));
-                let local = real.starts_with(&workspace)
+                let local = self.paths.relative_path(&real, &workspace).is_some()
                     && !in_system_bin_dir(&path.to_string_lossy())
                     && venv
                         .as_ref()

@@ -7,6 +7,25 @@ use nosh_permissions::{
     UserRules, assess_command, assess_read, classify_path, classify_path_real, evaluate,
 };
 
+fn assert_program_requires_approval(command: &str, context: &Context) {
+    let report = assess_command(command, context);
+    assert!(report.syntax_error.is_none(), "{command}: {report:?}");
+    assert!(report.risk() >= Risk::Mutating, "{command}: {report:?}");
+    assert!(report.operations[0].opaque, "{command}: {report:?}");
+    for mode in [ApprovalMode::Confirm, ApprovalMode::Auto] {
+        let policy = evaluate(
+            &report,
+            mode,
+            &UserRules::default(),
+            &SessionAllowList::default(),
+        );
+        assert!(
+            matches!(policy.decision, Decision::Ask { .. }),
+            "{command}: {mode:?}: {policy:?}"
+        );
+    }
+}
+
 #[test]
 fn explicit_native_programs_do_not_gain_help_or_version_admission() {
     let directory = tempfile::tempdir().unwrap();
@@ -24,23 +43,7 @@ fn explicit_native_programs_do_not_gain_help_or_version_admission() {
             format!(r"..\outside\{name}"),
         ] {
             for flag in ["--help", "--version"] {
-                let command = format!("'{path}' {flag}");
-                let report = assess_command(&command, &context);
-                assert!(report.syntax_error.is_none(), "{command}: {report:?}");
-                assert!(report.risk() >= Risk::Mutating, "{command}: {report:?}");
-                assert!(report.operations[0].opaque, "{command}: {report:?}");
-                for mode in [ApprovalMode::Confirm, ApprovalMode::Auto] {
-                    let policy = evaluate(
-                        &report,
-                        mode,
-                        &UserRules::default(),
-                        &SessionAllowList::default(),
-                    );
-                    assert!(
-                        matches!(policy.decision, Decision::Ask { .. }),
-                        "{command}: {mode:?}: {policy:?}"
-                    );
-                }
+                assert_program_requires_approval(&format!("'{path}' {flag}"), &context);
             }
         }
     }
@@ -49,6 +52,29 @@ fn explicit_native_programs_do_not_gain_help_or_version_admission() {
             assess_command(&format!("tool {flag}"), &context).risk(),
             Risk::Safe,
         );
+    }
+}
+
+#[test]
+fn unix_system_directory_spellings_are_not_trusted_on_windows() {
+    let context = Context::new(r"C:\workspace", r"C:\workspace");
+    for directory in ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"] {
+        for flag in ["--help", "--version"] {
+            assert_program_requires_approval(
+                &format!("'{directory}/nosh-permission-fixture.exe' {flag}"),
+                &context,
+            );
+        }
+    }
+}
+
+#[test]
+fn separator_free_drive_relative_programs_require_approval() {
+    let context = Context::new(r"C:\workspace", r"C:\workspace");
+    for program in ["C:tool.exe", "D:cargo", "c:cp"] {
+        for flag in ["--help", "--version"] {
+            assert_program_requires_approval(&format!("'{program}' {flag}"), &context);
+        }
     }
 }
 

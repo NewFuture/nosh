@@ -34,6 +34,9 @@ pub fn inherit_runtime_environment(command: &mut Command) -> std::io::Result<()>
             std::io::Error::other("SystemRoot is required by Windows runtime services")
         })?;
     command.env("SystemRoot", root);
+    if let Some(extensions) = std::env::var_os("PATHEXT") {
+        command.env("PATHEXT", extensions);
+    }
     Ok(())
 }
 

@@ -1572,6 +1572,30 @@ index bea89e399378cb191180c6dc3e677cadd9494b1a..03112b7f53a07516945eaede0965de2c
  
          params.process_group_policy = if self.options.enable_job_control {
              ProcessGroupPolicy::NewProcessGroup
+diff --git a/brush-core/src/shell/fs.rs b/brush-core/src/shell/fs.rs
+index e2a7fd663dc18b5722f7b703cfbf628bfb54d93e..1a54ae28a732f82949209abc63544ad13e9e84c0 100644
+--- a/brush-core/src/shell/fs.rs
++++ b/brush-core/src/shell/fs.rs
+@@ -8,7 +8,7 @@ use crate::{
+     ExecutionParameters, ShellFd,
+     env::{EnvironmentLookup, EnvironmentScope},
+     error, openfiles, pathsearch,
+-    sys::{fs::PathExt as _, users},
++    sys::users,
+     variables,
+ };
+ 
+@@ -126,8 +126,8 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
+         let path = self.env_str("PATH").unwrap_or_default();
+         for one_dir in crate::sys::fs::split_paths(path.as_ref()) {
+             let candidate_path = one_dir.join(candidate_name.as_ref());
+-            if candidate_path.executable() {
+-                return Some(candidate_path);
++            if let Some(resolved) = crate::sys::fs::resolve_executable(candidate_path) {
++                return Some(resolved);
+             }
+         }
+         None
 diff --git a/brush-core/src/shell/history.rs b/brush-core/src/shell/history.rs
 index 54be623bffac00010d9ea3b2b08306181dfc1743..4a0133bc63ec1c44e98c5b572fb2920b9dff1d58 100644
 --- a/brush-core/src/shell/history.rs

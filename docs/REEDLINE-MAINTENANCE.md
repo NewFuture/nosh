@@ -21,7 +21,7 @@ without submitting or clearing an unfinished draft.
 | `.nosh/reedline/.git/nosh` | Generated input snapshots and provenance, not another maintained source |
 | `.nosh/cache/reedline.git` | Optional official Git object cache when the submodule is absent |
 | `third_party/brush-upstream` | Clean official `reubeno/brush` gitlink at the brush-core 0.5.0 release |
-| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo; completion, host-managed history and host-owned process spawning delta |
+| `patches/brush-core/source.toml` / `nosh.patch` | Pinned brush monorepo; completion, host-managed history, resolved executable lookup and host-owned process spawning delta |
 | `.nosh/brush` | Ignored editable monorepo; Cargo overrides core, parser and builtins to matching crate subdirectories |
 | `.nosh/cache/brush-core.git` | Per-checkout brush object cache |
 
