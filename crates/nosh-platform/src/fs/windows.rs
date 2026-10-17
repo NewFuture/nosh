@@ -7,7 +7,8 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, LocalFree};
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
-    EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSID, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
@@ -78,11 +79,33 @@ pub fn owned_by_current_user(file: &File) -> io::Result<bool> {
         return Err(io::Error::last_os_error());
     }
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let user = token_information(&token, TokenUser)?;
+    let default_owner = token_information(&token, TokenOwner)?;
+    // SAFETY: each aligned buffer contains the requested token structure and its SIDs.
+    Ok(matches_token_owner(
+        owner,
+        unsafe { &*user.as_ptr().cast::<TOKEN_USER>() },
+        unsafe { &*default_owner.as_ptr().cast::<TOKEN_OWNER>() },
+    ))
+}
+
+fn matches_token_owner(owner: PSID, user: &TOKEN_USER, default_owner: &TOKEN_OWNER) -> bool {
+    // Elevated tokens can create files owned by their default owner rather than TokenUser.
+    !owner.is_null()
+        && [user.User.Sid, default_owner.Owner]
+            .into_iter()
+            .any(|sid| !sid.is_null() && unsafe { EqualSid(owner, sid) } != 0)
+}
+
+fn token_information(
+    token: &OwnedHandle,
+    class: TOKEN_INFORMATION_CLASS,
+) -> io::Result<Vec<usize>> {
     let mut length = 0;
     let first = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
+            class,
             std::ptr::null_mut(),
             0,
             &raw mut length,
@@ -91,14 +114,14 @@ pub fn owned_by_current_user(file: &File) -> io::Result<bool> {
     if first != 0
         || io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
     {
-        return Err(io::Error::other("cannot query token user size"));
+        return Err(io::Error::other("cannot query token identity size"));
     }
     let mut storage = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
     // SAFETY: aligned storage has at least the token information's reported byte size.
     if unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
+            class,
             storage.as_mut_ptr().cast(),
             length,
             &raw mut length,
@@ -107,8 +130,7 @@ pub fn owned_by_current_user(file: &File) -> io::Result<bool> {
     {
         return Err(io::Error::last_os_error());
     }
-    let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
-    Ok(!owner.is_null() && unsafe { EqualSid(owner, user.User.Sid) } != 0)
+    Ok(storage)
 }
 
 pub fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
@@ -130,4 +152,71 @@ pub fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Security::{
+        CreateWellKnownSid, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
+        WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WinLocalServiceSid,
+    };
+
+    fn sid(kind: WELL_KNOWN_SID_TYPE) -> Vec<usize> {
+        let mut length = SECURITY_MAX_SID_SIZE;
+        let mut storage = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    kind,
+                    std::ptr::null_mut(),
+                    storage.as_mut_ptr().cast(),
+                    &raw mut length,
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        storage
+    }
+
+    #[test]
+    fn ownership_accepts_only_the_token_user_or_default_owner() {
+        let mut user_sid = sid(WinLocalServiceSid);
+        let mut owner_sid = sid(WinBuiltinAdministratorsSid);
+        let mut unrelated_sid = sid(WinBuiltinUsersSid);
+        let user = TOKEN_USER {
+            User: SID_AND_ATTRIBUTES {
+                Sid: user_sid.as_mut_ptr().cast(),
+                Attributes: 0,
+            },
+        };
+        let default_owner = TOKEN_OWNER {
+            Owner: owner_sid.as_mut_ptr().cast(),
+        };
+        assert!(matches_token_owner(user.User.Sid, &user, &default_owner));
+        assert!(matches_token_owner(
+            default_owner.Owner,
+            &user,
+            &default_owner
+        ));
+        assert!(!matches_token_owner(
+            unrelated_sid.as_mut_ptr().cast(),
+            &user,
+            &default_owner,
+        ));
+        assert!(!matches_token_owner(
+            std::ptr::null_mut(),
+            &user,
+            &default_owner,
+        ));
+    }
+
+    #[test]
+    fn newly_created_files_match_the_current_tokens_ownership() {
+        let file = tempfile::tempfile().unwrap();
+        assert_eq!(file_identity(&file).unwrap().links, 1);
+        assert!(owned_by_current_user(&file).unwrap());
+    }
 }
