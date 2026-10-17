@@ -81,22 +81,40 @@ fn separator_free_drive_relative_programs_require_approval() {
 
 #[test]
 fn active_native_virtual_environments_use_only_the_scripts_directory() {
+    use std::os::windows::process::CommandExt;
+
     let directory = tempfile::tempdir().unwrap();
     let venv = directory.path().join(".venv");
     let scripts = venv.join("Scripts");
     std::fs::create_dir_all(&scripts).unwrap();
     let python = scripts.join("python.exe");
     std::fs::write(&python, b"MZ\0native fixture").unwrap();
+    let alias = directory.path().join("venv alias");
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&alias)
+        .arg(&venv)
+        .creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let alias_python = alias.join("Scripts").join("python.exe");
     for root in [
         venv.clone(),
         venv.canonicalize().unwrap(),
         PathBuf::from(venv.to_string_lossy().to_uppercase()),
+        alias.clone(),
     ] {
         let mut context = Context::new(directory.path(), directory.path());
         context
             .variables
             .insert("VIRTUAL_ENV".into(), root.to_string_lossy().into_owned());
-        for executable in [&python, &python.canonicalize().unwrap()] {
+        for executable in [&python, &python.canonicalize().unwrap(), &alias_python] {
             for (command, mode) in [
                 ("python --version", ApprovalMode::Confirm),
                 ("python -m pytest", ApprovalMode::Auto),
@@ -132,6 +150,7 @@ fn active_native_virtual_environments_use_only_the_scripts_directory() {
             Decision::Ask { .. }
         ));
     }
+    std::fs::remove_dir(alias).unwrap();
 }
 
 #[test]

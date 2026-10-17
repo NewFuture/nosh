@@ -2004,8 +2004,9 @@ impl Analyzer<'_> {
                     .parent()
                     .zip(venv.as_deref())
                     .is_some_and(|(parent, bin)| {
+                        let parent = self.paths.resolved_path(parent, true);
                         self.paths
-                            .relative_path(parent, bin)
+                            .relative_path(&parent, bin)
                             .is_some_and(|relative| relative.as_os_str().is_empty())
                     });
                 let local = self.paths.relative_path(&real, &workspace).is_some()
