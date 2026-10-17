@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub use admission::AutoAdmission;
 pub use analyze::{ProgramLookup, assess_command, assess_command_with_lookup};
-pub use paths::{PathClass, classify_path, classify_path_real, real_path};
+pub use paths::{PathClass, classify_path, classify_path_real, real_path, resolve_literal_path};
 pub use policy::{
     ApprovalMode, Decision, DecisionSource, PolicyDecision, SessionAllowList, UserRules, evaluate,
 };

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use nosh_permissions::{
     ApprovalMode, Context, Decision, PathClass, Risk, RuleSpec, SessionAllowList, UserRule,
-    UserRules, assess_command, assess_read, classify_path, classify_path_real, evaluate,
+    UserRules, assess_command, assess_command_with_lookup, assess_read, classify_path,
+    classify_path_real, evaluate,
 };
 
 fn assert_program_requires_approval(command: &str, context: &Context) {
@@ -75,6 +76,61 @@ fn separator_free_drive_relative_programs_require_approval() {
         for flag in ["--help", "--version"] {
             assert_program_requires_approval(&format!("'{program}' {flag}"), &context);
         }
+    }
+}
+
+#[test]
+fn active_native_virtual_environments_use_only_the_scripts_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let venv = directory.path().join(".venv");
+    let scripts = venv.join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let python = scripts.join("python.exe");
+    std::fs::write(&python, b"MZ\0native fixture").unwrap();
+    for root in [
+        venv.clone(),
+        venv.canonicalize().unwrap(),
+        PathBuf::from(venv.to_string_lossy().to_uppercase()),
+    ] {
+        let mut context = Context::new(directory.path(), directory.path());
+        context
+            .variables
+            .insert("VIRTUAL_ENV".into(), root.to_string_lossy().into_owned());
+        for executable in [&python, &python.canonicalize().unwrap()] {
+            for (command, mode) in [
+                ("python --version", ApprovalMode::Confirm),
+                ("python -m pytest", ApprovalMode::Auto),
+            ] {
+                let report = assess_command_with_lookup(command, &context, &|_, _, _, _| {
+                    Some(executable.clone())
+                });
+                assert!(!report.operations[0].local_program, "{root:?}: {report:?}");
+                let policy = evaluate(
+                    &report,
+                    mode,
+                    &UserRules::default(),
+                    &SessionAllowList::default(),
+                );
+                assert_eq!(policy.decision, Decision::Allow, "{root:?}: {policy:?}");
+            }
+        }
+        let nested = scripts.join("nested").join("python.exe");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"MZ\0nested fixture").unwrap();
+        let report = assess_command_with_lookup("python -m pytest", &context, &|_, _, _, _| {
+            Some(nested.clone())
+        });
+        assert!(report.operations[0].local_program, "{report:?}");
+        assert!(matches!(
+            evaluate(
+                &report,
+                ApprovalMode::Auto,
+                &UserRules::default(),
+                &SessionAllowList::default(),
+            )
+            .decision,
+            Decision::Ask { .. }
+        ));
     }
 }
 

@@ -167,6 +167,91 @@ fn native_agent_uses_existing_approval_and_mock_engine() {
     assert_eq!(ui.text, "done");
 }
 
+#[test]
+fn read_tool_paths_preserve_drive_unc_and_verbatim_roots() {
+    for (input, expected) in [
+        (r"D:\work\sub\..\file.txt", r"D:\work\file.txt"),
+        (
+            r"\\server\share\work\..\file.txt",
+            r"\\server\share\file.txt",
+        ),
+        (
+            r"\\?\UNC\server\share\work\file.txt",
+            r"\\?\UNC\server\share\work\file.txt",
+        ),
+        (r"\\?\D:\work \file.txt", r"\\?\D:\work \file.txt"),
+    ] {
+        for name in ["read_file", "grep"] {
+            let args = if name == "grep" {
+                json!({"path": input, "pattern": "needle"})
+            } else {
+                json!({"path": input})
+            };
+            let call = nosh_engine::ToolCall {
+                name: name.into(),
+                args: args.as_object().unwrap().clone(),
+            };
+            let path = nosh_core::tools::tool_path(&call, Path::new(r"C:\workspace"));
+            assert_eq!(path, Path::new(expected), "{name}: {input}");
+            assert!(path.is_absolute(), "{name}: {path:?}");
+        }
+    }
+}
+
+#[test]
+fn native_agent_read_and_grep_authorize_and_open_the_same_drive_path() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("native-read.txt");
+    fs::write(&file, "NATIVE-READ-FIXTURE\n").unwrap();
+    let mut calls = Vec::new();
+    for path in [&file, &file.canonicalize().unwrap()] {
+        calls.push(call("read_file", json!({"path": path})));
+        calls.push(call(
+            "grep",
+            json!({"path": path, "pattern": "NATIVE-READ-FIXTURE"}),
+        ));
+    }
+    let engine = MockChatEngine::new(vec![calls, vec![text("done")]]);
+    let received = engine.received();
+    let mut shell = shell(home.path());
+    let mut agent = Agent::new(
+        Box::new(engine),
+        AgentConfig {
+            mode: ApprovalMode::Confirm,
+            ..Default::default()
+        },
+        Environment::detect(&shell),
+        ToolSet::ReadOnly,
+    );
+    let mut approval = Scripted::new([]);
+    let mut ui = RecordUi::default();
+    let outcome = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Cli, "read and search the native fixture"),
+        &mut approval,
+        &mut ui,
+    );
+    assert_eq!(outcome.status, TaskStatus::Completed, "{outcome:?}");
+    assert!(approval.seen.is_empty(), "{:?}", approval.seen);
+    let received = received.lock().unwrap();
+    let results: Vec<_> = received
+        .iter()
+        .flatten()
+        .filter_map(|message| match message {
+            nosh_engine::Message::Tool(result) => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 4, "{results:?}");
+    for pair in results.chunks_exact(2) {
+        assert!(pair[0].contains("1  NATIVE-READ-FIXTURE"), "{pair:?}");
+        assert!(
+            pair[1].contains("native-read.txt:1:NATIVE-READ-FIXTURE"),
+            "{pair:?}"
+        );
+    }
+}
+
 struct OwnedProbe(Child);
 
 impl Drop for OwnedProbe {
@@ -247,11 +332,11 @@ fn native_child_helper() {
             .env_remove("NOSH_WINDOWS_PID_FILE")
             .spawn()
             .unwrap();
-        fs::write(
-            std::env::var_os("NOSH_WINDOWS_PID_FILE").unwrap(),
-            format!("{} {}", std::process::id(), child.id()),
-        )
-        .unwrap();
+        let path = std::path::PathBuf::from(std::env::var_os("NOSH_WINDOWS_PID_FILE").unwrap());
+        let pending = path.with_extension("pending");
+        fs::write(&pending, format!("{} {}", std::process::id(), child.id())).unwrap();
+        // Existence is the cancellation handshake; publish only a complete PID pair.
+        fs::rename(pending, path).unwrap();
         if mode == "orphan" {
             std::process::exit(0);
         }
@@ -271,14 +356,9 @@ fn conpty_standard_handles_are_native_console_handles() {
         .env("NOSH_WINDOWS_PROBE", "console")
         .env("NOSH_WINDOWS_PID_FILE", &path);
     let mut terminal = console::Terminal::spawn(command);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !path.is_file() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    terminal.expect("CONSOLE-PROBE");
     let handles: Vec<bool> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(handles, [true, true, true, true], "{}", terminal.text());
-    terminal.expect("CONSOLE-PROBE");
     terminal.finish();
 }
 
@@ -321,6 +401,20 @@ fn running(pid: u32) -> bool {
     code == 259
 }
 
+fn owned_pids(path: &Path) -> [u32; 2] {
+    let pids: Vec<u32> = fs::read_to_string(path)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .collect();
+    let pids: [u32; 2] = pids
+        .try_into()
+        .expect("helper must publish both owned PIDs");
+    assert!(pids.iter().all(|pid| *pid != 0));
+    assert_ne!(pids[0], pids[1]);
+    pids
+}
+
 fn tree_command(pid_file: &Path) -> String {
     format!(
         "NOSH_WINDOWS_PROBE=tree NOSH_WINDOWS_PID_FILE={} {} --exact native_child_helper --nocapture",
@@ -355,12 +449,8 @@ fn agent_timeout_reclaims_descendants_without_touching_an_unrelated_child() {
     assert!(result.timed_out, "{result:?}");
     assert_eq!(result.exit_code, 124);
     assert!(started.elapsed() < timeout + Duration::from_secs(4));
-    let pids = fs::read_to_string(pid_file).unwrap();
-    for pid in pids.split_whitespace() {
-        assert!(
-            !running(pid.parse().unwrap()),
-            "owned helper {pid} survived timeout"
-        );
+    for pid in owned_pids(&pid_file) {
+        assert!(!running(pid), "owned helper {pid} survived timeout");
     }
     assert!(unrelated.0.try_wait().unwrap().is_none());
     assert_eq!(
@@ -386,6 +476,7 @@ fn cancellation_restores_function_scopes_and_reclaims_the_owned_tree() {
             assert!(Instant::now() < deadline, "native helper did not start");
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(owned_pids(&watched).into_iter().all(running));
         interrupts.fire();
     });
     let result = shell
@@ -402,8 +493,8 @@ fn cancellation_restores_function_scopes_and_reclaims_the_owned_tree() {
     assert!(result.interrupted, "{result:?}");
     assert_eq!(result.exit_code, 130);
     assert_eq!(shell.var("NATIVE_SCOPE").as_deref(), Some("outer"));
-    for pid in fs::read_to_string(pid_file).unwrap().split_whitespace() {
-        assert!(!running(pid.parse().unwrap()));
+    for pid in owned_pids(&pid_file) {
+        assert!(!running(pid));
     }
 }
 
@@ -708,12 +799,9 @@ fn scripted_completion_reclaims_orphaned_descendants() {
     terminal.expect("NATIVE>");
     terminal.send(b"probe \t");
     terminal.expect("provider left background processes");
-    let pids = fs::read_to_string(&path).unwrap();
+    let pids = owned_pids(&path);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while pids
-        .split_whitespace()
-        .any(|pid| running(pid.parse().unwrap()))
-    {
+    while pids.iter().copied().any(running) {
         assert!(
             Instant::now() < deadline,
             "completion descendant survived cleanup"

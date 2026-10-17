@@ -1996,15 +1996,21 @@ impl Analyzer<'_> {
             if let Some(path) = executable {
                 let real = self.paths.resolved_path(&path, true);
                 let workspace = self.paths.resolved_path(&self.ctx.workspace, true);
-                let venv = self
-                    .vars
-                    .get("VIRTUAL_ENV")
-                    .map(|root| self.target_path(root, true).join("bin"));
+                let venv = self.vars.get("VIRTUAL_ENV").map(|root| {
+                    self.target_path(root, true)
+                        .join(if cfg!(windows) { "Scripts" } else { "bin" })
+                });
+                let in_venv = path
+                    .parent()
+                    .zip(venv.as_deref())
+                    .is_some_and(|(parent, bin)| {
+                        self.paths
+                            .relative_path(parent, bin)
+                            .is_some_and(|relative| relative.as_os_str().is_empty())
+                    });
                 let local = self.paths.relative_path(&real, &workspace).is_some()
                     && !in_system_bin_dir(&path.to_string_lossy())
-                    && venv
-                        .as_ref()
-                        .is_none_or(|bin| path.parent() != Some(bin.as_path()));
+                    && !in_venv;
                 if let Some(i) = self.operation {
                     self.report.operations[i].executable = Some(path.clone());
                     self.report.operations[i].local_program = local;

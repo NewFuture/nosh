@@ -23,12 +23,16 @@ pub fn resolve(p: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    resolve_literal(&expanded.to_string_lossy(), cwd)
+    resolve_literal_path(&expanded, cwd)
 }
 
 /// Shell words have already undergone tilde/parameter expansion.
 pub(crate) fn resolve_literal(p: &str, cwd: &Path) -> PathBuf {
-    let path = Path::new(p);
+    resolve_literal_path(Path::new(p), cwd)
+}
+
+/// Resolves an expanded path lexically without discarding its filesystem prefix.
+pub fn resolve_literal_path(path: &Path, cwd: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
