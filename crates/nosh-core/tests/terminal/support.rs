@@ -231,11 +231,18 @@ fn frame_matches(output: &str, expected: &str) -> bool {
     let Some((_, frame)) = completed.rsplit_once("\x1b[?25l") else {
         return false;
     };
-    let frame = style::strip_ansi(frame);
-    // Each line is a required fragment; "!" excludes text from this redraw.
+    let visible = style::strip_ansi(frame);
+    // Each line matches visible text or literal ANSI styling; "!" excludes a fragment.
     expected.lines().all(|part| {
-        part.strip_prefix('!')
-            .map_or_else(|| frame.contains(part), |part| !frame.contains(part))
+        let (part, excluded) = part
+            .strip_prefix('!')
+            .map_or((part, false), |part| (part, true));
+        let painted = if part.contains('\x1b') {
+            frame
+        } else {
+            visible.as_str()
+        };
+        painted.contains(part) != excluded
     })
 }
 
@@ -254,6 +261,23 @@ fn frame_steps_ignore_partial_redraws_and_old_menu_text() {
         "editing> partial"
     ));
     assert!(!frame_matches("editing> query", "editing> query"));
+}
+
+#[test]
+fn frame_steps_wait_for_styled_completion_redraws() {
+    let expected = "\x1b[48;2;250;179;135m\nCompletion\ncandidate_one\ncandidate_two";
+    let pending = "\x1b[?25lCompletion: checking candidates\x1b[?25h";
+    assert!(pending.contains("Completion"));
+    assert!(!frame_matches(pending, expected));
+    let menu =
+        "\x1b[?25l\x1b[48;2;250;179;135mCompletion\x1b[0m\ncandidate_one\ncandidate_two\x1b[?25h";
+    for end in 0..menu.len() {
+        assert!(!frame_matches(&menu[..end], expected));
+    }
+    assert!(frame_matches(menu, expected));
+    assert!(!frame_matches(menu, "\x1b[48;2;254;100;11m"));
+    assert!(frame_matches(menu, "candidate_one\n!\x1b[48;2;254;100;11m"));
+    assert!(!frame_matches(menu, "?25l"));
 }
 
 #[test]
