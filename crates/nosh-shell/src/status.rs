@@ -43,21 +43,28 @@ pub(crate) fn supported() -> bool {
     {
         return false;
     }
-    let mut device = None;
-    for fd in 0..=2 {
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
-        // SAFETY: fstat initializes this storage on success.
-        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-            return false;
+    #[cfg(unix)]
+    {
+        let mut device = None;
+        for fd in 0..=2 {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+            // SAFETY: fstat initializes this storage on success.
+            if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            let current = unsafe { stat.assume_init() }.st_rdev;
+            if device.is_some_and(|previous| previous != current) {
+                return false;
+            }
+            device = Some(current);
         }
-        let current = unsafe { stat.assume_init() }.st_rdev;
-        if device.is_some_and(|previous| previous != current) {
-            return false;
-        }
-        device = Some(current);
+        // SAFETY: these queries do not modify terminal or process state.
+        unsafe { libc::tcgetpgrp(0) == libc::getpgrp() }
     }
-    // SAFETY: these queries do not modify terminal or process state.
-    unsafe { libc::tcgetpgrp(0) == libc::getpgrp() }
+    #[cfg(windows)]
+    {
+        true
+    }
 }
 
 pub(crate) fn plain(text: &str) -> String {

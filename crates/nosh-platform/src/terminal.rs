@@ -19,7 +19,39 @@ impl Terminal {
             .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()));
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
             || std::env::var_os("CLICOLOR").is_some_and(|v| v == "0");
+        #[cfg(windows)]
+        let (term, locale) = {
+            let ansi = tty
+                && !matches!(term.as_deref(), Some("" | "dumb" | "unknown"))
+                && Self::enable_virtual_terminal();
+            (
+                ansi.then(|| term.unwrap_or_else(|| "windows".into())),
+                locale.or_else(|| tty.then(|| "UTF-8".into())),
+            )
+        };
         Self::with_env(tty, term.as_deref(), locale.as_deref(), no_color)
+    }
+
+    #[cfg(windows)]
+    fn enable_virtual_terminal() -> bool {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+            STD_OUTPUT_HANDLE, SetConsoleMode,
+        };
+        let mut enabled = false;
+        for stream in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: standard handles are borrowed, never closed; only output mode is changed.
+            unsafe {
+                let handle = GetStdHandle(stream);
+                let mut mode = 0;
+                if GetConsoleMode(handle, &raw mut mode) != 0
+                    && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+                {
+                    enabled = true;
+                }
+            }
+        }
+        enabled
     }
 
     fn with_env(tty: bool, term: Option<&str>, locale: Option<&str>, no_color: bool) -> Self {

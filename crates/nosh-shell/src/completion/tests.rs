@@ -206,6 +206,29 @@ fn completion_context_uses_active_command_and_byte_ranges() {
 }
 
 #[test]
+fn completion_context_preserves_bash_quoted_backslashes() {
+    let (_, _, snapshot) = fixture();
+    for (fragment, expected) in [
+        (r"'path space\fi", r"path space\fi"),
+        (r"'path space\fi'", r"path space\fi"),
+        (r#""C:\work\fi"#, r"C:\work\fi"),
+        (r#""C:\work\fi""#, r"C:\work\fi"),
+        (r#"'a\b'\"c\""#, "a\\b\"c\""),
+        (r#""a\$b\`c\"d\\e\q""#, "a$b`c\"d\\e\\q"),
+        (r"path\ space\\fi", r"path space\fi"),
+        ("a\\\nb", "ab"),
+        ("'a\\\nb'", "a\\\nb"),
+        ("\"a\\\nb\"", "ab"),
+    ] {
+        let request = query(&format!("printf %s {fragment}"));
+        let context = Context::parse(&request, &snapshot.native).unwrap();
+        assert_eq!(context.word, expected, "{fragment:?}");
+        assert_eq!(context.words[context.index], expected, "{fragment:?}");
+        assert_eq!(&request.text[context.span], fragment);
+    }
+}
+
+#[test]
 fn redirection_operands_and_leading_prefixes_keep_native_word_ranges() {
     let (directory, _, mut snapshot) = fixture();
     fs::write(directory.path().join("output"), "").unwrap();

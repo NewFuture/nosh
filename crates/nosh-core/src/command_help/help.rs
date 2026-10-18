@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 
@@ -17,7 +18,10 @@ pub(super) fn render(
     let mut blocks = blocks("stdout", &output.stdout);
     blocks.extend(self::blocks("stderr", &output.stderr));
     let exit_code = output.status.and_then(|status| status.code());
+    #[cfg(unix)]
     let signal = output.status.and_then(|status| status.signal());
+    #[cfg(windows)]
+    let signal: Option<i32> = None;
     if blocks.is_empty() {
         return Err(format!(
             "no help text returned by {} (exit={exit_code:?}, signal={signal:?}, capture_complete={})",

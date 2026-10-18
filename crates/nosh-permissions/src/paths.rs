@@ -8,6 +8,9 @@ use std::rc::Rc;
 
 use crate::Context;
 
+#[cfg(windows)]
+mod windows;
+
 /// Expands `~`, makes the path absolute against `cwd` and normalizes `.`/`..`
 /// lexically (symlinks are not followed).
 pub fn resolve(p: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
@@ -20,25 +23,37 @@ pub fn resolve(p: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     } else {
         PathBuf::from(p)
     };
-    resolve_literal(&expanded.to_string_lossy(), cwd)
+    resolve_literal_path(&expanded, cwd)
 }
 
 /// Shell words have already undergone tilde/parameter expansion.
 pub(crate) fn resolve_literal(p: &str, cwd: &Path) -> PathBuf {
-    let path = Path::new(p);
+    resolve_literal_path(Path::new(p), cwd)
+}
+
+/// Resolves an expanded path lexically without discarding its filesystem prefix.
+pub fn resolve_literal_path(path: &Path, cwd: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
     };
-    let mut out = PathBuf::from("/");
+    #[cfg(windows)]
+    if windows::non_equivalent_verbatim(&abs) {
+        return abs;
+    }
+    let mut out = PathBuf::new();
     for c in abs.components() {
         match c {
             Component::ParentDir => {
-                out.pop();
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
             }
             Component::Normal(n) => out.push(n),
-            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR_STR),
+            Component::CurDir => {}
         }
     }
     out
@@ -107,15 +122,23 @@ pub(crate) fn protected_list(ctx: &Context) -> Vec<(PathBuf, String)> {
     for p in &ctx.protected {
         v.push((p.clone(), p.display().to_string()));
     }
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        for relative in ["System32\\config", "System32\\drivers\\etc", "security"] {
+            let path = PathBuf::from(&root).join(relative);
+            v.push((path.clone(), path.display().to_string()));
+        }
+    }
     v
 }
 
 fn under(p: &Path, base: &Path) -> bool {
-    p == base || p.starts_with(base)
+    strip_scope(p, base).is_some()
 }
 
 /// `/etc/…`, `/tmp/…` or `/var/…` for `/private/etc/…`, `/private/tmp/…` or
 /// `/private/var/…`: on macOS the short forms are symlinks to the long ones.
+#[cfg(any(not(windows), test))]
 fn private_alias(p: &Path) -> Option<PathBuf> {
     let rest = p.strip_prefix("/private").ok()?;
     let first = rest.components().next()?.as_os_str();
@@ -128,13 +151,35 @@ fn private_alias(p: &Path) -> Option<PathBuf> {
 /// The form paths are compared in. On macOS a path with its symlinks
 /// resolved, `$TMPDIR` or a canonicalized workspace can name `/etc`, `/tmp`
 /// or `/var` in the long `/private` form, so both sides use the short form.
-fn short(p: &Path) -> Cow<'_, Path> {
-    if cfg!(target_os = "macos")
-        && let Some(s) = private_alias(p)
+pub(crate) fn short(p: &Path) -> Cow<'_, Path> {
+    #[cfg(windows)]
     {
-        return Cow::Owned(s);
+        windows::normalize(p)
     }
-    Cow::Borrowed(p)
+    #[cfg(not(windows))]
+    {
+        if cfg!(target_os = "macos")
+            && let Some(s) = private_alias(p)
+        {
+            return Cow::Owned(s);
+        }
+        Cow::Borrowed(p)
+    }
+}
+
+fn strip_scope(path: &Path, root: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows::strip_scope(path, root)
+    }
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(root).ok().map(Path::to_path_buf)
+    }
+}
+
+fn is_root(path: &Path) -> bool {
+    path.has_root() && path.file_name().is_none()
 }
 
 /// Filesystem path facts reused only for one permission assessment.
@@ -160,7 +205,16 @@ impl PathResolver {
                 .cloned()
                 .collect(),
             workspace: ctx.workspace.clone(),
-            tmpdir: std::env::var("TMPDIR").ok().map(PathBuf::from),
+            tmpdir: {
+                #[cfg(windows)]
+                {
+                    Some(std::env::temp_dir())
+                }
+                #[cfg(not(windows))]
+                {
+                    std::env::var("TMPDIR").ok().map(PathBuf::from)
+                }
+            },
             real_paths: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -192,9 +246,19 @@ impl PathResolver {
     }
 
     pub(crate) fn classify(&self, path: &Path) -> PathClass {
+        #[cfg(windows)]
+        if windows::ambiguous(path) {
+            return PathClass::Protected(
+                "ambiguous Windows path, device or alternate data stream".into(),
+            );
+        }
         let path = &*short(path);
         let display = path.to_string_lossy();
         if NULL_PATHS.contains(&display.as_ref()) {
+            return PathClass::Null;
+        }
+        #[cfg(windows)]
+        if windows::is_null(path) {
             return PathClass::Null;
         }
         for (base, label) in &self.protected {
@@ -205,11 +269,18 @@ impl PathResolver {
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name == ".env" || name.starts_with(".env."))
+            .is_some_and(|name| {
+                let name = if cfg!(windows) {
+                    name.to_ascii_lowercase()
+                } else {
+                    name.to_owned()
+                };
+                name == ".env" || name.starts_with(".env.")
+            })
         {
             return PathClass::Protected(".env".into());
         }
-        if path == Path::new("/") {
+        if is_root(path) {
             return PathClass::Root;
         }
         if self.homes.iter().any(|home| {
@@ -220,9 +291,12 @@ impl PathResolver {
         }
         let workspace = short(&self.workspace);
         if !workspace.as_os_str().is_empty()
-            && *workspace != *Path::new("/")
+            && !is_root(&workspace)
             && self.relative_path(path, &workspace).is_some()
-            && self.real_path(&workspace, true).as_deref() != Some(Path::new("/"))
+            && !self
+                .real_path(&workspace, true)
+                .as_deref()
+                .is_some_and(is_root)
         {
             return PathClass::Workspace;
         }
@@ -234,6 +308,19 @@ impl PathResolver {
             return PathClass::Temp;
         }
         let system = |dirs: &[&str]| dirs.iter().any(|dir| under(path, Path::new(dir)));
+        #[cfg(windows)]
+        if [
+            "SystemRoot",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ]
+        .iter()
+        .filter_map(std::env::var_os)
+        .any(|root| under(path, Path::new(&root)))
+        {
+            return PathClass::System;
+        }
         if path == Path::new("/home")
             || system(SYSTEM_DIRS)
             || (cfg!(target_os = "macos")
@@ -283,18 +370,13 @@ fn relative_path_with(
 ) -> Option<PathBuf> {
     // Preserve literal ancestry before shortening aliases: /private/etc is
     // below /private even though its shorthand /etc no longer is.
-    if let Ok(relative) = path.strip_prefix(root) {
-        return Some(relative.to_path_buf());
+    if let Some(relative) = strip_scope(path, root) {
+        return Some(relative);
     }
     let path = short(path);
     let root = short(root);
-    path.strip_prefix(&root)
-        .ok()
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            resolve_root(&root)
-                .and_then(|real| path.strip_prefix(short(&real)).ok().map(Path::to_path_buf))
-        })
+    strip_scope(&path, &root)
+        .or_else(|| resolve_root(&root).and_then(|real| strip_scope(&path, &short(&real))))
 }
 
 #[cfg(test)]
@@ -316,7 +398,17 @@ pub(crate) fn same_workspace_target(lexical: &Path, resolved: &Path, ctx: &Conte
 /// `/` or a directory right under it, such as `/etc`; on macOS also the real
 /// `/private/etc` and `/private/var` behind the `/etc` and `/var` symlinks.
 pub(crate) fn is_top_level(p: &Path) -> bool {
-    short(p).components().count() <= 2
+    #[cfg(windows)]
+    {
+        p.components()
+            .filter(|component| matches!(component, Component::Normal(_)))
+            .count()
+            <= 1
+    }
+    #[cfg(not(windows))]
+    {
+        short(p).components().count() <= 2
+    }
 }
 
 pub fn classify_path(p: &Path, ctx: &Context) -> PathClass {

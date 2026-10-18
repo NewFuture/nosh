@@ -218,8 +218,16 @@ const SH_SYNTAX: &[&str] = &[
     "sh", "bash", "dash", "ksh", "ash", "mksh", "zsh", "posh", "yash",
 ];
 
-fn basename(name: &str) -> &str {
-    name.rsplit('/').next().unwrap_or(name)
+pub(crate) fn basename(name: &str) -> &str {
+    name.rsplit(std::path::is_separator).next().unwrap_or(name)
+}
+
+pub(crate) fn is_explicit_program(name: &str) -> bool {
+    name.contains(std::path::is_separator)
+        || matches!(
+            Path::new(name).components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
 }
 
 /// Directories whose programs are taken to be the ones the rule table knows
@@ -240,8 +248,10 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
 ];
 
 pub(crate) fn in_system_bin_dir(name: &str) -> bool {
-    name.rsplit_once('/')
-        .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
+    cfg!(unix)
+        && name
+            .rsplit_once(std::path::is_separator)
+            .is_some_and(|(dir, _)| SYSTEM_BIN_DIRS.contains(&dir))
 }
 
 /// The text of a readable shell script at `path`, if small enough to
@@ -1940,7 +1950,8 @@ impl Analyzer<'_> {
             })
             .collect();
 
-        if !name.contains('/') {
+        let explicit_path = is_explicit_program(&name);
+        if !explicit_path {
             if let Some(alias) = self.ctx.aliases.get(&name).cloned() {
                 let key = format!("alias:{name}");
                 if !self.expanding.contains(&key) {
@@ -1975,7 +1986,7 @@ impl Analyzer<'_> {
         }
 
         let base = basename(&name).to_string();
-        if !name.contains('/') {
+        if !explicit_path {
             let executable = (self.lookup)(
                 &name,
                 &self.cwd,
@@ -1985,15 +1996,22 @@ impl Analyzer<'_> {
             if let Some(path) = executable {
                 let real = self.paths.resolved_path(&path, true);
                 let workspace = self.paths.resolved_path(&self.ctx.workspace, true);
-                let venv = self
-                    .vars
-                    .get("VIRTUAL_ENV")
-                    .map(|root| self.target_path(root, true).join("bin"));
-                let local = real.starts_with(&workspace)
+                let venv = self.vars.get("VIRTUAL_ENV").map(|root| {
+                    self.target_path(root, true)
+                        .join(if cfg!(windows) { "Scripts" } else { "bin" })
+                });
+                let in_venv = path
+                    .parent()
+                    .zip(venv.as_deref())
+                    .is_some_and(|(parent, bin)| {
+                        let parent = self.paths.resolved_path(parent, true);
+                        self.paths
+                            .relative_path(&parent, bin)
+                            .is_some_and(|relative| relative.as_os_str().is_empty())
+                    });
+                let local = self.paths.relative_path(&real, &workspace).is_some()
                     && !in_system_bin_dir(&path.to_string_lossy())
-                    && venv
-                        .as_ref()
-                        .is_none_or(|bin| path.parent() != Some(bin.as_path()));
+                    && !in_venv;
                 if let Some(i) = self.operation {
                     self.report.operations[i].executable = Some(path.clone());
                     self.report.operations[i].local_program = local;
@@ -2009,7 +2027,7 @@ impl Analyzer<'_> {
                 }
             }
         }
-        if name.contains('/') && !in_system_bin_dir(&name) {
+        if explicit_path && !in_system_bin_dir(&name) {
             // `./x.sh`, `/path/x.sh`, `~/bin/x.sh`: a shell script is analyzed.
             let path = self.target_path(&name, true);
             if self.script(&name, &path, false, &args) {
@@ -2268,7 +2286,7 @@ impl Analyzer<'_> {
                 // a system bin directory) asked only for its version or usage.
                 // Local programs (`./x --help`, `/tmp/x --version`) stay unknown.
                 if v.unlisted
-                    && (!name.contains('/') || in_system_bin_dir(&name))
+                    && (!explicit_path || in_system_bin_dir(&name))
                     && rules::asks_version_or_help(&args)
                 {
                     self.add(Risk::Safe, "prints version or usage");

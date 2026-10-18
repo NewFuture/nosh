@@ -83,7 +83,9 @@ pub(crate) fn paths(
     directories: bool,
 ) -> Answer {
     let word = &context.word;
-    let split = word.rfind('/').map_or(0, |position| position + 1);
+    let split = word
+        .rfind(std::path::is_separator)
+        .map_or(0, |position| position + 1);
     let head = &word[..split];
     let component = &word[split..];
     let expand_home = context.quote.is_none() && head.starts_with("~/");

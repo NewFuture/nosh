@@ -669,7 +669,9 @@ impl Analyzer<'_> {
                         && !value.is_empty()
                         && !value.contains("://")
                     {
-                        let use_ = if value.contains('/') || matches!(value.as_str(), "." | "..") {
+                        let use_ = if crate::host::contains_separator(&value)
+                            || matches!(value.as_str(), "." | "..")
+                        {
                             PathUse::Explicit
                         } else {
                             PathUse::Argument
