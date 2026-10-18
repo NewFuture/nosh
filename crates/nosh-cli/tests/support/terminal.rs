@@ -136,8 +136,9 @@ impl Terminal {
         self.replies = queries;
     }
 
-    pub fn wait_for(&mut self, needle: &str) {
+    pub fn wait_for(&mut self, needle: &str) -> usize {
         self.observed = self.wait(self.observed, needle);
+        self.observed
     }
 
     pub fn wait(&mut self, start: usize, needle: &str) -> usize {
