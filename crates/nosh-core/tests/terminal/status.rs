@@ -419,21 +419,36 @@ fn theme_updates_repaint_real_edit_menu_and_search_without_restarting_the_editor
         colorterm: Some("truecolor"),
         track_frames: true,
         steps: &[
-            ("(main)", b"echo theme_draft"),
-            ("echo theme_draft", b"@theme-switch"),
+            ("@frame:(main)", b"echo theme_draft"),
+            ("@frame:echo theme_draft", b"@theme-switch"),
             (
-                "\x1b[0;38;2;17;17;27;48;2;254;100;11m",
+                "@frame:\x1b[0;38;2;17;17;27;48;2;254;100;11m\necho theme_draft",
                 b"\x15cat candidate_\t",
             ),
-            ("Completion", b"@theme-switch"),
-            ("\x1b[0;38;2;17;17;27;48;2;250;179;135m", b"\x1b"),
-            ("Tab", b"\x15\x12history_accepted"),
             (
-                "history_accepted -> touch history_accepted",
+                "@frame:Completion\ncandidate_one\ncandidate_two",
                 b"@theme-switch",
             ),
-            ("\x1b[0;38;2;17;17;27;48;2;254;100;11m", b"\r"),
-            ("❯ touch history_accepted", b"\x15exit 0\r"),
+            (
+                "@frame:\x1b[0;38;2;17;17;27;48;2;250;179;135m\nCompletion\ncandidate_one\ncandidate_two",
+                b"\x1b",
+            ),
+            (
+                "@frame:cat candidate_\n!Completion",
+                b"\x15\x12history_accepted",
+            ),
+            (
+                "@frame:history_accepted -> touch history_accepted",
+                b"@theme-switch",
+            ),
+            (
+                "@frame:\x1b[0;38;2;17;17;27;48;2;254;100;11m\nHistory [all]\nhistory_accepted",
+                b"\r",
+            ),
+            (
+                "@frame:❯ touch history_accepted\n!History [all]",
+                b"\x15exit 0\r",
+            ),
         ],
         ..Default::default()
     }

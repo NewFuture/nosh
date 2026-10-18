@@ -16,6 +16,7 @@ mod eval_worker;
 mod eval_worker;
 mod init_cmd;
 mod model_cmd;
+mod model_defaults;
 mod shell_cmd;
 mod starship;
 mod theme_cmd;
@@ -247,11 +248,18 @@ fn main() {
         Some(Cmd::Abbr { args }) => abbr_cmd::run(&args),
         Some(Cmd::Init { .. }) => unreachable!("init is dispatched before runtime setup"),
         Some(Cmd::Theme { cmd }) => theme_cmd::run(cmd),
-        Some(Cmd::Model { cmd }) => model_cmd::run(cmd),
+        Some(Cmd::Model { cmd }) => model_cmd::run(cmd, cli.global.device.unwrap_or_default()),
         Some(Cmd::Debug { cmd }) => {
             let cfg = config::Config::load();
             cfg.print_warnings();
-            debug_cmd::run(cmd, &engine_setup(&cli, &cfg))
+            let allow_cuda = !matches!(
+                &cmd,
+                debug_cmd::DebugCmd::Gen {
+                    kv: debug_cmd::KvArg::F32,
+                    ..
+                }
+            );
+            debug_cmd::run(cmd, &engine_setup_with_cuda(&cli, &cfg, allow_cuda))
         }
         Some(Cmd::Doctor) => {
             let cfg = config::Config::load();
@@ -263,25 +271,48 @@ fn main() {
 }
 
 fn engine_setup(cli: &Cli, cfg: &config::Config) -> engine::EngineSetup {
+    engine_setup_with_cuda(cli, cfg, true)
+}
+
+fn engine_setup_with_cuda(
+    cli: &Cli,
+    cfg: &config::Config,
+    allow_cuda: bool,
+) -> engine::EngineSetup {
+    let model_path = cli.global.model_path.clone().or_else(|| {
+        std::env::var_os("NOSH_MODEL_PATH")
+            .filter(|s| !s.is_empty())
+            .map(Into::into)
+            .or_else(|| cfg.model_path.clone())
+    });
+    let model_id = cli
+        .global
+        .model
+        .clone()
+        .or_else(|| std::env::var("NOSH_MODEL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| cfg.model_id.clone());
+    let device = cli
+        .global
+        .device
+        .map(Ok)
+        .unwrap_or_else(|| cfg.model_device.clone());
+    let model_id = match &device {
+        Ok(device) => model_defaults::select(
+            model_id,
+            model_path.is_some(),
+            if allow_cuda {
+                *device
+            } else {
+                nosh_llm::InferenceDevice::Cpu
+            },
+        ),
+        Err(_) => Ok(model_id),
+    };
     engine::EngineSetup {
         theme: nosh_shell::theme::ThemeHandle::new(cfg.theme.palette),
-        device: cli
-            .global
-            .device
-            .map(Ok)
-            .unwrap_or_else(|| cfg.model_device.clone()),
-        model_id: cli
-            .global
-            .model
-            .clone()
-            .or_else(|| std::env::var("NOSH_MODEL").ok().filter(|s| !s.is_empty()))
-            .or_else(|| cfg.model_id.clone()),
-        model_path: cli.global.model_path.clone().or_else(|| {
-            std::env::var_os("NOSH_MODEL_PATH")
-                .filter(|s| !s.is_empty())
-                .map(Into::into)
-                .or_else(|| cfg.model_path.clone())
-        }),
+        device,
+        model_id,
+        model_path,
         context_length: cfg.context_length,
         seed: cli.global.seed,
         no_download: cli.global.no_download || !cfg.download_auto,

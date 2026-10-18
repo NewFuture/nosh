@@ -46,6 +46,35 @@ impl std::fmt::Display for InferenceDevice {
 }
 
 impl InferenceDevice {
+    /// Largest observed free VRAM on one enabled CUDA device, not a reservation.
+    /// CPU requests/builds do not probe CUDA. Diagnostics retain partial probe failures.
+    pub fn available_cuda_memory(self) -> CudaMemorySnapshot {
+        if self == Self::Cpu {
+            return CudaMemorySnapshot::default();
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            CudaMemorySnapshot::default()
+        }
+        #[cfg(feature = "cuda")]
+        {
+            let only = match self {
+                Self::Cuda(index) => Some(index),
+                _ => None,
+            };
+            match probe_cuda_devices(only) {
+                Ok((devices, warnings)) => CudaMemorySnapshot {
+                    free_bytes: largest_free_memory(&devices),
+                    warnings,
+                },
+                Err(error) => CudaMemorySnapshot {
+                    free_bytes: None,
+                    warnings: vec![error],
+                },
+            }
+        }
+    }
+
     /// Opens an explicit device; automatic selection needs the model's memory budget.
     pub fn open(self) -> Result<Device, LlmError> {
         match self {
@@ -117,6 +146,14 @@ impl InferenceDevice {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct CudaMemorySnapshot {
+    /// Maximum free bytes on a single visible, successfully probed device, not a sum.
+    pub free_bytes: Option<u64>,
+    /// Errors observing some or all eligible devices; unavailable is not zero free memory.
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceSelection {
     pub requested: InferenceDevice,
@@ -148,6 +185,11 @@ struct CudaMemory {
 }
 
 #[cfg(any(feature = "cuda", test))]
+fn largest_free_memory(devices: &[CudaMemory]) -> Option<u64> {
+    devices.iter().map(|device| device.free).max()
+}
+
+#[cfg(any(feature = "cuda", test))]
 fn best_fit(devices: &[CudaMemory], required: u64) -> Option<usize> {
     devices
         .iter()
@@ -158,22 +200,21 @@ fn best_fit(devices: &[CudaMemory], required: u64) -> Option<usize> {
 }
 
 #[cfg(feature = "cuda")]
-fn select_cuda(required: u64) -> Result<(Device, DeviceSelection), LlmError> {
+fn probe_cuda_devices(only: Option<usize>) -> Result<(Vec<CudaMemory>, Vec<String>), String> {
     use candle_core::cuda_backend::cudarc::driver::CudaContext;
 
-    let count = match CudaContext::device_count() {
-        Ok(count) if count > 0 => count,
-        Ok(_) => return Ok(cpu_selection("no visible CUDA devices", Some(required))),
-        Err(error) => {
-            return Ok(cpu_selection(
-                format!("CUDA detection unavailable: {error}"),
-                Some(required),
-            ));
-        }
-    };
+    let count = CudaContext::device_count()
+        .map_err(|error| format!("CUDA detection unavailable: {error}"))?;
+    if let Some(ordinal) = only
+        && ordinal >= count as usize
+    {
+        return Err(format!(
+            "cuda:{ordinal} is not among the {count} visible CUDA devices"
+        ));
+    }
     let mut devices = Vec::new();
     let mut diagnostics = Vec::new();
-    for ordinal in 0..count as usize {
+    for ordinal in (0..count as usize).filter(|ordinal| only.is_none_or(|only| only == *ordinal)) {
         let probe = CudaContext::new(ordinal).and_then(|context| {
             Ok(CudaMemory {
                 ordinal,
@@ -182,16 +223,29 @@ fn select_cuda(required: u64) -> Result<(Device, DeviceSelection), LlmError> {
             })
         });
         match probe {
-            Ok(device) => {
-                diagnostics.push(format!(
-                    "cuda:{ordinal}: {} MiB free",
-                    device.free / (1 << 20)
-                ));
-                devices.push(device);
-            }
+            Ok(device) => devices.push(device),
             Err(error) => diagnostics.push(format!("cuda:{ordinal}: probe failed: {error}")),
         }
     }
+    Ok((devices, diagnostics))
+}
+
+#[cfg(feature = "cuda")]
+fn select_cuda(required: u64) -> Result<(Device, DeviceSelection), LlmError> {
+    let (mut devices, mut diagnostics) = match probe_cuda_devices(None) {
+        Ok(probe) => probe,
+        Err(error) => return Ok(cpu_selection(error, Some(required))),
+    };
+    if devices.is_empty() && diagnostics.is_empty() {
+        return Ok(cpu_selection("no visible CUDA devices", Some(required)));
+    }
+    diagnostics.extend(devices.iter().map(|device| {
+        format!(
+            "cuda:{}: {} MiB free",
+            device.ordinal,
+            device.free / (1 << 20)
+        )
+    }));
     while let Some(index) = best_fit(&devices, required) {
         let candidate = devices.remove(index);
         let selection = InferenceDevice::Cuda(candidate.ordinal);
@@ -284,6 +338,27 @@ mod tests {
     }
 
     #[test]
+    fn cpu_memory_snapshot_does_not_probe_cuda() {
+        let snapshot = InferenceDevice::Cpu.available_cuda_memory();
+        assert!(snapshot.free_bytes.is_none());
+        assert!(snapshot.warnings.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn cpu_build_does_not_count_unusable_vram() {
+        for device in [
+            InferenceDevice::Auto,
+            InferenceDevice::Cuda(0),
+            InferenceDevice::Cuda(2),
+        ] {
+            let snapshot = device.available_cuda_memory();
+            assert!(snapshot.free_bytes.is_none());
+            assert!(snapshot.warnings.is_empty());
+        }
+    }
+
+    #[test]
     fn selects_most_free_fitting_device_with_stable_ties() {
         let devices = [
             CudaMemory {
@@ -308,6 +383,22 @@ mod tests {
         assert_eq!(best_fit(&devices[..1], 3999), Some(0));
         assert_eq!(best_fit(&[], 0), None);
         assert_eq!(devices[2].name, "free");
+        assert_eq!(largest_free_memory(&devices), Some(8000));
+        assert_eq!(largest_free_memory(&devices[..1]), Some(3999));
+        assert_eq!(largest_free_memory(&[]), None);
+        let split = [
+            CudaMemory {
+                ordinal: 0,
+                free: 4 << 30,
+                name: "first".into(),
+            },
+            CudaMemory {
+                ordinal: 1,
+                free: 4 << 30,
+                name: "second".into(),
+            },
+        ];
+        assert_eq!(largest_free_memory(&split), Some(4 << 30));
     }
 
     #[test]

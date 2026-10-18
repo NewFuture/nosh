@@ -84,9 +84,11 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
             no_prepack,
         } => {
             let resolved = crate::engine::locate(setup).and_then(|r| {
+                let id = setup.selected_model()?;
                 r.ok_or_else(|| {
-                    nosh_hub::HubError::NotInstalled(
-                        setup.model_id.as_deref().unwrap_or("default").into(),
+                    nosh_core::EngineLoadError::NotReady(
+                        nosh_hub::HubError::NotInstalled(id.unwrap_or("default").into())
+                            .to_string(),
                     )
                 })
             });

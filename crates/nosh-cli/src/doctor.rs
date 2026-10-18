@@ -87,7 +87,15 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
     }
 
     let hub = ModelHub::new();
-    let entry = hub.registry().lookup(setup.model_id.as_deref()).cloned();
+    let entry = setup
+        .selected_model()
+        .map_err(|error| error.to_string())
+        .and_then(|id| {
+            hub.registry()
+                .lookup(id)
+                .cloned()
+                .map_err(|error| error.to_string())
+        });
     let located = engine::locate(setup);
     let device_check = setup.device.clone().and_then(|request| {
         if let Ok(Some(model)) = &located {
@@ -124,26 +132,25 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
     // (or default) registry entry.
     let model: Option<ModelEntry> = match &located {
         Ok(Some(r)) => Some(r.entry.clone()),
-        _ => entry
-            .as_ref()
-            .ok()
-            .cloned()
-            .or_else(|| hub.registry().lookup(None).ok().cloned()),
+        _ => entry.as_ref().ok().cloned(),
     };
 
-    match (meminfo("MemTotal:"), meminfo("MemAvailable:")) {
-        (Some(t), Some(a)) => {
-            let line = format!(
-                "{:.1} GB total · {:.1} GB available",
-                t as f64 / 1e9,
-                a as f64 / 1e9
-            );
+    match nosh_platform::memory::available_bytes() {
+        Ok(a) => {
+            let line = match meminfo("MemTotal:") {
+                Some(t) => format!(
+                    "{:.2} GiB total · {:.2} GiB available",
+                    t as f64 / (1024.0 * 1024.0 * 1024.0),
+                    a as f64 / (1024.0 * 1024.0 * 1024.0)
+                ),
+                None => format!("{:.2} GiB available", a as f64 / (1024.0 * 1024.0 * 1024.0)),
+            };
             match model.as_ref().and_then(|m| memory_warning(m, a)) {
                 Some(w) => warn("memory", &format!("{line} · {w}")),
                 None => ok("memory", &line),
             }
         }
-        _ => warn("memory", "unknown"),
+        Err(error) => warn("memory", &format!("unknown: {error}")),
     }
 
     match located {
@@ -157,11 +164,15 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
                 .as_ref()
                 .map(|e| e.display.clone())
                 .unwrap_or_default();
+            let id = entry
+                .as_ref()
+                .map(|entry| entry.id.as_str())
+                .unwrap_or("default");
             bad(
                 "model",
                 &tr!(
-                    format!("{name} 未安装 · 运行 `nosh model pull`"),
-                    format!("{name} not installed · run `nosh model pull`")
+                    format!("{name} 未安装 · 运行 `nosh model pull {id}`"),
+                    format!("{name} not installed · run `nosh model pull {id}`")
                 ),
             );
         }
@@ -227,11 +238,11 @@ mod tests {
     #[test]
     fn memory_warning_follows_the_selected_model() {
         let reg = nosh_hub::Registry::builtin();
-        let q4 = reg.lookup(None).unwrap();
+        let q4 = reg.lookup(Some("minicpm5-2b:q4_k_m")).unwrap();
         let q8 = reg.lookup(Some("minicpm5-2b:q8_0")).unwrap();
         let small = reg.lookup(Some("minicpm5-1b:q4_k_m")).unwrap();
         let gb = |x: f64| (x * 1e9) as u64;
-        // The Q8_0 model declares more than the default Q4_K_M one.
+        // Q8_0 declares more memory than the low-memory Q4_K_M fallback.
         assert_eq!(memory_warning(q4, gb(3.5)), None);
         let w = memory_warning(q8, gb(3.5)).unwrap();
         assert!(w.contains(&q8.display), "{w}");

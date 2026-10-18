@@ -2,8 +2,8 @@
 //! `cargo test -p nosh-llm --release -- --ignored --nocapture`.
 //! Uses `NOSH_MODEL_PATH` or the default model in the user store.
 
-use candle_core::Device;
-use candle_core::quantized::{GgmlDType, gguf_file};
+use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
+use candle_core::{Device, Tensor};
 use nosh_engine::{ChatEngine, Event, Message, SamplingParams, SessionSpec, StopReason, ToolSpec};
 use nosh_llm::model::llama::{Llama, LoadOptions};
 use nosh_llm::template::{self, concat};
@@ -20,7 +20,7 @@ fn resolved() -> nosh_hub::ResolvedModel {
     }
     hub.find(None)
         .expect("model store")
-        .expect("default model not installed; run `nosh model pull`")
+        .expect("registry default model not installed; run `nosh model pull minicpm5-2b:q8_0` or set NOSH_MODEL_PATH")
 }
 
 fn model_source(model: &nosh_hub::ResolvedModel) -> ModelSource<'_> {
@@ -520,10 +520,16 @@ fn cuda_matches_cpu_logits_and_reuses_prefix() {
 }
 
 #[test]
-#[ignore = "needs the real model; manual ARM64 memory workflow"]
+#[ignore = "needs the real MiniCPM5-2B Q4_K_M or Q8_0 model"]
 fn prepacked_weights_match_retained_weights() {
     let r = resolved();
-    assert_eq!(r.entry.id, "minicpm5-2b:q4_k_m");
+    assert!(
+        matches!(
+            r.entry.id.as_str(),
+            "minicpm5-2b:q4_k_m" | "minicpm5-2b:q8_0"
+        ),
+        "prepack validation needs MiniCPM5-2B Q4_K_M or Q8_0"
+    );
     let features = nosh_llm::cpu::features();
     eprintln!(
         "prepack numerical validation: {} {features:?}",
@@ -578,7 +584,7 @@ fn prepacked_weights_match_retained_weights() {
         "prepack: {} matrices, {} raw bytes released",
         stats.tensors, stats.released_bytes
     );
-    if cfg!(target_arch = "aarch64") {
+    if cfg!(target_arch = "aarch64") && r.entry.id == "minicpm5-2b:q4_k_m" {
         assert!(
             features.contains(&"dotprod"),
             "ARM validation needs dotprod"
@@ -605,6 +611,40 @@ fn prepacked_weights_match_retained_weights() {
             expected,
             "layers and Q6K output"
         );
+    }
+    if r.entry.id == "minicpm5-2b:q8_0" {
+        let mut probe = QTensor::quantize(
+            &Tensor::zeros((16, 256), candle_core::DType::F32, &Device::Cpu).unwrap(),
+            GgmlDType::Q8_0,
+        )
+        .unwrap();
+        let supported = probe.prepack_and_release_storage().unwrap();
+        let ct = gguf_file::Content::read(&mut std::fs::File::open(&r.weights).unwrap()).unwrap();
+        let has_output = ct.tensor_infos.contains_key("output.weight");
+        let mut expected = (0, 0);
+        for (name, info) in &ct.tensor_infos {
+            let output = name == "output.weight" || (!has_output && name == "token_embd.weight");
+            if !supported
+                || !(name.starts_with("blk.") || output)
+                || info.ggml_dtype != GgmlDType::Q8_0
+            {
+                continue;
+            }
+            let (n, k) = info.shape.dims2().unwrap();
+            if n > 0 && n.is_multiple_of(16) && k > 0 && k.is_multiple_of(256) {
+                expected.0 += 1;
+                expected.1 += info.shape.elem_count() / info.ggml_dtype.block_size()
+                    * info.ggml_dtype.type_size();
+            }
+        }
+        assert_eq!(
+            (stats.tensors, stats.released_bytes),
+            expected,
+            "Q8 layers and output; release supported: {supported}"
+        );
+        if supported {
+            assert!(expected.0 > 0 && expected.1 > 0);
+        }
     }
     for ((name, ids), want) in samples.iter().zip(&want) {
         let (prompt, tail) = ids.split_at(ids.len() - 48);

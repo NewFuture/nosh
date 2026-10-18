@@ -52,10 +52,15 @@ All changes are marked `nosh patch`; `nosh.patch` is the diff against the rev ab
   returned `Error::NotCompiledWithCudaSupport`; it now returns
   `NotCompiledWithMetalSupport` like the other Metal stubs. Worth sending upstream.
 
-nosh calls the new method for Q4K layer matrices on x86, and Q4K/Q6K layer matrices plus
-`output` on aarch64. `token_embd` always retains its original blocks. The
+nosh calls the new method for Q4K/Q8_0 layer matrices and `output` on x86, and
+Q4K/Q6K layer matrices and `output` on aarch64. Q8_0 release requires VNNI;
+AVX2-only x86 keeps the raw Q8_0 blocks. The API checks shape and CPU eligibility
+before changing storage. `token_embd` always retains its original blocks, including
+when a separately loaded copy serves as the tied output projection. The
 `LoadOptions::prepack_weights` option (`nosh debug gen --no-prepack`) disables eager
 prepacking and release, not candle's lazy packing. See `crates/nosh-llm/src/model/llama.rs`.
+Explicit `CANDLE_DEQUANTIZE_ALL` or `CANDLE_DEQUANTIZE_ALL_F16` conversions also
+disable eager packing: the conversion still needs the original blocks.
 `crates/nosh-llm/tests/prepack.rs` checks every m from 1 to 64, empty inputs and prefill
 boundaries, with single/multiple k-blocks and platform-specific row alignments. It checks that
 prepacked matmuls equal the lazily tiled ones bit for bit and candle's raw-weight kernels
@@ -86,6 +91,15 @@ The workflow uploads inputs, outputs, model/build provenance, RSS JSON and the e
 numerical test log even on failure; numerical metrics use the shared `Divergence`
 display rather than a duplicate JSON reporter. Model tests remain ignored in ordinary CI; missing models, missing
 statistics or an ARM CPU without dotprod fail the explicit acceptance run.
+
+The same `prepacked_weights_match_retained_weights` test accepts an explicitly
+selected MiniCPM5-2B Q8_0 (`NOSH_MODEL_PATH` plus `NOSH_MEMORY_ARTIFACTS`).
+It checks the exact eligible layer/output count and released bytes against the
+GGUF metadata, as well as the unchanged 3.3K/8K numerical thresholds. On a CPU
+without Q8_0 release support it requires retained storage rather than claiming
+a memory optimization. Loader regressions cover explicit and tied Q4K/Q8_0
+outputs, prefill and single-token decode equality, retained embedding data,
+disabled prepacking, and damaged output tensors.
 
 ## Updating the pinned rev
 

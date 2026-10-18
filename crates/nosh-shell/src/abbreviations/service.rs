@@ -228,6 +228,14 @@ impl Session {
         if retain && !new_input {
             return;
         }
+        // An unchanged prompt must not invalidate an unfinished probe's serial.
+        if unchanged
+            && state.checked.is_none()
+            && state.error.is_none()
+            && state.context.as_ref() == context.as_ref().ok()
+        {
+            return;
+        }
         state.serial = state.serial.wrapping_add(1);
         state.config = config.clone();
         if !retain {
@@ -741,6 +749,70 @@ mod tests {
         session.begin_prompt(&shell, disabled, &crate::TriggerConfig::default());
         assert!(session.approved().applicable.is_empty());
         assert!(session.shared.state.lock().unwrap().checked.is_none());
+    }
+
+    #[test]
+    fn unchanged_prompts_preserve_the_queued_or_inflight_probe() {
+        let (_directory, shell) = crate::abbreviations::tests::fixture();
+        let config = crate::abbreviations::tests::probe_config();
+        let trigger = crate::TriggerConfig::default();
+        for active in [false, true] {
+            let mut session = Session::new(None, Arc::new(|| {}));
+            session.available = true;
+            session.begin_prompt(&shell, config.clone(), &trigger);
+            let probe = {
+                let mut state = session.shared.state.lock().unwrap();
+                if active {
+                    state.pending.take().unwrap()
+                } else {
+                    state.pending.clone().unwrap()
+                }
+            };
+            for _ in 0..4 {
+                session.begin_prompt(&shell, config.clone(), &trigger);
+                session.environment_changed(&shell, &trigger);
+                let state = session.shared.state.lock().unwrap();
+                assert_eq!(state.serial, probe.serial);
+                assert_eq!(
+                    state.pending.as_ref().map(|probe| probe.serial),
+                    (!active).then_some(probe.serial)
+                );
+            }
+            publish(
+                &session.shared,
+                probe.serial,
+                Ok(super::super::check(&probe)),
+            );
+            session.begin_prompt(&shell, config.clone(), &trigger);
+            assert!(session.approved().applicable.contains("ll"));
+            assert!(session.approved().applicable.contains("la"));
+        }
+    }
+
+    #[test]
+    fn changed_context_still_invalidates_the_inflight_probe() {
+        for command in ["alias ls='echo changed'", "hash -p /changed/ls ls"] {
+            let (_directory, mut shell) = crate::abbreviations::tests::fixture();
+            let config = crate::abbreviations::tests::probe_config();
+            let trigger = crate::TriggerConfig::default();
+            let mut session = Session::new(None, Arc::new(|| {}));
+            session.available = true;
+            session.begin_prompt(&shell, config.clone(), &trigger);
+            let probe = session.shared.state.lock().unwrap().pending.take().unwrap();
+            assert_eq!(shell.run_user_line(command).exit_code, 0, "{command}");
+            session.begin_prompt(&shell, config, &trigger);
+            publish(
+                &session.shared,
+                probe.serial,
+                Ok(super::super::check(&probe)),
+            );
+            assert!(!session.refresh());
+            assert!(session.approved().applicable.is_empty());
+            let state = session.shared.state.lock().unwrap();
+            assert_ne!(state.serial, probe.serial);
+            assert_eq!(state.pending.as_ref().unwrap().serial, state.serial);
+            assert!(state.ready.is_none());
+        }
     }
 
     #[test]

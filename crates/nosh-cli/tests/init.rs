@@ -389,14 +389,24 @@ fn init_bash_queued_enter_cannot_execute_an_unseen_suggestion() {
 
 #[test]
 fn init_bash_missing_model_uses_real_cli_without_destroying_input() {
-    let mut bash = Bash::new("[download]\nauto = 'never'\n", "", "", false);
+    let mut bash = Bash::new(
+        "[download]\nauto = 'never'\n",
+        "export NOSH_MODEL=minicpm5-2b:q8_0",
+        "",
+        false,
+    );
     bash.type_text("-find \u{4e2d}\u{6587}");
     bash.terminal.send(b"\x02");
     let before = bash.snapshot();
     bash.suggest();
     bash.terminal.wait_for("input unchanged");
     assert_eq!(bash.snapshot(), before);
-    assert!(String::from_utf8_lossy(&bash.terminal.output).contains("not installed"));
+    let output = String::from_utf8_lossy(&bash.terminal.output);
+    assert!(output.contains("not installed"), "{output}");
+    assert!(
+        output.contains("nosh model pull minicpm5-2b:q8_0"),
+        "{output}"
+    );
 }
 
 #[test]

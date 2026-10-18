@@ -55,9 +55,16 @@ fn shell_command(home: &Path, cwd: &Path) -> Command {
         .env_remove("HISTSIZE")
         .env_remove("HISTFILESIZE")
         .env_remove("NOSH_DISABLE_AI")
+        .env_remove("NOSH_MODEL_PATH")
         .env_remove("VISUAL")
         .env_remove("EDITOR")
-        .args(["--offline", "--no-download", "-i"]);
+        .args([
+            "--offline",
+            "--no-download",
+            "--model",
+            "minicpm5-2b:q8_0",
+            "-i",
+        ]);
     command
 }
 
@@ -70,16 +77,15 @@ fn launch_with_columns(home: &Path, cwd: &Path, columns: u16) -> Terminal {
 }
 
 fn submit(terminal: &mut Terminal, input: &str, output: &str) {
-    let start = terminal.output.len();
     terminal.send(format!("{input}\r").as_bytes());
-    terminal.wait_for(output);
-    wait_empty_prompt(terminal, start, "history-test> ");
+    let completed = terminal.wait_for(output);
+    wait_empty_prompt(terminal, completed, "history-test> ");
 }
 
 fn submit_to_prompt(terminal: &mut Terminal, input: &str) {
-    let start = terminal.output.len();
     terminal.send(format!("{input}\r").as_bytes());
-    wait_empty_prompt(terminal, start, "history-test> ");
+    let submitted = terminal.wait_for("\r\n");
+    wait_empty_prompt(terminal, submitted, "history-test> ");
 }
 
 fn wait_empty_prompt(terminal: &mut Terminal, start: usize, prompt: &str) {
