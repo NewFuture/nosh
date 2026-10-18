@@ -554,7 +554,7 @@ pub fn classify(line: &str, shell: &mut EmbeddedShell, cfg: &TriggerConfig) -> A
                 .into_iter()
                 .find(|c| shell.resolve_with_path(c, m.path.as_deref()) != Resolution::NotFound);
             match (fix, m.span) {
-                (Some(fix), Some(span)) if !m.name.contains('/') => {
+                (Some(fix), Some(span)) if !crate::host::contains_separator(&m.name) => {
                     first.get_or_insert((m.name.clone(), fix.to_string()));
                     edits.push((span, fix.to_string()));
                 }

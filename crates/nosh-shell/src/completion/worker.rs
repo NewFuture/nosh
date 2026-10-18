@@ -79,6 +79,11 @@ impl Execution {
                 serde_json::from_str(state.get()).map_err(std::io::Error::other)?,
             )
             .map_err(std::io::Error::other)?;
+        #[cfg(windows)]
+        shell.set_process_spawner(Arc::new(|mut command| {
+            nosh_platform::process::prepare_background(&mut command);
+            tokio::process::Command::from(command).spawn()
+        }));
         if let Ok(marker) = std::env::var(crate::procs::RUN_VAR) {
             let mut variable = brush_core::ShellVariable::new(marker);
             variable.export();
@@ -231,7 +236,10 @@ impl Server {
                 }
             });
         }
-        if context.index == 0 && !context.word.contains('/') && !context.word.starts_with('~') {
+        if context.index == 0
+            && !crate::host::contains_separator(&context.word)
+            && !context.word.starts_with('~')
+        {
             native::commands(query, context, snapshot, &mut self.cache, progress, || {
                 Instant::now() >= deadline
             })
@@ -288,7 +296,9 @@ impl Server {
                 .filter(|_| snapshot.scripts)
                 .cloned()
             else {
-                if context.word.contains(['$', '`']) && context.word.contains('/') {
+                if context.word.contains(['$', '`'])
+                    && crate::host::contains_separator(&context.word)
+                {
                     let expanded = execution
                         .runtime
                         .block_on(shell.expand_completion_path(&query.text[context.span.clone()]))

@@ -31,6 +31,9 @@ unicode-width.workspace = true
 uuid.workspace = true
 vte.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Use the select-based /dev/tty backend instead of kqueue.
 crossterm = { workspace = true, features = ["use-dev-tty"] }

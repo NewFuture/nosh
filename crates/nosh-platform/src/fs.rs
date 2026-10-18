@@ -6,6 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{FileIdentity, file_identity, owned_by_current_user, replace_file};
+
 /// What identifies one version of a file without reading it: size and
 /// nanosecond modification time, plus on Unix the device/inode and the
 /// status-change time (which tools cannot set, unlike mtime). Replacing or

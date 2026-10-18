@@ -218,7 +218,7 @@ fn abbreviation_paste_is_protected_but_tab_can_explicitly_expand() {
         &[
             ("@delay:1800", b"\x1b[200~zzq\x1b[201~ \r"),
             ("command not found: zzq", b"\x1b[200~zzq\x1b[201~\t"),
-            ("echo ABBR_DONE ", b"\r"),
+            ("@frame:abbr> echo ABBR_DONE ", b"\r"),
             ("ABBR_DONE", b"exit 0\r"),
         ],
     );
@@ -259,7 +259,7 @@ fn abbreviation_input_feedback_completion_and_literal_undo_share_one_rule() {
         &[
             ("@delay:1800", b"zzq"),
             ("echo ABBR_DONE", b"\t"),
-            ("echo ABBR_DONE ", b"\x1a"),
+            ("@frame:abbr> echo ABBR_DONE ", b"\x1a"),
             ("Input kept literal", b"\r"),
             ("no automatic AI", b"exit 0\r"),
         ],

@@ -4,7 +4,7 @@ mod package;
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use super::cache::{Cache, Entry, Set};
@@ -96,7 +96,7 @@ fn output(
     executable: &std::path::Path,
     limit: usize,
 ) -> Result<String, String> {
-    let mut command = Command::new(executable);
+    let mut command = nosh_platform::process::background_command(executable);
     command
         .args(args)
         .current_dir(&snapshot.context.cwd)
@@ -109,6 +109,9 @@ fn output(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    nosh_platform::process::inherit_runtime_environment(&mut command)
+        .map_err(|error| error.to_string())?;
     if let Some(marker) = std::env::var_os(crate::procs::RUN_VAR) {
         command.env(crate::procs::RUN_VAR, marker);
     }

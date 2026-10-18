@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use nosh_platform::fs::FileStamp;
 use serde::{Deserialize, Serialize};
 
 use super::{Config, Registry, validate_expansion};
@@ -41,7 +41,7 @@ fn program(context: &Context, name: &str) -> Result<PathBuf, String> {
 }
 
 fn output(context: &Context, program: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new(program);
+    let mut command = nosh_platform::process::background_command(program);
     command
         .args(args)
         .current_dir(&context.cwd)
@@ -53,6 +53,9 @@ fn output(context: &Context, program: &std::path::Path, args: &[&str]) -> Result
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    nosh_platform::process::inherit_runtime_environment(&mut command)
+        .map_err(|error| error.to_string())?;
     if let Some(marker) = std::env::var_os(crate::procs::RUN_VAR) {
         command.env(crate::procs::RUN_VAR, marker);
     }
@@ -87,7 +90,7 @@ struct Identity {
     path: PathBuf,
     cwd: PathBuf,
     search: Option<String>,
-    file: (u64, u64, u64, i64, i64, u32),
+    file: FileStamp,
 }
 
 struct Cached {
@@ -112,24 +115,17 @@ fn capability(probe: &Probe, target: &str, cache: &mut Checker) -> Result<String
     }
     if !probe.config.probe_commands {
         return Err(
-            "external capability probes disabled; opt in with shell.abbreviations.probe_commands = true only for a trusted PATH"
+            "external capability probes disabled; set shell.abbreviations.probe_commands = true only for a trusted PATH"
                 .into(),
         );
     }
     let resolved = program(context, target)?;
-    let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
+    let stamp = FileStamp::of(&resolved).ok_or("cannot inspect capability program")?;
     let identity = Identity {
         path: resolved.clone(),
         cwd: context.cwd.clone(),
         search: context.path.clone(),
-        file: (
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-            metadata.mode(),
-        ),
+        file: stamp,
     };
     if let Some(cached) = cache.capabilities.get(target)
         && cached.identity == identity

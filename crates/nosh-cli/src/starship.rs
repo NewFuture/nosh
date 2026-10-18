@@ -1,11 +1,19 @@
 //! The official CLI is the compatibility boundary; no Starship grammar or SDK is vendored.
 
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::{Child, Stdio};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use nosh_shell::theme::{Builtin, ColorPair, Fragment, Theme};
 
@@ -60,11 +68,13 @@ fn filter_glyphs(value: &mut toml::Value, glyphs: Glyphs, display_text: bool) {
     }
 }
 
+#[cfg(unix)]
 struct Process {
     child: Child,
     reaped: bool,
 }
 
+#[cfg(unix)]
 impl Drop for Process {
     fn drop(&mut self) {
         if self.reaped {
@@ -87,6 +97,7 @@ impl Drop for Process {
     }
 }
 
+#[cfg(unix)]
 fn exited(child: &Child) -> Result<bool, String> {
     let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
     // SAFETY: valid storage; WNOWAIT retains ownership of the leader PID until cleanup.
@@ -109,6 +120,7 @@ fn exited(child: &Child) -> Result<bool, String> {
     Ok(pid != 0)
 }
 
+#[cfg(unix)]
 fn nonblocking(fd: i32) -> Result<(), String> {
     // SAFETY: caller retains the open pipe throughout the operation.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -118,6 +130,7 @@ fn nonblocking(fd: i32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_available(reader: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool, String> {
     let mut chunk = [0; 4096];
     loop {
@@ -186,6 +199,7 @@ fn run(
     collect(&mut command, cancelled, TIMEOUT)
 }
 
+#[cfg(unix)]
 fn collect(
     command: &mut Command,
     cancelled: &dyn Fn() -> bool,
@@ -279,6 +293,29 @@ fn collect(
         ));
     }
     String::from_utf8(out).map_err(|_| "Starship output is not UTF-8".into())
+}
+
+#[cfg(windows)]
+fn collect(
+    command: &mut Command,
+    cancelled: &dyn Fn() -> bool,
+    timeout: Duration,
+) -> Result<String, String> {
+    let output = nosh_platform::process::capture(command, timeout, OUTPUT_LIMIT, cancelled)
+        .map_err(|error| format!("Starship: {error}"))?;
+    if !output.complete {
+        return Err("Starship output exceeded 64 KiB".into());
+    }
+    let error =
+        String::from_utf8(output.stderr).map_err(|_| "Starship diagnostics are not UTF-8")?;
+    if !output.status.is_some_and(|status| status.success()) || !error.trim().is_empty() {
+        return Err(format!(
+            "Starship {:?}: {}",
+            output.status,
+            nosh_shell::style::visible_text(error.trim())
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "Starship output is not UTF-8".into())
 }
 
 fn custom_style<'a>(table: &'a toml::Table, role: &str) -> Result<Option<&'a str>, String> {

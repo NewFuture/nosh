@@ -565,8 +565,8 @@ fn supervise(shared: Arc<Shared>, launcher: WorkerCommand) {
                         serial: received,
                         registry,
                     })) if received == serial => {
-                        match child.residual_children() {
-                            Ok(children) if children.is_empty() => {
+                        match child.has_descendants() {
+                            Ok(false) => {
                                 failures = 0;
                                 publish(&shared, serial, Ok(registry))
                             }
@@ -734,7 +734,11 @@ mod tests {
             assert!(session.approved().applicable.contains("la"));
             assert_eq!(session.shared.state.lock().unwrap().checked, Some(checked));
         }
-        session.begin_prompt(&shell, Config::default(), &crate::TriggerConfig::default());
+        let disabled = Config {
+            probe_commands: false,
+            ..config
+        };
+        session.begin_prompt(&shell, disabled, &crate::TriggerConfig::default());
         assert!(session.approved().applicable.is_empty());
         assert!(session.shared.state.lock().unwrap().checked.is_none());
     }

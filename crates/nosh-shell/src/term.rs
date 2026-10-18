@@ -15,23 +15,28 @@ use crate::style;
 
 /// Whether a controlling terminal can be used for prompts.
 pub fn available() -> bool {
+    #[cfg(unix)]
+    let terminal = "/dev/tty";
+    #[cfg(windows)]
+    let terminal = "CONIN$";
     std::io::stderr().is_terminal()
         && std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/dev/tty")
+            .open(terminal)
             .is_ok()
 }
 
 /// Query the actual output descriptor, not stdout or an unrelated `/dev/tty`.
 pub fn stderr_columns() -> Option<usize> {
-    columns(libc::STDERR_FILENO)
+    columns(2)
 }
 
 pub fn stdout_columns() -> Option<usize> {
-    columns(libc::STDOUT_FILENO)
+    columns(1)
 }
 
+#[cfg(unix)]
 fn columns(fd: i32) -> Option<usize> {
     let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
     // SAFETY: ioctl writes a winsize into valid storage; it is read only on success.
@@ -44,13 +49,59 @@ fn columns(fd: i32) -> Option<usize> {
     (columns > 0).then_some(columns)
 }
 
+#[cfg(windows)]
+fn columns(fd: i32) -> Option<usize> {
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+    let mut information = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: query the borrowed output handle into correctly sized storage.
+    let result = unsafe {
+        GetConsoleScreenBufferInfo(
+            GetStdHandle(if fd == 2 {
+                STD_ERROR_HANDLE
+            } else {
+                STD_OUTPUT_HANDLE
+            }),
+            &raw mut information,
+        )
+    };
+    if result == 0 {
+        return None;
+    }
+    usize::try_from(
+        i32::from(information.srWindow.Right) - i32::from(information.srWindow.Left) + 1,
+    )
+    .ok()
+    .filter(|columns| *columns > 0)
+}
+
 /// Discards pending typeahead so buffered keystrokes cannot answer a prompt.
+#[cfg(unix)]
 pub fn flush_input() -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let tty = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
     crate::pty::flush_input()?;
     // SAFETY: valid open fd for the duration of the call.
     if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn flush_input() -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let input = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")?;
+    // SAFETY: input owns a console input handle for this call.
+    if unsafe {
+        windows_sys::Win32::System::Console::FlushConsoleInputBuffer(input.as_raw_handle())
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
     Ok(())

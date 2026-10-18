@@ -1,27 +1,44 @@
 //! Explicit project environment integration, outside the shared shell lock.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use nosh_platform::fs::FileStamp;
 use nosh_platform::tr;
 
+#[cfg(unix)]
 use crate::input_assist::worker::OwnedChild;
 
 pub(crate) const MAX_ENV: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC: usize = 64 * 1024;
 const MAX_VARIABLES: usize = 16_384;
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(20);
 const MISE_UNTRUSTED: &str = "__MISE_LAST_UNTRUSTED_CONFIG_WARNING_KEY";
+const MISE_ENV: [(&str, &str); 6] = [
+    ("MISE_NO_HOOKS", "1"),
+    ("MISE_OFFLINE", "1"),
+    ("MISE_AUTO_INSTALL", "0"),
+    ("MISE_NOT_FOUND_AUTO_INSTALL", "0"),
+    ("MISE_EXEC_AUTO_INSTALL", "0"),
+    ("MISE_EXPERIMENTAL", "0"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Provider {
@@ -194,9 +211,9 @@ impl Service {
                     Some(executable.clone())
                 } else {
                     input.exported.get("PATH").and_then(|path| {
-                        path.split(':')
+                        std::env::split_paths(path)
                             .map(|part| input.cwd.join(part).join(&executable))
-                            .find(|path| crate::backend::is_executable(path))
+                            .find_map(|path| crate::host::resolve_executable(&path))
                     })
                 };
                 let output = match program {
@@ -558,6 +575,7 @@ pub(crate) fn validate_patch(patch: &Patch) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn nonblocking(fd: i32) -> io::Result<()> {
     // SAFETY: only flags of a retained pipe reader are changed.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -567,6 +585,7 @@ fn nonblocking(fd: i32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn drain(reader: &mut impl Read, buffer: &mut Vec<u8>, cap: usize) -> Result<(), String> {
     let mut chunk = [0; 8192];
     for _ in 0..8 {
@@ -586,6 +605,7 @@ fn drain(reader: &mut impl Read, buffer: &mut Vec<u8>, cap: usize) -> Result<(),
     Ok(())
 }
 
+#[cfg(unix)]
 fn run_tool(
     provider: Provider,
     program: &Path,
@@ -628,13 +648,7 @@ fn run_tool(
         .stdout(out)
         .stderr(err);
     if provider == Provider::Mise {
-        command
-            .env("MISE_NO_HOOKS", "1")
-            .env("MISE_OFFLINE", "1")
-            .env("MISE_AUTO_INSTALL", "0")
-            .env("MISE_NOT_FOUND_AUTO_INSTALL", "0")
-            .env("MISE_EXEC_AUTO_INSTALL", "0")
-            .env("MISE_EXPERIMENTAL", "0");
+        command.envs(MISE_ENV);
     }
     // SAFETY: only async-signal-safe process operations run between fork/exec.
     unsafe {
@@ -711,5 +725,43 @@ fn run_tool(
     result.map(|()| output)
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn run_tool(
+    provider: Provider,
+    program: &Path,
+    args: &[&str],
+    snapshot: &Snapshot,
+    cancel: &AtomicBool,
+    started: Instant,
+) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&snapshot.cwd)
+        .env_clear()
+        .envs(&snapshot.exported);
+    if provider == Provider::Mise {
+        command.envs(MISE_ENV);
+    }
+    let output = nosh_platform::process::capture(
+        &mut command,
+        TIMEOUT.saturating_sub(started.elapsed()),
+        MAX_ENV + MAX_DIAGNOSTIC,
+        || cancel.load(Ordering::Acquire),
+    )
+    .map_err(|error| format!("{} environment refresh: {error}", provider.name()))?;
+    if !output.complete || output.stdout.len() > MAX_ENV || output.stderr.len() > MAX_DIAGNOSTIC {
+        return Err("environment tool output limit exceeded".into());
+    }
+    if !output.status.is_some_and(|status| status.success()) {
+        return Err(format!(
+            "{} {} failed; review the tool's configuration/authorization",
+            provider.name(),
+            args[0]
+        ));
+    }
+    Ok(output.stdout)
+}
+
+#[cfg(all(test, unix))]
 mod tests;

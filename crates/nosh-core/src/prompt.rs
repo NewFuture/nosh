@@ -202,24 +202,11 @@ impl Attachment {
 
 /// Local time as `YYYY-MM-DDTHH:MM`.
 pub fn local_time() -> String {
-    // SAFETY: time/localtime_r only write into the provided struct.
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min
-        )
-    }
+    chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string()
 }
 
 pub(crate) fn git_dirty(cwd: &Path) -> Option<bool> {
-    let mut child = std::process::Command::new("git")
+    let mut child = nosh_platform::process::background_command("git")
         .args([
             "--no-optional-locks",
             "--no-pager",

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub use admission::AutoAdmission;
 pub use analyze::{ProgramLookup, assess_command, assess_command_with_lookup};
-pub use paths::{PathClass, classify_path, classify_path_real, real_path};
+pub use paths::{PathClass, classify_path, classify_path_real, real_path, resolve_literal_path};
 pub use policy::{
     ApprovalMode, Decision, DecisionSource, PolicyDecision, SessionAllowList, UserRules, evaluate,
 };
@@ -99,7 +99,18 @@ impl Context {
         let mut ctx = Self {
             cwd: cwd.into(),
             workspace: workspace.into(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: {
+                #[cfg(windows)]
+                {
+                    std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .map(PathBuf::from)
+                }
+                #[cfg(not(windows))]
+                {
+                    std::env::var_os("HOME").map(PathBuf::from)
+                }
+            },
             timeout: std::time::Duration::from_secs(60),
             ..Self::default()
         };

@@ -1,6 +1,6 @@
 # 代码架构与维护
 
-本文是**当前代码组织、依赖方向和扩展入口**的维护来源。产品行为和配置见 [DESIGN](DESIGN.md)，功能契约见[文档导航](README.md)。只维护当前接口；这里的 crate 边界不是进程隔离或 Windows shell 支持。
+本文是**当前代码组织、依赖方向和扩展入口**的维护来源。产品行为和配置见 [DESIGN](DESIGN.md)，功能契约见[文档导航](README.md)。只维护当前接口；crate 边界不是进程隔离，平台范围见 [DESIGN §4.6](DESIGN.md#46-平台)。
 
 ## Crate 职责与依赖
 
@@ -9,7 +9,7 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | Crate | 职责 | 允许依赖的项目 crate |
 |---|---|---|
 | `nosh-engine` | `ChatEngine`、消息、事件、取消、通用错误、脚本化 Mock | 无 |
-| `nosh-platform` | 语言、终端能力、应用路径、文件指纹、进程与可用内存统计 | 无 |
+| `nosh-platform` | 语言、终端能力、应用路径、文件身份、进程与可用内存统计及 Windows 进程组原语 | 无 |
 | `nosh-permissions` | AST 风险分析、路径分类、审批策略、会话放行 | 无 |
 | `nosh-hub` | 模型清单、选源、下载、校验、安装与离线导入 | `nosh-platform` |
 | `nosh-llm` | Candle 模型、分词、模板、采样、对话 token 日志、KV、设备选择 | `nosh-engine` |
@@ -41,7 +41,9 @@ Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：t
 
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。
 
-Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存在的后端保留转发 trait 或兼容接口。推理依赖解耦不意味着 Shell 后端、Windows 或 IPC 已实现。
+Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存在的后端保留转发 trait 或兼容接口。Windows 与 Unix 复用同一 brush 会话和状态契约，`nosh-shell/src/host.rs` 隔离输入句柄、命令查找、中断和执行生命周期。Windows Job Object、文件身份和安全替换属于平台原语；审批路径策略仍归 permissions，不移入平台层。
+
+Agent 的 brush 执行参数可注入宿主进程启动器。Windows 在子进程恢复运行前加入本次执行独占的 Job Object，作用域结束后拒绝迟到的启动，并回收仍属于该次执行的后代，不按进程名或全局进程树回收。Unix 保持既有进程组及标记跟踪。
 
 ## 代码与测试组织
 
@@ -81,7 +83,18 @@ cargo build --release --locked
 ./target/release/nosh
 ```
 
-Windows 工作树先用 Windows Git/Rust 准备源码，再在 WSL 构建应用，不用 Linux Git 操作 Windows `.git` 文件。离线准备、联调和补丁导出见[源码维护说明](REEDLINE-MAINTENANCE.md)。普通应用构建不要求 Python、Node 或 npm；完整评测工具链独立于运行时。
+原生 Windows x64 使用 MSVC Rust 工具链、C++ Build Tools 和 Windows SDK，在 PowerShell 运行：
+
+```powershell
+cargo source prepare
+cargo build --release --locked -p nosh-cli
+.\target\release\nosh.exe --safe -c 'printf "native Windows\n"'
+cargo test -p nosh-cli -p nosh-permissions --test windows --locked
+cargo test -p nosh-permissions --lib windows_tests --locked
+cargo clippy --workspace --lib --bins --locked -- -D warnings
+```
+
+Windows 工作树用 Windows Git/Rust 准备源码；需要 Unix 回归时可在 WSL 构建，但使用独立的 `CARGO_TARGET_DIR`，不用 Linux Git 操作 Windows `.git` 文件。离线准备、联调和补丁导出见[源码维护说明](REEDLINE-MAINTENANCE.md)。普通应用构建不要求 Python、Node 或 npm；完整评测工具链独立于运行时。
 
 Linux / macOS / WSL 下，按变更选择最小覆盖范围：
 
