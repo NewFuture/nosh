@@ -65,6 +65,8 @@ jobs:
         env:
           NOSH_OFFLINE: "1"
         run: |
+          NOSH_MODEL_PATH="$(target/release/nosh model path minicpm5-2b:q4_k_m)"
+          export NOSH_MODEL_PATH
           cargo test --release --locked -p nosh-llm --test real_model prepacked_weights_match_retained_weights -- --ignored --exact --nocapture --test-threads 1 2>&1 | tee "$NOSH_MEMORY_ARTIFACTS/numerical.log"
       - name: acceptance summary
         if: always()
