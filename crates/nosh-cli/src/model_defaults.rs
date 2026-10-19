@@ -8,8 +8,11 @@ use nosh_platform::{memory, tr};
 
 const Q8: &str = "minicpm5-2b:q8_0";
 const Q4: &str = "minicpm5-2b:q4_k_m";
+const SMALL: &str = "qwen3.5-0.8b:q8_0";
 const Q8_AVAILABLE_BYTES: u64 = 7 * 1024 * 1024 * 1024;
 const Q4_AVAILABLE_BYTES: u64 = Q8_AVAILABLE_BYTES / 2;
+const MIN_AVAILABLE_BYTES: u64 = 3 * 1024 * 1024 * 1024 / 2;
+const MIN_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Resolve once before loading; callers keep the chosen ID in their setup.
 pub fn select(
@@ -17,54 +20,68 @@ pub fn select(
     has_path: bool,
     device: InferenceDevice,
 ) -> Result<Option<String>, String> {
-    let (id, warning) = select_with(requested, has_path, memory::available_bytes, || {
-        device.available_cuda_memory()
-    });
-    if let Some(warning) = warning {
-        eprintln!("nosh: {warning}");
-    }
-    id
+    select_with(
+        requested,
+        has_path,
+        memory::available_bytes,
+        memory::total_bytes,
+        || device.available_cuda_memory(),
+    )
+}
+
+fn observation_error(detail: impl std::fmt::Display) -> String {
+    tr!(
+        format!(
+            "资源检测不完整（{detail}）；暂停自动安装和加载。可用 --model ID、--model-path PATH 或 nosh model pull ID 显式尝试。"
+        ),
+        format!(
+            "resource observations are incomplete ({detail}); automatic installation and loading are disabled. Explicit attempts remain available via --model ID, --model-path PATH or nosh model pull ID."
+        )
+    )
 }
 
 fn select_with(
     requested: Option<String>,
     has_path: bool,
     available: impl FnOnce() -> io::Result<u64>,
+    total: impl FnOnce() -> io::Result<u64>,
     cuda_memory: impl FnOnce() -> CudaMemorySnapshot,
-) -> (Result<Option<String>, String>, Option<String>) {
+) -> Result<Option<String>, String> {
     if requested.is_some() || has_path {
-        return (Ok(requested), None);
+        return Ok(requested);
     }
-    let ram = available();
-    if ram.as_ref().is_ok_and(|bytes| *bytes >= Q8_AVAILABLE_BYTES) {
-        return (Ok(Some(Q8.into())), None);
+    let ram = available().map_err(|error| observation_error(format!("available RAM: {error}")))?;
+    if ram >= Q8_AVAILABLE_BYTES {
+        return Ok(Some(Q8.into()));
     }
     let cuda = cuda_memory();
-    let mut warnings = cuda.warnings;
-    let ram = match ram {
-        Ok(bytes) => Some(bytes),
-        Err(error) => {
-            warnings.push(tr!(
-                format!("无法读取可用内存：{error}"),
-                format!("cannot read available RAM: {error}")
-            ));
-            None
+    if !cuda.warnings.is_empty() {
+        return Err(observation_error(cuda.warnings.join("; ")));
+    }
+    // No eligible device (CPU request/build, or no visible GPU) is not a failed observation.
+    let available = ram.max(cuda.free_bytes.unwrap_or(0));
+    let id = match available {
+        bytes if bytes >= Q8_AVAILABLE_BYTES => Q8,
+        bytes if bytes >= Q4_AVAILABLE_BYTES => Q4,
+        bytes if bytes >= MIN_AVAILABLE_BYTES => SMALL,
+        _ => {
+            let total =
+                total().map_err(|error| observation_error(format!("total RAM: {error}")))?;
+            if total == 0 || total < ram {
+                return Err(observation_error(
+                    "inconsistent total/available physical RAM",
+                ));
+            }
+            if total < MIN_TOTAL_BYTES {
+                return Err(tr!(
+                    "可用内存和可用单卡显存均低于 1.5 GiB，且总内存低于 4 GiB；不建议安装或加载，已暂停自动安装和加载。可用 --model ID、--model-path PATH 或 nosh model pull ID 显式尝试。",
+                    "available RAM and usable single-GPU VRAM are both below 1.5 GiB and total RAM is below 4 GiB; installation/loading is not recommended and automatic installation/loading are disabled. Explicit attempts remain available via --model ID, --model-path PATH or nosh model pull ID."
+                ).into());
+            }
+            SMALL
         }
     };
-    let id = match ram.into_iter().chain(cuda.free_bytes).max() {
-        Some(bytes) if bytes >= Q8_AVAILABLE_BYTES => Q8,
-        Some(bytes) if bytes >= Q4_AVAILABLE_BYTES => Q4,
-        _ if !warnings.is_empty() => Q4,
-        _ => return (Err(tr!(
-            "可用内存和可用单卡显存均低于 3.5 GiB；不自动选择、安装或加载模型。推理可用 --model ID 或 --model-path PATH；模型管理命令请提供位置 ID，例如 nosh model pull ID。",
-            "available RAM and usable single-GPU VRAM are both below 3.5 GiB; automatic model selection, installation and loading are disabled. For inference use --model ID or --model-path PATH; model commands require a positional ID, e.g. nosh model pull ID."
-        ).into()), None),
-    };
-    let warning = (!warnings.is_empty()).then(|| tr!(
-        format!("资源检测不完整（{}）；选择 {id}，可显式指定模型覆盖。", warnings.join("; ")),
-        format!("resource observations are incomplete ({}); selecting {id}; specify a model explicitly to override", warnings.join("; "))
-    ));
-    (Ok(Some(id.into())), warning)
+    Ok(Some(id.into()))
 }
 
 #[cfg(test)]
@@ -74,56 +91,47 @@ mod tests {
     #[test]
     fn thresholds_use_available_ram_or_single_gpu_memory_without_adding_them() {
         for (ram, vram, expected) in [
-            (0, 0, None),
-            (Q4_AVAILABLE_BYTES - 1, Q4_AVAILABLE_BYTES - 1, None),
-            (Q4_AVAILABLE_BYTES, 0, Some(Q4)),
-            (0, Q4_AVAILABLE_BYTES, Some(Q4)),
-            (Q4_AVAILABLE_BYTES + 1, 0, Some(Q4)),
-            (2 << 30, 2 << 30, None),
-            (Q8_AVAILABLE_BYTES - 1, 0, Some(Q4)),
-            (0, Q8_AVAILABLE_BYTES - 1, Some(Q4)),
-            (Q8_AVAILABLE_BYTES, 0, Some(Q8)),
-            (0, Q8_AVAILABLE_BYTES, Some(Q8)),
-            (Q8_AVAILABLE_BYTES + 1, 0, Some(Q8)),
-            (0, Q8_AVAILABLE_BYTES + 1, Some(Q8)),
-            (4 << 30, 4 << 30, Some(Q4)),
-            (Q8_AVAILABLE_BYTES - 1, Q8_AVAILABLE_BYTES - 1, Some(Q4)),
+            (0, 0, SMALL),
+            (Q4_AVAILABLE_BYTES - 1, Q4_AVAILABLE_BYTES - 1, SMALL),
+            (Q4_AVAILABLE_BYTES, 0, Q4),
+            (0, Q4_AVAILABLE_BYTES, Q4),
+            (Q4_AVAILABLE_BYTES + 1, 0, Q4),
+            (2 << 30, 2 << 30, SMALL),
+            (Q8_AVAILABLE_BYTES - 1, 0, Q4),
+            (0, Q8_AVAILABLE_BYTES - 1, Q4),
+            (Q8_AVAILABLE_BYTES, 0, Q8),
+            (0, Q8_AVAILABLE_BYTES, Q8),
+            (Q8_AVAILABLE_BYTES + 1, 0, Q8),
+            (0, Q8_AVAILABLE_BYTES + 1, Q8),
+            (4 << 30, 4 << 30, Q4),
+            (Q8_AVAILABLE_BYTES - 1, Q8_AVAILABLE_BYTES - 1, Q4),
         ] {
-            let (id, warning) = select_with(
+            let id = select_with(
                 None,
                 false,
                 || Ok(ram),
+                || Ok(MIN_TOTAL_BYTES),
                 || CudaMemorySnapshot {
                     free_bytes: Some(vram),
                     warnings: vec![],
                 },
             );
-            match expected {
-                Some(expected) => assert_eq!(id.unwrap().as_deref(), Some(expected)),
-                None => {
-                    let reason = id.unwrap_err();
-                    assert!(reason.contains("3.5 GiB"), "{reason}");
-                    for hint in ["--model ID", "--model-path PATH", "nosh model pull ID"] {
-                        assert!(reason.contains(hint), "{reason}");
-                    }
-                }
-            }
-            assert!(warning.is_none());
+            assert_eq!(id.unwrap().as_deref(), Some(expected));
         }
     }
 
     #[test]
     fn explicit_ids_and_paths_never_probe_or_switch() {
-        for requested in [Q8, Q4, "minicpm5-1b:q4_k_m", "no-such-model", ""] {
+        for requested in [Q8, Q4, SMALL, "minicpm5-1b:q4_k_m", "no-such-model", ""] {
             for has_path in [false, true] {
-                let (id, warning) = select_with(
+                let id = select_with(
                     Some(requested.into()),
                     has_path,
                     || panic!("must not probe RAM"),
+                    || panic!("must not probe total RAM"),
                     || panic!("must not probe CUDA"),
                 );
                 assert_eq!(id.unwrap().as_deref(), Some(requested));
-                assert!(warning.is_none());
             }
         }
         assert_eq!(
@@ -131,49 +139,39 @@ mod tests {
                 None,
                 true,
                 || panic!("explicit path must not probe RAM"),
+                || panic!("explicit path must not probe total RAM"),
                 || panic!("explicit path must not probe CUDA")
             ),
-            (Ok(None), None)
+            Ok(None)
         );
     }
 
     #[test]
-    fn incomplete_observations_warn_and_use_known_resources_or_the_q4_fallback() {
-        for (ram, vram, gpu_error, expected) in [
-            (Err("fixture RAM failure"), None, None, Q4),
+    fn incomplete_observations_pause_instead_of_using_a_success_shaped_fallback() {
+        for (ram, vram, gpu_error) in [
+            (Err("fixture RAM failure"), None, None),
             (
                 Err("fixture RAM failure"),
                 Some(Q4_AVAILABLE_BYTES - 1),
                 None,
-                Q4,
             ),
-            (
-                Err("fixture RAM failure"),
-                Some(Q8_AVAILABLE_BYTES),
-                None,
-                Q8,
-            ),
-            (Ok(0), None, Some("fixture GPU failure"), Q4),
-            (
-                Ok(0),
-                Some(Q8_AVAILABLE_BYTES),
-                Some("fixture GPU failure"),
-                Q8,
-            ),
+            (Err("fixture RAM failure"), Some(Q8_AVAILABLE_BYTES), None),
+            (Ok(0), None, Some("fixture GPU failure")),
+            (Ok(0), Some(Q8_AVAILABLE_BYTES), Some("fixture GPU failure")),
         ] {
-            let (id, warning) = select_with(
+            let id = select_with(
                 None,
                 false,
                 || ram.map_err(io::Error::other),
+                || panic!("incomplete observations must not query total RAM"),
                 || CudaMemorySnapshot {
                     free_bytes: vram,
                     warnings: gpu_error.into_iter().map(str::to_string).collect(),
                 },
             );
-            assert_eq!(id.unwrap().as_deref(), Some(expected));
-            let warning = warning.expect("probe failures must remain visible");
-            assert!(warning.contains("fixture"), "{warning}");
-            assert!(warning.contains(expected), "{warning}");
+            let error = id.unwrap_err();
+            assert!(error.contains("fixture"), "{error}");
+            assert!(error.contains("--model ID"), "{error}");
         }
     }
 
@@ -184,9 +182,10 @@ mod tests {
                 None,
                 false,
                 || Ok(Q8_AVAILABLE_BYTES),
+                || panic!("RAM already qualifies"),
                 || panic!("RAM already qualifies")
             ),
-            (Ok(Some(Q8.into())), None)
+            Ok(Some(Q8.into()))
         );
     }
 
@@ -195,5 +194,73 @@ mod tests {
         let registry = nosh_hub::Registry::builtin();
         assert_eq!(registry.default_model().id, Q8);
         assert!(registry.get(Q4).is_some());
+        assert!(registry.get(SMALL).is_some());
+    }
+
+    #[test]
+    fn low_resource_pause_uses_three_strict_conditions_with_exact_boundaries() {
+        for (ram, vram, total, paused) in [
+            (
+                MIN_AVAILABLE_BYTES - 1,
+                MIN_AVAILABLE_BYTES - 1,
+                MIN_TOTAL_BYTES - 1,
+                true,
+            ),
+            (MIN_AVAILABLE_BYTES, 0, MIN_TOTAL_BYTES - 1, false),
+            (0, MIN_AVAILABLE_BYTES, MIN_TOTAL_BYTES - 1, false),
+            (MIN_AVAILABLE_BYTES + 1, 0, MIN_TOTAL_BYTES - 1, false),
+            (MIN_AVAILABLE_BYTES - 1, 0, MIN_TOTAL_BYTES, false),
+            (0, 0, MIN_TOTAL_BYTES + 1, false),
+        ] {
+            let result = select_with(
+                None,
+                false,
+                || Ok(ram),
+                || Ok(total),
+                || CudaMemorySnapshot {
+                    free_bytes: Some(vram),
+                    warnings: vec![],
+                },
+            );
+            if paused {
+                let reason = result.unwrap_err();
+                assert!(
+                    reason.contains("1.5 GiB") && reason.contains("4 GiB"),
+                    "{reason}"
+                );
+            } else {
+                assert_eq!(result.unwrap().as_deref(), Some(SMALL));
+            }
+        }
+    }
+
+    #[test]
+    fn total_ram_is_required_only_when_both_available_resources_are_low() {
+        for (ram, vram) in [(MIN_AVAILABLE_BYTES, 0), (0, MIN_AVAILABLE_BYTES)] {
+            assert_eq!(
+                select_with(
+                    None,
+                    false,
+                    || Ok(ram),
+                    || panic!("total is irrelevant"),
+                    || CudaMemorySnapshot {
+                        free_bytes: Some(vram),
+                        warnings: vec![],
+                    }
+                )
+                .unwrap()
+                .as_deref(),
+                Some(SMALL)
+            );
+        }
+        let error = select_with(
+            None,
+            false,
+            || Ok(0),
+            || Err(io::Error::other("fixture total failure")),
+            CudaMemorySnapshot::default,
+        )
+        .unwrap_err();
+        assert!(error.contains("fixture total failure"), "{error}");
     }
 }

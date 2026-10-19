@@ -12,12 +12,17 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::conversation::Conversation;
+use crate::model::Model;
 use crate::model::attn::KvDtype;
-use crate::model::llama::{Llama, LoadOptions, PrepackStats};
+use crate::model::llama::{LoadOptions, PrepackStats};
+use crate::protocol::{ChatFormat, ControlTokens};
 use crate::sampling::Sampler;
+#[cfg(test)]
 use crate::template;
 use crate::tokenizer::Tok;
-use crate::toolcall::{FUNCTION_OPEN, Parsed, StreamParser};
+use crate::toolcall::Parsed;
+#[cfg(test)]
+use crate::toolcall::{FUNCTION_OPEN, StreamParser};
 use crate::{DeviceSelection, InferenceDevice, LlmError};
 use nosh_engine::{
     CancelHandle, ChatEngine, EngineError, Event, Message, SamplingParams, SessionId, SessionSpec,
@@ -32,16 +37,17 @@ pub const EOS: u32 = 1;
 pub struct ModelSource<'a> {
     pub id: &'a str,
     pub arch: &'a str,
+    pub chat_format: &'a str,
     pub weights: &'a Path,
     pub tokenizer: &'a Path,
     pub eog_ids: &'a [u32],
     pub sampling: SamplingParams,
 }
 
-fn mask_tool_choice(logits: &mut [f32], choice: &ToolChoice) {
+fn mask_tool_choice(logits: &mut [f32], choice: &ToolChoice, call_open: u32) {
     if *choice == ToolChoice::None {
         // The parser can enter a call only through this special token.
-        logits[FUNCTION_OPEN as usize] = f32::NEG_INFINITY;
+        logits[call_open as usize] = f32::NEG_INFINITY;
     }
 }
 
@@ -75,12 +81,18 @@ impl LocalEngineOptions {
         &self,
         weights: &Path,
     ) -> Result<(candle_core::Device, DeviceSelection), LlmError> {
-        self.device.select(
+        let selection = self.device.select(
             weights,
             self.context_length,
             self.prefill_chunk,
             self.kv_dtype,
-        )
+        )?;
+        match crate::model::architecture(weights)?.as_str() {
+            "llama" | "qwen35" => Ok(selection),
+            arch => Err(LlmError::Config(format!(
+                "unsupported GGUF architecture '{arch}'"
+            ))),
+        }
     }
 }
 
@@ -90,6 +102,8 @@ pub struct EngineInfo {
     pub device_selection: DeviceSelection,
     pub model_id: String,
     pub arch: String,
+    pub chat_format: String,
+    pub recurrent_state_dtype: Option<&'static str>,
     pub layers: usize,
     pub vocab: usize,
     pub context: usize,
@@ -102,7 +116,10 @@ pub struct EngineInfo {
 }
 
 pub struct LocalChatEngine {
-    model: Llama,
+    model: Model,
+    format: ChatFormat,
+    controls: ControlTokens,
+    valid_tokens: Vec<bool>,
     tok: Tok,
     eog: Vec<u32>,
     newline: Vec<u32>,
@@ -136,25 +153,41 @@ impl LocalChatEngine {
             prepack_weights: opts.prepack_weights,
         };
         let (device, device_selection) = opts.select_device(model.weights)?;
+        let actual_arch = crate::model::architecture(model.weights)?;
+        if actual_arch != model.arch {
+            return Err(LlmError::Config(format!(
+                "GGUF architecture {actual_arch} does not match model metadata ({}); for a custom file name, specify the matching --model ID",
+                model.arch
+            )));
+        }
+        let format = ChatFormat::parse(model.chat_format, model.arch)?;
         let device_init_secs = t0.elapsed().as_secs_f64();
         let model_start = Instant::now();
         let mut tok = Tok::load(model.tokenizer)?;
-        let llama = Llama::load(model.weights, opts.context_length, load, &device)
-            .map_err(|error| error.context(load_error_context(&device_selection)))?;
-        let cfg = llama.config().clone();
-        if cfg.arch != model.arch {
-            return Err(LlmError::Config(format!(
-                "GGUF architecture {} does not match model metadata ({})",
-                cfg.arch, model.arch
-            )));
+        let controls = format.control_tokens(&mut tok)?;
+        let valid_tokens = crate::model::validate_tokenizer(model.weights, model.arch, &tok)?;
+        for id in model.eog_ids.iter().copied().chain([
+            controls.eos,
+            controls.im_end,
+            controls.think_open,
+            controls.think_close,
+            controls.call_open,
+            controls.call_close,
+        ]) {
+            if !valid_tokens.get(id as usize).copied().unwrap_or(false) {
+                return Err(LlmError::Config(format!(
+                    "invalid model control/ending token {id}"
+                )));
+            }
         }
-        if tok.vocab_size() != cfg.vocab {
-            return Err(LlmError::Config(format!(
-                "tokenizer vocab {} does not match model vocab {}",
-                tok.vocab_size(),
-                cfg.vocab
-            )));
-        }
+        let backend = Model::load(
+            model.weights,
+            model.arch,
+            opts.context_length,
+            load,
+            &device,
+        )
+        .map_err(|error| error.context(load_error_context(&device_selection)))?;
         let newline = tok.encode("\n", false)?;
         let default_sampling = SamplingParams {
             seed: opts.seed,
@@ -164,19 +197,24 @@ impl LocalChatEngine {
             device: device_selection.actual,
             device_selection,
             model_id: model.id.to_owned(),
-            arch: cfg.arch.clone(),
-            layers: cfg.n_layer,
-            vocab: cfg.vocab,
-            context: llama.max_context(),
+            arch: model.arch.to_owned(),
+            chat_format: model.chat_format.to_owned(),
+            recurrent_state_dtype: (format == ChatFormat::Qwen35).then_some("F32"),
+            layers: backend.layers(),
+            vocab: backend.vocab(),
+            context: backend.max_context(),
             threads,
             load_secs: t0.elapsed().as_secs_f64(),
             device_init_secs,
             model_init_secs: model_start.elapsed().as_secs_f64(),
-            kv_dtype: llama.kv_dtype(),
-            prepack: llama.prepack_stats(),
+            kv_dtype: backend.kv_dtype(),
+            prepack: backend.prepack_stats(),
         };
         Ok(Self {
-            model: llama,
+            model: backend,
+            format,
+            controls,
+            valid_tokens,
             tok,
             eog: model.eog_ids.to_vec(),
             newline,
@@ -203,6 +241,16 @@ impl LocalChatEngine {
         &mut self.tok
     }
 
+    fn forward(&mut self, ids: &[u32]) -> Result<candle_core::Tensor, LlmError> {
+        match self.model.forward(ids) {
+            Ok(logits) => Ok(logits),
+            Err(error) => {
+                self.kv_tokens.clear();
+                Err(error.into())
+            }
+        }
+    }
+
     /// Feeds `tokens` after the longest prefix already cached; returns last logits.
     fn prefill(
         &mut self,
@@ -219,11 +267,11 @@ impl LocalChatEngine {
         if lcp == full.len() {
             lcp = lcp.saturating_sub(1);
         }
-        self.model.truncate(lcp);
+        lcp = self.model.prepare_prefix(lcp);
         self.kv_tokens.truncate(lcp);
         usage.cached_tokens = lcp;
         let todo = &full[lcp..];
-        usage.prompt_tokens = todo.len();
+        usage.prompt_tokens = 0;
         let t0 = Instant::now();
         let mut logits = None;
         let chunk = self.opts.prefill_chunk.max(1);
@@ -232,8 +280,9 @@ impl LocalChatEngine {
                 usage.prefill_secs = t0.elapsed().as_secs_f64();
                 return Ok(None);
             }
-            logits = Some(self.model.forward(c)?);
+            logits = Some(self.forward(c)?);
             self.kv_tokens.extend_from_slice(c);
+            usage.prompt_tokens += c.len();
             if todo.len() > chunk {
                 sink(Event::Prefill {
                     done: ((i + 1) * chunk).min(todo.len()),
@@ -276,7 +325,7 @@ impl ChatEngine for LocalChatEngine {
     }
 
     fn open(&mut self, spec: SessionSpec) -> Result<SessionId, EngineError> {
-        let conversation = Conversation::new(spec, &mut self.tok)?;
+        let conversation = Conversation::new(spec, &mut self.tok, self.format)?;
         let id = self.next_id;
         self.next_id += 1;
         self.sessions.insert(id, conversation);
@@ -302,10 +351,10 @@ impl ChatEngine for LocalChatEngine {
         let choice = std::mem::take(&mut conversation.tool_choice);
         let forced_prefix = self
             .tok
-            .encode_segments(&template::tool_choice_prefix(&choice))?;
+            .encode_segments(&self.format.tool_choice(&choice))?;
         let mut gen_prompt = self
             .tok
-            .encode_segments(&[template::generation_prompt(Some(thinking))])?;
+            .encode_segments(&[self.format.generation(thinking)])?;
         gen_prompt.extend_from_slice(&forced_prefix);
         let full = conversation.tokens(&gen_prompt);
         let max_ctx = self.model.max_context();
@@ -335,7 +384,7 @@ impl ChatEngine for LocalChatEngine {
         };
 
         let mut sampler = Sampler::new(sampling);
-        let mut parser = StreamParser::new(tools, thinking);
+        let mut parser = self.format.parser(tools, thinking, self.controls);
         for id in forced_prefix {
             dispatch(parser.push(id, &self.tok), &mut outcome, sink);
         }
@@ -350,7 +399,19 @@ impl ChatEngine for LocalChatEngine {
             }
             let ts = Instant::now();
             let mut l: Vec<f32> = logits.to_vec1().map_err(LlmError::from)?;
-            mask_tool_choice(&mut l, &choice);
+            if l.len() != self.valid_tokens.len() || l.iter().any(|v| !v.is_finite()) {
+                self.model.reset();
+                self.kv_tokens.clear();
+                return Err(EngineError::Config(
+                    "model returned non-finite logits or a vocabulary length mismatch".into(),
+                ));
+            }
+            for (logit, valid) in l.iter_mut().zip(&self.valid_tokens) {
+                if !valid {
+                    *logit = f32::NEG_INFINITY;
+                }
+            }
+            mask_tool_choice(&mut l, &choice, self.controls.call_open);
             let id = sampler.sample(&mut l, parser.in_call());
             sampler.observe(id);
             t_samp += ts.elapsed().as_secs_f64();
@@ -371,7 +432,7 @@ impl ChatEngine for LocalChatEngine {
                 break StopReason::MaxTokens;
             }
             let tf = Instant::now();
-            logits = self.model.forward(&[id]).map_err(LlmError::from)?;
+            logits = self.forward(&[id])?;
             t_fwd += tf.elapsed().as_secs_f64();
             self.kv_tokens.push(id);
             if trace && generated.len().is_multiple_of(16) {
@@ -392,11 +453,11 @@ impl ChatEngine for LocalChatEngine {
         usage.completion_tokens = generated.len();
 
         // Close the turn the way the template does: `<|im_end|>\n`.
-        if matches!(generated.last(), Some(&EOS)) {
+        if generated.last() == Some(&self.controls.eos) {
             generated.pop();
         }
-        if generated.last() != Some(&IM_END) {
-            generated.push(IM_END);
+        if generated.last() != Some(&self.controls.im_end) {
+            generated.push(self.controls.im_end);
         }
         let mut raw = gen_prompt;
         raw.extend_from_slice(&generated);
@@ -405,7 +466,7 @@ impl ChatEngine for LocalChatEngine {
             .sessions
             .get_mut(&sid)
             .ok_or(EngineError::UnknownSession(sid))?;
-        conversation.push_assistant(raw);
+        conversation.push_assistant(raw, &self.tok);
         usage.context_used = conversation.token_count();
         outcome.stop = stop;
         outcome.usage = usage;
@@ -573,7 +634,7 @@ mod tests {
                         let mut logits = vec![f32::NEG_INFINITY; 32];
                         logits[FUNCTION_OPEN as usize] = 100.0;
                         logits[text_id as usize] = 0.0;
-                        mask_tool_choice(&mut logits, &ToolChoice::None);
+                        mask_tool_choice(&mut logits, &ToolChoice::None, FUNCTION_OPEN);
                         let id = sampler.sample(&mut logits, parser.in_call());
                         sampler.observe(id);
                         assert_eq!(id, text_id);
@@ -604,7 +665,7 @@ mod tests {
             ToolChoice::None,
         ] {
             let mut masked = logits.clone();
-            mask_tool_choice(&mut masked, &choice);
+            mask_tool_choice(&mut masked, &choice, FUNCTION_OPEN);
             for (id, (&before, &after)) in logits.iter().zip(&masked).enumerate() {
                 assert_eq!(
                     after,
@@ -674,6 +735,7 @@ mod tests {
         let model = ModelSource {
             id: "missing-model",
             arch: "llama",
+            chat_format: "minicpm5",
             weights: Path::new("missing-model.gguf"),
             tokenizer: Path::new("missing-tokenizer.json"),
             eog_ids: &[EOS],
@@ -691,6 +753,44 @@ mod tests {
         .expect("unsupported combination")
         .to_string();
         assert!(error.contains("only f16 KV"), "{error}");
+    }
+
+    #[test]
+    fn custom_path_architecture_mismatch_is_reported_before_tokenizer_io() {
+        use candle_core::quantized::gguf_file;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        gguf_file::write(
+            &mut file,
+            &[(
+                "general.architecture",
+                &gguf_file::Value::String("qwen35".into()),
+            )],
+            &[],
+        )
+        .unwrap();
+        let model = ModelSource {
+            id: "minicpm5-2b:q8_0",
+            arch: "llama",
+            chat_format: "minicpm5",
+            weights: file.path(),
+            tokenizer: Path::new("missing-tokenizer.json"),
+            eog_ids: &[EOS, IM_END],
+            sampling: SamplingParams::default(),
+        };
+        let error = LocalChatEngine::load(
+            model,
+            LocalEngineOptions {
+                device: InferenceDevice::Cpu,
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("architecture mismatch")
+        .to_string();
+        assert!(
+            error.contains("architecture qwen35") && error.contains("--model ID"),
+            "{error}"
+        );
     }
 
     #[test]

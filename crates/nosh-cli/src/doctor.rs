@@ -26,14 +26,6 @@ fn memory_warning(model: &ModelEntry, available: u64) -> Option<String> {
     })
 }
 
-fn meminfo(key: &str) -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix(key))
-        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
-        .map(|kb| kb * 1024)
-}
-
 fn cpu_model() -> String {
     std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -137,13 +129,16 @@ pub fn run(cfg: &Config, setup: &EngineSetup) -> i32 {
 
     match nosh_platform::memory::available_bytes() {
         Ok(a) => {
-            let line = match meminfo("MemTotal:") {
-                Some(t) => format!(
+            let line = match nosh_platform::memory::total_bytes() {
+                Ok(t) => format!(
                     "{:.2} GiB total · {:.2} GiB available",
                     t as f64 / (1024.0 * 1024.0 * 1024.0),
                     a as f64 / (1024.0 * 1024.0 * 1024.0)
                 ),
-                None => format!("{:.2} GiB available", a as f64 / (1024.0 * 1024.0 * 1024.0)),
+                Err(error) => {
+                    warn("memory", &format!("total physical RAM unknown: {error}"));
+                    format!("{:.2} GiB available", a as f64 / (1024.0 * 1024.0 * 1024.0))
+                }
             };
             match model.as_ref().and_then(|m| memory_warning(m, a)) {
                 Some(w) => warn("memory", &format!("{line} · {w}")),

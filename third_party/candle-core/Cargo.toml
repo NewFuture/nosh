@@ -3,7 +3,8 @@
 # Source: https://github.com/huggingface/candle, candle-core at rev
 # 5ba5d5b468b5b1df40e82dd3d556987bedeea041 (0.11.0). This manifest is the one
 # `cargo package` generates for that rev, without the example, test and bench
-# targets (their files are not vendored). The workspace uses it through
+# targets (their files are not vendored), retaining the same-revision CUDA
+# kernel dependency. The workspace uses it through
 # `[patch."https://github.com/huggingface/candle"]`, so candle-nn from the same
 # rev links against it too.
 
@@ -71,6 +72,8 @@ version = "1.4.3"
 
 [dependencies.candle-kernels]
 version = "0.11.0"
+git = "https://github.com/huggingface/candle"
+rev = "5ba5d5b468b5b1df40e82dd3d556987bedeea041"
 optional = true
 
 [dependencies.candle-metal-kernels]

@@ -23,13 +23,96 @@ pub fn available_bytes() -> io::Result<u64> {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         macos_available(text)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows_memory().map(|(_, available)| available)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "available RAM observation is not supported on this platform",
         ))
     }
+}
+
+/// Total physical RAM. It does not include swap, pagefile or any GPU memory.
+pub fn total_bytes() -> io::Result<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = linux_bytes(&std::fs::read_to_string("/proc/meminfo")?, "MemTotal:")?;
+        if bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "total physical memory is zero",
+            ));
+        }
+        Ok(bytes)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "hw.memsize"])
+            .env("LC_ALL", "C")
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "sysctl hw.memsize failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let text = std::str::from_utf8(&output.stdout)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        parse_total_bytes(text)
+    }
+    #[cfg(windows)]
+    {
+        windows_memory().map(|(total, _)| total)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "total RAM observation is not supported on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn windows_memory() -> io::Result<(u64, u64)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: status has the documented length and is writable for the call.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if status.ullTotalPhys == 0 || status.ullAvailPhys > status.ullTotalPhys {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid physical memory status",
+        ));
+    }
+    Ok((status.ullTotalPhys, status.ullAvailPhys))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_total_bytes(text: &str) -> io::Result<u64> {
+    text.trim()
+        .parse::<u64>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .and_then(|bytes| {
+            if bytes > 0 {
+                Ok(bytes)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "total physical memory is zero",
+                ))
+            }
+        })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -49,20 +132,25 @@ fn field<'a>(text: &'a str, name: &str) -> io::Result<&'a str> {
 
 #[cfg(any(target_os = "linux", test))]
 fn linux_available(text: &str) -> io::Result<u64> {
-    let mut value = field(text, "MemAvailable:")?.split_whitespace();
+    linux_bytes(text, "MemAvailable:")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_bytes(text: &str, key: &str) -> io::Result<u64> {
+    let mut value = field(text, key)?.split_whitespace();
     let kb = value
         .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemAvailable value"))?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing {key} value")))?
         .parse::<u64>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if value.next() != Some("kB") || value.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "MemAvailable must use kB",
+            format!("{key} must use kB"),
         ));
     }
     kb.checked_mul(1024)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MemAvailable overflow"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{key} overflow")))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -96,6 +184,32 @@ fn macos_available(text: &str) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_memory_is_physical_and_rejects_invalid_observations() {
+        assert_eq!(
+            linux_bytes(
+                "MemTotal: 4194304 kB\nSwapTotal: 99999999 kB\n",
+                "MemTotal:"
+            )
+            .unwrap(),
+            4 << 30
+        );
+        assert_eq!(parse_total_bytes("4294967296\n").unwrap(), 4 << 30);
+        for text in ["", "0", "-1", "4096 kB", "18446744073709551616", "12\n13"] {
+            assert!(parse_total_bytes(text).is_err(), "{text}");
+        }
+        assert!(linux_bytes("MemTotal: 1 kB\nMemTotal: 2 kB\n", "MemTotal:").is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_windows_observes_available_and_total_physical_memory() {
+        let (total, available) = windows_memory().unwrap();
+        assert!(total > 0 && available <= total);
+        assert!(total_bytes().unwrap() > 0);
+        assert!(available_bytes().unwrap() <= total);
+    }
 
     #[test]
     fn linux_uses_available_not_total_or_free_memory() {

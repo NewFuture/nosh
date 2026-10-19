@@ -40,17 +40,46 @@ pub fn inherit_runtime_environment(command: &mut Command) -> std::io::Result<()>
     Ok(())
 }
 
-/// Resident set size of this process in MB (Linux), current and peak.
+/// Current and peak resident memory in MiB, when the host exposes both.
 pub fn rss_mb() -> Option<(f64, f64)> {
-    let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    let field = |name: &str| -> Option<f64> {
-        s.lines()
-            .find(|l| l.starts_with(name))?
-            .split_whitespace()
-            .nth(1)?
-            .parse::<f64>()
-            .ok()
-            .map(|kb| kb / 1024.0)
-    };
-    Some((field("VmRSS:")?, field("VmHWM:")?))
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the process pseudo-handle is valid and counters is correctly sized.
+        if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) } == 0 {
+            return None;
+        }
+        Some((
+            counters.WorkingSetSize as f64 / 1048576.0,
+            counters.PeakWorkingSetSize as f64 / 1048576.0,
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let s = std::fs::read_to_string("/proc/self/status").ok()?;
+        let field = |name: &str| -> Option<f64> {
+            s.lines()
+                .find(|l| l.starts_with(name))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<f64>()
+                .ok()
+                .map(|kb| kb / 1024.0)
+        };
+        Some((field("VmRSS:")?, field("VmHWM:")?))
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn native_process_rss_is_observed_not_zero() {
+    let (current, peak) = rss_mb().expect("Windows process memory counters");
+    assert!(current > 0.0 && peak >= current);
 }

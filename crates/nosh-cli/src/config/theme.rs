@@ -405,19 +405,24 @@ mod tests {
 
     #[test]
     fn save_preserves_comments_permissions_and_unrelated_configuration() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let text = "# keep me\n[shell]\ntheme = 'soft-dark' # chosen\nstatus_bar = false\n\n[safety]\ndeny = [{ command_prefix = 'rm' }] # important\n";
         fs::write(&path, text).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        #[cfg(unix)]
         let original_group = fs::metadata(&path).unwrap().gid();
         save(&path, Builtin::Light.name()).unwrap();
         let updated = fs::read_to_string(&path).unwrap();
         assert!(updated.contains("# keep me") && updated.contains("# chosen"));
         assert!(updated.contains("deny = [{ command_prefix = 'rm' }] # important"));
         assert_eq!(load(&path).unwrap().builtin(), Some(Builtin::Light));
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path).unwrap().gid(), original_group);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o640
@@ -430,6 +435,7 @@ mod tests {
 
     #[test]
     fn invalid_readonly_symlink_and_concurrent_saves_do_not_overwrite() {
+        #[cfg(unix)]
         use std::os::unix::fs::{PermissionsExt, symlink};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -437,10 +443,13 @@ mod tests {
         assert!(save(&path, Builtin::Light.name()).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "broken [");
         fs::write(&path, "[shell]\ntheme = 'soft-dark'\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
-        assert!(save(&path, Builtin::Light.name()).is_err());
-        assert_eq!(load(&path).unwrap().builtin(), Some(Builtin::Dark));
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+            assert!(save(&path, Builtin::Light.name()).is_err());
+            assert_eq!(load(&path).unwrap().builtin(), Some(Builtin::Dark));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let changed = "[shell]\ntheme = 'soft-dark'\n# concurrent\n";
         assert!(
             save_checked(&path, Builtin::Light.name(), || fs::write(&path, changed)
@@ -448,15 +457,18 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), changed);
-        let link = directory.path().join("linked.toml");
-        symlink(&path, &link).unwrap();
-        assert!(save(&link, Builtin::Light.name()).is_err());
-        assert!(
-            fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("linked.toml");
+            symlink(&path, &link).unwrap();
+            assert!(save(&link, Builtin::Light.name()).is_err());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
     }
 
     #[test]

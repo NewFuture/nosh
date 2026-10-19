@@ -11,7 +11,7 @@ use nosh_shell::style;
 pub enum ModelCmd {
     /// Download (or resume) a model and its tokenizer, verifying SHA-256.
     Pull {
-        /// Model id (automatic: 2B Q8 at 7 GiB RAM/usable VRAM, 2B Q4 at 3.5 GiB; otherwise specify an ID).
+        /// Model id (automatic: 2B Q8 at 7 GiB RAM/usable VRAM, 2B Q4 at 3.5 GiB, otherwise Qwen 0.8B unless resource checks pause it).
         id: Option<String>,
         /// Source: auto | hf | hf-mirror | modelscope.
         #[arg(long, default_value = "auto")]

@@ -1,6 +1,6 @@
 [package]
 name = "nosh-llm"
-description = "Local inference for nosh: candle model, tokenizer, MiniCPM5 template, sampling and tool-call parsing."
+description = "Local Candle inference for nosh: quantized MiniCPM5/Qwen3.5, model-specific chat protocols, sampling and session state."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,7 @@ tokenizers.workspace = true
 
 [dev-dependencies]
 nosh-hub.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

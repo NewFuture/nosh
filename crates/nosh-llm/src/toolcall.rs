@@ -8,6 +8,8 @@ use serde_json::Value;
 use crate::tokenizer::{Tok, Utf8Stream};
 use nosh_engine::{CallError, CallErrorKind, ToolCall, ToolSpec};
 
+pub(crate) mod qwen35;
+
 pub const THINK_OPEN: u32 = 8;
 pub const THINK_CLOSE: u32 = 9;
 pub const FUNCTION_OPEN: u32 = 18;
@@ -148,6 +150,14 @@ fn err(kind: CallErrorKind, tool: Option<&str>, message: impl Into<String>) -> C
     }
 }
 
+fn find_tool<'a>(tools: &'a [ToolSpec], name: &str) -> Option<&'a ToolSpec> {
+    tools.iter().find(|tool| tool.name == name).or_else(|| {
+        let mut matches = tools.iter().filter(|tool| tool.matches_name(name));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    })
+}
+
 /// Parses an attribute value `name="x"` / `name='x'` / `name=x` at the start of `s`.
 fn parse_attr<'a>(s: &'a str, attr: &str) -> Option<(String, &'a str)> {
     let s = s.trim_start();
@@ -246,22 +256,14 @@ pub fn parse_call(raw: &str, tools: &[ToolSpec]) -> Result<ToolCall, CallError> 
         )
     })?;
 
-    let mut matches = tools.iter().filter(|tool| tool.matches_name(&name));
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .or_else(|| {
-            let first = matches.next()?;
-            matches.next().is_none().then_some(first)
-        })
-        .ok_or_else(|| {
-            let known: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-            err(
-                CallErrorKind::UnknownTool,
-                Some(&name),
-                format!("unknown tool '{name}'; available: {}", known.join(", ")),
-            )
-        })?;
+    let tool = find_tool(tools, &name).ok_or_else(|| {
+        let known: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        err(
+            CallErrorKind::UnknownTool,
+            Some(&name),
+            format!("unknown tool '{name}'; available: {}", known.join(", ")),
+        )
+    })?;
 
     let mut raw_args: Vec<(String, String)> = Vec::new();
     loop {
@@ -372,6 +374,39 @@ mod tests {
         assert_eq!(c.name, "exec");
         assert_eq!(c.str_arg("command"), Some("ls -la"));
         assert_eq!(c.int_arg("timeout_sec"), Some(30));
+    }
+
+    #[test]
+    fn both_protocols_prefer_exact_names_and_reject_ambiguous_aliases() {
+        let tools = [
+            ToolSpec {
+                name: "exec".into(),
+                description: String::new(),
+                parameters: json!({"x-name-aliases": ["run", "shell"]}),
+            },
+            ToolSpec {
+                name: "run".into(),
+                description: String::new(),
+                parameters: json!({"x-name-aliases": ["shell"]}),
+            },
+        ];
+        for (name, expected) in [
+            ("exec", Some("exec")),
+            ("EXEC", Some("exec")),
+            ("run", Some("run")),
+            ("shell", None),
+            ("missing", None),
+        ] {
+            for result in [
+                parse_call(&format!("<function name=\"{name}\"></function>"), &tools),
+                qwen35::parse_call(&format!("<function={name}></function>"), &tools),
+            ] {
+                match expected {
+                    Some(expected) => assert_eq!(result.unwrap().name, expected),
+                    None => assert_eq!(result.unwrap_err().kind, CallErrorKind::UnknownTool),
+                }
+            }
+        }
     }
 
     #[test]

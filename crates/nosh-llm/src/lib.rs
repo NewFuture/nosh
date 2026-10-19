@@ -1,12 +1,13 @@
-//! Local inference for nosh: a candle-based quantized llama (forked from
-//! candle-transformers), the MiniCPM5 chat template, sampling, token-id driven
-//! tool-call parsing and the local [`nosh_engine::ChatEngine`] implementation.
+//! Local Candle inference: quantized Llama/MiniCPM5 and text-only Qwen3.5,
+//! model-specific templates and token-driven tools, sampling, and the local
+//! [`nosh_engine::ChatEngine`] implementation.
 
 mod conversation;
 pub mod cpu;
 pub mod device;
 pub mod local;
 pub mod model;
+mod protocol;
 pub mod pyjson;
 pub mod sampling;
 pub mod template;

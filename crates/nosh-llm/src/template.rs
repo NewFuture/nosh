@@ -7,6 +7,8 @@
 use crate::pyjson;
 use nosh_engine::{Message, ToolCall, ToolSpec};
 
+pub mod qwen35;
+
 pub const TOOL_DEF_SEP: &str = "<tool_def_sep>";
 pub const BOS: &str = "<s>";
 
@@ -239,7 +241,7 @@ mod tests {
         official_expected: String,
     }
 
-    fn to_tool(v: &Value) -> ToolSpec {
+    pub(super) fn to_tool(v: &Value) -> ToolSpec {
         let f = &v["function"];
         ToolSpec {
             name: f["name"].as_str().unwrap().to_string(),
@@ -248,7 +250,7 @@ mod tests {
         }
     }
 
-    fn to_msg(v: &Value) -> Message {
+    pub(super) fn to_msg(v: &Value) -> Message {
         let content = v["content"].as_str().unwrap_or_default().to_string();
         match v["role"].as_str().unwrap() {
             "system" => Message::System(content),

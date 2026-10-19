@@ -502,7 +502,7 @@ pub enum StopReason {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
-    /// Tokens that had to be prefilled this step.
+    /// Tokens actually prefilled this step, excluding unprocessed cancelled chunks.
     pub prompt_tokens: usize,
     /// Tokens reused from the KV cache.
     pub cached_tokens: usize,

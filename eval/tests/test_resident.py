@@ -1076,7 +1076,7 @@ class ProductionProxyTests(unittest.TestCase):
     def test_trial_pipeline_preserves_native_clarification_grading(self):
         turns = [{"calls": [{"name": "ask_user", "args": {"question": "你希望我具体处理什么任务？"}}]},
                  {"text": "已停止本次任务，未执行任何操作。"}]
-        config = {"model": "minicpm5-2b:q8_0", "weights": str(self.weights),
+        config = {"model": "minicpm5-2b:q8_0", "arch": "llama", "chat_format": "minicpm5", "weights": str(self.weights),
                   "tokenizer": str(self.base / "tokenizer.json"), "device": "cpu",
                   "context_length": 8192, "kv_dtype": "F16", "prefill_chunk": 512, "prepack_weights": True,
                   "threads": "1", "rayon_threads": "1", "cuda_visible_devices": None, "cuda_device_order": None}
@@ -1104,7 +1104,7 @@ class ProductionProxyTests(unittest.TestCase):
         from eval.suite import load_suite
         scenario = next(s for s in load_suite("command-assist")["scenarios"]
                         if s["id"] == "next-retry-after-prerequisite")
-        config = {"model": "minicpm5-2b:q8_0", "weights": str(self.weights),
+        config = {"model": "minicpm5-2b:q8_0", "arch": "llama", "chat_format": "minicpm5", "weights": str(self.weights),
                   "tokenizer": str(self.base / "tokenizer.json"), "device": "cpu",
                   "context_length": 8192, "kv_dtype": "F16", "prefill_chunk": 512, "prepack_weights": True,
                   "threads": "1", "rayon_threads": "1", "cuda_visible_devices": None, "cuda_device_order": None}

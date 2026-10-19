@@ -745,8 +745,13 @@ on = true
     }
 
     #[test]
-    fn output_capture_defaults_to_last_and_validates_overrides() {
-        assert_eq!(Config::default().capture_output, CaptureOutput::Last);
+    fn output_capture_uses_platform_default_and_validates_overrides() {
+        let default = if cfg!(windows) {
+            CaptureOutput::Off
+        } else {
+            CaptureOutput::Last
+        };
+        assert_eq!(Config::default().capture_output, default);
         for (value, expected) in [("off", CaptureOutput::Off), ("last", CaptureOutput::Last)] {
             let config = Config::parse(&format!("[shell]\ncapture_output = \"{value}\"\n"));
             assert_eq!(config.capture_output, expected);
@@ -754,7 +759,7 @@ on = true
         }
         for value in ["\"all\"", "true", "42"] {
             let config = Config::parse(&format!("[shell]\ncapture_output = {value}\n"));
-            assert_eq!(config.capture_output, CaptureOutput::Last);
+            assert_eq!(config.capture_output, default);
             assert!(
                 config
                     .warnings
@@ -901,12 +906,17 @@ on = true
 
     #[test]
     fn config_loading_preserves_symlink_and_invalid_utf8_behavior() {
+        #[cfg(unix)]
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("settings.toml");
+        #[cfg(unix)]
         let path = directory.path().join("config.toml");
+        #[cfg(not(unix))]
+        let path = target.clone();
         std::fs::write(&target, "[agent]\nmax_steps = 3\n").unwrap();
+        #[cfg(unix)]
         symlink(&target, &path).unwrap();
         let accepted = Config::load_from(path.clone());
         assert_eq!(accepted.max_steps, 3);
@@ -919,6 +929,7 @@ on = true
     }
 
     #[test]
+    #[cfg(unix)]
     fn config_loading_rejects_a_fifo_without_waiting_for_a_writer() {
         use std::os::unix::ffi::OsStrExt;
 

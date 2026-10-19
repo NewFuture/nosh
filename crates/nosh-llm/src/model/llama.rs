@@ -18,6 +18,7 @@
 //! the caller drives chunked prefill.
 
 use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 use candle_core::quantized::{GgmlDType, QMatMul, QTensor, gguf_file};
@@ -107,13 +108,13 @@ struct Layer {
     kv: LayerKv,
 }
 
-enum LayerKv {
+pub(super) enum LayerKv {
     Cpu(KvStore),
     Cuda(TensorKv),
 }
 
 impl LayerKv {
-    fn new(n_kv: usize, hd: usize, dtype: KvDtype, device: &Device) -> Self {
+    pub(super) fn new(n_kv: usize, hd: usize, dtype: KvDtype, device: &Device) -> Self {
         if device.is_cuda() {
             Self::Cuda(TensorKv::new(dtype))
         } else {
@@ -128,7 +129,7 @@ impl LayerKv {
         }
     }
 
-    fn truncate(&mut self, len: usize) {
+    pub(super) fn truncate(&mut self, len: usize) {
         match self {
             Self::Cpu(kv) => kv.truncate(len),
             Self::Cuda(kv) => kv.truncate(len),
@@ -237,7 +238,7 @@ fn dense_weights_requested() -> bool {
 /// [`LoadOptions::prepack_weights`]); other dtypes keep their raw data. It is
 /// called per layer with its seven matrices (and separately for output),
 /// joining them before returning, so at most seven threads run at a time.
-fn prepack_weights(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
+pub(super) fn prepack_weights(ts: &mut [QTensor], stats: &mut PrepackStats) -> Result<()> {
     if dense_weights_requested() {
         return Ok(());
     }
@@ -370,8 +371,8 @@ impl LlamaConfig {
 
 /// Reads metadata only, not the model's tensors. Invalid models remain errors.
 pub fn cuda_memory_estimate(path: &Path, context: usize, chunk: usize) -> Result<u64> {
-    let mut file = File::open(path)?;
-    let mut weights = file.metadata()?.len();
+    let mut file = BufReader::new(File::open(path)?);
+    let mut weights = file.get_ref().metadata()?.len();
     let content = gguf_file::Content::read(&mut file)?;
     let cfg = LlamaConfig::from_gguf(&content)?;
     let enabled = |key| std::env::var(key).is_ok_and(|v| !v.is_empty() && v != "0");
@@ -412,7 +413,7 @@ impl Llama {
         if device.is_cuda() {
             opts.validate_cuda()?;
         }
-        let mut file = File::open(path)?;
+        let mut file = BufReader::new(File::open(path)?);
         let ct = gguf_file::Content::read(&mut file)?;
         let cfg = LlamaConfig::from_gguf(&ct)?;
         let (vocab, hidden, rms_eps) = (cfg.vocab, cfg.hidden, cfg.rms_eps);
@@ -642,14 +643,14 @@ impl Llama {
 }
 
 /// Opt-in per-op timing (`NOSH_PROFILE=1`), printed to stderr.
-struct Prof {
+pub(super) struct Prof {
     on: bool,
     t: std::time::Instant,
     acc: [f64; 11],
 }
 
 impl Prof {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         Self {
             on: *ON.get_or_init(|| std::env::var_os("NOSH_PROFILE").is_some()),
@@ -658,7 +659,7 @@ impl Prof {
         }
     }
 
-    fn lap(&mut self, i: usize) {
+    pub(super) fn lap(&mut self, i: usize) {
         if self.on {
             let now = std::time::Instant::now();
             self.acc[i] += (now - self.t).as_secs_f64();
@@ -666,7 +667,7 @@ impl Prof {
         }
     }
 
-    fn report(&self, s: usize, pos: usize) {
+    pub(super) fn report(&self, s: usize, pos: usize) {
         if !self.on || (s == 1 && !pos.is_multiple_of(32)) {
             return;
         }

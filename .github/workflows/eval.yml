@@ -20,6 +20,14 @@ on:
           - smoke
           - workflows
         default: regression
+      model:
+        description: Registry-pinned model to evaluate
+        type: choice
+        options:
+          - minicpm5-2b:q4_k_m
+          - minicpm5-2b:q8_0
+          - qwen3.5-0.8b:q8_0
+        default: minicpm5-2b:q4_k_m
 
 concurrency:
   group: evaluation-${{ github.ref }}
@@ -43,6 +51,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       EVAL_TRIAL_TIMEOUT_S: '60'
       EVAL_SUITE: ${{ inputs.suite || 'regression' }}
+      EVAL_MODEL_ID: ${{ inputs.model || 'minicpm5-2b:q4_k_m' }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -169,12 +178,12 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: ${{ runner.temp }}/nosh-evaluation-model/models
-          key: evaluation-model-${{ env.EVAL_SOURCE_REVISION }}
+          key: evaluation-model-${{ env.EVAL_MODEL_ID }}-${{ env.EVAL_SOURCE_REVISION }}
       - name: explicitly prepare and verify the pinned model
         timeout-minutes: 20
         run: |
-          "$EVAL_BINARY" model pull minicpm5-2b:q4_k_m --source hf
-          "$EVAL_BINARY" model verify minicpm5-2b:q4_k_m
+          "$EVAL_BINARY" model pull "$EVAL_MODEL_ID" --source hf
+          "$EVAL_BINARY" model verify "$EVAL_MODEL_ID"
       - name: prepare the pinned checkpoint artifact client
         timeout-minutes: 5
         run: npm install --prefix "$RUNNER_TEMP/evaluation-artifact-client" --ignore-scripts --no-audit --no-fund @actions/artifact@6.2.1
@@ -197,7 +206,7 @@ jobs:
             const args = ['-n', '10', 'python3', '-u', '-m', 'eval',
               '--suite', process.env.EVAL_SUITE,
               '--binary', process.env.EVAL_BINARY,
-              '--model-path', path.join(process.env.NOSH_HOME, 'models/minicpm5-2b-q4_k_m'),
+              '--model-path', path.join(process.env.NOSH_HOME, 'models', process.env.EVAL_MODEL_ID.replaceAll(':', '-')),
               '--build-info', path.join(root, 'build-info.json'),
               '--threads', '2', '--repeat', '2',
               '--timeout', process.env.EVAL_TRIAL_TIMEOUT_S,

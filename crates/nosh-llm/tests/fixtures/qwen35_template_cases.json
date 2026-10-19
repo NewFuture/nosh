@@ -1,0 +1,281 @@
+[
+ {
+  "name": "agent_multi_turn",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "exec",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file with line numbers; \"path\" may be relative.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start_line": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools."
+   },
+   {
+    "role": "user",
+    "content": "[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？"
+   },
+   {
+    "role": "assistant",
+    "content": "我先看看端口。",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "exec",
+       "arguments": {
+        "command": "ss -ltnp 'sport = :8080'"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)"
+   },
+   {
+    "role": "assistant",
+    "content": "8080 端口被 **node** 占用。"
+   },
+   {
+    "role": "user",
+    "content": "再把它结束掉"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "official_expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\n[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？<|im_end|>\n<|im_start|>assistant\n我先看看端口。\n\n<tool_call>\n<function=exec>\n<parameter=command>\nss -ltnp 'sport = :8080'\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)\n</tool_response><|im_end|>\n<|im_start|>assistant\n8080 端口被 **node** 占用。<|im_end|>\n<|im_start|>user\n再把它结束掉<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "expected": "<|im_start|>system\nYou are nosh, an AI shell running fully offline on the user's computer.\n# Tools\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nTool calls:\n<tool_call>\n<function=function-name>\n<parameter=parameter-name>\nvalue\n</parameter>\n</function>\n</tool_call>\nInclude all required parameters. Array and object values must be JSON. Values may span multiple lines. Do not add text after a tool call.\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\n[task trigger=hash cwd=/home/u/proj]\n刚才为什么启动失败？<|im_end|>\n<|im_start|>assistant\n我先看看端口。\n\n<tool_call>\n<function=exec>\n<parameter=command>\nss -ltnp 'sport = :8080'\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[exit_code=0 duration=0.02s truncated=no]\n--- stdout ---\nLISTEN 0 511 *:8080\n--- stderr ---\n(empty)\n</tool_response><|im_end|>\n<|im_start|>assistant\n8080 端口被 **node** 占用。<|im_end|>\n<|im_start|>user\n再把它结束掉<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "template_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+  "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+ },
+ {
+  "name": "parallel_tool_results_merge",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "exec",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools."
+   },
+   {
+    "role": "user",
+    "content": "count files"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "exec",
+       "arguments": {
+        "command": "ls | wc -l",
+        "timeout_sec": 30
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "exec",
+       "arguments": {
+        "command": "echo <done> && printf 'a\\nb'"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "3"
+   },
+   {
+    "role": "tool",
+    "content": "<done>\na\nb"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "official_expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are nosh, an AI shell running fully offline on the user's computer.\n<tool_def_sep>\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\ncount files<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=exec>\n<parameter=command>\nls | wc -l\n</parameter>\n<parameter=timeout_sec>\n30\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=exec>\n<parameter=command>\necho <done> && printf 'a\\nb'\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3\n</tool_response>\n<tool_response>\n<done>\na\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "expected": "<|im_start|>system\nYou are nosh, an AI shell running fully offline on the user's computer.\n# Tools\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nTool calls:\n<tool_call>\n<function=function-name>\n<parameter=parameter-name>\nvalue\n</parameter>\n</function>\n</tool_call>\nInclude all required parameters. Array and object values must be JSON. Values may span multiple lines. Do not add text after a tool call.\n# Rules\n1. Act through tools.<|im_end|>\n<|im_start|>user\ncount files<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=exec>\n<parameter=command>\nls | wc -l\n</parameter>\n<parameter=timeout_sec>\n30\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=exec>\n<parameter=command>\necho <done> && printf 'a\\nb'\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3\n</tool_response>\n<tool_response>\n<done>\na\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "template_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+  "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+ },
+ {
+  "name": "system_without_separator",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file with line numbers; \"path\" may be relative.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start_line": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "system",
+    "content": "Be brief."
+   },
+   {
+    "role": "user",
+    "content": "hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": true,
+  "official_expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+  "expected": "<|im_start|>system\n# Tools\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a text file with line numbers; \\\"path\\\" may be relative.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"start_line\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}}}\n</tools>\n\nTool calls:\n<tool_call>\n<function=function-name>\n<parameter=parameter-name>\nvalue\n</parameter>\n</function>\n</tool_call>\nInclude all required parameters. Array and object values must be JSON. Values may span multiple lines. Do not add text after a tool call.\n\nBe brief.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+  "template_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+  "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+ },
+ {
+  "name": "no_tools",
+  "tools": null,
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Say hello in 中文."
+   },
+   {
+    "role": "assistant",
+    "content": "你好！"
+   },
+   {
+    "role": "user",
+    "content": "thanks"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "official_expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nSay hello in 中文.<|im_end|>\n<|im_start|>assistant\n你好！<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nSay hello in 中文.<|im_end|>\n<|im_start|>assistant\n你好！<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "template_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+  "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+ },
+ {
+  "name": "tools_without_system",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "exec",
+     "description": "Run a bash command in the user's shell session.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The command line."
+       },
+       "timeout_sec": {
+        "type": "integer",
+        "description": "Timeout in seconds (default 60)."
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "content": "pwd?"
+   }
+  ],
+  "add_generation_prompt": false,
+  "enable_thinking": null,
+  "official_expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\npwd?<|im_end|>\n",
+  "expected": "<|im_start|>system\n# Tools\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"exec\", \"description\": \"Run a bash command in the user's shell session.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command line.\"}, \"timeout_sec\": {\"type\": \"integer\", \"description\": \"Timeout in seconds (default 60).\"}}, \"required\": [\"command\"]}}}\n</tools>\n\nTool calls:\n<tool_call>\n<function=function-name>\n<parameter=parameter-name>\nvalue\n</parameter>\n</function>\n</tool_call>\nInclude all required parameters. Array and object values must be JSON. Values may span multiple lines. Do not add text after a tool call.<|im_end|>\n<|im_start|>user\npwd?<|im_end|>\n",
+  "template_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+  "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+ }
+]

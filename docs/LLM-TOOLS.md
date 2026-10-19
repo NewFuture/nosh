@@ -26,7 +26,7 @@
 
 额外接受明确单位的 `timeout_ms`，与秒字段同时提供时必须表示同一超时；不猜测无单位的其它超时字段。`cwd`／`workdir` 仅在解析后等于共享会话当前目录时接受，不能悄悄切换或恢复目录。grep 兼容 `ignore_case`／`case_sensitive`，作为正则默认大小写设置，内嵌正则旗标仍按库语义生效；相互矛盾的设置明确报错。必填内容、不能解释的值、字节／扫描预算、保护路径、审批、取消及跨字段语义仍由宿主保证。兼容不等于猜测用户意图或授予新权限。
 
-共享工具区先给出简短调用格式，再列 `<tools>` 中的完整 JSON schema：
+工具定义共享规范名称和 JSON schema，调用语法按模型渲染。MiniCPM5 工具区先给出简短调用格式，再列 `<tools>` 中的完整 JSON schema：
 
 ```text
 Tool calls:
@@ -36,7 +36,9 @@ Wrap values containing <, & or newlines in <![CDATA[...]]>.
 
 仅当前工具包含数组参数时追加 `Array values must be JSON, e.g. ["yes", "no"].`，让 `ask_user.choices` 的 XML 值格式明确，不给没有数组参数的 CommandAssist 增加说明。
 
-这部分只描述语法，不包含“正常回答”、`[None]`、只读或执行策略，因此不会把 CommandAssist 的限制带入 Agent。工具名称、参数转换、CDATA／实体解析和调用数量约束不随文案顺序改变。角色与工具调用格式仍遵循 MiniCPM5；共享说明的文字和位置是明确的 nosh 定制，不再声称完整 prompt 与官方模板逐字相同。
+Qwen3.5 使用 `<tool_call>` 中的 `<function=名称>` 和 `<parameter=名称>`，参数值在起止标签之间，可为 UTF-8 多行文本；数组/对象值为 JSON。它不使用 MiniCPM5 的 name 属性、CDATA 或实体反转义。Qwen 的工具/思考标记虽然被官方 tokenizer 标为 `special=false`，仍按协议控制 ID 处理；不可信正文不匹配这些 ID，普通文本中的相同字样不会打开工具流。保护控制 token 时保持原 ID 和已注册 special token 的属性，重复保护不重建匹配表。
+
+这部分只描述语法，不包含 `[None]`、只读或执行策略，不把 CommandAssist 的限制带入 Agent。工具名称、归一化、类型校验、调用数量和宿主审批对两个模型相同；模型专属字符串解析留在 `nosh-llm`。角色和工具帧遵循各自模型协议，工具说明文字是 nosh 定制，不声称整个 prompt 与官方模板逐字相同。
 
 CommandAssist 共用固定 System：建议而不执行、平台、查询协议、数据边界和输出约定。协议 User 是 nosh，三个意图的本次请求与上下文都放进 User 任务包；终答要求和拒绝理由也是 nosh 的 User 反馈，不重复命令或原始需求。终端用户不直接参与此子会话，Agent 的交互与权限独立保留。具体文案见 [CommandAssist](COMMAND-ASSIST.md#instructions-与-prompt)。
 

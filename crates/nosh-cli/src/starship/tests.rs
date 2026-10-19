@@ -324,6 +324,7 @@ fn official_modules_use_real_directory_git_and_rust_context() {
 }
 
 #[test]
+#[cfg(unix)]
 #[ignore = "requires official Starship on PATH"]
 fn official_modules_render_git_changes_runtime_environment_and_command_metrics() {
     use std::os::unix::fs::PermissionsExt;
@@ -445,6 +446,7 @@ fn official_modules_render_git_changes_runtime_environment_and_command_metrics()
 }
 
 #[test]
+#[cfg(unix)]
 fn native_runs_are_bounded() {
     let start = Instant::now();
     let mut command = Command::new("/bin/sh");

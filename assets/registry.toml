@@ -4,6 +4,35 @@
 schema = 1
 
 [[model]]
+id = "qwen3.5-0.8b:q8_0"
+display = "Qwen3.5-0.8B Q8_0"
+arch = "qwen35"
+chat_format = "qwen35"
+context_max = 262144
+min_memory_mb = 1600
+eog_ids = [248044, 248046]
+license = "Apache-2.0"
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 40, min_p = 0.0 }
+
+  [[model.files]]
+  role = "weights"
+  name = "Qwen3.5-0.8B-Q8_0.gguf"
+  size = 833592096
+  sha256 = "37ae482d336108d23516fa35e8e0c4126688d81018b87178a18d752a1357814f"
+  sources = [
+    { hub = "hf", repo = "ggml-org/Qwen3.5-0.8B-GGUF", revision = "8fea620810c4afa23dd6443f999a48574c1611a3" },
+  ]
+
+  [[model.files]]
+  role = "tokenizer"
+  name = "tokenizer.json"
+  size = 12807982
+  sha256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+  sources = [
+    { hub = "hf", repo = "Qwen/Qwen3.5-0.8B", revision = "2fc06364715b967f1860aea9cf38778875588b17" },
+  ]
+
+[[model]]
 id = "minicpm5-2b:q4_k_m"
 display = "MiniCPM5-2B Q4_K_M"
 arch = "llama"
