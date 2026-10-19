@@ -63,13 +63,13 @@ Qwen 的无 BOS 文本角色、思考开关和工具帧遵循固定官方模板�
 
 固定输入使用 `tests/fixtures/model_context.txt` 的 3300/8065 个 prompt token，加 48 个 teacher-forced token。共享 `tests/support/divergence.rs` 的 cosine、KL、NLL、top-5 和 confident top-1 门槛与 MiniCPM5 相同，不以生成文字一致代替数值比较。
 
-参考导出仅用于开发验证：使用 llama.cpp b11706 的已校验 Windows x64 CPU release（源码提交、库/归档哈希由 `tools/qwen35-reference.py` 固定），不是生产推理依赖。先显式生成不可覆盖的参考输入，再导出对应 logits/manifest：
+参考导出仅用于开发验证：使用 llama.cpp b11706 的 Windows x64 CPU release，不是生产推理依赖。必须同时提供原始 ZIP 与解压目录；`tools/qwen35-reference.py` 在加载任何 DLL 前校验固定归档 SHA-256，再逐项核对目录内全部 DLL 与归档内容，缺失、额外或改写的库均拒绝。manifest 记录实际验证得到的归档及完整 DLL 哈希，验收同时核对固定 DLL 清单，不接受旧的仅校验 `llama.dll` 的来源记录。先显式生成不可覆盖的参考输入，再导出对应 logits/manifest：
 
 ```powershell
 $env:NOSH_MODEL_PATH = "VERIFIED_QWEN_MODEL_DIR"
 $env:NOSH_QWEN_REFERENCE = "NEW_REFERENCE_DIR"
 cargo test --profile fastrel -p nosh-llm --test qwen35_real_model --locked qwen35_export_reference_inputs -- --ignored --exact --nocapture --test-threads=1
-python tools\qwen35-reference.py --bin VERIFIED_B11706_CPU_DIR --model "$env:NOSH_MODEL_PATH\Qwen3.5-0.8B-Q8_0.gguf" "$env:NOSH_QWEN_REFERENCE\3300.json" "$env:NOSH_QWEN_REFERENCE\8065.json"
+python tools\qwen35-reference.py --archive VERIFIED_B11706_CPU_ZIP --bin VERIFIED_B11706_CPU_DIR --model "$env:NOSH_MODEL_PATH\Qwen3.5-0.8B-Q8_0.gguf" "$env:NOSH_QWEN_REFERENCE\3300.json" "$env:NOSH_QWEN_REFERENCE\8065.json"
 cargo test --profile fastrel -p nosh-llm --test qwen35_real_model --locked qwen35_matches_pinned_reference_at_3k_and_8k -- --ignored --exact --nocapture --test-threads=1
 cargo test --profile fastrel -p nosh-llm --test qwen35_real_model --locked qwen35_kv_and_prepack_match_at_3k_and_8k -- --ignored --exact --nocapture --test-threads=1
 ```

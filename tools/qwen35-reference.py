@@ -13,6 +13,11 @@ import json
 import os
 from pathlib import Path
 import time
+import zipfile
+
+
+REFERENCE_ARCHIVE_SHA256 = "f426ae6d20afeb6970f51cc182dedc3b21cf23ec278192da1af262de43be6115"
+REFERENCE_VERIFICATION = "sha256-pinned-archive-and-complete-dll-set"
 
 
 class ModelParams(c.Structure):
@@ -64,6 +69,49 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def verify_libraries(directory, archive):
+    with archive.open("rb") as stream:
+        archive_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        if archive_sha256 != REFERENCE_ARCHIVE_SHA256:
+            raise ValueError("not the pinned b11706 Windows x64 CPU archive")
+        stream.seek(0)
+        with zipfile.ZipFile(stream) as distribution:
+            expected = {}
+            for entry in distribution.infolist():
+                if entry.is_dir() or not entry.filename.lower().endswith(".dll"):
+                    continue
+                name = entry.filename.casefold()
+                if "/" in name or "\\" in name or name in expected:
+                    raise ValueError(f"invalid reference archive DLL path: {entry.filename}")
+                with distribution.open(entry) as library:
+                    expected[name] = hashlib.file_digest(library, "sha256").hexdigest()
+    if not {"llama.dll", "ggml.dll", "ggml-base.dll"}.issubset(expected):
+        raise ValueError("reference archive is missing computation libraries")
+    libraries = {}
+    for path in directory.rglob("*"):
+        if path.is_file() and path.suffix.casefold() == ".dll":
+            name = path.relative_to(directory).as_posix().casefold()
+            if name in libraries:
+                raise ValueError(f"duplicate reference DLL: {name}")
+            libraries[name] = path
+    if libraries.keys() != expected.keys():
+        raise ValueError(
+            f"reference DLL set mismatch; missing: {sorted(expected.keys() - libraries.keys())}; "
+            f"unexpected: {sorted(libraries.keys() - expected.keys())}"
+        )
+    verified = {}
+    for name, path in sorted(libraries.items()):
+        actual = digest(path)
+        if actual != expected[name]:
+            raise ValueError(f"reference computation library mismatch: {name}")
+        verified[name] = actual
+    return {
+        "release_archive_sha256": archive_sha256,
+        "computation_libraries_sha256": verified,
+        "reference_verification": REFERENCE_VERIFICATION,
+    }
+
+
 def run(args):
     if os.name != "nt":
         raise RuntimeError("this exporter requires the verified Windows x64 b11706 CPU release")
@@ -72,8 +120,8 @@ def run(args):
     assert c.sizeof(Batch) == 56
     if digest(args.model) != "37ae482d336108d23516fa35e8e0c4126688d81018b87178a18d752a1357814f":
         raise ValueError("not the pinned Qwen Q8 weights")
-    if digest(args.bin / "llama.dll") != "8f64b0cb6ccbe75780261eaae2e12485b8b3939809bd57000ba4e99e428e3217":
-        raise ValueError("not the verified b11706 Windows x64 CPU library")
+    args.bin = args.bin.resolve()
+    provenance = verify_libraries(args.bin, args.archive)
     dll_dir = os.add_dll_directory(str(args.bin))
     ggml = c.CDLL(str(args.bin / "ggml.dll"))
     ggml.ggml_backend_load_all_from_path.argtypes = [c.c_char_p]
@@ -154,8 +202,8 @@ def run(args):
                 manifest = {
                     "backend": "llama.cpp-reference-only",
                     "revision": data["reference_revision"], "release": "b11706",
-                    "release_archive_sha256": "f426ae6d20afeb6970f51cc182dedc3b21cf23ec278192da1af262de43be6115",
-                    "library_sha256": digest(args.bin / "llama.dll"),
+                    **provenance,
+                    "library_sha256": provenance["computation_libraries_sha256"]["llama.dll"],
                     "exporter_sha256": digest(Path(__file__)),
                     "model_sha256": digest(args.model),
                     "input_sha256": digest(path), "logits_sha256": digest(output),
@@ -177,6 +225,8 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin", type=Path, required=True)
+    parser.add_argument("--archive", type=Path, required=True,
+                        help="original digest-pinned b11706 Windows x64 CPU ZIP")
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("inputs", type=Path, nargs="+")

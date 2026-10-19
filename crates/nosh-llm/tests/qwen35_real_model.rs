@@ -539,6 +539,8 @@ fn qwen35_matches_pinned_reference_at_3k_and_8k() {
     let (weights, _) = paths();
     let dev = device().open().unwrap();
     let mut model = Qwen35::load(&weights, 8192, LoadOptions::default(), &dev).unwrap();
+    let reference_libraries: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/qwen35_reference_libraries.json")).unwrap();
     for prompt_len in [3300, 8065] {
         let input_path = reference_dir().join(format!("{prompt_len}.json"));
         let input: serde_json::Value =
@@ -564,6 +566,14 @@ fn qwen35_matches_pinned_reference_at_3k_and_8k() {
         assert_eq!(
             manifest["library_sha256"],
             "8f64b0cb6ccbe75780261eaae2e12485b8b3939809bd57000ba4e99e428e3217"
+        );
+        assert_eq!(
+            manifest["reference_verification"],
+            "sha256-pinned-archive-and-complete-dll-set"
+        );
+        assert_eq!(
+            manifest["computation_libraries_sha256"],
+            reference_libraries
         );
         assert_eq!(manifest["model_sha256"], MODEL_SHA256);
         assert_eq!(manifest["kv_dtype"], "f16");
