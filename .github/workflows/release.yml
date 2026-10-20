@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.98.1'
+          targets: x86_64-pc-windows-msvc
+      - name: prepare patched sources
+        run: cargo source prepare --offline
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: native Windows regressions
+        run: cargo test -p nosh-cli -p nosh-permissions --test windows --target x86_64-pc-windows-msvc --locked
+      - name: build native CPU executable
+        run: cargo build -p nosh-cli --release --target x86_64-pc-windows-msvc --locked
+      # gh creates a draft, uploads the asset, then publishes it for immutable releases.
+      - name: publish release with executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $output = (& .\target\x86_64-pc-windows-msvc\release\nosh.exe --version) -join "`n"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($output -cnotmatch '\Anosh (?<version>\S+)\z') {
+            throw "Unexpected executable version: $output"
+          }
+          $version = $Matches.version
+          $tag = "v$version"
+          $prerelease = $version -match '^[0-9]+\.[0-9]+\.[0-9]+-'
+          $matchingRefs = gh api "repos/$env:GH_REPO/git/matching-refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $existingTag = ($matchingRefs | ConvertFrom-Json) |
+            Where-Object ref -CEQ "refs/tags/$tag"
+          if ($null -ne $existingTag -and
+              ($existingTag.object.type -cne 'commit' -or $existingTag.object.sha -cne $env:RELEASE_COMMIT)) {
+            throw "Tag '$tag' already exists and does not point directly to commit '$env:RELEASE_COMMIT'."
+          }
+          gh release create "$tag" .\target\x86_64-pc-windows-msvc\release\nosh.exe --target "$env:RELEASE_COMMIT" --generate-notes --prerelease="$prerelease"

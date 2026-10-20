@@ -115,6 +115,14 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 完整平台矩阵以 [CI](../.github/workflows/ci.yml) 为准。模型吞吐、首 token 延迟和内存必须按 [DESIGN §13.2](DESIGN.md#132-测试矩阵) 固定构建、硬件、模型和冷热条件单独测量；代码整理不构成性能改善证据。
 
+## 版本与发布
+
+应用版本来自根 `Cargo.toml` 的 `[workspace.package].version`，各 crate 继承，`nosh --version` 显示同一版本。发布新版前修改该版本，运行 `cargo update --workspace` 同步 `Cargo.lock`，一起提交并推送；工作流不自动递增版本。
+
+[Release 工作流](../.github/workflows/release.yml) 合入默认分支后，在 **Actions → Release → Run workflow** 选择分支运行。它准备修补源、运行原生 Windows 回归并构建 x64 CPU 版，从 exe 读取版本，自动创建指向本次提交的 `v<版本号>` tag 和附带 `nosh.exe` 的 Release，无需手动创建 tag 或配置发布凭据。`-rc.1` 等版本自动标为 prerelease；模型不打包进 exe。
+
+`gh release create` 先创建草稿、上传 exe，最后发布，兼容需在仓库设置中启用的 Immutable releases。已有 tag 必须直接指向本次提交，工作流不移动 tag 或覆盖已有 Release。失败留下草稿时，删除该草稿后重跑原始运行；已发布的不可变版本需修改应用版本后重新发布。
+
 ## 文档维护
 
 项目 README 介绍功能与使用方式，AGENTS.md 提供简短日常开发指引，[文档导航](README.md) 管理分类。本文件维护代码边界和构建开发入口，DESIGN 维护当前系统行为和配置，功能文档维护详细契约。文档引用对应来源，不复制完整规则或接口清单。
