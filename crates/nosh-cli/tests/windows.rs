@@ -51,7 +51,7 @@ fn executable_is_native_and_runs_bash_without_unix_utilities() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        "nosh 0.1.0"
+        format!("nosh {}", env!("CARGO_PKG_VERSION"))
     );
     let system = std::env::var_os("SystemRoot").unwrap();
     let output = nosh(home.path()).env("PATH", Path::new(&system).join("System32"))
