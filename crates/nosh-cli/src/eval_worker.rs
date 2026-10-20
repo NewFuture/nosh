@@ -147,6 +147,8 @@ fn configuration(setup: &crate::engine::EngineSetup) -> Result<Value, String> {
     let opts = nosh_llm::LocalEngineOptions::default();
     Ok(json!({
         "model": model.entry.id,
+        "arch": model.entry.arch,
+        "chat_format": model.entry.chat_format,
         "weights": model.weights.canonicalize().map_err(|e| e.to_string())?,
         "tokenizer": model.tokenizer.canonicalize().map_err(|e| e.to_string())?,
         "device": setup.device.clone()?.to_string(),

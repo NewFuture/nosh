@@ -135,7 +135,8 @@ python3 -m eval --suite regression --scenario largest-files --seeds 0 --repeat 2
 
 这里只是显式有界运行示例，不自动预热或追加试验。worker readiness **只加载模型，不生成 token**；
 第一条正式 trial 的首次设备 kernel/workspace 初始化照常计时，不把它悄悄丢掉。
-后续 case 只复用活动 KV 的**精确 token 最长共同前缀**；切换 prompt 的不同后缀重新计算，
+Llama 后续 case 可复用活动 KV 的**精确 token 最长共同前缀**；Qwen35 只有整个活动混合状态可直接续接时才复用，
+需要局部回退则清空 attention/卷积/循环状态并重新 prefill，cached tokens 如实记为零。
 不会携带上一任务的聊天历史，也不承诺每条都是全缓存命中。顺序仍为 repeat → scenario → seed，
 因此是否热命中必须看原生 first-step new/cached tokens，而不是仅凭 repeat 编号。
 
@@ -188,7 +189,7 @@ gh workflow run eval.yml --repo NewFuture/nosh --ref EVALUATOR_BRANCH \
   -f source_ref=SOURCE_BRANCH -f source_revision=FULL_SOURCE_SHA -f suite=command-assist
 ```
 
-工作流的 `suite` 可选 `regression`（默认）、`command-assist`、`smoke`、`workflows`，对应 `eval/suites/` 中的清单。
+工作流的 `suite` 可选 `regression`（默认）、`command-assist`、`smoke`、`workflows`，对应 `eval/suites/` 中的清单。`model` 可显式选择 `minicpm5-2b:q4_k_m`（默认）、`minicpm5-2b:q8_0` 或 `qwen3.5-0.8b:q8_0`；缓存、下载校验和传给 CLI 的路径使用同一个型号。该 hosted CPU 工作流不代替 CUDA 实机验收。
 
 新工作流首次使用前需合入默认分支。`source_ref` 默认 `main`，也可显式指定本仓库的待验收分支；`source_revision` 必须是该分支可达的完整 SHA，留空则在作业开始固定该分支。分支名与 SHA 均校验，不接受 Git 表达式代替固定版本。工作流归档干净源码构建，显式下载并校验模型，在同一个 Ubuntu runner 上以 **threads 2 / Rayon 1 / nice 10** 串行双跑。
 
@@ -203,6 +204,14 @@ Hosted 工作流显式使用 **每次试验 60 秒**期限，本地默认仍为 
 运行时使用 `--ref` 的评测器，分别记录被测源码分支/SHA、评测器和模型来源。首个检查点在 5 分钟后保存，此后每 45 分钟一次，最多八份、保留一天；最终 artifact 为 `evaluation-<run-id>-<attempt>`。检查点复制已结束试验，不改判定或 seed，也不能跨机器拼接成正式双跑。完整性检查逐一核对声明的场景/seed/重复身份，不以过时的固定数量判断完成。
 
 **工作流绿色不等于模型全通过**：完整采样、无运行器错误即可成功；模型失败及原始退出码仍保留。runner 失联时保留已有证据，修复后完整重跑，不选择性重抽失败 seed。快照复制/压缩可能影响耗时，比较时需注明。
+
+### Qwen35 原生结果
+
+同一套场景和裁判可通过 `--model-path` 选择 registry 固定的 Qwen3.5-0.8B。原生 engine 信息记录 `arch`、`chat_format` 和 `recurrent_state_dtype`，worker 配置握手也核对架构和聊天格式；不把 MiniCPM5 的结束/工具 token 用于 Qwen。CPU/CUDA 的实际设备、attention KV 和 f32 循环状态应分别记录。
+
+结果保存到新的目录，不覆写旧 llama.cpp 筛选或其它量化模型报告。模型任务通过率和本地纠错分开；正确加载、数值通过和原生工具帧可解析都不等于任务通过。Markdown、非严格 `[None]`、错误路径、被拒后重试及不完整任务保留原裁判结果，不改写请求或放宽审批/判定规则。
+
+模型数值/状态与 Q4/Q8 预打包控制使用 [Qwen 验收入口](../docs/INFERENCE.md#qwen-数值验收)，不把开发用参考实现标为 nosh 的推理后端。缺 GPU、驱动或 toolkit 时，CUDA 验收必须明确保持未完成。
 
 ## 场景与判定
 

@@ -11,11 +11,11 @@ use crate::template::Seg;
 
 pub struct Tok {
     inner: Tokenizer,
-    /// Raw bytes of every token id.
-    bytes: Vec<Vec<u8>>,
+    /// Raw token bytes in ID order, indexed by adjacent offsets.
+    bytes: Vec<u8>,
+    byte_offsets: Vec<usize>,
     /// Added tokens (content, id), longest first, for splitting trusted text.
     added: Vec<(String, u32)>,
-    vocab: HashMap<String, u32>,
 }
 
 /// GPT-2 byte-level alphabet: maps each byte to a printable char.
@@ -55,25 +55,32 @@ impl Tok {
             rev[*c as usize] = b as u8;
             rev_ok[*c as usize] = true;
         }
-        let mut bytes = vec![Vec::new(); size];
+        let mut tokens = vec![None; size];
         for (s, &id) in &vocab {
-            let v = if let Some(a) = added_dec.get(&id) {
-                a.content.as_bytes().to_vec()
-            } else {
-                let mut out = Vec::with_capacity(s.len());
+            tokens[id as usize] = Some(s.as_str());
+        }
+        let mut bytes = Vec::new();
+        let mut byte_offsets = Vec::with_capacity(size + 1);
+        for (id, token) in tokens.into_iter().enumerate() {
+            byte_offsets.push(bytes.len());
+            if let Some(s) = token {
+                if let Some(a) = added_dec.get(&(id as u32)) {
+                    bytes.extend_from_slice(a.content.as_bytes());
+                    continue;
+                }
                 for ch in s.chars() {
                     let cp = ch as usize;
                     if cp < rev.len() && rev_ok[cp] {
-                        out.push(rev[cp]);
+                        bytes.push(rev[cp]);
                     } else {
                         let mut buf = [0u8; 4];
-                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
                     }
                 }
-                out
-            };
-            bytes[id as usize] = v;
+            }
         }
+        byte_offsets.push(bytes.len());
+        bytes.shrink_to_fit();
         let mut added: Vec<(String, u32)> = added_dec
             .iter()
             .map(|(id, t)| (t.content.clone(), *id))
@@ -83,24 +90,61 @@ impl Tok {
         Self {
             inner,
             bytes,
+            byte_offsets,
             added,
-            vocab,
         }
     }
 
     pub fn vocab_size(&self) -> usize {
-        self.bytes.len()
+        self.byte_offsets.len() - 1
     }
 
     pub fn token_id(&self, s: &str) -> Option<u32> {
-        self.vocab.get(s).copied()
+        self.inner.token_to_id(s)
+    }
+
+    pub(crate) fn vocabulary(&self) -> HashMap<String, u32> {
+        self.inner.get_vocab(true)
+    }
+
+    /// Reclassifies existing added controls in memory so plain-text encoding
+    /// cannot match them, including Qwen's `special=false` tool/think tokens.
+    pub(crate) fn protect_tokens(&mut self, names: &[&str]) -> Result<(), LlmError> {
+        let ids: Vec<_> = names
+            .iter()
+            .map(|name| {
+                self.token_id(name).ok_or_else(|| {
+                    LlmError::Config(format!("tokenizer control token {name:?} missing"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let tokens: Vec<_> = names
+            .iter()
+            .filter(|name| !self.inner.get_added_vocabulary().is_special_token(name))
+            .map(|name| tokenizers::AddedToken::from(*name, true))
+            .collect();
+        if !tokens.is_empty() {
+            self.inner
+                .add_special_tokens(tokens)
+                .map_err(|error| LlmError::Tokenizer(error.to_string()))?;
+        }
+        if names
+            .iter()
+            .zip(ids)
+            .any(|(name, id)| self.inner.token_to_id(name) != Some(id))
+        {
+            return Err(LlmError::Config(
+                "protecting protocol controls changed tokenizer IDs".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn token_bytes(&self, id: u32) -> &[u8] {
-        self.bytes
-            .get(id as usize)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        match self.byte_offsets.get(id as usize..) {
+            Some([start, end, ..]) => &self.bytes[*start..*end],
+            _ => &[],
+        }
     }
 
     /// Encodes text; `allow_special` lets added tokens in the text be matched.
@@ -247,6 +291,65 @@ mod tests {
         assert_eq!(s.push(&[b'a', 0xff, b'b']), "a\u{FFFD}b");
         assert_eq!(s.push(&[0xe4]), "");
         assert_eq!(s.finish(), "\u{FFFD}");
+    }
+
+    #[test]
+    fn compact_bytes_keep_sparse_ids_and_added_token_contents() {
+        let model_json = serde_json::json!({
+            "type": "WordLevel",
+            "vocab": {"[UNK]": 0, "A": 3, "Ġ": 5, "你": 8, "<|control|>": 12},
+            "unk_token": "[UNK]",
+        })
+        .to_string();
+        let model: tokenizers::models::wordlevel::WordLevel =
+            serde_json::from_str(&model_json).unwrap();
+        let mut inner = Tokenizer::new(model);
+        inner
+            .add_special_tokens([tokenizers::AddedToken::from("<|control|>", true)])
+            .unwrap();
+        let tok = Tok::from_tokenizer(inner);
+        assert_eq!(tok.vocab_size(), 13);
+        assert_eq!(tok.token_id("你"), Some(8));
+        assert_eq!(tok.token_id("<|control|>"), Some(12));
+        assert_eq!(tok.token_bytes(3), b"A");
+        assert_eq!(tok.token_bytes(5), b" ");
+        assert_eq!(tok.token_bytes(8), "你".as_bytes());
+        assert_eq!(tok.token_bytes(12), b"<|control|>");
+        for id in [1, 2, 4, 13, u32::MAX] {
+            assert!(tok.token_bytes(id).is_empty(), "{id}");
+        }
+        let flattened: Vec<_> = (0..tok.vocab_size() as u32)
+            .flat_map(|id| tok.token_bytes(id).iter().copied())
+            .collect();
+        assert_eq!(tok.bytes, flattened);
+        assert_eq!(tok.vocabulary().get("A"), Some(&3));
+    }
+
+    #[test]
+    fn protecting_controls_preserves_existing_special_properties_and_ids() {
+        let model_json = r#"{"type":"WordLevel","vocab":{"[UNK]":0},"unk_token":"[UNK]"}"#;
+        let model: tokenizers::models::wordlevel::WordLevel =
+            serde_json::from_str(model_json).unwrap();
+        let mut inner = Tokenizer::new(model);
+        let special = tokenizers::AddedToken::from("<|control|>", true).lstrip(true);
+        inner.add_special_tokens([special.clone()]).unwrap();
+        inner
+            .add_tokens([tokenizers::AddedToken::from("<think>", false)])
+            .unwrap();
+        let mut tok = Tok::from_tokenizer(inner);
+        let control = tok.token_id("<|control|>").unwrap();
+        let think = tok.token_id("<think>").unwrap();
+        let size = tok.vocab_size();
+        for _ in 0..2 {
+            tok.protect_tokens(&["<|control|>", "<think>"]).unwrap();
+            assert_eq!(tok.inner.get_added_tokens_decoder()[&control], special);
+            assert_eq!(tok.token_id("<|control|>"), Some(control));
+            assert_eq!(tok.token_id("<think>"), Some(think));
+            assert_eq!(tok.vocab_size(), size);
+            assert_eq!(tok.token_bytes(think), b"<think>");
+            assert!(!tok.encode("<think>", false).unwrap().contains(&think));
+            assert_eq!(tok.encode("<think>", true).unwrap(), [think]);
+        }
     }
 
     #[test]

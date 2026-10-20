@@ -5,6 +5,8 @@ use candle_core::{DType, Result, Tensor};
 
 use super::attn::KvDtype;
 
+const QUERY_BLOCK: usize = 32;
+
 pub struct TensorKv {
     data: Option<(Tensor, Tensor)>,
     len: usize,
@@ -39,6 +41,20 @@ impl TensorKv {
 
     /// Q/K/V are `[1, heads, tokens, head_dim]`, after interleaved RoPE.
     pub fn attention(&mut self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+        self.attention_with_block(q, k, v, q.dim(2)?.max(1))
+    }
+
+    pub fn attention_chunked(&mut self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+        self.attention_with_block(q, k, v, QUERY_BLOCK)
+    }
+
+    fn attention_with_block(
+        &mut self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        query_block: usize,
+    ) -> Result<Tensor> {
         let (_, n_head, s, hd) = q.dims4()?;
         let (_, n_kv, _, _) = k.dims4()?;
         let pos = self.len;
@@ -55,27 +71,51 @@ impl TensorKv {
             ),
             None => (k, v),
         };
-        // Group adjacent query heads under their KV head, without repeating K/V.
         // Widen f16 KV for f32 accumulation, matching the CPU cache semantics.
-        let q = q.reshape((n_kv, n_head / n_kv * s, hd))?;
         let keys = k.to_dtype(DType::F32)?.reshape((n_kv, len, hd))?;
         let values = v.to_dtype(DType::F32)?.reshape((n_kv, len, hd))?;
-        let scores = (q.matmul(&keys.t()?)? / (hd as f64).sqrt())?.reshape((n_head, s, len))?;
-        let scores = if s > 1 {
-            let mask: Vec<f32> = (0..s)
-                .flat_map(|i| {
-                    (0..len).map(move |j| if j > pos + i { f32::NEG_INFINITY } else { 0.0 })
-                })
-                .collect();
-            scores.broadcast_add(&Tensor::from_vec(mask, (1, s, len), q.device())?)?
-        } else {
-            scores
-        };
-        let probabilities =
-            candle_nn::ops::softmax_last_dim(&scores)?.reshape((n_kv, n_head / n_kv * s, len))?;
-        let y = probabilities
-            .matmul(&values)?
-            .reshape((1, n_head, s, hd))?
+        let mut output = Vec::with_capacity(s.div_ceil(query_block));
+        for start in (0..s).step_by(query_block) {
+            let count = query_block.min(s - start);
+            let end = pos + start + count;
+            // Bound scores by query blocks, and group heads without repeating KV.
+            let query = q.narrow(2, start, count)?.contiguous()?.reshape((
+                n_kv,
+                n_head / n_kv * count,
+                hd,
+            ))?;
+            let scores = {
+                let scores = (query.matmul(&keys.narrow(1, 0, end)?.t()?)? / (hd as f64).sqrt())?
+                    .reshape((n_head, count, end))?;
+                if count > 1 {
+                    let mask: Vec<f32> = (0..count)
+                        .flat_map(|i| {
+                            (0..end).map(move |j| {
+                                if j > pos + start + i {
+                                    f32::NEG_INFINITY
+                                } else {
+                                    0.0
+                                }
+                            })
+                        })
+                        .collect();
+                    scores.broadcast_add(&Tensor::from_vec(mask, (1, count, end), q.device())?)?
+                } else {
+                    scores
+                }
+            };
+            let probabilities = candle_nn::ops::softmax_last_dim(&scores)?.reshape((
+                n_kv,
+                n_head / n_kv * count,
+                end,
+            ))?;
+            output.push(
+                probabilities
+                    .matmul(&values.narrow(1, 0, end)?)?
+                    .reshape((1, n_head, count, hd))?,
+            );
+        }
+        let y = Tensor::cat(&output, 2)?
             .transpose(1, 2)?
             .contiguous()?
             .reshape((1, s, n_head * hd))?;
@@ -97,6 +137,7 @@ mod tests {
         n_kv: usize,
         hd: usize,
         chunks: &[(usize, usize)],
+        chunked: bool,
     ) -> Result<()> {
         for dtype in [KvDtype::F16, KvDtype::F32] {
             let mut cpu = KvStore::new(n_kv, hd, dtype);
@@ -121,10 +162,14 @@ mod tests {
                         .transpose(1, 2)?
                         .contiguous()
                 };
-                let actual = tensor
-                    .attention(&t(q, n_head)?, &t(k, n_kv)?, &t(v, n_kv)?)?
-                    .flatten_all()?
-                    .to_vec1::<f32>()?;
+                let (q, k, v) = (t(q, n_head)?, t(k, n_kv)?, t(v, n_kv)?);
+                let actual = if chunked {
+                    tensor.attention_chunked(&q, &k, &v)?
+                } else {
+                    tensor.attention(&q, &k, &v)?
+                }
+                .flatten_all()?
+                .to_vec1::<f32>()?;
                 let error = actual
                     .iter()
                     .zip(&expected)
@@ -146,7 +191,23 @@ mod tests {
             2,
             8,
             &[(0, 5), (5, 3), (8, 1), (3, 2), (0, 1)],
+            false,
         )
+    }
+
+    #[test]
+    fn tensor_query_blocks_match_cpu_across_boundaries_and_rewind() -> Result<()> {
+        for n_kv in [1, 2, 4] {
+            compare(
+                &Device::Cpu,
+                4,
+                n_kv,
+                8,
+                &[(0, 65), (65, 67), (132, 1), (63, 66), (0, 1)],
+                true,
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -154,7 +215,14 @@ mod tests {
     #[ignore = "requires an NVIDIA GPU"]
     fn cuda_gqa_matches_cpu_with_rewind() -> Result<()> {
         let device = Device::new_cuda(0)?;
-        compare(&device, 4, 2, 8, &[(0, 5), (5, 3), (8, 1), (3, 2), (0, 1)])?;
+        compare(
+            &device,
+            4,
+            2,
+            8,
+            &[(0, 5), (5, 3), (8, 1), (3, 2), (0, 1)],
+            false,
+        )?;
         compare(
             &device,
             24,
@@ -168,6 +236,15 @@ mod tests {
                 (1111, 3),
                 (0, 1),
             ],
+            false,
+        )?;
+        compare(
+            &device,
+            8,
+            2,
+            256,
+            &[(0, 65), (65, 67), (132, 1), (63, 66), (0, 1)],
+            true,
         )
     }
 }

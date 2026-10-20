@@ -48,14 +48,15 @@ fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
     if output.status.success() {
         assert!(
             path.trim_end().ends_with("minicpm5-2b-q8_0")
-                || path.trim_end().ends_with("minicpm5-2b-q4_k_m"),
+                || path.trim_end().ends_with("minicpm5-2b-q4_k_m")
+                || path.trim_end().ends_with("qwen3.5-0.8b-q8_0"),
             "{path}"
         );
     } else {
         assert_eq!(output.status.code(), Some(1));
         assert!(path.is_empty());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("3.5 GiB"),
+            String::from_utf8_lossy(&output.stderr).contains("--model ID"),
             "{:?}",
             output.stderr
         );
@@ -65,6 +66,7 @@ fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
         ("minicpm5-2b:q8_0", "minicpm5-2b-q8_0"),
         ("minicpm5-1b:q4_k_m", "minicpm5-1b-q4_k_m"),
         ("minicpm5-2b", "minicpm5-2b-q8_0"),
+        ("qwen3.5-0.8b", "qwen3.5-0.8b-q8_0"),
     ] {
         let output = run(&["path", id]);
         assert!(output.status.success(), "{:?}", output.stderr);
@@ -77,12 +79,14 @@ fn model_management_uses_memory_defaults_but_keeps_explicit_ids() {
     let marked: Vec<_> = list.lines().filter(|line| line.contains('*')).collect();
     match marked.as_slice() {
         [] => assert!(
-            String::from_utf8_lossy(&output.stderr).contains("3.5 GiB"),
+            String::from_utf8_lossy(&output.stderr).contains("--model ID"),
             "{:?}",
             output.stderr
         ),
         [line] => assert!(
-            line.starts_with("minicpm5-2b:q8_0") || line.starts_with("minicpm5-2b:q4_k_m"),
+            line.starts_with("minicpm5-2b:q8_0")
+                || line.starts_with("minicpm5-2b:q4_k_m")
+                || line.starts_with("qwen3.5-0.8b:q8_0"),
             "{list}"
         ),
         _ => panic!("multiple automatic defaults: {list}"),

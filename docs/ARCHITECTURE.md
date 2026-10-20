@@ -26,7 +26,7 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | 边界 | 契约与入口 |
 |---|---|
 | 引擎 | [`nosh-engine`](../crates/nosh-engine/src/lib.rs) 定义 open / step / rewind / compact / close 和结构化事件；不含 tokenizer、special token 或 Candle 类型 |
-| 本地推理适配 | [`LocalChatEngine`](../crates/nosh-llm/src/local.rs) 实现引擎契约；`ModelSource` 只接收模型 ID、预期架构、权重与 tokenizer 路径、结束 token 和采样默认值 |
+| 本地推理适配 | [`LocalChatEngine`](../crates/nosh-llm/src/local.rs) 实现引擎契约；`ModelSource` 接收模型 ID、预期架构、聊天格式、权重与 tokenizer 路径、结束 token 和采样默认值 |
 | 模型装配 | CLI 的 [`engine.rs`](../crates/nosh-cli/src/engine.rs) 查找或下载模型，并集中把 `ResolvedModel` 转成 `ModelSource`；普通加载和 debug 共用该转换，doctor 的设备检查只接收权重路径 |
 | Shell | [`EmbeddedShell`](../crates/nosh-shell/src/backend.rs) 持有共享 brush 会话；用户执行直连终端，Agent 执行采集输出；snapshot / resolve / parse 提供状态与解析 |
 | 风险与审批 | [`nosh-permissions`](../crates/nosh-permissions/src/lib.rs) 分析风险并计算 Allow / Ask / Deny；[`ApprovalChannel`](../crates/nosh-core/src/approval.rs) 负责审批交互，不由模型决定放行 |
@@ -42,6 +42,10 @@ Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：t
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。
 
 Harness 直接使用 `EmbeddedShell`，REPL AI 适配在 core；不为尚未存在的后端保留转发 trait 或兼容接口。Windows 与 Unix 复用同一 brush 会话和状态契约，`nosh-shell/src/host.rs` 隔离输入句柄、命令查找、中断和执行生命周期。Windows Job Object、文件身份和安全替换属于平台原语；审批路径策略仍归 permissions，不移入平台层。
+
+`nosh-llm` 的内部模型枚举分派 Llama 与 Qwen35；协议分派集中在 `protocol.rs`，模板和调用解析按模型隔离。共享的仍是 `ChatEngine`，不是 tokenizer 或模型状态类型。Qwen 的局部回退使用完整重算，不能借 Llama 的 KV 截短接口假装保留循环状态；usage 记录实际保留长度。宿主可用/总物理内存属于 platform，默认型号与失败暂停策略仍归 CLI。
+
+Tokenizer 的逐 ID 解码字节使用连续存储和偏移表，保留空洞 ID 与 added token 的原始内容；完整词表副本只在加载校验时临时取得，不额外常驻。存储布局不改变控制 token ID、可信分段编码或增量 UTF-8 解码规则。
 
 Agent 的 brush 执行参数可注入宿主进程启动器。Windows 在子进程恢复运行前加入本次执行独占的 Job Object，作用域结束后拒绝迟到的启动，并回收仍属于该次执行的后代，不按进程名或全局进程树回收。Unix 保持既有进程组及标记跟踪。
 

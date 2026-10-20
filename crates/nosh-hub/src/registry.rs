@@ -192,7 +192,7 @@ mod tests {
             "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078"
         );
         assert_eq!(def.tokenizer().size, 9_894_271);
-        assert_eq!(reg.models.len(), 3);
+        assert_eq!(reg.models.len(), 4);
         assert_eq!(def.dir_name(), "minicpm5-2b-q8_0");
     }
 
@@ -217,6 +217,12 @@ mod tests {
             reg.lookup(Some("minicpm5-2b:q4_k_m")).unwrap().id,
             "minicpm5-2b:q4_k_m"
         );
+        let qwen = reg.lookup(Some("qwen3.5-0.8b")).unwrap();
+        assert_eq!(qwen.id, "qwen3.5-0.8b:q8_0");
+        assert_eq!((&*qwen.arch, &*qwen.chat_format), ("qwen35", "qwen35"));
+        assert_eq!(qwen.eog_ids, [248044, 248046]);
+        assert_eq!(qwen.weights().size, 833_592_096);
+        assert_eq!(qwen.tokenizer().size, 12_807_982);
     }
 
     #[test]

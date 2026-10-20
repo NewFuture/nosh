@@ -54,6 +54,10 @@ pub enum DebugCmd {
     },
 }
 
+fn memory_text(value: Option<f64>) -> String {
+    value.map_or_else(|| "unavailable".into(), |value| format!("{value:.0}"))
+}
+
 pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
     let device = match &setup.device {
         Ok(device) => *device,
@@ -125,7 +129,7 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                 info.device_selection.requested, info.device, info.device_selection.reason,
             );
             eprintln!(
-                "[{} | device {} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {:.0} MB]",
+                "[{} | device {} | {} layers | ctx {} | {} threads | load {:.2}s | KV {:?} | recurrent {} | prepacked {} matrices, {:.0} MiB raw released in {:.2}s | RSS {} MB]",
                 info.model_id,
                 info.device,
                 info.layers,
@@ -133,10 +137,11 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                 info.threads,
                 info.load_secs,
                 info.kv_dtype,
+                info.recurrent_state_dtype.unwrap_or("none"),
                 info.prepack.tensors,
                 info.prepack.released_bytes as f64 / (1024.0 * 1024.0),
                 info.prepack.secs,
-                rss_mb().map_or(0.0, |r| r.0)
+                memory_text(rss_mb().map(|r| r.0))
             );
             let mut sampling = engine.default_sampling();
             if let Some(t) = temp {
@@ -205,9 +210,9 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                 match res {
                     Ok(o) => {
                         let u = &o.usage;
-                        let (rss, peak) = rss_mb().unwrap_or((0.0, 0.0));
+                        let memory = rss_mb();
                         eprintln!(
-                            "[round {} | prompt {} tok (cached {}) prefill {:.1} tok/s | TTFT {:.2}s | {} tok decode {:.1} tok/s | stop {:?} | ctx {}/{} | RSS {:.0} MB peak {:.0} MB]",
+                            "[round {} | prompt {} tok (cached {}) prefill {:.1} tok/s | TTFT {:.2}s | {} tok decode {:.1} tok/s | stop {:?} | ctx {}/{} | RSS {} MB peak {} MB]",
                             round + 1,
                             u.prompt_tokens,
                             u.cached_tokens,
@@ -218,8 +223,8 @@ pub fn run(cmd: DebugCmd, setup: &crate::engine::EngineSetup) -> i32 {
                             o.stop,
                             u.context_used,
                             u.context_max,
-                            rss,
-                            peak
+                            memory_text(memory.map(|m| m.0)),
+                            memory_text(memory.map(|m| m.1))
                         );
                     }
                     Err(e) => {

@@ -11,8 +11,8 @@ use windows_sys::Win32::Security::{
     TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
-    ReplaceFileW,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FileBasicInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, ReplaceFileW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -41,6 +41,44 @@ pub fn file_identity(file: &File) -> io::Result<FileIdentity> {
         index: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
         links: information.nNumberOfLinks,
         attributes: information.dwFileAttributes,
+    })
+}
+
+pub(super) fn file_stamp(path: &Path) -> io::Result<super::FileStamp> {
+    let file = File::open(path)?;
+    let identity = file_identity(&file)?;
+    let metadata = file.metadata()?;
+    let mut basic = FILE_BASIC_INFO::default();
+    // SAFETY: the opened file and correctly sized output storage outlive this query.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut basic).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let unix_ns = |ticks: i64| -> io::Result<u64> {
+        u64::try_from(ticks)
+            .ok()
+            .and_then(|ticks| ticks.checked_sub(116_444_736_000_000_000))
+            .and_then(|ticks| ticks.checked_mul(100))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file time outside supported range",
+                )
+            })
+    };
+    Ok(super::FileStamp {
+        size: metadata.len(),
+        mtime_ns: unix_ns(basic.LastWriteTime)?,
+        ctime_ns: unix_ns(basic.ChangeTime)?,
+        dev: u64::from(identity.volume),
+        ino: identity.index,
     })
 }
 

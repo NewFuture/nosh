@@ -59,6 +59,7 @@ pub(crate) fn model_source(model: &ResolvedModel) -> ModelSource<'_> {
     ModelSource {
         id: &model.entry.id,
         arch: &model.entry.arch,
+        chat_format: &model.entry.chat_format,
         weights: &model.weights,
         tokenizer: &model.tokenizer,
         eog_ids: &model.entry.eog_ids,
@@ -304,6 +305,9 @@ pub(crate) fn load_local(
     );
     let metadata = serde_json::json!({
         "model": resolved.entry.id,
+        "arch": info.arch,
+        "chat_format": info.chat_format,
+        "recurrent_state_dtype": info.recurrent_state_dtype,
         "device": info.device.to_string(),
         "device_requested": info.device_selection.requested.to_string(),
         "device_reason": info.device_selection.reason,
@@ -340,6 +344,7 @@ mod tests {
         let source = model_source(&model);
         assert_eq!(source.id, model.entry.id);
         assert_eq!(source.arch, model.entry.arch);
+        assert_eq!(source.chat_format, model.entry.chat_format);
         assert_eq!(source.weights, model.weights);
         assert_eq!(source.tokenizer, model.tokenizer);
         assert_eq!(source.eog_ids, model.entry.eog_ids);

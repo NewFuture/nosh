@@ -8,6 +8,12 @@ against it too. License: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 
 Vendored: `src/` unchanged apart from the patch, and the manifest `cargo package` generates
 for that rev without the example, test and bench targets (their files are not included).
+The optional `candle-kernels` dependency explicitly retains the same Git revision.
+The published `0.11.0` kernels predate this revision and lack `fast_sum_small_*`,
+which this core dispatches for sums of at most 32 elements. Using only the generated
+version requirement builds successfully but fails with `CUDA_ERROR_NOT_FOUND` at
+runtime. This manifest pin preserves the matching upstream kernels without changing
+their implementation or the CPU prepack patch.
 `third_party` is excluded from the workspace, so nosh's fmt, clippy and tests skip it.
 
 ## Why
@@ -107,10 +113,16 @@ disabled prepacking, and damaged output tensors.
    by hand).
 2. Regenerate the manifest: `cargo package -p candle-core --no-verify --allow-dirty` in the
    candle checkout, take `Cargo.toml` from the `.crate`, drop the `[[example]]`,
-   `[[test]]`, `[[bench]]` and dev-dependency sections, keep the header comment.
+   `[[test]]`, `[[bench]]` and dev-dependency sections, keep the header comment and
+   restore the optional `candle-kernels` Git dependency at the same revision.
 3. Update the rev in this file, in the file headers of `src/quantized/{mod,repack}.rs` and
    in the root `Cargo.toml`; run `cargo test -p nosh-llm --test prepack --test vendored_candle`.
    If upstream has fixed the Metal stub, drop that hunk.
+
+`crates/nosh-llm/tests/vendored_candle.rs` guards the kernel source pin and provides
+an opt-in real-CUDA reduction regression over f32/f16, small/boundary widths and
+strided/contiguous reductions. Run it with `--features cuda -- --include-ignored`
+on a GPU host; ordinary CPU runs do not initialize CUDA.
 
 ## When to remove it
 

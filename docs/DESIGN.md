@@ -35,7 +35,7 @@ nosh init bash                     # 只输出现有 Bash 的集成脚本
 
 风险分析与审批不是沙箱。普通用户命令直接执行，Agent 工具按权限策略执行；允许执行不代表操作可撤销、原子或已备份。`--offline` 只约束 nosh 的模型下载与探测，不限制 shell 命令或补全脚本联网。
 
-## 2. 默认模型：MiniCPM5-2B
+## 2. 本地模型与默认选择
 
 ### 2.1 模型与格式
 
@@ -45,17 +45,19 @@ nosh init bash                     # 只输出现有 Bash 的集成脚本
 |---|---|
 | 内存或单卡显存任一达到 **7 GiB** | `minicpm5-2b:q8_0` |
 | 未达到 7 GiB，但内存或单卡显存任一达到 **3.5 GiB** | `minicpm5-2b:q4_k_m` |
-| 内存和可用单卡显存都低于 **3.5 GiB** | 不自动选择、安装或加载模型，明确提示资源不足 |
+| 内存和可用单卡显存都低于 **3.5 GiB**，且未触发下述暂停条件 | `qwen3.5-0.8b:q8_0` |
 
 内存与显存不相加，多卡显存也不相加：自动设备设置取可见、可探测 GPU 的最大单卡空闲值，显式 `cuda:N` 只看该逻辑卡。显式 `cpu`、CPU-only 构建及不支持 CUDA 的 f32 KV 不使用显存提升默认档位；没有可用 GPU 时只看主机内存。主机内存足够选择最高档时无需初始化 CUDA 来选择型号。
 
-主机检测使用 Linux / WSL 的 `MemAvailable`；macOS 根据 `vm_stat` 的空闲、非活动和 speculative 页及实际页大小估算可回收内存。检测失败会明确警告，仍可依据另一项成功观测选择达到阈值的档位；无法确定两项都低于 3.5 GiB 时保守使用 2B Q4_K_M，不把未知伪装成零。该选择保留在本次引擎设置中，不因加载后的资源变化而重新选择，也不改写用户配置。这些是资源快照，不是总容量或资源预留，仍需满足所选型号、上下文和实际设备的加载预算。
+**可用主机内存和可用单卡显存均低于 1.5 GiB，且系统总物理内存低于 4 GiB** 时，提示不建议安装/加载，并暂停自动安装及自动加载。1.5 GiB 和 4 GiB 等值不属于“低于”。必要的资源观测失败或部分 CUDA 探测失败时也暂停自动路径，不把未知当零，不回退到另一个型号。没有 CUDA 构建、显式 CPU 或不支持 CUDA 的 KV 类型属于已知不适用，不是探测失败；总内存仅在两个可用资源都低于 1.5 GiB 时需要读取。
+
+主机检测使用 Linux / WSL 的 `MemAvailable`/`MemTotal`；macOS 根据 `vm_stat` 的空闲、非活动和 speculative 页及实际页大小估算可回收内存，并通过 `hw.memsize` 读取总物理内存；Windows 使用原生物理内存状态 API。选择保留在本次引擎设置中，不因加载后的资源变化而重新选择，也不改写用户配置。这些是资源快照，不是资源预留或加载成功保证，仍需满足所选型号、上下文和实际设备的加载预算。
 
 显式 CLI、环境变量或配置中的模型 ID 和路径不受该策略覆盖；短模型名 `minicpm5-2b` 显式选择该系列的首选 Q8_0。资源不足时普通 shell 仍可使用，但已缓存模型也不会自动加载；用户可用 `--model ID`、`--model-path PATH`、`nosh model pull ID` 或手动导入显式尝试，不保证加载成功。
 
 `nosh model pull`、`verify`、`path` 未带 ID 时使用相同策略，`list` 的 `*` 标记本次自动默认型号；无自动型号时仍列出清单，但不标记默认。它们仍使用各自的显式参数，不继承交互模型配置，设备选择按全局 `--device` 或默认 `auto` 探测。只按原有下载／确认策略缓存被选中的型号，不额外下载其它型号。模型使用 GGUF 权重与 `tokenizer.json`，文件、哈希、下载来源和采样默认值以[内置 registry](../assets/registry.toml)为准，运行时核对 GGUF 架构与 tokenizer 词表。
 
-MiniCPM5 使用 ChatML 和基于 special token 的工具格式。模型特定的模板、结束 token、工具调用解析和采样留在 `nosh-llm`，不进入 Agent 或通用引擎契约。
+MiniCPM5 使用 ChatML 和自己的 function/param 工具格式；Qwen3.5 使用无 BOS 的原生 ChatML 文本模板，以及 tool_call/function/parameter 工具格式。Qwen 只加载文本主干，不执行 GGUF 内附带的 MTP 块，也不提供视觉能力。模型特定的模板、控制 token、工具解析和状态留在 `nosh-llm`，不进入 Agent 或通用引擎契约。小模型的任务质量按真实原生评测独立报告，不由模型大小、后端接通或本地纠错成绩推断。
 
 ### 2.2 文件与加载
 
@@ -64,6 +66,8 @@ CLI 通过 hub 解析文件，再把明确的 `ModelSource` 传给本地引擎�
 ### 2.3 内存
 
 CPU KV 默认使用 f16，可通过 debug 入口对照 f32。CPU 层矩阵和输出投影的权重预重排与释放只在受支持的内核路径启用：x86 的 Q4K、具备 VNNI 的 x86 的 Q8_0、支持 dotprod 的 ARM 的 Q4K/Q6K；token embedding 保留原始块，不把某个平台的释放效果外推到其他平台。实现与补丁契约见 [Candle 说明](../third_party/candle-core/NOSH_PATCH.md)。
+
+Qwen3.5 的 f16/f32 KV 只作用于完整 attention 层；卷积和 Gated DeltaNet 循环状态始终为 f32。不保存每个 token 的循环状态快照；需要局部回退时清空混合状态并重算，不以错误前缀复用节省内存。
 
 内存需求随模型、上下文、KV 类型和设备变化。加载使用显式上下文配置；除 §2.1 的初始化默认选择外，不随剩余内存变化迁移或替换正在使用的模型。`doctor` 的可用内存提示不构成资源预留。当前没有磁盘 KV 缓存。
 
@@ -226,13 +230,13 @@ CommandAssist 对 Generate / Fix / Next 使用相同终答校验和具体拒绝�
 
 ### 7.1 实现与设备
 
-Candle 加载量化 llama，CPU 进行运行时内核选择；CUDA 为显式构建能力。`auto` 在加载时根据设备和显存选择后端，显式 CUDA 失败不回退。GPU 只开放 f16 KV。构建、设备编号和约束见[本地推理与 CUDA](INFERENCE.md)。
+Candle 加载量化 Llama/MiniCPM5 或 Qwen35 文本混合模型，CPU 进行运行时内核选择；CUDA 为显式构建能力。`auto` 在型号确定后根据设备和显存选择后端，显式 CUDA 失败不回退。GPU 只开放 f16 attention KV，Qwen 的循环状态仍为 f32。未指定型号时，必要资源探测失败先按 §2.1 暂停自动路径。构建、设备编号和约束见[本地推理与 CUDA](INFERENCE.md)。
 
 CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，避免把内部覆盖泄漏给用户子进程。默认 Candle 使用物理核，Rayon 为单线程；显式环境覆盖仍有效。
 
 ### 7.2 模板与分词
 
-使用 `tokenizers` 的 fancy-regex 路径。静态模板可编码受信 special token，用户、背景和工具正文按普通文本编码。模板 golden 和分段编码一致性由推理测试维护，不在文档复制整份模板。
+使用 `tokenizers` 的 fancy-regex 路径。静态模板可编码受信控制 token，用户、背景和工具正文按普通文本编码。Qwen 将部分协议 added token 标为 `special=false`；适配器在内存中保护这些已有 ID，不修改已校验的 tokenizer 文件。padding 词表行不能进入采样。模板 golden 和分段编码一致性由推理测试维护，不在文档复制整份模板。
 
 ### 7.3 采样
 
@@ -260,7 +264,7 @@ CLI 在启动线程前设置推理线程环境，并向 shell 登记原始值，
 
 支持 HF、hf-mirror、ModelScope；自动选源并行探测、顺序下载与故障换源，不是多源并行下载。下载使用文件锁、磁盘空间检查、Range 分块、断点续传和校验后的原子 rename。
 
-已校验文件通过当前 manifest 格式中的哈希、大小和 `FileStamp` 复用结果。版本不支持或记录不完整时缓存失效，重新 SHA-256 校验后重建；不会仅凭旧记录或 mtime 信任文件。
+已校验文件通过当前 manifest 格式中的哈希、大小和 `FileStamp` 复用结果。Unix 使用设备/inode 和 ctime；Windows 使用同一打开文件的卷/文件索引及 ChangeTime，不以创建时间代替内容变更时间。因此，同尺寸改写并恢复 mtime 也会使缓存失效。版本不支持、记录不完整或身份变化时重新 SHA-256 校验后重建；旧 Windows 记录会自然失配并重新校验，不会仅凭旧记录或 mtime 信任文件。
 
 交互首次下载询问，非交互按既有策略在 stderr 提示；`--no-download` 或 `download.auto = "never"` 禁止自动下载。后台辅助只使用已安装模型，`-c` 和脚本不下载。
 

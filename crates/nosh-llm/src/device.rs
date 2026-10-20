@@ -140,7 +140,7 @@ impl InferenceDevice {
         #[cfg(feature = "cuda")]
         {
             let required =
-                crate::model::llama::cuda_memory_estimate(weights, context_length, prefill_chunk)?;
+                crate::model::cuda_memory_estimate(weights, context_length, prefill_chunk)?;
             select_cuda(required)
         }
     }

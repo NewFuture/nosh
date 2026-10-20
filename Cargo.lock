@@ -426,8 +426,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67450168a281bbb195a14cc85cf164c7a12023a54a03409a3324f476346e0789"
+source = "git+https://github.com/huggingface/candle?rev=5ba5d5b468b5b1df40e82dd3d556987bedeea041#5ba5d5b468b5b1df40e82dd3d556987bedeea041"
 dependencies = [
  "cudaforge",
 ]
@@ -2161,6 +2160,7 @@ dependencies = [
  "num_cpus",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokenizers",
 ]
