@@ -117,11 +117,23 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 ## 版本与发布
 
-应用版本来自根 `Cargo.toml` 的 `[workspace.package].version`，各 crate 继承，`nosh --version` 显示同一版本。发布新版前修改该版本，运行 `cargo update --workspace` 同步 `Cargo.lock`，一起提交并推送；工作流不自动递增版本。
+在 **Actions → Release → Run workflow** 选择分支，并填写必填的完整 `version`，例如 `0.2.0` 或 `0.2.0-rc.1`，不带 `v`。同一个[工作流](../.github/workflows/release.yml) 自动更新根 `Cargo.toml` 的 `[workspace.package].version`，用 `cargo update --workspace` 同步 `Cargo.lock`，提交并推送这两个文件；各 crate 继承版本，`nosh --version` 显示同一版本。已是指定版本时复用当前提交，不创建空提交。
 
-[Release 工作流](../.github/workflows/release.yml) 合入默认分支后，在 **Actions → Release → Run workflow** 选择分支运行。它准备修补源、运行原生 Windows 回归并构建 x64 CPU 版，从 exe 读取版本，自动创建指向本次提交的 `v<版本号>` tag 和附带 `nosh.exe` 的 Release，无需手动创建 tag 或配置发布凭据。`-rc.1` 等版本自动标为 prerelease；模型不打包进 exe。
+后续构建和发布都固定到该版本提交，不依赖机器人 push 再触发另一个工作流。版本 tag 冲突会在推送提交前拒绝。需要仓库允许 Actions 使用 `contents: write` 推送版本提交；分支保护拒绝推送时会明确失败，不绕过保护，也不会继续发布。
 
-`gh release create` 先创建草稿、上传 exe，最后发布，兼容需在仓库设置中启用的 Immutable releases。已有 tag 必须直接指向本次提交，工作流不移动 tag 或覆盖已有 Release。失败留下草稿时，删除该草稿后重跑原始运行；已发布的不可变版本需修改应用版本后重新发布。
+| 平台 | Rust target | 产物 |
+|---|---|---|
+| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` |
+
+五个平台并行构建 CPU 版，Linux 使用 Ubuntu 22.04 构建环境。归档命名为 `nosh-<版本>-<target>`，包含可执行文件和许可证，不打包模型或 CUDA。打包前执行产物的 `--version`，汇总时要求全部平台齐全并验证 SHA-256，随后生成统一的 `SHA256SUMS`。
+
+只有全部构建成功才自动创建指向版本提交的 `v<版本>` tag 和 Release，说明自动生成，`-rc.1` 等版本自动标为 prerelease。`gh release create` 先创建草稿、上传所有归档和校验文件，最后发布，兼容需在仓库设置中启用的 Immutable releases；不移动已有 tag，不覆盖已发布 Release。
+
+构建失败后优先使用 **Re-run failed jobs**，或以同一版本在当前分支重新运行，避免重跑旧的版本提交步骤造成非快进推送。若上传失败留下草稿，先检查并删除未发布草稿，再重试发布；已发布的不可变版本必须使用新版本号。
 
 ## 文档维护
 
