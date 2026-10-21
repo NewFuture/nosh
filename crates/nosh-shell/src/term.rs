@@ -178,7 +178,30 @@ pub fn read_key() -> Option<KeyEvent> {
 /// Reads a short line on stderr, starting from `initial`.
 /// `None` on Esc, Ctrl-C or Ctrl-D.
 pub fn read_text(prompt: &str, initial: &str) -> Option<String> {
-    text_result(read_short_line(prompt, initial, false, None, None, None).map(|(signal, _)| signal))
+    text_result(
+        read_short_line(prompt, initial, false, None, None, None).map(|(signal, ..)| signal),
+    )
+}
+
+/// Selects a fixed choice with Up/Down or its number; Enter accepts the default.
+pub fn read_choice(prompt: &str, choices: &[String], default: usize) -> io::Result<Option<usize>> {
+    let initial = choices.get(default).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "default choice is out of range",
+        )
+    })?;
+    let options = AnswerInput {
+        choices,
+        max_bytes: usize::MAX,
+        cancelled: &|| false,
+        selected: Some(default),
+        choice_only: true,
+    };
+    match read_short_line(prompt, initial, false, None, None, Some(&options))? {
+        (Signal::Success(_), _, selected) => Ok(selected),
+        _ => Ok(None),
+    }
 }
 
 /// Reads from the controlling terminal, never stdin. Up/Down selects a choice;
@@ -193,9 +216,11 @@ pub fn read_answer(
         choices,
         max_bytes,
         cancelled,
+        selected: None,
+        choice_only: false,
     };
     match read_short_line(prompt, "", false, None, None, Some(&options))? {
-        (Signal::Success(text), _) => Ok(Some(text)),
+        (Signal::Success(text), ..) => Ok(Some(text)),
         _ => Ok(None),
     }
 }
@@ -204,6 +229,8 @@ struct AnswerInput<'a> {
     choices: &'a [String],
     max_bytes: usize,
     cancelled: &'a dyn Fn() -> bool,
+    selected: Option<usize>,
+    choice_only: bool,
 }
 
 fn text_result(result: io::Result<Signal>) -> Option<String> {
@@ -223,7 +250,8 @@ pub(crate) fn read_plain_line(
     assistance: Option<&crate::AssistDisplay>,
     editing: &crate::editing::Compiled,
 ) -> io::Result<Signal> {
-    let (signal, buffer) = read_short_line(prompt, draft, true, assistance, Some(editing), None)?;
+    let (signal, buffer, _) =
+        read_short_line(prompt, draft, true, assistance, Some(editing), None)?;
     *draft = buffer;
     Ok(signal)
 }
@@ -235,7 +263,7 @@ fn read_short_line(
     assistance: Option<&crate::AssistDisplay>,
     editing: Option<&crate::editing::Compiled>,
     answer: Option<&AnswerInput<'_>>,
-) -> io::Result<(Signal, String)> {
+) -> io::Result<(Signal, String, Option<usize>)> {
     if !available() {
         return Err(io::Error::new(
             io::ErrorKind::NotConnected,
@@ -246,6 +274,7 @@ fn read_short_line(
     let _raw = RawInput::new(ansi)?;
     let mut err = io::stderr().lock();
     let mut buf = initial.to_string();
+    let choice_only = answer.is_some_and(|input| input.choice_only);
     let mut line = InputLine {
         prompt: if ansi {
             prompt.to_string()
@@ -256,11 +285,12 @@ fn read_short_line(
         previous_width: 0,
         ansi,
         command,
+        choice_only,
     };
     line.start(&mut err)?;
     line.draw(&mut err, &buf)?;
     let mut shown = String::new();
-    let mut selected: Option<usize> = None;
+    let mut selected = answer.and_then(|input| input.selected);
     let result = loop {
         if answer.is_some_and(|input| (input.cancelled)()) {
             break Signal::CtrlC;
@@ -282,6 +312,7 @@ fn read_short_line(
             continue;
         }
         match event::read()? {
+            Event::Paste(_) if choice_only => {}
             Event::Paste(s) => {
                 selected = None;
                 if let Some(display) = assistance {
@@ -336,8 +367,8 @@ fn read_short_line(
                     KeyCode::Char('d') if ctrl && (editing.is_none() || buf.is_empty()) => {
                         break Signal::CtrlD;
                     }
-                    KeyCode::Char('u') if ctrl && editing.is_none() => buf.clear(),
-                    KeyCode::Backspace => pop_grapheme(&mut buf),
+                    KeyCode::Char('u') if ctrl && editing.is_none() && !choice_only => buf.clear(),
+                    KeyCode::Backspace if !choice_only => pop_grapheme(&mut buf),
                     KeyCode::Up | KeyCode::Down
                         if answer.is_some_and(|input| !input.choices.is_empty()) =>
                     {
@@ -352,6 +383,14 @@ fn read_short_line(
                         };
                         selected = Some(index);
                         buf.clone_from(&choices[index]);
+                    }
+                    KeyCode::Char(c) if !ctrl && choice_only => {
+                        if let Some(index) = c.to_digit(10).and_then(|n| n.checked_sub(1))
+                            && let Some(choice) = answer.unwrap().choices.get(index as usize)
+                        {
+                            selected = Some(index as usize);
+                            buf.clone_from(choice);
+                        }
                     }
                     KeyCode::Char(c) if !ctrl => {
                         selected = None;
@@ -380,7 +419,7 @@ fn read_short_line(
     };
     write!(err, "\r\n")?;
     err.flush()?;
-    Ok((result, buf))
+    Ok((result, buf, selected))
 }
 
 fn pop_grapheme(buf: &mut String) {
@@ -389,7 +428,7 @@ fn pop_grapheme(buf: &mut String) {
     }
 }
 
-fn input_tail(buf: &str, columns: usize, command: bool) -> String {
+fn input_window(buf: &str, columns: usize, command: bool, from_start: bool) -> String {
     let text = if command {
         style::visible(buf)
     } else {
@@ -400,6 +439,9 @@ fn input_tail(buf: &str, columns: usize, command: bool) -> String {
         return text;
     }
     let marker = style::clip_line(style::glyph("…", "..."), columns, 0, "");
+    if from_start {
+        return style::clip_line(&text, columns, 0, &marker);
+    }
     let budget = columns.saturating_sub(style::width(&marker));
     let mut used = 0;
     let mut start = text.len();
@@ -419,6 +461,7 @@ struct InputLine {
     previous_width: usize,
     ansi: bool,
     command: bool,
+    choice_only: bool,
 }
 
 impl InputLine {
@@ -435,7 +478,7 @@ impl InputLine {
     fn draw(&mut self, out: &mut impl Write, buf: &str) -> io::Result<()> {
         let prompt_width = style::width(&style::strip_ansi(&self.prompt));
         let room = self.columns.saturating_sub(prompt_width + 1);
-        let text = input_tail(buf, room, self.command);
+        let text = input_window(buf, room, self.command, self.choice_only);
         let width = prompt_width + style::width(&text);
         if self.ansi {
             write!(out, "\r\x1b[K{}{text}", self.prompt)?;
@@ -486,7 +529,7 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
         text_result(ed.read_line(&PlainPrompt(prompt.to_string())))
     } else {
         text_result(
-            read_short_line(prompt, initial, true, None, None, None).map(|(signal, _)| signal),
+            read_short_line(prompt, initial, true, None, None, None).map(|(signal, ..)| signal),
         )
     }
 }
@@ -494,6 +537,14 @@ pub fn edit_line(prompt: &str, initial: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_default_choices_are_rejected_before_reading_the_terminal() {
+        for choices in [vec![], vec!["one".into()]] {
+            let error = read_choice("", &choices, choices.len()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
 
     #[test]
     fn backspace_removes_whole_graphemes() {
@@ -519,13 +570,21 @@ mod tests {
             "\u{4e2d}".repeat(50)
         );
         for columns in 0..100 {
-            let tail = input_tail(&input, columns, false);
+            let tail = input_window(&input, columns, false, false);
             assert!(style::width(&tail) <= columns);
             if tail.ends_with('\u{1f4bb}') {
                 assert!(tail.ends_with("\u{1f469}\u{200d}\u{1f4bb}"));
             }
         }
-        assert_eq!(input_tail("a\nb\tc\x1b", 80, true), "a\\nb\\tc\\e");
+        assert_eq!(input_window("a\nb\tc\x1b", 80, true, false), "a\\nb\\tc\\e");
+        let choice = input_window(
+            "minicpm5-2b:q4_k_m (MiniCPM5-2B Q4_K_M, 1.57 GB, Apache-2.0)",
+            32,
+            false,
+            true,
+        );
+        assert!(choice.starts_with("minicpm5-2b:q4_k_m"), "{choice}");
+        assert!(style::width(&choice) <= 32);
     }
 
     #[test]
@@ -536,6 +595,7 @@ mod tests {
             previous_width: 0,
             ansi: false,
             command: false,
+            choice_only: false,
         };
         let mut out = Vec::new();
         line.draw(&mut out, "\u{1f600}").unwrap();

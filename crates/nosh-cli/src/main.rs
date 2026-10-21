@@ -291,6 +291,7 @@ fn engine_setup_with_cuda(
         .clone()
         .or_else(|| std::env::var("NOSH_MODEL").ok().filter(|s| !s.is_empty()))
         .or_else(|| cfg.model_id.clone());
+    let explicit_model = model_id.is_some() || model_path.is_some();
     let device = cli
         .global
         .device
@@ -312,11 +313,13 @@ fn engine_setup_with_cuda(
         theme: nosh_shell::theme::ThemeHandle::new(cfg.theme.palette),
         device,
         model_id,
+        explicit_model,
         model_path,
         context_length: cfg.context_length,
         seed: cli.global.seed,
         no_download: cli.global.no_download || !cfg.download_auto,
         selection: cfg.source_selection,
+        installation: None,
     }
 }
 
@@ -486,7 +489,11 @@ fn run_shell(
     }
     let mut setup = engine_setup(cli, &cfg);
     setup.theme = themes.clone();
-    engine::offer_first_download(&setup);
+    let model_config_path = cfg
+        .path
+        .clone()
+        .unwrap_or_else(nosh_platform::paths::config_file);
+    let startup = engine::offer_first_model(&mut setup, &model_config_path);
     let mode = approval_mode(cli, &cfg);
     if mode == nosh_permissions::ApprovalMode::Yolo {
         eprintln!(
@@ -497,13 +504,17 @@ fn run_shell(
                 .red_bold(&nosh_core::handler::yolo_warning())
         );
     }
-    let loader_setup = setup.clone();
     let mut ai = nosh_core::ShellAi::new(
-        Box::new(move |mode| engine::load(&loader_setup, mode)),
+        Box::new(move |mode| engine::load(&setup, mode)),
         agent_cmd::agent_config(&cfg, mode, cli.global.seed),
         nosh_core::TerminalApproval::detect_with_theme(themes.clone()),
     )
     .with_theme(themes);
+    if let Some(installation) = startup
+        && let Err(error) = ai.preload(installation.display, installation.cancel)
+    {
+        eprintln!("nosh: {error}");
+    }
     let login = args.login;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         nosh_shell::repl::run(&mut shell, &mut ai, repl_cfg)
