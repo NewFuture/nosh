@@ -308,6 +308,20 @@ impl ModelHub {
         opts: &PullOptions,
         progress: &dyn Progress,
     ) -> Result<ResolvedModel, HubError> {
+        self.pull_with_cancel(id, opts, progress, &|| false)
+    }
+
+    /// Like [`Self::pull`], with cancellation that survives resetting the Ctrl-C flag.
+    pub fn pull_with_cancel(
+        &self,
+        id: Option<&str>,
+        opts: &PullOptions,
+        progress: &dyn Progress,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ResolvedModel, HubError> {
+        if cancelled() {
+            return Err(HubError::Cancelled);
+        }
         let entry = self.registry.lookup(id)?.clone();
         if let Some(found) = self.find(Some(&entry.id))? {
             return Ok(found);
@@ -316,6 +330,10 @@ impl ModelHub {
             return Err(HubError::Offline);
         }
         net::clear_cancel();
+        let cancelled = || cancelled() || net::is_cancelled();
+        if cancelled() {
+            return Err(HubError::Cancelled);
+        }
         let dir = self.user_model_dir(&entry);
         paths::ensure_private_dir(&dir)?;
         let endpoints = sources::Endpoints::from_env();
@@ -349,6 +367,9 @@ impl ModelHub {
 
         let mut best_hub = None;
         for role in [FileRole::Tokenizer, FileRole::Weights] {
+            if cancelled() {
+                return Err(HubError::Cancelled);
+            }
             let file = entry.file(role);
             let manifest = store::read_manifest(&dir);
             if let FileState::Present { verified: true } =
@@ -358,7 +379,14 @@ impl ModelHub {
             }
             let cands =
                 select::order_by_preference(&sources::candidates(file, &endpoints), &hub_order);
-            let out = download::download_file(file, &dir, &cands, &opts.download, progress)?;
+            let out = download::download_file_with(
+                file,
+                &dir,
+                &cands,
+                &opts.download,
+                progress,
+                &cancelled,
+            )?;
             let used = out.hub.or(cands.first().map(|c| c.hub));
             let rev = cands
                 .iter()
@@ -716,6 +744,59 @@ sampling = {{ temperature = 1.0, top_p = 1.0, min_p = 0.0 }}
             }],
         };
         assert!(sources::candidates(&f, &sources::Endpoints::default()).is_empty());
+    }
+
+    #[test]
+    fn scoped_pull_cancellation_is_checked_before_and_after_ctrl_c_reset() {
+        use std::cell::Cell;
+        let root = tempdir("hub-pull-cancelled");
+        let hub = ModelHub::with_root(&root, test_registry(b"weights", b"tokenizer"));
+        for cancel_after in [0, 1] {
+            let checks = Cell::new(0);
+            let result = hub.pull_with_cancel(None, &PullOptions::default(), &NoProgress, &|| {
+                let before = checks.get();
+                checks.set(before + 1);
+                before >= cancel_after
+            });
+            assert!(matches!(result, Err(HubError::Cancelled)), "{result:?}");
+            assert!(!root.join("models").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scoped_pull_cancellation_stops_a_model_lock_wait_without_network_access() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct CancelOnNote(AtomicBool);
+        impl Progress for CancelOnNote {
+            fn start(&self, _: &str, _: u64, _: u64) {}
+            fn advance(&self, _: u64) {}
+            fn note(&self, _: &str) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+            fn finish(&self, _: bool) {}
+        }
+        let root = tempdir("hub-pull-cancel-lock");
+        let hub = ModelHub::with_root(&root, test_registry(b"weights", b"tokenizer"));
+        let entry = hub.registry().default_model();
+        let directory = hub.user_model_dir(entry);
+        fs::create_dir_all(&directory).unwrap();
+        let lock = fs::File::create(directory.join("tokenizer.json.lock")).unwrap();
+        lock.try_lock().unwrap();
+        let progress = CancelOnNote(AtomicBool::new(false));
+        let result = hub.pull_with_cancel(
+            None,
+            &PullOptions {
+                selection: SourceSelection::parse("hf").unwrap(),
+                ..PullOptions::default()
+            },
+            &progress,
+            &|| progress.0.load(Ordering::SeqCst),
+        );
+        assert!(matches!(result, Err(HubError::Cancelled)), "{result:?}");
+        assert!(!directory.join("tokenizer.json.partial").exists());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

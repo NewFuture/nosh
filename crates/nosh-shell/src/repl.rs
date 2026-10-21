@@ -851,13 +851,22 @@ impl Prompt for ReplPrompt {
             "已保留原文；Tab 可明确选择展开，F2 可主动请求 AI",
             "Input kept literal; Tab can explicitly expand, F2 can request AI"
         );
+        let model_note = self
+            .command_assist
+            .as_ref()
+            .and_then(crate::AssistDisplay::model_status)
+            .map(|note| crate::status::plain(&note));
+        let note = match (&self.note, &model_note) {
+            (Some(note), Some(model)) => Some(format!("{note} | {model}")),
+            (note, model) => note.clone().or_else(|| model.clone()),
+        };
         let note = if literal {
-            Some(self.note.as_ref().map_or_else(
+            Some(note.as_ref().map_or_else(
                 || literal_notice.into(),
                 |note| format!("{note} | {literal_notice}"),
             ))
         } else {
-            self.note.clone()
+            note
         };
         let mut feedback = self
             .input_assist
@@ -999,7 +1008,12 @@ impl Prompt for ReplPrompt {
                 );
                 left = format!("{}\n{left}", styles.dim(&status));
             }
-            (left, self.right.clone())
+            let right = match model_note {
+                Some(model) if !self.right.is_empty() => format!("{} · {model}", self.right),
+                Some(model) => model,
+                None => self.right.clone(),
+            };
+            (left, right)
         };
         *self.rendered.borrow_mut() = Some(RenderedPrompt {
             left,
@@ -2834,6 +2848,38 @@ mod tests {
         prompt.update_context(context);
         assert!(!prompt.render_prompt_left().contains("printf safe"));
         assert!(!prompt.render_prompt_left().contains("F2"));
+    }
+
+    #[test]
+    fn model_progress_refreshes_the_current_status_row_without_a_new_badge() {
+        let mut prompt = status_prompt(false);
+        let display = crate::AssistDisplay::default();
+        prompt.command_assist = Some(display.clone());
+        for status in [
+            "AI: downloading 25%",
+            "AI: downloading 80%",
+            "AI: loading fixture",
+            "AI: model ready",
+            "AI: fixture download failed",
+        ] {
+            display.set_model_status(Some(status.into()));
+            display.invalidate();
+            let mut context = prompt_context(180, 24);
+            context.buffer = "echo untouched";
+            context.cursor = context.buffer.len();
+            prompt.update_context(context);
+            let left = style::strip_ansi(&prompt.render_prompt_left());
+            assert!(left.contains(status), "{left}");
+            assert_eq!(left.matches('\n').count(), 1);
+            assert!(prompt.render_prompt_right().is_empty());
+        }
+        prompt.status_enabled = false;
+        prompt.update_context(prompt_context(180, 24));
+        assert!(
+            prompt
+                .render_prompt_right()
+                .contains("AI: fixture download failed")
+        );
     }
 
     #[test]

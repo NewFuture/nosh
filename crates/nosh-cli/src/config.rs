@@ -7,7 +7,7 @@ pub mod theme;
 
 pub use document::read_text;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nosh_hub::SourceSelection;
 use nosh_permissions::{ApprovalMode, RuleSpec, UserRule};
@@ -145,6 +145,23 @@ const KNOWN: &[(&str, &[&str])] = &[
         &["allow", "deny", "protected_paths", "fallback_shell"],
     ),
 ];
+
+pub fn save_model(path: &Path, id: &str) -> Result<(), String> {
+    document::update(path, |document| {
+        if !document.contains_key("model") {
+            document["model"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let model = document["model"]
+            .as_table_like_mut()
+            .ok_or("model must be a table")?;
+        let mut value = toml_edit::Value::from(id);
+        if let Some(old) = model.get("id").and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        model.insert("id", toml_edit::Item::Value(value));
+        Ok(())
+    })
+}
 
 fn expand_home(s: &str) -> PathBuf {
     let home = std::env::var_os("HOME");
@@ -617,6 +634,32 @@ cancel = ["Ctrl+G", "F5"]
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn saving_a_model_preserves_comments_and_other_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# user config\n[shell]\nstatus_bar = false\n[model]\nid = 'old' # chosen\ncontext_length = 4096\n",
+        )
+        .unwrap();
+        save_model(&path, "minicpm5-2b:q4_k_m").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# user config") && text.contains("# chosen"));
+        let config = Config::parse(&text);
+        assert_eq!(config.model_id.as_deref(), Some("minicpm5-2b:q4_k_m"));
+        assert_eq!(config.context_length, 4096);
+        assert!(!config.status_bar);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+
+        std::fs::write(&path, "model = 'invalid'\n").unwrap();
+        assert!(save_model(&path, "fixture:q4").is_err());
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "model = 'invalid'\n"
+        );
     }
 
     #[test]

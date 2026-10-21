@@ -14,16 +14,22 @@ pub(crate) struct EngineState {
     pub theme: nosh_shell::theme::ThemeHandle,
     pub loader: EngineLoader,
     pub agent: Option<Agent>,
+    pub preloaded: Option<crate::LoadedEngine>,
+    pub model_display: Option<AssistDisplay>,
     pub availability: Arc<Mutex<ModelAvailability>>,
 }
 
 impl EngineState {
-    pub fn load(
-        &mut self,
-        mode: LoadMode,
-        config: &AgentConfig,
-        environment: impl FnOnce() -> Environment,
-    ) -> Result<(), EngineLoadError> {
+    fn model_status(&self, status: String) {
+        if let Some(display) = &self.model_display {
+            display.set_model_status(Some(status));
+        }
+    }
+
+    pub fn preload(&mut self, mode: LoadMode) -> Result<(), EngineLoadError> {
+        if self.agent.is_some() || self.preloaded.is_some() {
+            return Ok(());
+        }
         if mode == LoadMode::Background {
             let availability = self
                 .availability
@@ -33,6 +39,11 @@ impl EngineState {
                 return Err(error);
             }
         }
+        *self
+            .availability
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = ModelAvailability::Loading;
+        self.model_status(nosh_platform::tr!("AI: 正在准备模型", "AI: preparing model").into());
         let loaded = match (self.loader)(mode) {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -44,22 +55,42 @@ impl EngineState {
                         ModelAvailability::NotReady(reason.clone())
                     }
                     EngineLoadError::Failed(reason) => ModelAvailability::Failed(reason.clone()),
+                    EngineLoadError::Cancelled(reason) if self.model_display.is_some() => {
+                        ModelAvailability::NotReady(reason.clone())
+                    }
                     EngineLoadError::Cancelled(_) => ModelAvailability::NotLoaded,
                 };
+                self.model_status(format!("AI: {error}"));
                 return Err(error);
             }
         };
+        *self
+            .availability
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            ModelAvailability::Ready(loaded.description.clone());
+        self.preloaded = Some(loaded);
+        self.model_status(nosh_platform::tr!("AI: 模型已就绪", "AI: model ready").into());
+        Ok(())
+    }
+
+    pub fn load(
+        &mut self,
+        mode: LoadMode,
+        config: &AgentConfig,
+        environment: impl FnOnce() -> Environment,
+    ) -> Result<(), EngineLoadError> {
+        if self.agent.is_some() {
+            return Ok(());
+        }
+        self.preload(mode)?;
+        let loaded = self.preloaded.take().expect("model preloaded");
         self.agent = Some(
             Agent::new(loaded.engine, config.clone(), environment(), ToolSet::Full)
                 .with_user_input(Box::new(
                     crate::user_input::TerminalUserInput.with_theme(self.theme.clone()),
                 )),
         );
-        *self
-            .availability
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            ModelAvailability::Ready(loaded.description);
         Ok(())
     }
 }
@@ -114,20 +145,34 @@ pub(crate) struct Worker {
     display: AssistDisplay,
     thread: Option<JoinHandle<EngineState>>,
     context: Option<(usize, usize)>,
+    load_cancel: Option<CancelHandle>,
 }
 
 impl Worker {
-    pub fn start(state: EngineState, display: AssistDisplay) -> Self {
+    pub fn start(
+        state: EngineState,
+        display: AssistDisplay,
+        load_cancel: Option<CancelHandle>,
+    ) -> Self {
         let context = state.agent.as_ref().and_then(Agent::context_usage);
         let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
         let worker_mailbox = mailbox.clone();
         let worker_display = display.clone();
-        let thread = std::thread::spawn(move || serve(state, worker_mailbox, worker_display));
+        let preload = load_cancel.is_some();
+        let thread = std::thread::spawn(move || {
+            let mut state = state;
+            if preload {
+                // Preload records errors in availability and the model status.
+                let _ = state.preload(LoadMode::Background);
+            }
+            serve(state, worker_mailbox, worker_display)
+        });
         Self {
             mailbox,
             display,
             thread: Some(thread),
             context,
+            load_cancel,
         }
     }
 
@@ -158,6 +203,7 @@ impl Worker {
 
     pub fn reclaim(mut self) -> Result<EngineState, String> {
         self.stop();
+        self.load_cancel = None;
         self.thread
             .take()
             .expect("worker owns its thread")
@@ -176,6 +222,9 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.load_cancel {
+            cancel.cancel();
+        }
         self.stop();
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()

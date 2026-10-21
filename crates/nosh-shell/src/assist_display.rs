@@ -36,6 +36,7 @@ struct State {
     cancel: Option<Arc<dyn Fn() + Send + Sync>>,
     repaint: Option<Arc<dyn Fn() + Send + Sync>>,
     last_failure: Option<String>,
+    model_status: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -76,6 +77,29 @@ impl AssistDisplay {
 
     pub fn on_repaint(&self, repaint: Arc<dyn Fn() + Send + Sync>) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).repaint = Some(repaint);
+    }
+
+    /// Model lifecycle updates survive edits and cancellation of command suggestions.
+    pub fn set_model_status(&self, status: Option<String>) {
+        let repaint = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.model_status == status {
+                return;
+            }
+            state.model_status = status;
+            state.repaint.clone()
+        };
+        if let Some(repaint) = repaint {
+            repaint();
+        }
+    }
+
+    pub fn model_status(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_status
+            .clone()
     }
 
     /// Returns whether this version was still current at publication.
@@ -134,7 +158,14 @@ impl AssistDisplay {
     }
 
     pub(crate) fn status(&self, key: Option<&str>) -> String {
-        status_text(self.result().as_ref(), key)
+        let status = status_text(self.result().as_ref(), key);
+        if status.is_empty() {
+            self.model_status()
+                .map(|status| crate::style::visible_text(&status).into_owned())
+                .unwrap_or_default()
+        } else {
+            status
+        }
     }
 }
 
@@ -221,6 +252,33 @@ impl reedline::EditMode for AssistEditMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_status_survives_edits_and_repaints_only_when_changed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let display = AssistDisplay::default();
+        let repaints = Arc::new(AtomicUsize::new(0));
+        let observed = repaints.clone();
+        let shared = display.clone();
+        display.on_repaint(Arc::new(move || {
+            assert!(shared.state.try_lock().is_ok());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        let version = display.invalidate();
+        assert!(display.pending(version));
+        display.set_model_status(Some("AI: downloading 25%".into()));
+        display.set_model_status(Some("AI: downloading 25%".into()));
+        assert_eq!(repaints.load(Ordering::SeqCst), 1);
+        assert_eq!(display.status(None), "AI: downloading 25%");
+        display.invalidate();
+        assert!(display.result().is_none());
+        assert_eq!(
+            display.model_status().as_deref(),
+            Some("AI: downloading 25%")
+        );
+        display.set_model_status(None);
+        assert_eq!(repaints.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn superseded_results_cannot_replace_input() {

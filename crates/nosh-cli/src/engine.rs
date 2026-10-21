@@ -1,25 +1,36 @@
-//! Finding, downloading (with first-run confirmation) and loading the model.
+//! Model selection, authorized downloads and local engine assembly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nosh_core::{EngineLoadError, LoadMode, LoadedEngine};
-use nosh_engine::SamplingParams;
-use nosh_hub::{BarProgress, HubError, ModelHub, PullOptions, ResolvedModel, SourceSelection, net};
+use nosh_engine::{CancelHandle, SamplingParams};
+use nosh_hub::{
+    BarProgress, HubError, ModelEntry, ModelHub, Progress, PullOptions, Registry, ResolvedModel,
+    SharedProgress, SourceSelection, net,
+};
 use nosh_llm::{LocalChatEngine, LocalEngineOptions, ModelSource};
 use nosh_platform::tr;
 use nosh_shell::{style, term};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Default)]
+pub struct Installation {
+    pub display: nosh_shell::AssistDisplay,
+    pub cancel: CancelHandle,
+}
+
+#[derive(Clone)]
 pub struct EngineSetup {
     pub theme: nosh_shell::theme::ThemeHandle,
     pub device: Result<nosh_llm::InferenceDevice, String>,
     pub model_id: Result<Option<String>, String>,
+    pub explicit_model: bool,
     pub model_path: Option<PathBuf>,
     pub context_length: usize,
     pub seed: Option<u64>,
     /// `--no-download` or `download.auto = "never"`.
     pub no_download: bool,
     pub selection: SourceSelection,
+    pub installation: Option<Installation>,
 }
 
 impl EngineSetup {
@@ -28,6 +39,17 @@ impl EngineSetup {
             .as_ref()
             .map(|id| id.as_deref())
             .map_err(|reason| EngineLoadError::NotReady(reason.clone()))
+    }
+
+    fn check_cancelled(&self) -> Result<(), EngineLoadError> {
+        if self
+            .installation
+            .as_ref()
+            .is_some_and(|installation| installation.cancel.is_cancelled())
+        {
+            return Err(load_error(HubError::Cancelled));
+        }
+        Ok(())
     }
 }
 
@@ -82,10 +104,7 @@ fn load_error(error: HubError) -> EngineLoadError {
     }
 }
 
-/// Asks (default yes) and downloads the model in the foreground.
-/// `ask`: prompt on the terminal; otherwise announce and proceed.
-pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineLoadError> {
-    let hub = ModelHub::new();
+fn downloadable_model(setup: &EngineSetup, hub: &ModelHub) -> Result<ModelEntry, EngineLoadError> {
     let entry = hub
         .registry()
         .lookup(setup.selected_model()?)
@@ -115,6 +134,41 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineL
             )
         )));
     }
+    Ok(entry)
+}
+
+fn remember_declined() -> Result<(), EngineLoadError> {
+    nosh_platform::paths::ensure_private_dir(&nosh_platform::paths::state_dir())
+        .and_then(|()| std::fs::write(declined_marker(), ""))
+        .map_err(|error| format!("cannot save model installation preference: {error}").into())
+}
+
+fn pull_model(
+    setup: &EngineSetup,
+    hub: &ModelHub,
+    entry: &ModelEntry,
+    progress: &dyn Progress,
+) -> Result<ResolvedModel, EngineLoadError> {
+    let opts = PullOptions {
+        selection: setup.selection,
+        ..PullOptions::default()
+    };
+    let resolved = match &setup.installation {
+        Some(installation) => hub.pull_with_cancel(Some(&entry.id), &opts, progress, &|| {
+            installation.cancel.is_cancelled()
+        }),
+        None => hub.pull(Some(&entry.id), &opts, progress),
+    }
+    .map_err(load_error)?;
+    let _ = std::fs::remove_file(declined_marker());
+    Ok(resolved)
+}
+
+/// Asks (default yes) and downloads the model in the foreground.
+/// `ask`: prompt on the terminal; otherwise announce and proceed.
+pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineLoadError> {
+    let hub = ModelHub::new();
+    let entry = downloadable_model(setup, &hub)?;
     let question = tr!(
         format!(
             "首次使用需要下载模型 {}（{}，{}），是否继续？[Y/n] ",
@@ -133,9 +187,9 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineL
         match term::read_text(&question, "") {
             Some(a) if a.trim().is_empty() || a.trim().to_lowercase().starts_with('y') => {}
             _ => {
-                let _ =
-                    nosh_platform::paths::ensure_private_dir(&nosh_platform::paths::state_dir());
-                let _ = std::fs::write(declined_marker(), "");
+                if let Err(error) = remember_declined() {
+                    eprintln!("nosh: {error}");
+                }
                 return Err(EngineLoadError::Cancelled(
                     tr!(
                         format!("已取消下载；之后可以运行 `nosh model pull {}`", entry.id),
@@ -165,14 +219,7 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineL
             )
         );
     }
-    let opts = PullOptions {
-        selection: setup.selection,
-        ..PullOptions::default()
-    };
-    let r = hub
-        .pull(Some(&entry.id), &opts, &BarProgress::new())
-        .map_err(load_error)?;
-    let _ = std::fs::remove_file(declined_marker());
+    let r = pull_model(setup, &hub, &entry, &BarProgress::new())?;
     eprintln!(
         "{} {}",
         style::glyph("✔", "+"),
@@ -184,20 +231,110 @@ pub fn download(setup: &EngineSetup, ask: bool) -> Result<ResolvedModel, EngineL
     Ok(r)
 }
 
-/// First interactive start without a model: offer the download once.
-pub fn offer_first_download(setup: &EngineSetup) {
+fn model_choices(registry: &Registry, selected: &str, explicit: bool) -> (Vec<String>, usize) {
+    let default = registry
+        .models
+        .iter()
+        .position(|entry| entry.id == selected)
+        .expect("selected model belongs to the registry");
+    let mut choices = registry
+        .models
+        .iter()
+        .map(|entry| {
+            let label = if entry.id != selected {
+                ""
+            } else if explicit {
+                tr!(" [已选择]", " [selected]")
+            } else {
+                tr!(" [推荐]", " [recommended]")
+            };
+            format!(
+                "{} ({}, {}, {}){label}",
+                entry.id,
+                entry.display,
+                gb(entry.total_size()),
+                entry.license
+            )
+        })
+        .collect::<Vec<_>>();
+    choices.push(
+        tr!(
+            "暂不安装，直接使用 shell",
+            "Skip installation; use the shell"
+        )
+        .into(),
+    );
+    (choices, default)
+}
+
+/// Select without downloading; the caller runs the authorized work alongside the REPL.
+pub fn offer_first_model(setup: &mut EngineSetup, config_path: &Path) -> Option<Installation> {
     let styles = setup.theme.snapshot().styles(style::stderr());
-    match first_download_needed(setup) {
-        Ok(true) => {
-            if let Err(e) = download(setup, true) {
-                eprintln!("{}", styles.dim(&format!("nosh: {e}")));
-            }
+    let installation = match select_first_model(setup, config_path) {
+        Ok(selected) => selected.then(Installation::default),
+        Err(error) => {
+            eprintln!("{}", styles.dim(&format!("nosh: {error}")));
+            None
         }
-        Ok(false) => {}
-        // A configured model that cannot be used (`--model-path` missing or
-        // ambiguous) is reported; downloading another one would not help.
-        Err(e) => eprintln!("{}", styles.dim(&format!("nosh: {e}"))),
+    };
+    setup.installation = installation.clone();
+    installation
+}
+
+fn select_first_model(
+    setup: &mut EngineSetup,
+    config_path: &Path,
+) -> Result<bool, EngineLoadError> {
+    if !first_download_needed(setup)? || !term::available() {
+        return Ok(false);
     }
+    let registry = Registry::builtin();
+    let selected = registry
+        .lookup(setup.selected_model()?)
+        .map_err(load_error)?;
+    let (choices, default) = model_choices(&registry, &selected.id, setup.explicit_model);
+    term::flush_input().map_err(|error| format!("cannot prepare model selection: {error}"))?;
+    eprintln!(
+        "{}",
+        tr!(
+            "选择要安装的模型；确认后进入 shell，在后台自动下载并加载：",
+            "Choose a model to install; enter the shell while it downloads and loads in the background:"
+        )
+    );
+    for (index, choice) in choices.iter().enumerate() {
+        eprintln!("  {}. {choice}", index + 1);
+    }
+    let choice = term::read_choice(
+        tr!(
+            "选择 [↑/↓ 或数字，Enter 确认，Esc 跳过]: ",
+            "Model [Up/Down or number, Enter to select, Esc to skip]: "
+        ),
+        &choices,
+        default,
+    )
+    .map_err(|error| format!("cannot select a model: {error}"))?;
+    let Some(entry) = choice.and_then(|index| registry.models.get(index)) else {
+        remember_declined()?;
+        eprintln!(
+            "{}",
+            tr!(
+                "nosh: 已跳过模型安装；之后可用 `nosh model pull ID` 安装。",
+                "nosh: model installation skipped; use `nosh model pull ID` later."
+            )
+        );
+        return Ok(false);
+    };
+    setup.model_id = Ok(Some(entry.id.clone()));
+    if let Err(error) = crate::config::save_model(config_path, &entry.id) {
+        eprintln!(
+            "nosh: {}: {error}",
+            tr!(
+                "无法保存模型选择，仅本次会话使用",
+                "cannot save model selection; using it for this session only"
+            )
+        );
+    }
+    Ok(true)
 }
 
 /// Whether the first start should offer the download: only when no model is
@@ -208,9 +345,10 @@ fn first_download_needed(setup: &EngineSetup) -> Result<bool, EngineLoadError> {
     Ok(missing && !setup.no_download && !net::is_offline() && !declined_marker().exists())
 }
 
-/// Background loading uses installed models only, without terminal interaction.
+/// Ordinary background assistance uses installed models only.
 pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, EngineLoadError> {
     setup.selected_model()?;
+    setup.check_cancelled()?;
     let (engine, description, metadata) = if let Some(path) = std::env::var_os("NOSH_EVAL_WORKER") {
         crate::eval_worker::connect(std::path::Path::new(&path), setup)?
     } else {
@@ -231,15 +369,97 @@ pub fn load(setup: &EngineSetup, mode: LoadMode) -> Result<LoadedEngine, EngineL
     })
 }
 
+struct ModelProgress<'a> {
+    shared: SharedProgress,
+    display: &'a nosh_shell::AssistDisplay,
+    model: &'a str,
+}
+
+impl ModelProgress<'_> {
+    fn publish(&self) {
+        let status = self.shared.state.lock().unwrap().clone();
+        self.display.set_model_status(Some(tr!(
+            format!(
+                "AI: 下载 {}% {} ({})",
+                status.percent(),
+                self.model,
+                status.file
+            ),
+            format!(
+                "AI: downloading {}% {} ({})",
+                status.percent(),
+                self.model,
+                status.file
+            )
+        )));
+    }
+}
+
+impl Progress for ModelProgress<'_> {
+    fn start(&self, name: &str, total: u64, already: u64) {
+        self.shared.start(name, total, already);
+        self.publish();
+    }
+
+    fn advance(&self, pos: u64) {
+        self.shared.advance(pos);
+        self.publish();
+    }
+
+    fn note(&self, message: &str) {
+        self.shared.note(message);
+        self.display.set_model_status(Some(tr!(
+            format!("AI: 下载 {}: {message}", self.model),
+            format!("AI: downloading {}: {message}", self.model)
+        )));
+    }
+
+    fn finish(&self, ok: bool) {
+        self.shared.finish(ok);
+        self.display.set_model_status(Some(if ok {
+            tr!(
+                format!("AI: {} 校验通过", self.model),
+                format!("AI: {} verified", self.model)
+            )
+        } else {
+            tr!(
+                format!("AI: {} 下载已停止", self.model),
+                format!("AI: {} download stopped", self.model)
+            )
+        }));
+    }
+}
+
+fn download_selected(
+    setup: &EngineSetup,
+    mode: LoadMode,
+    installation: &Installation,
+) -> Result<ResolvedModel, EngineLoadError> {
+    let hub = ModelHub::new();
+    let entry = downloadable_model(setup, &hub)?;
+    if mode == LoadMode::Foreground {
+        return pull_model(setup, &hub, &entry, &BarProgress::new());
+    }
+    let progress = ModelProgress {
+        shared: SharedProgress::default(),
+        display: &installation.display,
+        model: &entry.id,
+    };
+    progress.note(tr!("正在准备下载", "preparing download"));
+    pull_model(setup, &hub, &entry, &progress)
+}
+
 pub(crate) fn load_local(
     setup: &EngineSetup,
     mode: LoadMode,
 ) -> Result<(LocalChatEngine, String, serde_json::Value), EngineLoadError> {
+    setup.check_cancelled()?;
     let device = setup.device.clone()?;
     let background = mode == LoadMode::Background;
-    let resolved = match locate(setup)? {
-        Some(r) => r,
-        None if background => {
+    let resolved = match (locate(setup)?, &setup.installation) {
+        (Some(r), _) => r,
+        (None, Some(installation)) => download_selected(setup, mode, installation)?,
+        (None, None) if background => {
             let hub = ModelHub::new();
             let entry = hub
                 .registry()
@@ -247,8 +467,15 @@ pub(crate) fn load_local(
                 .map_err(load_error)?;
             return Err(load_error(HubError::NotInstalled(entry.id.clone())));
         }
-        None => download(setup, true)?,
+        (None, None) => download(setup, true)?,
     };
+    setup.check_cancelled()?;
+    if let Some(installation) = &setup.installation {
+        installation.display.set_model_status(Some(tr!(
+            format!("AI: 加载 {}", resolved.entry.id),
+            format!("AI: loading {}", resolved.entry.id)
+        )));
+    }
     let terminal = style::stderr();
     if terminal.tty && !background {
         let status = format!(
@@ -285,6 +512,7 @@ pub(crate) fn load_local(
     }
     let engine =
         engine.map_err(|e| format!("failed to load {}: {e}", resolved.weights.display()))?;
+    setup.check_cancelled()?;
     let info = engine.info();
     if !background && info.device_selection.requested == nosh_llm::InferenceDevice::Auto {
         eprintln!(
@@ -365,11 +593,13 @@ mod tests {
             theme: Default::default(),
             device: Ok(nosh_llm::InferenceDevice::Cpu),
             model_id: Ok(None),
+            explicit_model: true,
             model_path: Some(model_path),
             context_length: 8192,
             seed: None,
             no_download: false,
             selection: SourceSelection::Auto,
+            installation: None,
         }
     }
 
@@ -404,12 +634,105 @@ mod tests {
                 .expect("local loader must honor the gate"),
             expected
         );
-        for mode in [LoadMode::Foreground, LoadMode::Background] {
-            let error = load(&setup, mode)
-                .err()
-                .expect("resource gate must run before any model or worker");
-            assert_eq!(error, expected);
+        for installation in [None, Some(Installation::default())] {
+            setup.installation = installation;
+            for mode in [LoadMode::Foreground, LoadMode::Background] {
+                let error = load(&setup, mode)
+                    .err()
+                    .expect("resource gate must run before any model or worker");
+                assert_eq!(error, expected);
+            }
         }
+    }
+
+    #[test]
+    fn picker_preselects_the_resource_recommendation_and_lists_all_models() {
+        let registry = Registry::builtin();
+        for recommended in [
+            "minicpm5-2b:q8_0",
+            "minicpm5-2b:q4_k_m",
+            "qwen3.5-0.8b:q8_0",
+        ] {
+            let (choices, default) = model_choices(&registry, recommended, false);
+            assert_eq!(choices.len(), registry.models.len() + 1);
+            assert_eq!(registry.models[default].id, recommended);
+            assert!(choices[default].contains(tr!("推荐", "recommended")));
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter(|label| label.contains(tr!("推荐", "recommended")))
+                    .count(),
+                1
+            );
+            for (choice, entry) in choices.iter().zip(&registry.models) {
+                assert!(choice.contains(&entry.id));
+                assert!(choice.contains(&gb(entry.total_size())));
+                assert!(choice.contains(&entry.license));
+            }
+        }
+        let requested = "minicpm5-1b:q4_k_m";
+        let (choices, default) = model_choices(&registry, requested, true);
+        assert_eq!(registry.models[default].id, requested);
+        assert!(choices[default].contains(tr!("已选择", "selected")));
+        assert!(
+            !choices
+                .iter()
+                .any(|label| label.contains(tr!("推荐", "recommended")))
+        );
+    }
+
+    #[test]
+    fn selected_download_progress_survives_edits_and_records_each_file() {
+        let display = nosh_shell::AssistDisplay::default();
+        let progress = ModelProgress {
+            shared: SharedProgress::default(),
+            display: &display,
+            model: "fixture:q4",
+        };
+        progress.start("weights.gguf", 1000, 250);
+        assert!(display.model_status().unwrap().contains("25%"));
+        progress.advance(800);
+        display.invalidate();
+        let status = display.model_status().unwrap();
+        assert!(
+            status.contains("80%") && status.contains("weights.gguf"),
+            "{status}"
+        );
+        progress.note("fixture source changed");
+        assert!(
+            display
+                .model_status()
+                .unwrap()
+                .contains("fixture source changed")
+        );
+        progress.finish(false);
+        assert!(progress.shared.state.lock().unwrap().failed);
+        progress.start("tokenizer.json", 100, 0);
+        assert!(display.model_status().unwrap().contains("0%"));
+        assert!(!progress.shared.state.lock().unwrap().failed);
+        progress.advance(100);
+        assert!(display.model_status().unwrap().contains("100%"));
+        progress.finish(true);
+        let snapshot = progress.shared.state.lock().unwrap().clone();
+        assert!(snapshot.done && !snapshot.failed);
+        assert_eq!(snapshot.percent(), 100);
+    }
+
+    #[test]
+    fn selecting_a_model_does_not_override_disabled_downloads_or_cancellation() {
+        let mut setup = setup("must-not-be-opened.gguf".into());
+        setup.no_download = true;
+        assert!(matches!(
+            download_selected(&setup, LoadMode::Background, &Installation::default(),),
+            Err(EngineLoadError::NotReady(_))
+        ));
+        let installation = Installation::default();
+        installation.cancel.cancel();
+        setup.installation = Some(installation);
+        assert!(matches!(
+            load(&setup, LoadMode::Background),
+            Err(EngineLoadError::Cancelled(_))
+        ));
     }
 }
 #[test]

@@ -146,8 +146,8 @@ fn hash_unless_cancelled(
     Ok(())
 }
 
-/// [`download_file`] with the cancellation check used while waiting.
-fn download_file_with(
+/// [`download_file`] with an operation-scoped cancellation check.
+pub(crate) fn download_file_with(
     file: &FileEntry,
     dir: &Path,
     cands: &[Candidate],

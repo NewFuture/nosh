@@ -26,7 +26,7 @@ pub struct LoadedEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadMode {
     Foreground,
-    /// Use installed models only, without terminal input or output.
+    /// No terminal input or output; downloads require prior user selection.
     Background,
 }
 
@@ -65,6 +65,7 @@ impl EngineLoadError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelAvailability {
     NotLoaded,
+    Loading,
     Ready(String),
     NotReady(String),
     Failed(String),
@@ -103,6 +104,8 @@ impl ShellAi {
                 theme: Default::default(),
                 loader,
                 agent: None,
+                preloaded: None,
+                model_display: None,
                 availability: availability.clone(),
             }),
             background: None,
@@ -124,6 +127,31 @@ impl ShellAi {
 
     pub fn mode(&self) -> ApprovalMode {
         self.cfg.mode
+    }
+
+    /// Warm the same shared engine without waiting for a command or probing its environment.
+    pub fn preload(
+        &mut self,
+        display: nosh_shell::AssistDisplay,
+        cancel: nosh_engine::CancelHandle,
+    ) -> Result<(), String> {
+        if self.background.is_some()
+            || self
+                .foreground
+                .as_ref()
+                .is_none_or(|state| state.agent.is_some() || state.preloaded.is_some())
+        {
+            return Err("model preloading must start before the engine is used".into());
+        }
+        let mut state = self.foreground.take().expect("unused engine");
+        self.display = display;
+        state.model_display = Some(self.display.clone());
+        *self
+            .availability
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = ModelAvailability::Loading;
+        self.background = Some(Worker::start(state, self.display.clone(), Some(cancel)));
+        Ok(())
     }
 
     pub fn availability(&self) -> ModelAvailability {
@@ -161,7 +189,23 @@ impl ShellAi {
         shell: &EmbeddedShell,
         retry_loading: bool,
     ) -> Result<&mut Agent, EngineLoadError> {
+        let interrupts = shell.interrupts().count();
+        if matches!(self.availability(), ModelAvailability::Loading) {
+            let status = self.display.model_status().unwrap_or_else(|| {
+                tr!(
+                    "正在加载模型；Ctrl+C 可取消下载",
+                    "loading model; Ctrl+C cancels the download"
+                )
+                .into()
+            });
+            eprintln!("nosh: {}", style::visible_text(&status));
+        }
         self.reclaim()?;
+        if shell.interrupts().count() != interrupts {
+            return Err(EngineLoadError::Cancelled(
+                tr!("已取消", "cancelled").into(),
+            ));
+        }
         if !retry_loading && let Some(error) = self.availability().loading_error() {
             return Err(error);
         }
@@ -292,6 +336,10 @@ impl AiHandler for ShellAi {
                         "not loaded (loads on first use)"
                     )
                     .to_owned(),
+                    ModelAvailability::Loading => self
+                        .display
+                        .model_status()
+                        .unwrap_or_else(|| tr!("正在加载", "loading").to_owned()),
                     ModelAvailability::Ready(description) => description,
                     ModelAvailability::NotReady(reason) => {
                         format!("{}: {reason}", tr!("未就绪", "not ready"))
@@ -472,7 +520,9 @@ impl AiHandler for ShellAi {
     }
 
     fn automatic_requests_available(&self) -> bool {
-        self.availability().loading_error().is_none()
+        let availability = self.availability();
+        !matches!(availability, ModelAvailability::Loading)
+            && availability.loading_error().is_none()
     }
 
     fn retry_assistance(&mut self) -> Result<(), String> {
@@ -536,7 +586,7 @@ impl AiHandler for ShellAi {
                 );
                 return;
             };
-            self.background = Some(Worker::start(state, self.display.clone()));
+            self.background = Some(Worker::start(state, self.display.clone(), None));
         }
         self.background
             .as_ref()
@@ -665,6 +715,198 @@ mod tests {
             ModelAvailability::Ready("fixture".into())
         );
         assert!(shell.recent_commands().is_empty());
+    }
+
+    fn wait_for_model(ai: &ShellAi) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while matches!(ai.availability(), ModelAvailability::Loading) {
+            assert!(
+                Instant::now() < deadline,
+                "model initialization did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn preloading_starts_without_commands_and_reuses_the_same_engine() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (started, loading) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let modes = Arc::new(Mutex::new(Vec::new()));
+        let observed = modes.clone();
+        let mut engine = Some(nosh_engine::MockChatEngine::with_responder(|_| {
+            vec![nosh_engine::mock::text("echo ready")]
+        }));
+        let mut ai = ShellAi::new(
+            Box::new(move |mode| {
+                observed.lock().unwrap().push(mode);
+                started.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(LoadedEngine {
+                    engine: Box::new(engine.take().expect("only one model")),
+                    description: "selected fixture".into(),
+                })
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        let display = nosh_shell::AssistDisplay::default();
+        let cancel = nosh_engine::CancelHandle::default();
+        ai.preload(display.clone(), cancel.clone()).unwrap();
+        loading.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(ai.availability(), ModelAvailability::Loading);
+        assert!(!ai.automatic_requests_available());
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        assert_eq!(shell.run_user_line("true").exit_code, 0);
+        ai.after_command(
+            &shell,
+            shell.recent_commands().last().unwrap().clone(),
+            None,
+        );
+        ai.command(&mut shell, ManagementCommand::Status);
+        ai.command(&mut shell, ManagementCommand::Ctx);
+        display.invalidate();
+        assert!(display.model_status().is_some());
+        release
+            .send(())
+            .expect("shell must not wait for model initialization");
+        wait_for_model(&ai);
+        assert_eq!(
+            ai.availability(),
+            ModelAvailability::Ready("selected fixture".into())
+        );
+        assert!(ai.automatic_requests_available());
+        ai.reclaim().unwrap();
+        let state = ai.foreground.as_ref().unwrap();
+        assert!(
+            state.agent.is_none(),
+            "preloading must not probe the agent environment"
+        );
+        assert!(state.preloaded.is_some());
+        assert!(
+            !cancel.is_cancelled(),
+            "reclaim must not cancel a future loading attempt"
+        );
+        assert_eq!(
+            ai.suggest(&mut shell, "print ready"),
+            SuggestionOutcome::Command("echo ready".into())
+        );
+        assert_eq!(*modes.lock().unwrap(), [LoadMode::Background]);
+    }
+
+    #[test]
+    fn cancelling_a_foreground_wait_does_not_restart_the_startup_download() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (started, loading) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed = loads.clone();
+        let mut ai = ShellAi::new(
+            Box::new(move |_| {
+                if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(3)).unwrap();
+                }
+                Err(EngineLoadError::Cancelled(
+                    "fixture download cancelled".into(),
+                ))
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        let display = nosh_shell::AssistDisplay::default();
+        ai.preload(display.clone(), nosh_engine::CancelHandle::default())
+            .unwrap();
+        loading.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        let interrupts = shell.interrupts();
+        let version = display.invalidate();
+        display.on_cancel(
+            version,
+            Arc::new(move || {
+                interrupts.fire();
+                release.send(()).unwrap();
+            }),
+        );
+
+        assert_eq!(
+            ai.suggest(&mut shell, "print ready"),
+            SuggestionOutcome::Cancelled
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(!ai.automatic_requests_available());
+    }
+
+    #[test]
+    fn preload_errors_and_cancellation_pause_automatic_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for error in [
+            EngineLoadError::Failed("fixture invalid model".into()),
+            EngineLoadError::Cancelled("fixture download cancelled".into()),
+        ] {
+            let loads = Arc::new(AtomicUsize::new(0));
+            let observed = loads.clone();
+            let mut ai = ShellAi::new(
+                Box::new(move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Err(error.clone())
+                }),
+                AgentConfig::default(),
+                Box::new(crate::NoTerminal),
+            );
+            let display = nosh_shell::AssistDisplay::default();
+            ai.preload(display.clone(), nosh_engine::CancelHandle::default())
+                .unwrap();
+            wait_for_model(&ai);
+            assert!(ai.availability().loading_error().is_some());
+            assert!(!ai.automatic_requests_available());
+            assert!(display.model_status().unwrap().contains("fixture"));
+            let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+            for _ in 0..3 {
+                shell.run_user_line("true");
+                ai.after_command(
+                    &shell,
+                    shell.recent_commands().last().unwrap().clone(),
+                    None,
+                );
+            }
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn shutdown_cancels_preloading_even_before_the_loader_starts() {
+        use std::time::{Duration, Instant};
+        let cancel = nosh_engine::CancelHandle::default();
+        let loading_cancel = cancel.clone();
+        let display = nosh_shell::AssistDisplay::default();
+        let mut ai = ShellAi::new(
+            Box::new(move |_| {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !loading_cancel.is_cancelled() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "shutdown did not cancel the loader"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(EngineLoadError::Cancelled(
+                    "fixture download cancelled".into(),
+                ))
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        ai.preload(display.clone(), cancel.clone()).unwrap();
+        drop(ai);
+        assert!(cancel.is_cancelled());
+        assert!(display.model_status().unwrap().contains("cancelled"));
     }
 
     fn wait_for_assistance(ai: &ShellAi) {
@@ -820,7 +1062,7 @@ mod tests {
             let version = ai.display.invalidate();
             ai.display
                 .on_cancel(version, Arc::new(move || release.send(()).unwrap()));
-            assert!(ai.automatic_requests_available());
+            assert!(!ai.automatic_requests_available());
 
             let request = AiRequest {
                 trigger,
