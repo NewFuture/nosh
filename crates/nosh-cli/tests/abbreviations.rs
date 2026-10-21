@@ -605,8 +605,18 @@ fn actual_binary_prefix_management_persists_add_disable_and_remove() {
 #[test]
 fn actual_binary_ll_and_la_use_confirmed_host_ls_flags() {
     let home = tempfile::tempdir().unwrap();
-    interactive_config(home.path(), "");
-    let mut terminal = launch(home.path(), true);
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(&git, "#!/bin/sh\n: > git-probed\nexec /bin/sleep 10\n").unwrap();
+    fs::set_permissions(git, fs::Permissions::from_mode(0o700)).unwrap();
+    // The real ls probe must not depend on Git or macOS toolchain cold startup.
+    interactive_config(
+        home.path(),
+        "[shell.abbreviations]\ndisabled = ['gst', 'gd', 'gds', 'gb', 'glo', 'glog']\n",
+    );
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let mut terminal = launch_with_path(home.path(), true, &path);
     wait_rule(&mut terminal, "ll", "ll -> ls -lh [builtin] available");
     wait_rule(&mut terminal, "la", "la -> ls -lAh [builtin] available");
     for (name, expansion) in [("ll", "ls -lh "), ("la", "ls -lAh ")] {
@@ -620,6 +630,7 @@ fn actual_binary_ll_and_la_use_confirmed_host_ls_flags() {
         terminal.wait_for("abbr-real> ");
     }
     finish(&mut terminal);
+    assert!(!home.path().join("git-probed").exists());
 }
 
 #[test]
