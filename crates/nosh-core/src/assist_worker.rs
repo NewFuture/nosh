@@ -16,6 +16,7 @@ pub(crate) struct EngineState {
     pub agent: Option<Agent>,
     pub preloaded: Option<crate::LoadedEngine>,
     pub model_display: Option<AssistDisplay>,
+    pub load_cancel: Option<CancelHandle>,
     pub availability: Arc<Mutex<ModelAvailability>>,
 }
 
@@ -149,16 +150,12 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub fn start(
-        state: EngineState,
-        display: AssistDisplay,
-        load_cancel: Option<CancelHandle>,
-    ) -> Self {
+    pub fn start(state: EngineState, display: AssistDisplay, preload: bool) -> Self {
         let context = state.agent.as_ref().and_then(Agent::context_usage);
+        let load_cancel = state.load_cancel.clone();
         let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
         let worker_mailbox = mailbox.clone();
         let worker_display = display.clone();
-        let preload = load_cancel.is_some();
         let thread = std::thread::spawn(move || {
             let mut state = state;
             if preload {

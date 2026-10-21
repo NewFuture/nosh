@@ -106,6 +106,7 @@ impl ShellAi {
                 agent: None,
                 preloaded: None,
                 model_display: None,
+                load_cancel: None,
                 availability: availability.clone(),
             }),
             background: None,
@@ -146,11 +147,12 @@ impl ShellAi {
         let mut state = self.foreground.take().expect("unused engine");
         self.display = display;
         state.model_display = Some(self.display.clone());
+        state.load_cancel = Some(cancel);
         *self
             .availability
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = ModelAvailability::Loading;
-        self.background = Some(Worker::start(state, self.display.clone(), Some(cancel)));
+        self.background = Some(Worker::start(state, self.display.clone(), true));
         Ok(())
     }
 
@@ -586,7 +588,7 @@ impl AiHandler for ShellAi {
                 );
                 return;
             };
-            self.background = Some(Worker::start(state, self.display.clone(), None));
+            self.background = Some(Worker::start(state, self.display.clone(), false));
         }
         self.background
             .as_ref()
@@ -878,6 +880,103 @@ mod tests {
             }
             assert_eq!(loads.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn shutdown_cancels_retried_installation_after_reclaim_with_model_lock_held() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct LockWait(mpsc::Sender<()>);
+
+        impl nosh_hub::Progress for LockWait {
+            fn start(&self, _: &str, _: u64, _: u64) {}
+            fn advance(&self, _: u64) {}
+            fn note(&self, _: &str) {
+                self.0.send(()).unwrap();
+            }
+            fn finish(&self, _: bool) {}
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let hub = nosh_hub::ModelHub::with_root(directory.path(), nosh_hub::Registry::builtin());
+        let model = hub.registry().default_model();
+        let model_directory = hub.user_model_dir(model);
+        std::fs::create_dir_all(&model_directory).unwrap();
+        let lock =
+            std::fs::File::create(model_directory.join(format!("{}.lock", model.tokenizer().name)))
+                .unwrap();
+        lock.try_lock().unwrap();
+        let (waiting, lock_wait) = mpsc::channel();
+        let progress = LockWait(waiting);
+        let cancel = nosh_engine::CancelHandle::default();
+        let loading_cancel = cancel.clone();
+        let mut attempts = 0;
+        let mut ai = ShellAi::new(
+            Box::new(move |mode| {
+                assert_eq!(mode, LoadMode::Background);
+                attempts += 1;
+                if attempts == 1 {
+                    return Err(EngineLoadError::Failed("fixture startup failure".into()));
+                }
+                let outcome = hub.pull_with_cancel(
+                    None,
+                    &nosh_hub::PullOptions {
+                        selection: nosh_hub::SourceSelection::parse("hf").unwrap(),
+                        ..Default::default()
+                    },
+                    &progress,
+                    &|| loading_cancel.is_cancelled(),
+                );
+                match outcome {
+                    Err(nosh_hub::HubError::Cancelled) => {
+                        Err(EngineLoadError::Cancelled("download cancelled".into()))
+                    }
+                    outcome => panic!("held model lock must end via cancellation: {outcome:?}"),
+                }
+            }),
+            AgentConfig::default(),
+            Box::new(crate::NoTerminal),
+        );
+        ai.preload(Default::default(), cancel.clone()).unwrap();
+        wait_for_model(&ai);
+        assert!(!ai.automatic_requests_available());
+
+        let mut shell = EmbeddedShell::new(Default::default()).unwrap();
+        ai.command(&mut shell, ManagementCommand::Mode(None));
+        assert!(ai.foreground.is_some());
+        assert!(!cancel.is_cancelled(), "reclaim must preserve installation");
+        ai.retry_assistance().unwrap();
+        assert_eq!(shell.run_user_line("true").exit_code, 0);
+        ai.after_command(
+            &shell,
+            shell.recent_commands().last().unwrap().clone(),
+            None,
+        );
+        let waiting = lock_wait.recv_timeout(Duration::from_secs(3));
+        if waiting.is_err() {
+            cancel.cancel();
+        }
+        waiting.expect("retried installation must reach the held model lock");
+
+        let (exited, exit) = mpsc::channel();
+        let timeout_cancel = cancel.clone();
+        let shutdown = std::thread::spawn(move || {
+            let result = exit.recv_timeout(Duration::from_secs(3));
+            if result.is_err() {
+                timeout_cancel.cancel();
+            }
+            result.is_ok()
+        });
+        drop(ai);
+        let _ = exited.send(());
+        assert!(
+            shutdown.join().unwrap(),
+            "shell exit did not cancel the retried download"
+        );
+        assert!(cancel.is_cancelled());
+        assert!(!model_directory.join("tokenizer.json.partial").exists());
+        drop(lock);
     }
 
     #[test]
