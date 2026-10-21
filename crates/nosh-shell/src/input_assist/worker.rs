@@ -11,6 +11,12 @@ use std::time::Instant;
 
 use super::*;
 
+#[cfg(windows)]
+#[path = "worker/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::accept_worker;
+
 #[cfg(unix)]
 type WorkerStream = UnixStream;
 #[cfg(windows)]
@@ -912,52 +918,12 @@ impl Worker {
         nosh_platform::process::inherit_runtime_environment(&mut command)?;
         let process = group.spawn(&mut command)?;
         let mut child = OwnedChild::new(process, group);
-        let connection = (|| {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "worker startup timed out",
-                    ));
-                }
-                if let Some(code) = child.exit_code()? {
-                    return Err(io::Error::other(format!(
-                        "worker exited during startup ({code})"
-                    )));
-                }
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-                        let mut received = [0; 32];
-                        match stream.read_exact(&mut received) {
-                            Ok(()) if received == token.as_bytes() => {
-                                stream.set_read_timeout(None)?;
-                                stream.set_nodelay(true)?;
-                                stream.set_nonblocking(true)?;
-                                return Ok(stream);
-                            }
-                            Ok(()) => continue,
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    io::ErrorKind::TimedOut
-                                        | io::ErrorKind::WouldBlock
-                                        | io::ErrorKind::UnexpectedEof
-                                ) =>
-                            {
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })();
+        let connection = accept_worker(
+            &listener,
+            &token,
+            Instant::now() + Duration::from_secs(3),
+            || child.exit_code(),
+        );
         let stream = match connection {
             Ok(stream) => stream,
             Err(error) => {

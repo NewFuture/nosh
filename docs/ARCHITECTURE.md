@@ -93,7 +93,7 @@ cargo build --release --locked
 cargo source prepare
 cargo build --release --locked -p nosh-cli
 .\target\release\nosh.exe --safe -c 'printf "native Windows\n"'
-cargo test -p nosh-cli -p nosh-permissions --test windows --locked
+cargo test -p nosh-cli -p nosh-permissions -p nosh-shell --test windows --locked
 cargo test -p nosh-permissions --lib windows_tests --locked
 cargo clippy --workspace --lib --bins --locked -- -D warnings
 ```
