@@ -128,7 +128,9 @@ def package(root: Path, assets: Path, version: str, target: str) -> None:
     archive = assets / f"nosh-{version}-{target}.{extension}"
     files = [binary, root / "LICENSE"]
     if windows:
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        with zipfile.ZipFile(
+            archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as output:
             for file in files:
                 output.write(file, arcname=file.name)
     else:

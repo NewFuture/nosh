@@ -110,6 +110,26 @@ class ReleaseTests(unittest.TestCase):
             tomllib.loads(self.manifest.read_text(encoding="utf-8")), expected
         )
 
+    def test_release_keeps_hot_paths_optimized_and_panics_recoverable(self):
+        manifest = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
+        profile = manifest["profile"]["release"]
+        self.assertEqual(profile["panic"], "unwind")
+        self.assertEqual(profile["opt-level"], 3)
+        overrides = profile.get("package", {})
+        self.assertNotIn("*", overrides)
+        for name in [
+            "nosh-cli", "nosh-llm", "candle-core", "candle-nn", "gemm",
+            "gemm-common", "gemm-f16", "gemm-f32", "gemm-f64",
+            "gemm-c32", "gemm-c64", "half", "tokenizers",
+            "regex", "regex-automata", "regex-syntax", "fancy-regex",
+            "aho-corasick", "memchr", "ring", "rustls",
+        ]:
+            with self.subTest(package=name):
+                self.assertEqual(overrides.get(name, {}).get("opt-level", 3), 3)
+        for name in ["brush-core", "brush-parser", "brush-builtins", "libsqlite3-sys"]:
+            with self.subTest(package=name):
+                self.assertEqual(overrides[name]["opt-level"], "s")
+
     def test_commits_manifest_and_lockfile_and_pushes_version(self):
         crate = self.root / "crate"
         (crate / "src").mkdir(parents=True)
@@ -216,6 +236,18 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(
                 path.with_name(path.name + ".sha256").read_text(), release.checksum(path)
             )
+
+    def test_windows_archive_uses_maximum_deflate_compression(self):
+        with mock.patch.object(
+            release.zipfile, "ZipFile", wraps=zipfile.ZipFile
+        ) as archive:
+            self.packages()
+        archive.assert_called_once_with(
+            self.assets / f"nosh-{VERSION}-{TARGETS[-1]}.zip",
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        )
 
     def test_wrong_executable_version_cannot_be_packaged(self):
         with mock.patch.object(

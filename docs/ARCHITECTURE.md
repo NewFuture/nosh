@@ -98,6 +98,10 @@ cargo test -p nosh-permissions --lib windows_tests --locked
 cargo clippy --workspace --lib --bins --locked -- -D warnings
 ```
 
+本地 `cargo build --release` 与发布流水线共用根 `Cargo.toml` 的构建配置：默认保持 `opt-level = 3`；brush 解释器、解析器、内建命令和 SQLite 使用包级 `"s"`，其余交互/UI、JSON/TOML 序列化、printf 格式化依赖及非推理业务 crate 使用 `"z"`。不全局降低依赖的优化级别：CLI 最终链接、`nosh-llm`、Candle、GEMM、half、tokenizers、正则匹配和 TLS 加密实现保留级别 3。继续使用 fat LTO、单 codegen unit 和符号剥离，不删减内建命令、模型或 Unicode 支持，也不使用依赖本机 CPU 的构建参数。
+
+`panic = "unwind"` 必须保留：AI 异常隔离与登录 shell 的故障恢复依赖 `catch_unwind`，不能为缩小文件而切换为 abort。`fastrel` 继承包级优化，但仍使用 thin LTO、多 codegen unit 与增量编译供本地迭代。
+
 Windows 工作树用 Windows Git/Rust 准备源码；需要 Unix 回归时可在 WSL 构建，但使用独立的 `CARGO_TARGET_DIR`，不用 Linux Git 操作 Windows `.git` 文件。离线准备、联调和补丁导出见[源码维护说明](REEDLINE-MAINTENANCE.md)。普通应用构建不要求 Python、Node 或 npm；完整评测工具链独立于运行时。
 
 Linux / macOS / WSL 下，按变更选择最小覆盖范围：
@@ -129,7 +133,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` |
 | Windows x64 | `x86_64-pc-windows-msvc` | `.zip` |
 
-五个平台并行构建 CPU 版，Linux 使用 Ubuntu 22.04 构建环境。归档命名为 `nosh-<版本>-<target>`，包含可执行文件和许可证，不打包模型或 CUDA。打包前执行产物的 `--version`，汇总时要求全部平台齐全并验证 SHA-256，随后生成统一的 `SHA256SUMS`。
+五个平台并行构建 CPU 版，Linux 使用 Ubuntu 22.04 构建环境。归档命名为 `nosh-<版本>-<target>`，包含可执行文件和许可证，不打包模型或 CUDA。Windows ZIP 使用最高级别的标准 DEFLATE 压缩，不压壳或改变解压方式。打包前执行产物的 `--version`，汇总时要求全部平台齐全并验证 SHA-256，随后生成统一的 `SHA256SUMS`。
 
 只有全部构建成功才自动创建指向版本提交的 `v<版本>` tag 和 Release，说明自动生成，`-rc.1` 等版本自动标为 prerelease。`gh release create` 先创建草稿、上传所有归档和校验文件，最后发布，兼容需在仓库设置中启用的 Immutable releases；不移动已有 tag，不覆盖已发布 Release。
 
