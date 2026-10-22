@@ -241,6 +241,10 @@ printf 'GNU Make 4.4\n'
     let mut ai = CompletionAi::default();
     let code = nosh_shell::repl::run(&mut shell, &mut ai, config);
     assert_eq!(code, 0);
+    eprintln!("{REPL_EXIT}");
+    if mode.ends_with("-delayed-teardown") {
+        thread::sleep(Duration::from_millis(600));
+    }
     if let Ok(pid) = std::fs::read_to_string(directory.join("sleep_pid")) {
         let pid: libc::pid_t = pid.trim().parse().unwrap();
         let deadline = Instant::now() + Duration::from_millis(300);
@@ -577,17 +581,34 @@ fn completion_slow_builtin_and_external_provider_do_not_block_edit_cancel_or_exi
             "{command}: {:?}",
             timings.input[2]
         );
+        let repl_exit = timings
+            .repl_exit
+            .expect("completion probe must report REPL shutdown");
         assert!(
-            timings.exit < Duration::from_millis(500),
-            "{command} exit: {:?}",
+            repl_exit < Duration::from_millis(500),
+            "{command} REPL exit: {repl_exit:?}; complete fixture exit: {:?}",
             timings.exit,
         );
         println!(
             "completion_{command}_edit_cancel_us={} exit_us={}",
             timings.input[2].as_micros(),
-            timings.exit.as_micros(),
+            repl_exit.as_micros(),
         );
     }
+}
+
+#[test]
+fn completion_shutdown_timing_excludes_fixture_teardown() {
+    let (result, _, timings) = fixture(
+        "repl-completion-delayed-teardown",
+        &[("completion> ", b"exit 0\r")],
+    );
+    unexecuted(&result);
+    assert!(timings.exit >= Duration::from_millis(600));
+    let repl_exit = timings
+        .repl_exit
+        .expect("missing completion shutdown marker");
+    assert!(repl_exit < Duration::from_millis(500), "{repl_exit:?}");
 }
 
 #[test]

@@ -118,10 +118,35 @@ brush-builtins = { path = ".nosh/brush/brush-builtins" }
 opt-level = 3
 
 [profile.release]
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "unwind"
 strip = true
+
+# Keep the interpreter/storage at "s", other UI/serialization code at "z",
+# and numerical kernels, regex matching and cryptography at level 3.
+[profile.release.package]
+bigdecimal = { opt-level = "z" }
+brush-builtins = { opt-level = "s" }
+brush-core = { opt-level = "s" }
+brush-parser = { opt-level = "s" }
+clap_builder = { opt-level = "z" }
+libsqlite3-sys = { opt-level = "s" }
+nosh-core = { opt-level = "z" }
+nosh-engine = { opt-level = "z" }
+nosh-hub = { opt-level = "z" }
+nosh-permissions = { opt-level = "z" }
+nosh-shell = { opt-level = "z" }
+num-bigint = { opt-level = "z" }
+reedline = { opt-level = "z" }
+serde = { opt-level = "z" }
+serde_core = { opt-level = "z" }
+serde_json = { opt-level = "z" }
+toml = { opt-level = "z" }
+toml_edit = { opt-level = "z" }
+toml_parser = { opt-level = "z" }
+uucore = { opt-level = "z" }
 
 # Faster local iteration for model tests: `cargo test --profile fastrel -- --ignored`.
 [profile.fastrel]

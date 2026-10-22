@@ -19,7 +19,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Run affected crate/test targets first. Interactive changes need CLI/PTY coverage.
-Native Windows regressions: `cargo test -p nosh-cli -p nosh-permissions --test windows --locked`.
+Native Windows regressions: `cargo test -p nosh-cli -p nosh-permissions -p nosh-shell --test windows --locked`.
 Windows production lint: `cargo clippy --workspace --lib --bins --locked -- -D warnings`.
 For evaluation changes, run relevant Python unittest modules from [eval](eval/README.md).
 Real-model tests and downloads are opt-in.

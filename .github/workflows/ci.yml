@@ -188,7 +188,7 @@ jobs:
       - name: native Windows production lint
         run: cargo clippy --workspace --lib --bins --locked -- -D warnings
       - name: native executable, shared session, ownership and ConPTY regressions
-        run: cargo test -p nosh-cli -p nosh-permissions --test windows --locked
+        run: cargo test -p nosh-cli -p nosh-permissions -p nosh-shell --test windows --locked
       - name: native Git recovery evidence regression
         run: cargo test -p nosh-permissions --lib windows_tests --locked
       - name: native CPU executable
