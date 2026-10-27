@@ -12,6 +12,10 @@ shell 与本地 agent 都代表当前用户操作，不是彼此隔离的权限�
 
 Agent 构造入口为 `task_messages`，必须传入调用方的权限 context。已由失败事实表示的同一 command ID 从最近三条命令摘要中排除；命令文本相同但 ID 不同的执行仍保留。
 
+最近命令按旧到新逐条展示，命令原文使用安全 `bash` 围栏，退出码表示原整条程序的结果，不表示被裁剪片段执行成功或失败。命令与必要的执行目录各最多 1,024 UTF-8 bytes，裁剪时分别标注 `command_truncated`／`execution_cwd_truncated`；目录仅在不同于当前 cwd 时附带，字符串元数据保留 JSON 转义。Agent 与 Next 共用此展示逻辑，不把多行命令拼成无边界的单行摘要，也不附历史输出。
+
+回复语言遵循用户本次明确选择，否则使用原始请求的语言；不从文件名、附件或失败命令中的 CJK 字符推导 `lang: zh`，也不把日文／韩文当作中文。此规则不改变输入分流所用的 CJK 检测。
+
 CommandAssist 的协议 User 是 nosh，不是终端用户。Generate/Fix/Next 都把本次任务、原始需求／命令、当前 cwd／可选 venv，以及适用的执行记录和失败证据集中在一个 User 任务包中；元数据使用键值段，原文使用安全文本围栏。System 只保留固定规则，终答反馈也由 nosh 以 User 消息发出，强调纯命令格式但不重复原始任务。不提供终端对话或 `ask_user`。Next 仅在用户命令成功后自动触发，没有手动目标入口；可附最多三条早于当前执行的真实用户命令快照，按旧到新排序，不自动推断 Goal 或绑定 Generate。不自动注入 README／AGENTS／manifest／Git 状态或 Agent 历史；原有查询和路径保护仍生效。详见 [CommandAssist](COMMAND-ASSIST.md)。
 
 用户终端输出仅由失败诊断入口按命令 ID 配对；普通请求不自动携带。Agent 继续使用 `[user_output]` 和同一对话去重，Fix 使用 User 包中的 `Terminal output (stdout/stderr not separated):`；二者保留相同的内部归属、完整性和 4,096 字节正文预算。Agent 模型视图省略耗时、原始字节计数和无异常标记，保留命令身份、执行 cwd、退出码、来源、状态及正文界定长度；Fix 在已有执行段之外仅补充必要的采集质量与正文。两者都不隐藏异常质量或缺失状态，宿主完整元数据不变。详见[输出采集设计](OUTPUT-CAPTURE.md)。
@@ -26,7 +30,7 @@ CommandAssist 的协议 User 是 nosh，不是终端用户。Generate/Fix/Next �
 |---|---|
 | cwd、项目类型／名称、脚本名、包管理器 | cwd 只出现一次；相同根省略，祖先根用相对路径；推断的 `manager_hint` 不证明已安装 |
 | 执行约束 | Rust edition／继承、有效 workspace、Python 要求、Node 模块类型；不展开普通包版本或完整依赖表 |
-| Git、语言、venv、真实失败 | head 为分支或短 SHA；已跟踪改动用明确的存在／无／未知表述，不把退出成功或无已跟踪改动说成整个工作区干净；失败保留命令与退出码 |
+| Git、venv、真实失败 | head 为分支或短 SHA；已跟踪改动用明确的存在／无／未知表述，不把退出成功或无已跟踪改动说成整个工作区干净；失败保留命令与退出码 |
 | 缺失与告警 | 未识别 manifest、无 Git、未知、受保护、不可读分别表达；未识别不等于目录为空或输入不存在 |
 
 固定的 `git status` 是普通的本地状态查询，Git 可在内部检查／哈希已跟踪文件，context 只保留 `dirty`，不携带正文。不会仅因工作区存在受保护文件而新增整仓库拦截；现有用户配置不变，查询失败则如实标为未知。
@@ -41,7 +45,6 @@ Agent 模型可见 context 使用标签行，不再输出 JSON 对象；内部�
 cwd: /work/app
 project: rust; name=app; edition=2021; workspace=true
 git: none detected
-lang: zh
 <|im_end|>
 <|im_start|>user
 编译<|im_end|>

@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use nosh_core::approval::{ApprovalResponse, Scripted};
+use nosh_core::command_assist::{AssistResult, generate};
 use nosh_core::{Agent, AgentConfig, Environment, RecordUi, TaskInput, TaskStatus, ToolSet};
 use nosh_engine::mock::{MockChatEngine, call, text};
 use nosh_permissions::ApprovalMode;
@@ -250,6 +251,143 @@ fn native_agent_read_and_grep_authorize_and_open_the_same_drive_path() {
             "{pair:?}"
         );
     }
+}
+
+#[test]
+fn native_prompt_keeps_the_request_and_recent_execution_scope() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("nested")).unwrap();
+    let mut shell = shell(home.path());
+    assert_eq!(shell.run_user_line("cd nested").exit_code, 0);
+    let long = format!("LONG='{}'\nfalse", "\u{65e5}\u{5fd7}".repeat(400));
+    assert_eq!(shell.run_user_line(&long).exit_code, 1);
+    let engine = MockChatEngine::new(vec![vec![text("done")]]);
+    let received = engine.received();
+    let specs = engine.specs();
+    let mut agent = Agent::new(
+        Box::new(engine),
+        AgentConfig::default(),
+        Environment::detect(&shell),
+        ToolSet::Full,
+    );
+    let request = "Explain \u{65e5}\u{5fd7}.txt in English.";
+    let outcome = agent.run_task(
+        &mut shell,
+        TaskInput::new(Trigger::Cli, request),
+        &mut Scripted::new([]),
+        &mut RecordUi::default(),
+    );
+    assert_eq!(outcome.status, TaskStatus::Completed, "{outcome:?}");
+    let received = received.lock().unwrap();
+    let [
+        nosh_engine::Message::System(context),
+        nosh_engine::Message::User(actual),
+    ] = received[0].as_slice()
+    else {
+        panic!("expected separate context and request");
+    };
+    assert_eq!(actual, request);
+    assert!(!context.contains("\nlang:"), "{context}");
+    assert!(context.contains("```bash\ncd nested\n```"), "{context}");
+    assert!(
+        context.contains(&format!("execution_cwd: {}", json!(home.path()))),
+        "{context}"
+    );
+    assert!(context.contains("command_truncated: true"), "{context}");
+    assert!(!context.contains(&long));
+    assert!(
+        specs.lock().unwrap()[0]
+            .system
+            .contains("Detected external commands (non-exhaustive):")
+    );
+}
+
+#[test]
+fn native_help_paths_are_literal_and_do_not_bypass_permissions() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("workspace");
+    let installed = home.path().join("program files (x86)~1");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&installed).unwrap();
+    let program = installed.join("nosh-help-fixture.exe");
+    fs::copy(env!("CARGO_BIN_EXE_nosh"), &program).unwrap();
+    let mut shell = shell(&workspace);
+    assert_eq!(
+        shell
+            .run_user_line(&format!("export PATH={}", quote(&installed)))
+            .exit_code,
+        0
+    );
+    let cfg = AgentConfig::default();
+    let mut engine = MockChatEngine::new(vec![
+        vec![call(
+            "command_help",
+            json!({"name": "nosh-help-fixture.exe"}),
+        )],
+        vec![text("echo ready")],
+    ]);
+    let received = engine.received();
+    let outcome = generate(&mut engine, &shell, "show the program help", &cfg).unwrap();
+    assert_eq!(outcome.result, AssistResult::Command("echo ready".into()));
+    let received = received.lock().unwrap();
+    let [nosh_engine::Message::Tool(result)] = received[1].as_slice() else {
+        panic!("expected help evidence");
+    };
+    assert!(result.starts_with("[command_help]\n"), "{result}");
+    assert!(result.contains("\"argument\":\"--help\""), "{result}");
+    drop(received);
+
+    for path in [program.clone(), program.canonicalize().unwrap()] {
+        for quote in ['\'', '"'] {
+            let name = format!("{quote}{}{quote}", path.display());
+            let mut engine = MockChatEngine::new(vec![
+                vec![call("command_help", json!({"name": name}))],
+                vec![text("[None]")],
+            ]);
+            let error = generate(&mut engine, &shell, "show the program help", &cfg).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("help query is not authorized; no program was executed"),
+                "{name:?}: {error}"
+            );
+        }
+    }
+    for name in [
+        r"\\nosh.invalid\share\tool.exe",
+        r"\\?\UNC\nosh.invalid\share\tool.exe",
+        r"\\.\PhysicalDrive0",
+        "//nosh.invalid/share/tool.exe",
+        r"\/nosh.invalid\share\tool.exe",
+        r"/\nosh.invalid/share/tool.exe",
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\tool.exe",
+    ] {
+        let mut engine = MockChatEngine::new(vec![
+            vec![call("command_help", json!({"name": name}))],
+            vec![text("[None]")],
+        ]);
+        let error = generate(&mut engine, &shell, "show the program help", &cfg).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("help queries do not support network or device paths"),
+            "{error}"
+        );
+    }
+    let missing = workspace.join("missing.exe");
+    let name = format!("\"{}\";touch marker", missing.display());
+    let mut engine = MockChatEngine::new(vec![
+        vec![call("command_help", json!({"name": name}))],
+        vec![text("[None]")],
+    ]);
+    let error = generate(&mut engine, &shell, "show the program help", &cfg).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("expected whitespace after the quoted program path"),
+        "{error}"
+    );
+    assert!(!workspace.join("marker").exists());
 }
 
 struct OwnedProbe(Child);

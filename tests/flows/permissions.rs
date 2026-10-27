@@ -868,9 +868,13 @@ fn unavailable_tools_are_rejected_before_approval_or_execution() {
         let specs = specs.lock().unwrap();
         if set == ToolSet::ReadOnly {
             assert!(specs[0].system.contains("read-only: use read_file, grep"));
-            assert!(!specs[0].system.contains("Available:"));
+            assert!(!specs[0].system.contains("Detected external commands"));
         } else {
-            assert!(specs[0].system.contains("Available:"));
+            assert!(
+                specs[0]
+                    .system
+                    .contains("Detected external commands (non-exhaustive):")
+            );
         }
         assert_eq!(
             tool_results(&received.lock().unwrap()),
