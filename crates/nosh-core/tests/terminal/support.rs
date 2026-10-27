@@ -367,6 +367,9 @@ impl Probe<'_> {
     }
 
     pub(super) fn run_with_timings(self) -> (String, String, ProbeTimings) {
+        // Concurrent terminal fixtures distort the sub-second latency assertions.
+        static TERMINAL: Mutex<()> = Mutex::new(());
+        let _terminal = TERMINAL.lock().unwrap_or_else(|error| error.into_inner());
         assert!(
             self.resizes.is_empty() || self.track_frames,
             "resize testing requires screen acknowledgement"
