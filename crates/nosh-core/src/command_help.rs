@@ -7,6 +7,8 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::{Component, Prefix};
 #[cfg(unix)]
 use std::process::{Child, ExitStatus};
 use std::process::{Command, Stdio};
@@ -33,7 +35,7 @@ pub(crate) fn spec() -> ToolSpec {
         parameters: json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "minLength": 1, "x-aliases": ["command", "command_name", "program"], "description": "Program name/path and optional subcommands, e.g. git commit. No flags or shell code."},
+                "name": {"type": "string", "minLength": 1, "x-aliases": ["command", "command_name", "program"], "description": "Program name/path and optional subcommands, e.g. git commit. Quote paths containing spaces. No flags or shell code."},
                 "query": {"type": "string", "minLength": 1, "x-aliases": ["keyword", "filter"], "description": "Case-insensitive literal keyword, phrase or option, e.g. gzip or -C. Omit for an overview."}
             },
             "required": ["name"],
@@ -60,20 +62,50 @@ impl<'a> HelpCommand<'a> {
         {
             return Err("invalid command name".into());
         }
-        let mut words = name.split_whitespace();
-        let program = words.next().ok_or("empty command name")?;
-        if program.starts_with('-')
-            || !program
-                .chars()
-                .all(|c| c.is_alphanumeric() || "_-./+".contains(c))
+        let input = name.trim();
+        let (program, rest) =
+            if let Some(quote) = input.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+                let (program, rest) = input[1..]
+                    .split_once(quote)
+                    .ok_or("unterminated program path quote")?;
+                if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                    return Err("expected whitespace after the quoted program path".into());
+                }
+                (program, rest)
+            } else {
+                input.split_once(char::is_whitespace).unwrap_or((input, ""))
+            };
+        let literal_path = if cfg!(windows) {
+            program.strip_prefix(r"\\?\").unwrap_or(program)
+        } else {
+            program
+        };
+        #[cfg(windows)]
+        if let Some(Component::Prefix(prefix)) = Path::new(program).components().next()
+            && !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        {
+            return Err("help queries do not support network or device paths".into());
+        }
+        if program.is_empty()
+            || program.starts_with('-')
+            || !literal_path.chars().all(|c| {
+                c.is_alphanumeric()
+                    || "_-./+ ()".contains(c)
+                    || (cfg!(windows) && "\\:".contains(c))
+            })
         {
             return Err("name must be a command name or path followed by plain subcommand names, not shell code".into());
         }
-        let mut subcommands: Vec<_> = words.collect();
+        let mut subcommands: Vec<_> = rest.split_whitespace().collect();
         let git = Path::new(program)
             .file_name()
             .and_then(|name| name.to_str())
-            == Some("git");
+            .is_some_and(|name| {
+                name == "git"
+                    || (cfg!(windows)
+                        && (name.eq_ignore_ascii_case("git")
+                            || name.eq_ignore_ascii_case("git.exe")))
+            });
         while subcommands
             .last()
             .is_some_and(|word| *word == "--help" || (git && *word == "-h"))

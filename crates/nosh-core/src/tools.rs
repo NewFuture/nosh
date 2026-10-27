@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nosh_engine::{ToolCall, ToolSpec};
-use nosh_shell::{CommandResult, OutputState, UserOutput};
+use nosh_shell::{CommandResult, OutputState, UserCommand, UserOutput};
 use serde_json::json;
 
 /// Characters of tool output fed back per call (~1.5K tokens).
@@ -190,6 +190,24 @@ pub(crate) fn format_key_values(metadata: &serde_json::Value) -> String {
         .map(|(key, value)| format!("{key}: {value}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+pub(crate) fn format_recent_command(command: &UserCommand, cwd: &Path) -> String {
+    let (line, truncated) = nosh_shell::user_output::bounded_metadata(&command.line);
+    let mut metadata = json!({"exit_code": command.exit});
+    if command.cwd != cwd {
+        let execution_cwd = command.cwd.to_string_lossy();
+        let (execution_cwd, cwd_truncated) =
+            nosh_shell::user_output::bounded_metadata(&execution_cwd);
+        metadata["execution_cwd"] = json!(execution_cwd);
+        if cwd_truncated {
+            metadata["execution_cwd_truncated"] = json!(true);
+        }
+    }
+    if truncated {
+        metadata["command_truncated"] = json!(true);
+    }
+    format!("{}\n{}", shell_block(line), format_key_values(&metadata))
 }
 
 pub(crate) fn text_block(text: &str) -> String {

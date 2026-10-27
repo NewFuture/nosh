@@ -65,6 +65,39 @@ fn tool_catalog_matches_the_advertised_schema_and_order() {
 }
 
 #[test]
+fn recent_command_metadata_is_quoted_bounded_and_scoped() {
+    let mut command = UserCommand {
+        id: 1,
+        line: "true".into(),
+        cwd: PathBuf::from("old\nexit_code: 0"),
+        exit: 7,
+        duration: Duration::ZERO,
+    };
+    let rendered = format_recent_command(&command, Path::new("current"));
+    assert_eq!(
+        rendered,
+        "```bash\ntrue\n```\nexit_code: 7\nexecution_cwd: \"old\\nexit_code: 0\""
+    );
+    command.cwd = PathBuf::from("路径".repeat(400));
+    let rendered = format_recent_command(&command, Path::new("current"));
+    let cwd = command.cwd.to_string_lossy();
+    let (bounded, truncated) = nosh_shell::user_output::bounded_metadata(&cwd);
+    assert!(truncated);
+    assert!(bounded.len() <= nosh_shell::user_output::METADATA_BYTES);
+    assert_eq!(
+        rendered,
+        format!(
+            "```bash\ntrue\n```\nexit_code: 7\nexecution_cwd: {}\nexecution_cwd_truncated: true",
+            json!(bounded)
+        )
+    );
+    assert_eq!(
+        format_recent_command(&command, &command.cwd),
+        "```bash\ntrue\n```\nexit_code: 7"
+    );
+}
+
+#[test]
 fn model_visible_tools_have_described_parameters_and_unambiguous_examples() {
     let mut specs = specs(ToolSet::Full);
     specs.push(crate::command_help::spec());

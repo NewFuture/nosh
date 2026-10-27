@@ -189,24 +189,8 @@ impl AssistRequest {
         if !self.recent.is_empty() {
             task.push_str("\n\nRecent user commands (oldest first; not a complete activity log):");
             for command in &self.recent {
-                let (line, truncated) = nosh_shell::user_output::bounded_metadata(&command.line);
-                let mut metadata = json!({"exit_code": command.exit});
-                if command.cwd != self.context.cwd {
-                    let cwd = command.cwd.to_string_lossy();
-                    let (cwd, cwd_truncated) = nosh_shell::user_output::bounded_metadata(&cwd);
-                    metadata["execution_cwd"] = json!(cwd);
-                    if cwd_truncated {
-                        metadata["execution_cwd_truncated"] = json!(true);
-                    }
-                }
-                if truncated {
-                    metadata["command_truncated"] = json!(true);
-                }
-                task.push_str(&format!(
-                    "\n\n{}\n{}",
-                    tools::shell_block(line),
-                    tools::format_key_values(&metadata),
-                ));
+                task.push_str("\n\n");
+                task.push_str(&tools::format_recent_command(command, &self.context.cwd));
             }
         }
         if self.intent == Intent::Next {

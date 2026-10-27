@@ -115,6 +115,16 @@ fn command_names_accept_literal_subcommands_but_not_shell_syntax_or_options() {
             vec!["remote", "add", "-h"],
         ),
         (
+            "\"/usr/bin/git\" commit --help",
+            "/usr/bin/git",
+            vec!["commit", "-h"],
+        ),
+        (
+            " '/usr/local/program files (x86)/git' remote add ",
+            "/usr/local/program files (x86)/git",
+            vec!["remote", "add", "-h"],
+        ),
+        (
             "docker compose build",
             "docker",
             vec!["compose", "build", "--help"],
@@ -148,6 +158,20 @@ fn command_names_accept_literal_subcommands_but_not_shell_syntax_or_options() {
         "git commit ../path",
         "-git commit",
         "git commit\u{202e}",
+        "\"git",
+        "'git",
+        "\"\" commit",
+        "\"git\"commit",
+        "'git'remote add",
+        "\"git\";touch marker",
+        "\"git\" && touch marker",
+        "\"$(touch marker)\"",
+        "\"git `touch marker`\"",
+        "\"git\" commit --amend",
+        "\"git\" 'commit'",
+        "'/tmp/tool'\\ --help",
+        "\"/tmp/tool\nname\"",
+        "\"/tmp/tool\tname\"",
     ] {
         assert!(HelpCommand::parse(name).is_err(), "{name:?}");
     }
@@ -708,6 +732,41 @@ fn external_query_uses_snapshot_identity_environment_cwd_and_only_the_help_flag(
         )));
         assert!(!body.contains("unexpected stdin"));
     }
+}
+
+#[test]
+fn quoted_local_program_paths_remain_denied_without_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed = dir.path().join("program files");
+    std::fs::create_dir(&installed).unwrap();
+    let program = installed.join("git");
+    std::fs::write(&program, "#!/bin/sh\ntouch ran\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shell = EmbeddedShell::new(ShellOptions {
+        working_dir: Some(dir.path().into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let commands = CommandSnapshot::capture(&shell).unwrap();
+    let cfg = AgentConfig::default();
+    let context = cfg.permission_context(&shell);
+    for name in [
+        format!("'{}' commit", program.display()),
+        format!("\"{}\" commit", program.display()),
+    ] {
+        let result = query(
+            &commands,
+            &context,
+            &cfg,
+            &tool(json!({"name": name})),
+            &CancelHandle::default(),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "help query is not authorized; no program was executed"
+        );
+    }
+    assert!(!dir.path().join("ran").exists());
 }
 
 #[test]

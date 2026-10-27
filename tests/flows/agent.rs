@@ -871,12 +871,7 @@ fn repl_pipeline_with_mock_engine() {
     }
     assert_eq!(received.lock().unwrap().len(), steps_before);
 
-    for (line, chinese) in [
-        ("帮我看看磁盘空间", true),
-        ("编译", true),
-        ("# 编译", true),
-        ("xqzvw_nosuch --help", false),
-    ] {
+    for line in ["帮我看看磁盘空间", "编译", "# 编译", "xqzvw_nosuch --help"] {
         p.process(&mut sh, &mut ai, &mut Ui, line);
         let rec = received.lock().unwrap();
         let Some(append) = rec.last() else {
@@ -888,8 +883,12 @@ fn repl_pipeline_with_mock_engine() {
         assert!(background.starts_with("[context]\n"), "{background}");
         assert!(!background.contains("trigger="), "{background}");
         assert!(context_field(background, "exit").is_none());
-        assert_eq!(context_field(background, "lang") == Some("zh"), chinese);
-        assert!(background.contains("[recent] pwd >"), "{background}");
+        assert!(context_field(background, "lang").is_none());
+        assert!(
+            background.contains("[recent] User commands"),
+            "{background}"
+        );
+        assert!(background.contains("```bash\npwd >"), "{background}");
         assert_eq!(request, line.trim_start_matches("# "));
     }
     let _ = std::fs::remove_dir_all(dir);

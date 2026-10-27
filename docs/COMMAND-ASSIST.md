@@ -41,7 +41,9 @@ User 任务包只包含当前意图。Generate/Next 以请求开头；Fix 先展
 
 工具用于核对事实，结果不构成新任务。上下文不足以支持明确命令时返回 `[None]`，不捏造目标、输入或终端用户回答。任务协议不按终端是否可交互分支；Agent 自己的背景规则和宿主权限保护不变。
 
-Fix 的修复约束只在初始 User 包中出现一次：`Fixing the error's cause is sufficient. Preserve the intended result and output format. Preserve existing data. Do not repeat steps that already worked or create placeholder input files to bypass an error.` 修复报错不意味着可以丢掉原任务需要的输出格式；例如不能把 gzip 归档退化为只去掉非法选项的未压缩归档。它约束模型建议，不是宿主文件系统保护器；完整程序校验只检查程序结构和命令可用性，不能证明不会覆盖数据。不能把格式合法或退出成功当作修复正确。
+Fix 的修复约束只在初始 User 包中出现一次：`Fixing the error's cause is sufficient. Preserve the intended result and output format. Preserve existing data. Do not repeat steps that already worked or create placeholder input files to bypass an error.`
+
+修复报错不意味着可以丢掉原任务需要的操作或输出格式；例如不能把创建归档改成解压，也不能把 gzip 归档退化为只去掉非法选项的未压缩归档。帮助和检查用于核实事实，不因错误输出建议查看帮助而成为新的修复目标。上述规则约束模型建议，不是宿主文件系统保护器；完整程序校验只检查程序结构和命令可用性，不能证明不会覆盖数据。不能把格式合法或退出成功当作修复正确。
 
 Fix 根据上一条命令和实际输出提出解决当前错误原因的命令，不要求把原命令改写一遍，也不要求本次建议完成整个原任务。例如输出证明归档父目录缺失时，仅建议创建该目录就是有效修复；也可以继续归档，但不能重放已经成功的移动步骤。宿主仍只保留真实的整条命令、退出码及输出，不推造子步骤状态。
 
@@ -57,7 +59,7 @@ Assistant：向 nosh 返回最终命令文本或 [None]
 
 Generate 保留固定前缀 `Give a shell command for:`，需求原文放入文本围栏，随后附 `Environment:`。不翻译、扩写或把需求改写成第三人称目标。即使需求最初来自终端，也由 nosh 构造协议 User 消息，不把这个内部会话变成终端聊天；原始请求对象不变。
 
-Generate 的首条 User 包在环境后追加一句 `Return the shell input itself, without wrapping the response in inline backticks or Markdown fences.`，区分命令正文与聊天中的行内代码包装。它只约束整条回复的展示包装，不禁止 shell 内部合法的引号或命令替换；宿主不自动去引号、去围栏或改写候选。Fix 不追加这句首轮强调，继续使用共享输出规则和已有的具体拒绝反馈。共享 System、Next 的任务包、终答反馈和完整程序校验不变。这是生成约束，不保证模型一定遵守。
+Generate 的首条 User 包在环境后追加一句 `Return the shell input itself, without wrapping the response in inline backticks or Markdown fences.`，区分命令正文与聊天中的行内代码包装。它只约束整条回复的展示包装，不禁止 shell 内部合法的引号或命令替换；宿主不自动去引号、去围栏或改写候选。Fix 不追加这句首轮强调，继续使用共享输出规则和已有的具体拒绝反馈。共享 System、Next 的任务包和完整程序校验不变。这是生成约束，不保证模型一定遵守。
 
 Generate 的职责是自然语言转命令，不是替用户执行需求。例如“查看 tar 帮助”应生成 `tar --help`；查询工具只在生成确有需要时辅助，未调用工具不构成质量失败。Next 则可以提出与现有任务有关的诊断或继续操作，不要求每条建议一次完成整个任务；没有依据时仍返回 `[None]`。
 
@@ -69,14 +71,14 @@ Generate/Fix/Next 的查询阶段使用 `ToolChoice::Auto`，终答阶段使用 
 
 默认终答阶段追加一条 nosh 的 User 请求：`Return only the final shell program for the task above. No explanation or Markdown fences. Return exactly [None] if no command is supported. Do not call tools.` 若因正文格式不合格进入纠正，在同一条消息前附 `Previous response rejected: {实际错误}`。这里再次强调终答格式，但不重复原命令、需求、意图说明或完整证据；它们仍在原会话历史中，尤其不能通过反复回显失败复合命令暗示从头重跑。终答同时启用上述 None 解码约束；若其他引擎仍返回工具调用，宿主拒绝且不执行。这是提示强化，不保证模型遵守，也不从 Markdown 提取命令。
 
-Fix 的拒绝反馈区分空回复、超出长度限制、隐藏字符、Markdown 围栏，以及不能作为完整 shell 输入的回复。最后一种可能是说明文字、语法错误或不可用命令，不通过额外自然语言分类器猜测具体原因。仅在 Fix 已发生正文拒绝时，终答请求改为：
+Fix 的拒绝反馈区分空回复、超出长度限制、隐藏字符、Markdown 围栏，以及不能作为完整 shell 输入的回复。最后一种可能是说明文字、语法错误或不可用命令，不通过额外自然语言分类器猜测具体原因。仅在 Fix 已发生正文拒绝时，终答请求使用修复文案：
 
 ```text
 Previous response rejected: command assistance: reply contains Markdown fences
 Return only shell code for the original repair task. No explanation or Markdown fences. Return exactly [None] if no repair is supported. Do not call tools.
 ```
 
-首行随实际拒绝原因变化。该反馈针对回复格式，而不是让模型再次解释原始命令为何失败；也不要求原样保留可能仍有错误的候选命令。原始任务、失败证据和被拒绝的 Assistant 回复都保留在会话中。Generate/Next 的拒绝文案与终答请求不变；没有正文拒绝、仅因达到最后预算步进入终答的 Fix 也沿用默认请求。校验条件、输出协议、一次纠正上限、查询错误处理和不执行建议的边界均不变。
+首行随实际拒绝原因变化。该反馈针对回复格式，而不是让模型再次解释原始命令为何失败；也不要求原样保留可能仍有错误的候选命令。原始任务、失败证据和被拒绝的 Assistant 回复都保留在会话中。Generate/Next 的拒绝文案与终答请求不变；没有拒绝、仅因达到最后预算步进入终答的 Fix 也沿用默认请求。输出协议、一次纠正上限和不执行建议的边界均不变。
 
 `SessionSpec.label` 仅供宿主观测区分 `agent` 与 `command_assist.<intent>.<foreground|background>`，不编码进模型输入。没有新增分类模型调用。
 
@@ -118,7 +120,9 @@ Fix 只接受匹配 command ID、命令正文及截断标记、退出码与执�
 
 命令辅助不注册 `exec`，不执行生成的目标操作，即使目标本身只读。查询仍受用户 deny 和保护路径限制；需要审批的查询返回明确错误，不在后台弹审批，不使用 YOLO 绕过命令辅助的能力上限。
 
-`name` 接受以空白分隔的命令路径与子命令名，例如 `git commit`、`git remote add`；不接受命令选项、重定向、管道、变量展开、引号或其他 shell 代码。宿主从快照解析第一个名称，把子命令作为独立 argv 传入，不经 shell 执行。普通程序追加固定 `--help`；Git 子命令使用已知的 `-h` usage 形式，避免 `--help` 启动 man／文档查看器。这不是失败后的盲试，不自动换程序或旗标重试。保留调用路径的 argv[0]，兼容多调用名程序。
+`name` 接受命令路径与以空白分隔的子命令名，例如 `git commit`、`git remote add`。程序路径可整体用单引号或双引号包裹以容纳空格，引号后必须是空白或结束；不拼接引号片段，不做 shell 转义、变量或命令替换。命令选项、重定向、管道、带引号的子命令和其他 shell 代码仍拒绝。原生 Windows 的盘符、反斜杠与本地盘符的 verbatim 路径前缀按字面保留；显式 UNC／网络和设备路径（包括混合分隔符写法）在查找前拒绝，不为核对帮助隐式访问这些目标。语法可解析不代表路径或程序已获授权，显式路径仍受原有权限检查，不能借此获得普通 PATH 名称的准入。
+
+宿主从快照解析程序，把子命令作为独立 argv 传入，不经 shell 执行。普通程序追加固定 `--help`；Git 子命令使用已知的 `-h` usage 形式，避免 `--help` 启动 man／文档查看器。这不是失败后的盲试，不自动换程序或旗标重试。保留调用路径的 argv[0]，兼容多调用名程序。
 
 权限分析和用户规则检查的是**实际完整调用**。Git 的已知内建子命令及部分多级子命令增加精确的短帮助识别；未知 Git 扩展／alias、其他不能判为 Safe 的调用仍明确拒绝。不会因为最后加了帮助旗标，就将任意程序、脚本或子命令当成只读。shell alias、function、本地／不透明程序和受保护路径的限制不变；builtin／keyword 不替换成同名外部命令。旧 `command_info` 不再注册或分派，`topic` 不保留为参数别名；`query="version"` 只搜索帮助里的 version，不执行 `--version`。
 
@@ -145,6 +149,8 @@ Fix 只接受匹配 command ID、命令正文及截断标记、退出码与执�
 完整程序必须非空，可以包含由换行或分号分隔的多个顶层语句；纯注释不算建议。三个意图共用具体拒绝原因：超出 16,384 字节、空回复、隐藏字符、Markdown 围栏或无效完整程序，不维护按意图区分的新旧文案。宿主完整解析并按顺序校验所有语句及可静态解析的命令，保留函数作用域、嵌套检查和递归预算。不会把顺序语句改写为 `&&`、提取 Markdown 中的代码或执行命令、替换与重定向；返回程序仍需用户明确执行。
 
 查询回合可以带说明文字或多个受限查询；说明只保留在会话／trace，不展示为候选或执行。每个查询仍单独检查权限、取消和期限。合法早期终答立即返回，不增加模型调用。早期正常结束、没有工具调用但正文校验失败时，nosh 将拒绝原因与终答要求合并为一条 User 反馈，在原预算内仅用下一步进入终答阶段，不无限重试。最后预算步也进入相同终答阶段，不再查询。终答仍无效、解析错误、截断、取消、超时和预算耗尽均明确失败；宿主不改写命令或把错误替换为 `[None]`。模型在纠正步骤自行返回 `[None]` 时仍受最后一次查询失败的防掩盖检查。
+
+解析器报告工具名、参数类型或缺失参数错误时，三个意图均直接失败，整轮不运行任何查询，包括同轮已解析成功的调用。不能把未完成的查询跳过后当作已有充分修复证据，也不能把同一回复中的 `[None]` 当作正常无建议。`Malformed`、`Truncated` 和非正常停止遵循相同的失败边界；这与执行查询后返回的真实工具错误不同。
 
 ### 内部任务，不提供终端对话
 

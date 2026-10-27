@@ -369,12 +369,16 @@ class ScriptedWorker:
                             sessions[sid] += len(request["append"]) + 1
                             turn = next(self.turns)
                             text, calls = turn.get("text", ""), turn.get("calls", [])
+                            errors = turn.get("errors", [])
                             for call in calls:
                                 self.send(connection, {"Event": {"ToolCall": call}})
+                            for error in errors:
+                                self.send(connection, {"Event": {"CallError": error}})
                             if text:
                                 self.send(connection, {"Event": {"Text": text}})
                             outcome = {
-                                "text": text, "think": "", "tool_calls": calls, "errors": [], "stop": "EndOfTurn",
+                                "text": text, "think": "", "tool_calls": calls, "errors": errors,
+                                "stop": turn.get("stop", "EndOfTurn"),
                                 "usage": {"prompt_tokens": 10, "cached_tokens": 20, "completion_tokens": 2,
                                           "prefill_secs": .001, "decode_secs": .001, "ttft_secs": .001,
                                           "context_used": 32, "context_max": 8192}}
@@ -878,6 +882,105 @@ class ProductionProxyTests(unittest.TestCase):
             self.assertFalse(capture["truncated"])
             self.assertFalse((root / "not-created").exists())
 
+    def test_fix_correction_keeps_original_request_and_prior_effects(self):
+        cases = [
+            {
+                "files": {"numbers.txt": "20\n3\n100\n1\n"},
+                "command": "head -n many numbers.txt",
+                "draft": "Use ten lines:\n```bash\nhead -n 10 numbers.txt\n```",
+            },
+            {
+                "files": {
+                    "submit.py": (
+                        "from pathlib import Path\nimport sys\n"
+                        "with Path('journal').open('a') as stream:\n"
+                        "    stream.write('submitted\\n')\n"
+                        "print('submitted; result unknown after timeout', file=sys.stderr)\n"
+                        "raise SystemExit(7)\n"
+                    ),
+                },
+                "command": "python3 submit.py",
+                "draft": "Try again:\n```bash\npython3 submit.py\n```",
+            },
+        ]
+        for number, case in enumerate(cases):
+            turns = [{"text": case["draft"]}, {"text": "[None]"}]
+            with self.subTest(command=case["command"]), ScriptedWorker(self.socket, turns) as server:
+                root, _, trace, env, argv = self.case(number, 0, capture_output="last", command_assist=True)
+                for name, content in case["files"].items():
+                    (root / name).write_text(content)
+                scenario = {"inputs": [case["command"]], "completions": [{"kind": "assist"}],
+                            "check": "fix-finalization"}
+                result = driver.run_repl(argv, root, env, 15, scenario, lambda *_: False)
+                self.assertIsNone(result.error, result.transcript)
+                self.assertIsNone(result.failure, result.transcript)
+                requests = list(server.requests)
+                steps = [request["append"] for request in requests if request["op"] == "step"]
+                self.assertEqual(len(steps), 2)
+                self.assertEqual(len(steps[1]), 1)
+                feedback = steps[1][0]["User"]
+                self.assertIn("Return only shell code for the original repair task.", feedback)
+                self.assertEqual(
+                    [request["keep"] for request in requests if request["op"] == "rewind"], [],
+                )
+                self.assertNotIn(case["command"], feedback)
+                self.assertNotIn(case["draft"], feedback)
+                self.assertEqual(
+                    [request["choice"] for request in requests if request["op"] == "choice"],
+                    [{"type": "auto"}, {"type": "none"}],
+                )
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                self.assertEqual(next(event["text"] for event in events if event["ev"] == "step_end"), case["draft"])
+                outcome, = observations.assistance_observations(events)
+                self.assertEqual(outcome["status"], "completed")
+                self.assertEqual(outcome["kind"], "none")
+                for name, content in case["files"].items():
+                    self.assertEqual((root / name).read_text(), content)
+                if number == 1:
+                    self.assertEqual((root / "journal").read_text(), "submitted\n")
+                self.assertEqual(outcome["execution"]["command"], case["command"])
+            self.socket.unlink()
+
+    def test_automatic_fix_rejects_call_errors_without_dispatching_the_batch(self):
+        original = "sh -c 'printf \"actual-error\\n\" >&2; exit 7'"
+        variants = [
+            ("UnknownTool", "EndOfTurn", "mkdir -p not-created", "failed", 1),
+            ("MissingParam", "EndOfTurn", "mkdir -p not-created", "failed", 1),
+            ("BadType", "EndOfTurn", "mkdir -p not-created", "failed", 1),
+            ("UnknownTool", "EndOfTurn", "[None]", "failed", 1),
+            ("Malformed", "EndOfTurn", "mkdir -p not-created", "failed", 1),
+            ("Truncated", "EndOfTurn", "mkdir -p not-created", "failed", 1),
+            ("UnknownTool", "MaxTokens", "mkdir -p not-created", "failed", 1),
+        ]
+        for number, (kind, stop, reply, status, count) in enumerate(variants):
+            error = {"kind": kind, "message": "invalid query arguments", "tool": "command"}
+            turns = [
+                {"calls": [{"name": "read_file", "args": {"path": "probe"}}],
+                 "errors": [error], "stop": stop},
+                {"text": reply},
+            ]
+            with self.subTest(kind=kind, stop=stop, reply=reply), ScriptedWorker(self.socket, turns) as server:
+                root, _, trace, env, argv = self.case(number, 0, capture_output="last", command_assist=True)
+                (root / "probe").write_text("MUST-NOT-BE-READ")
+                scenario = {"inputs": [original], "completions": [{"kind": "assist"}], "check": "fix-recovery"}
+                result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+                self.assertIsNone(result.error, result.transcript)
+                self.assertIsNone(result.failure, result.transcript)
+                requests = list(server.requests)
+                steps = [request["append"] for request in requests if request["op"] == "step"]
+                self.assertEqual(len(steps), count)
+                self.assertFalse(any("Tool" in message for step in steps for message in step))
+                self.assertNotIn("MUST-NOT-BE-READ", json.dumps(steps))
+                choices = [request["choice"] for request in requests if request["op"] == "choice"]
+                self.assertEqual(choices, [{"type": "auto"}])
+                events = [json.loads(line) for line in trace.read_text().splitlines()]
+                outcomes = observations.assistance_observations(events)
+                self.assertEqual([outcome["status"] for outcome in outcomes], [status])
+                self.assertNotIn("kind", outcomes[0])
+                self.assertNotIn("text", outcomes[0])
+                self.assertEqual(sorted(path.name for path in root.iterdir()), ["probe"])
+            self.socket.unlink()
+
     def test_suggest_accepts_complete_programs_without_executing_or_rewriting_them(self):
         cases = [
             ("printf first\nprintf second", 0),
@@ -1005,6 +1108,50 @@ class ProductionProxyTests(unittest.TestCase):
                 self.assertIn("\nfailed_command:", context)
                 self.assertIn("\n[user_output ", context)
                 self.assertIn("not-json", context)
+            self.socket.unlink()
+
+    def test_agent_prompt_keeps_language_choices_and_recent_execution_context(self):
+        for number, request in enumerate((
+            "Explain 日志.txt in English.",
+            "日本語で説明してください",
+            "한국어로 설명해 주세요",
+        )):
+            with self.subTest(request=request), ScriptedWorker(self.socket, [{"text": "done"}]) as server:
+                root, _, trace, env, argv = self.case(number, 0)
+                (root / "nested").mkdir()
+                original = "VALUE='日志'"
+                scenario = {
+                    "mode": "repl", "check": "agent-log",
+                    "inputs": ["sh -c 'printf \"previous failure\\n\" >&2; exit 7'",
+                               "cd nested", original, "# " + request],
+                    "completions": [
+                        {"kind": "shell", "exit_code": 7, "contains": ["previous failure"]},
+                        {"kind": "observe"},
+                        {"kind": "observe"},
+                        {"kind": "agent"},
+                    ],
+                }
+                result = driver.run_repl(argv + ["-i"], root, env, 15, scenario, lambda *_: False)
+                self.assertIsNone(result.error, result.transcript)
+                self.assertIsNone(result.failure, result.transcript)
+                self.assertEqual(result.exit_code, 0, result.transcript)
+                requests = list(server.requests)
+                spec, = (entry["spec"] for entry in requests if entry["op"] == "open")
+                self.assertEqual(spec["label"], "agent")
+                self.assertIn("Detected external commands (non-exhaustive):", spec["system"])
+                self.assertIn("Follow the user's explicit language choice", spec["system"])
+                append = next(entry["append"] for entry in requests if entry["op"] == "step")
+                self.assertEqual([message["User"] for message in append if "User" in message], [request])
+                context = next(message["System"] for message in append if "System" in message)
+                self.assertNotIn("\nlang:", context)
+                self.assertIn("\ncwd: " + str(root / "nested"), context)
+                recent = context.split("\n[recent] ", 1)[1]
+                self.assertLess(recent.index("previous failure"), recent.index("cd nested"))
+                self.assertLess(recent.index("cd nested"), recent.index("VALUE="))
+                self.assertEqual(recent.count("execution_cwd: " + json.dumps(str(root))), 2)
+                self.assertIn("```bash\n" + original + "\n```\nexit_code: 0", recent)
+                self.assertNotIn("command_truncated:", recent)
+                self.assertEqual(list((root / "nested").iterdir()), [])
             self.socket.unlink()
 
     def test_next_is_automatic_after_success_and_does_not_execute_its_suggestion(self):
