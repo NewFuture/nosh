@@ -77,6 +77,8 @@ CLI 的编辑、历史、主题、缩写、项目环境和 Bash 集成测试共�
 
 Linux CI 为评测器设置 `NOSH_TEST_BINARY`，把当前真实 CLI/PTY 与脚本化 worker 的无模型用例纳入正常回归，避免可选测试长期跳过后与接口或终端行为脱节。
 
+core 的终端测试夹具按进程串行运行，Windows CI 的原生 `windows` 测试目标使用 `-- --test-threads=1`，避免多个终端夹具及其 shell worker 争抢 runner 资源而触发交互延迟断言或补全期限；其它测试保留并行，不放宽生产查询期限或测试中的响应时间上限。不设置会被 probe 子进程继承的 `RUST_TEST_THREADS`。
+
 ## 开发入口
 
 使用 `rust-toolchain.toml` 固定的工具链，在 Linux / macOS / WSL 下准备依赖并构建：
