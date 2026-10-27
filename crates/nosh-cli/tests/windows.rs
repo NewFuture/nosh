@@ -306,7 +306,7 @@ fn native_prompt_keeps_the_request_and_recent_execution_scope() {
 fn native_help_paths_are_literal_and_do_not_bypass_permissions() {
     let home = tempfile::tempdir().unwrap();
     let workspace = home.path().join("workspace");
-    let installed = home.path().join("program files (x86)");
+    let installed = home.path().join("program files (x86)~1");
     fs::create_dir(&workspace).unwrap();
     fs::create_dir(&installed).unwrap();
     let program = installed.join("nosh-help-fixture.exe");
@@ -349,7 +349,7 @@ fn native_help_paths_are_literal_and_do_not_bypass_permissions() {
                 error
                     .to_string()
                     .contains("help query is not authorized; no program was executed"),
-                "{error}"
+                "{name:?}: {error}"
             );
         }
     }

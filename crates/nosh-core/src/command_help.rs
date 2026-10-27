@@ -91,7 +91,7 @@ impl<'a> HelpCommand<'a> {
             || !literal_path.chars().all(|c| {
                 c.is_alphanumeric()
                     || "_-./+ ()".contains(c)
-                    || (cfg!(windows) && "\\:".contains(c))
+                    || (cfg!(windows) && "\\:~".contains(c))
             })
         {
             return Err("name must be a command name or path followed by plain subcommand names, not shell code".into());
