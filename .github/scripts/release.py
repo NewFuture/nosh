@@ -129,6 +129,7 @@ def package(root: Path, assets: Path, version: str, target: str) -> None:
     asset.with_name(asset.name + ".sha256").write_text(
         checksum(asset), encoding="utf-8", newline="\n"
     )
+    shutil.copyfile(root / "LICENSE", assets / "LICENSE")
 
 
 def publish(assets: Path, version: str, commit: str, count: int) -> None:
@@ -146,6 +147,8 @@ def publish(assets: Path, version: str, commit: str, count: int) -> None:
         if binary.with_name(binary.name + ".sha256").read_text(encoding="utf-8") != expected:
             raise ValueError(f"Checksum mismatch: {binary.name}")
         checksums.append(expected)
+    license_file = assets / "LICENSE"
+    checksums.append(checksum(license_file))
     sums = assets / "SHA256SUMS"
     sums.write_text("".join(checksums), encoding="utf-8", newline="\n")
     repo = os.environ["GITHUB_REPOSITORY"]
@@ -154,7 +157,7 @@ def publish(assets: Path, version: str, commit: str, count: int) -> None:
     # gh uploads every asset to a draft before publishing an immutable release.
     subprocess.run(
         [
-            "gh", "release", "create", tag, *map(str, binaries), str(sums),
+            "gh", "release", "create", tag, *map(str, binaries), str(license_file), str(sums),
             "--repo", repo, "--target", commit, "--generate-notes",
             f"--prerelease={str(match['prerelease'] is not None).lower()}",
         ],

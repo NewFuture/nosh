@@ -135,7 +135,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | macOS Apple Silicon | `aarch64-apple-darwin` | 可执行文件（无扩展名） |
 | Windows x64 | `x86_64-pc-windows-msvc` | `.exe` |
 
-五个平台并行构建 CPU 版，Linux 使用 Ubuntu 22.04 构建环境。所有平台直接发布可执行文件，不打包 ZIP 或 tar.gz，也不打包模型或 CUDA。产物命名为 `nosh-<版本>-<target>`，Windows 追加 `.exe`；Linux/macOS 下载后需用 `chmod +x` 添加执行权限。发布前执行产物的 `--version`，汇总时要求全部平台齐全并验证 SHA-256，随后生成统一的 `SHA256SUMS`。
+五个平台并行构建 CPU 版，Linux 使用 Ubuntu 22.04 构建环境。所有平台直接发布可执行文件，不打包 ZIP 或 tar.gz，也不打包模型或 CUDA；许可证作为独立的 `LICENSE` 附件一同发布。产物命名为 `nosh-<版本>-<target>`，Windows 追加 `.exe`；Linux/macOS 下载后需用 `chmod +x` 添加执行权限。发布前执行产物的 `--version`，汇总时要求全部平台齐全并验证 SHA-256，随后生成包含可执行文件和许可证的统一 `SHA256SUMS`。
 
 只有全部构建成功才自动创建指向版本提交的 `v<版本>` tag 和 Release，说明自动生成，`-rc.1` 等版本自动标为 prerelease。`gh release create` 先创建草稿、上传所有产物和校验文件，最后发布，兼容需在仓库设置中启用的 Immutable releases；不移动已有 tag，不覆盖已发布 Release。
 

@@ -220,6 +220,9 @@ class ReleaseTests(unittest.TestCase):
     def test_packages_are_uncompressed_native_executables(self):
         self.packages()
         self.assertEqual(len(list(self.assets.glob("*.sha256"))), len(TARGETS))
+        self.assertEqual(
+            (self.assets / "LICENSE").read_bytes(), (self.root / "LICENSE").read_bytes()
+        )
         for target in TARGETS:
             extension = ".exe" if target.endswith("-windows-msvc") else ""
             path = self.assets / f"nosh-{VERSION}-{target}{extension}"
@@ -235,7 +238,19 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(list(self.assets.glob("*.zip")), [])
         self.assertEqual(list(self.assets.glob("*.tar.gz")), [])
         self.assertEqual(len(list(self.assets.glob("*.exe"))), 1)
-        self.assertEqual(len(list(self.assets.iterdir())), len(TARGETS) * 2)
+        self.assertEqual(len(list(self.assets.iterdir())), len(TARGETS) * 2 + 1)
+
+    def test_missing_license_prevents_publication(self):
+        self.packages()
+        (self.assets / "LICENSE").unlink()
+        with (
+            mock.patch.object(release.subprocess, "check_output") as api,
+            mock.patch.object(release.subprocess, "run") as run,
+        ):
+            with self.assertRaises(FileNotFoundError):
+                release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
+            api.assert_not_called()
+            run.assert_not_called()
 
     def test_wrong_executable_version_cannot_be_packaged(self):
         with mock.patch.object(
@@ -264,8 +279,8 @@ class ReleaseTests(unittest.TestCase):
                 release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["gh", "release", "create", f"v{VERSION}"])
-        files = command[4 : 4 + len(TARGETS) + 1]
-        self.assertEqual(len(files), len(TARGETS) + 1)
+        files = command[4 : 4 + len(TARGETS) + 2]
+        self.assertEqual(len(files), len(TARGETS) + 2)
         self.assertEqual(Path(files[-1]).name, "SHA256SUMS")
         self.assertCountEqual(
             [Path(file).name for file in files[:-1]],
@@ -273,13 +288,17 @@ class ReleaseTests(unittest.TestCase):
                 f"nosh-{VERSION}-{target}"
                 + (".exe" if target.endswith("-windows-msvc") else "")
                 for target in TARGETS
-            ],
+            ] + ["LICENSE"],
         )
         self.assertEqual(command[command.index("--target") + 1], COMMIT)
         self.assertIn("--prerelease=true", command)
         self.assertNotIn("--clobber", command)
         self.assertEqual(
-            len((self.assets / "SHA256SUMS").read_text().splitlines()), len(TARGETS)
+            (self.assets / "SHA256SUMS").read_text().splitlines(),
+            [
+                release.checksum(Path(file)).strip()
+                for file in files[:-1]
+            ],
         )
         self.assertTrue(run.call_args.kwargs["check"])
 
