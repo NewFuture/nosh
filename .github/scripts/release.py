@@ -6,10 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
-import tarfile
 import tomllib
-import zipfile
 
 
 NUMBER = r"(?:0|[1-9][0-9]*)"
@@ -110,10 +109,10 @@ def commit_version(root: Path, version: str) -> None:
         output.write(f"version={version}\ncommit={commit}\n")
 
 
-def checksum(archive: Path) -> str:
-    with archive.open("rb") as stream:
+def checksum(asset: Path) -> str:
+    with asset.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    return f"{digest}  {archive.name}\n"
+    return f"{digest}  {asset.name}\n"
 
 
 def package(root: Path, assets: Path, version: str, target: str) -> None:
@@ -124,42 +123,28 @@ def package(root: Path, assets: Path, version: str, target: str) -> None:
     if actual.splitlines() != [f"nosh {version}"]:
         raise ValueError(f"Unexpected executable version: {actual!r}")
     assets.mkdir(parents=True, exist_ok=True)
-    extension = "zip" if windows else "tar.gz"
-    archive = assets / f"nosh-{version}-{target}.{extension}"
-    files = [binary, root / "LICENSE"]
-    if windows:
-        with zipfile.ZipFile(
-            archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
-        ) as output:
-            for file in files:
-                output.write(file, arcname=file.name)
-    else:
-        with tarfile.open(archive, "w:gz") as output:
-            for file in files:
-                member = tarfile.TarInfo(file.name)
-                member.size = file.stat().st_size
-                member.mode = 0o755 if file == binary else 0o644
-                with file.open("rb") as stream:
-                    output.addfile(member, stream)
-    archive.with_name(archive.name + ".sha256").write_text(
-        checksum(archive), encoding="utf-8", newline="\n"
+    extension = ".exe" if windows else ""
+    asset = assets / f"nosh-{version}-{target}{extension}"
+    shutil.copy2(binary, asset)
+    asset.with_name(asset.name + ".sha256").write_text(
+        checksum(asset), encoding="utf-8", newline="\n"
     )
 
 
 def publish(assets: Path, version: str, commit: str, count: int) -> None:
     match = parse_version(version)
-    archives = sorted(
+    binaries = sorted(
         file
         for file in assets.glob(f"nosh-{version}-*")
-        if file.name.endswith((".zip", ".tar.gz"))
+        if file.name.endswith(("-linux-gnu", "-apple-darwin", "-windows-msvc.exe"))
     )
-    if count < 1 or len(archives) != count:
-        raise ValueError(f"Expected {count} platform archives, found {len(archives)}.")
+    if count < 1 or len(binaries) != count:
+        raise ValueError(f"Expected {count} platform assets, found {len(binaries)}.")
     checksums = []
-    for archive in archives:
-        expected = checksum(archive)
-        if archive.with_name(archive.name + ".sha256").read_text(encoding="utf-8") != expected:
-            raise ValueError(f"Checksum mismatch: {archive.name}")
+    for binary in binaries:
+        expected = checksum(binary)
+        if binary.with_name(binary.name + ".sha256").read_text(encoding="utf-8") != expected:
+            raise ValueError(f"Checksum mismatch: {binary.name}")
         checksums.append(expected)
     sums = assets / "SHA256SUMS"
     sums.write_text("".join(checksums), encoding="utf-8", newline="\n")
@@ -169,7 +154,7 @@ def publish(assets: Path, version: str, commit: str, count: int) -> None:
     # gh uploads every asset to a draft before publishing an immutable release.
     subprocess.run(
         [
-            "gh", "release", "create", tag, *map(str, archives), str(sums),
+            "gh", "release", "create", tag, *map(str, binaries), str(sums),
             "--repo", repo, "--target", commit, "--generate-notes",
             f"--prerelease={str(match['prerelease'] is not None).lower()}",
         ],
