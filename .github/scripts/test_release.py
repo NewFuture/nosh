@@ -4,12 +4,10 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import tomllib
 import unittest
 from unittest import mock
-import zipfile
 
 import release
 
@@ -219,35 +217,40 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertFalse(self.output.exists())
 
-    def test_archives_include_native_executable_and_license(self):
+    def test_packages_are_uncompressed_native_executables(self):
         self.packages()
         self.assertEqual(len(list(self.assets.glob("*.sha256"))), len(TARGETS))
+        self.assertEqual(
+            (self.assets / "LICENSE").read_bytes(), (self.root / "LICENSE").read_bytes()
+        )
         for target in TARGETS:
-            if target.endswith("-windows-msvc"):
-                path = self.assets / f"nosh-{VERSION}-{target}.zip"
-                with zipfile.ZipFile(path) as archive:
-                    self.assertCountEqual(archive.namelist(), ["nosh.exe", "LICENSE"])
-                    self.assertEqual(archive.read("nosh.exe"), b"test executable")
-            else:
-                path = self.assets / f"nosh-{VERSION}-{target}.tar.gz"
-                with tarfile.open(path) as archive:
-                    self.assertCountEqual(archive.getnames(), ["nosh", "LICENSE"])
-                    self.assertTrue(archive.getmember("nosh").mode & 0o111)
+            extension = ".exe" if target.endswith("-windows-msvc") else ""
+            path = self.assets / f"nosh-{VERSION}-{target}{extension}"
+            self.assertEqual(path.read_bytes(), b"test executable")
+            if os.name != "nt":
+                self.assertTrue(path.stat().st_mode & 0o111)
             self.assertEqual(
                 path.with_name(path.name + ".sha256").read_text(), release.checksum(path)
             )
 
-    def test_windows_archive_uses_maximum_deflate_compression(self):
-        with mock.patch.object(
-            release.zipfile, "ZipFile", wraps=zipfile.ZipFile
-        ) as archive:
-            self.packages()
-        archive.assert_called_once_with(
-            self.assets / f"nosh-{VERSION}-{TARGETS[-1]}.zip",
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-        )
+    def test_executables_are_packaged_without_archives(self):
+        self.packages()
+        self.assertEqual(list(self.assets.glob("*.zip")), [])
+        self.assertEqual(list(self.assets.glob("*.tar.gz")), [])
+        self.assertEqual(len(list(self.assets.glob("*.exe"))), 1)
+        self.assertEqual(len(list(self.assets.iterdir())), len(TARGETS) * 2 + 1)
+
+    def test_missing_license_prevents_publication(self):
+        self.packages()
+        (self.assets / "LICENSE").unlink()
+        with (
+            mock.patch.object(release.subprocess, "check_output") as api,
+            mock.patch.object(release.subprocess, "run") as run,
+        ):
+            with self.assertRaises(FileNotFoundError):
+                release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
+            api.assert_not_called()
+            run.assert_not_called()
 
     def test_wrong_executable_version_cannot_be_packaged(self):
         with mock.patch.object(
@@ -260,7 +263,7 @@ class ReleaseTests(unittest.TestCase):
     def test_every_platform_and_checksum_is_required_before_publication(self):
         self.packages()
         with mock.patch.object(release.subprocess, "check_output") as api:
-            archive = next(self.assets.glob("*.zip"))
+            archive = next(self.assets.glob("*.exe"))
             archive.unlink()
             with self.assertRaisesRegex(ValueError, "found 4"):
                 release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
@@ -269,21 +272,33 @@ class ReleaseTests(unittest.TestCase):
                 release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
             api.assert_not_called()
 
-    def test_publishes_all_archives_together_for_the_version_commit(self):
+    def test_publishes_all_assets_together_for_the_version_commit(self):
         self.packages()
         with mock.patch.object(release.subprocess, "check_output", return_value="[]"):
             with mock.patch.object(release.subprocess, "run") as run:
                 release.publish(self.assets, VERSION, COMMIT, len(TARGETS))
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["gh", "release", "create", f"v{VERSION}"])
-        files = command[4 : 4 + len(TARGETS) + 1]
-        self.assertEqual(len(files), len(TARGETS) + 1)
+        files = command[4 : 4 + len(TARGETS) + 2]
+        self.assertEqual(len(files), len(TARGETS) + 2)
         self.assertEqual(Path(files[-1]).name, "SHA256SUMS")
+        self.assertCountEqual(
+            [Path(file).name for file in files[:-1]],
+            [
+                f"nosh-{VERSION}-{target}"
+                + (".exe" if target.endswith("-windows-msvc") else "")
+                for target in TARGETS
+            ] + ["LICENSE"],
+        )
         self.assertEqual(command[command.index("--target") + 1], COMMIT)
         self.assertIn("--prerelease=true", command)
         self.assertNotIn("--clobber", command)
         self.assertEqual(
-            len((self.assets / "SHA256SUMS").read_text().splitlines()), len(TARGETS)
+            (self.assets / "SHA256SUMS").read_text().splitlines(),
+            [
+                release.checksum(Path(file)).strip()
+                for file in files[:-1]
+            ],
         )
         self.assertTrue(run.call_args.kwargs["check"])
 
