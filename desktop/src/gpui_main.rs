@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod gpui_view;
+mod gpui_input;
+mod gpui_terminal;
+mod gpui_workbench;
 
 use clap::Parser;
 use gpui::{
     App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
-use gpui_view::{Desktop, Options};
+use gpui_workbench::{Desktop, Options};
 
 fn main() {
     let options = Options::parse();
@@ -17,7 +19,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(800.), px(540.))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("nosh - GPUI desktop experiment".into()),
+                    title: Some("nosh - GPUI Workbench".into()),
                     ..Default::default()
                 }),
                 ..Default::default()

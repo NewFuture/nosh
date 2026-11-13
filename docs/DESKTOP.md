@@ -103,7 +103,7 @@ SSH 断开不保证服务器上的程序停止，不代表回滚。重新连接�
 
 ## GPUI 本地验证入口
 
-此分支额外提供原生 `nosh-gpui`，窗口标题为 `nosh - GPUI desktop experiment`。
+此分支额外提供原生 `nosh-gpui`，窗口标题为 `nosh - GPUI Workbench`。
 它固定使用 crates.io 的 Apache-2.0 `gpui = 0.2.2`，不是 WebView，也没有复制
 Zed 的 GPL 终端模块。egui 的 `nosh-desktop` 入口保留，两个入口共用 Alacritty
 终端、ConPTY 生命周期及 OpenSSH 参数校验。CLI 的零 OSC 缓冲解析器仍独立。
@@ -116,20 +116,34 @@ cargo build -p nosh-cli -p nosh-desktop --features gpui --locked
 .\target\debug\nosh-gpui.exe --cwd 'C:\work tree'
 ```
 
-使用 `+ Local` 新建真实 nosh 标签，`+ SSH` 打开包含名称、主机、用户、端口、
-身份文件及跳板机的连接表单。空白可选字段使用 OpenSSH 配置；失败保留原始输出
-与退出码。连接进程存活不代表认证成功。点击标签或 Ctrl+Tab / Ctrl+Shift+Tab
-切换；Ctrl+Shift+T 新建本地标签，Ctrl+Shift+W 请求关闭当前标签。
-窗口关闭和标签关闭均要求确认，随后回收 PTY 与本地进程。
+工作台使用浅色工作区与全宽深色终端，不保留旧实验界面的固定连接侧栏。
+底部会话卡片显示本地/SSH 类型、名称及真实进程状态；点击卡片或
+Ctrl+Tab / Ctrl+Shift+Tab 切换，切换不重启进程。`Session board` / `New session`
+打开独立会话板，可选择本机 nosh、建立 SSH 连接或重新打开保存的 SSH 目标。
+Ctrl+Shift+T 直接新建本地会话，Ctrl+Shift+W 请求关闭当前会话。
+
+SSH 在右侧抽屉中配置主机、显示名称、用户、端口、身份文件及跳板机。
+显示名称为空时使用主机；空白可选字段使用 OpenSSH 配置。`Connect` 只连接一次，
+`Save target and connect` 另存连接元数据。终端继续显示原始 SSH 输出与退出码，
+连接进程存活不代表认证成功。连接抽屉打开时底层终端输入暂停。
+
+点击会话卡片的 `x` 或关闭窗口会打开模态确认，目标绑定稳定的会话 ID。
+确认期间按键、剪贴板粘贴、原生文本提交和 IME 预编辑都不能写入 PTY，也不能
+点击背后的会话或按钮。默认选中保留会话：Enter 保留，Escape 始终保留；
+Tab 或左右键切换按钮，显式选中关闭后 Enter 才确认，或直接点击关闭按钮。
+确认后回收 PTY 与本地进程；SSH 远端程序不保证停止。
 
 终端使用 GPUI 原生字体与绘制，支持 ANSI 颜色、备用屏幕、键盘/Unicode 输入、
 窗口缩放、滚动历史、拖动选择、Ctrl+Shift+C/V 复制粘贴及 Ctrl+加号/减号
-字体缩放（Ctrl+0 重置）。PTY 协议查询仍在 I/O 路径回复，后台标签不依赖绘制。
-SSH 表单当前为轻量输入：文字在末尾编辑，Backspace 删除，Ctrl+A 全选替换，
-Ctrl+C/V 复制粘贴，Tab 切换字段。不是完整文本编辑器。
+字体缩放（Ctrl+0 重置）；终端工具栏也提供复制、粘贴和缩放按钮。
+PTY 协议查询仍在 I/O 路径回复，后台会话不依赖绘制。
+SSH 字段支持点击定位、左右/Home/End、Shift 扩选、Backspace/Delete、
+Ctrl+A/C/X/V、UTF-16 范围替换及 IME 预编辑。Tab 按可见字段顺序切换，
+Enter 连接一次，Escape 返回终端；编辑键不会落入背后的 PTY。
+这不是完整富文本编辑器，尚不提供单词/字素级导航、撤销或鼠标拖动扩选。
 
 GPUI 设置单独保存在系统用户配置目录的 `nosh/desktop-gpui.json`，不覆盖 egui
-配置；保存的连接可点击重新打开。损坏配置禁用保存并报告错误。此实验尚未迁移
+配置；保存的连接在会话板中重新打开。损坏配置禁用保存并报告错误。此实验尚未迁移
 egui 的独立 AI 建议面板、主题切换和连接删除按钮；AI 仍通过真实 nosh 终端显式
 调用，不把本地上下文用于 SSH。尚不支持终端鼠标协议上报、图片协议或完整
 可访问性语义。此入口只承诺本次 Windows 原生验证，其它平台尚未运行验证。
@@ -138,6 +152,9 @@ egui 的独立 AI 建议面板、主题切换和连接删除按钮；AI 仍通�
 cargo test -p nosh-desktop --features gpui --locked -- --test-threads=1
 cargo clippy -p nosh-desktop --features gpui --all-targets --locked -- -D warnings
 ```
+
+GPUI 回归额外覆盖模态输入隔离、默认保留/显式关闭、表单 Unicode 编辑及大小限制；
+真实窗口交互仍需本机图形会话验证，不以无窗口测试替代原生运行。
 
 ## 回归
 
