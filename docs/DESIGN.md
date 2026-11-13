@@ -27,6 +27,8 @@ nosh init bash                     # 只输出现有 Bash 的集成脚本
 
 支持 Linux（含 WSL）、macOS 和 Windows x64 的本地 shell、共享会话、Agent、命令辅助、模型下载与离线使用。默认 CPU 推理，Linux/WSL 可显式构建单卡 CUDA；Windows 首版范围见 §4.6。远程会话服务、跨进程共享模型、沙箱和自动回滚均不提供。
 
+可选的[纯 Rust 桌面入口](DESKTOP.md)提供本地 CLI 与系统 OpenSSH 的真实 PTY 多标签终端，以及独立的本地命令建议。它不提供结构化远程 Agent 或远程共享会话服务，也不改变下文 CLI 的状态与审批契约。
+
 现有 Bash 可通过 `eval "$(nosh init bash)"` 接入主动建议，要求 Bash 5.1+、交互 Readline 和可用终端；不替换宿主 shell。其它 shell 的初始化集成尚未提供。
 
 ## 1. 目标与边界

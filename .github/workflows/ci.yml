@@ -194,6 +194,11 @@ jobs:
         run: cargo test -p nosh-permissions --lib windows_tests --locked
       - name: native CPU executable
         run: cargo build -p nosh-cli --release --locked
+      - name: native desktop PTY and SSH regressions (no model or display)
+        run: |
+          cargo test -p nosh-desktop --locked -- --test-threads=1
+          $env:NOSH_TEST_BINARY = (Resolve-Path .\target\release\nosh.exe).Path
+          cargo test -p nosh-desktop --locked real_nosh_keeps_shell_state -- --ignored --test-threads=1
       - name: source lifecycle
         run: cargo test --manifest-path tools/source/Cargo.toml --locked
       - name: patched editor regressions

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tests"]
+members = ["crates/*", "desktop", "tests"]
 default-members = ["crates/*", "tests"]
 exclude = ["third_party", ".nosh", "tools/source"]
 
@@ -59,7 +59,8 @@ nu-ansi-term = "0.50.3"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 # Keep the bounded, zero-sized OSC buffer rather than std's growable buffer.
-vte = { version = "0.15.0", default-features = false }
+# Keep zero-payload stripping separate from Alacritty's std-enabled parser.
+vte = { version = "=0.14.1", default-features = false, features = ["no_std"] }
 signal-hook = "0.4.4"
 filedescriptor = "0.8.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "signal", "time", "macros", "sync"] }

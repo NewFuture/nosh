@@ -67,6 +67,20 @@ eval "$(nosh init bash)"
 
 输入描述后按默认的 **F2**，建议会填回命令行，检查后自行回车执行。初始化不会修改 rc 或默认 shell。完整用法见[Bash 集成](docs/INPUT-EDITING.md#外部-bash-的轻量建议入口)。
 
+### 原生桌面终端
+
+可选的 **纯 Rust 桌面入口**提供真实本地 nosh 与 OpenSSH 多标签终端、本地 AI 命令
+建议、连接保存及深浅主题，无需 WebView、Node 或浏览器服务。构建后在 Windows 运行：
+
+```powershell
+cargo source prepare
+cargo build -p nosh-cli -p nosh-desktop --locked
+.\target\debug\nosh-desktop.exe
+```
+
+远程连接使用系统 OpenSSH，认证与指纹验证留在真实终端；当前不提供结构化远程
+Agent。完整能力、平台要求及限制见[桌面终端](docs/DESKTOP.md)。
+
 ## 使用时需了解
 
 Agent 默认采用自动审批，可用 `#mode confirm` 切到询问模式。自动模式允许常见低风险操作及构建／测试，用户 deny 始终优先。**审批不是沙箱，也不保证操作可撤销**；检测到命令需要终端或密码时会交回用户，不自动重试，但命令可能已有部分执行。详见[审批说明](docs/APPROVAL-MODES.md)。

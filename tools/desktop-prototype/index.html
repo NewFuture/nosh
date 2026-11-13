@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>nosh — your shell, with a second pair of eyes</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 7 5 5-5 5m8 0h6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01m4-11h4m-4 11h4"/></symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="12" rx="2"/><path d="m5 16-3 4h20l-3-4"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Zm7-1v4m-2-2h4"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7m2-4v5l3 2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-.8 3-2.8 1-2.4 2 2 3-1 3 2 3 3-.3L12 21l3-3.3 3 .3 2-3-1-3 2-3-2.4-2-2.8-1-.8-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10c0 6-12 3-12 8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5h7l2 3h9v12H3Z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 7 3-3a5 5 0 0 1 7 7l-3 3m-3 3-3 3a5 5 0 0 1-7-7l3-3m1 9L17 7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A9 9 0 0 1 10 3a9 9 0 1 0 10 11Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></symbol>
+    <symbol id="i-disconnect" viewBox="0 0 24 24"><path d="m8 3 13 13M3 8l13 13M5 10l5-5m4 14 5-5M2 22l6-6M16 8l6-6"/></symbol>
+  </svg>
+
+  <div class="app">
+    <header class="titlebar">
+      <a class="brand" href="#" aria-label="nosh home"><span class="brand-mark">n<span>o</span>sh<span class="brand-dot">.</span></span><span class="edition">DESKTOP</span></a>
+      <div class="titlebar-center"><span class="prototype-tag">INTERACTIVE PROTOTYPE</span><span class="demo-description">Simulated sessions · no commands are executed</span></div>
+      <button class="command-search" id="open-palette"><svg class="icon"><use href="#i-search"/></svg><span>Jump to anything</span><kbd>Ctrl K</kbd></button>
+    </header>
+
+    <div class="workspace">
+      <nav class="sidebar" aria-label="Connections">
+        <div class="sidebar-heading"><span>WORKSPACE</span><button class="icon-button" id="add-connection" title="Add SSH connection" aria-label="Add SSH connection"><svg class="icon"><use href="#i-plus"/></svg></button></div>
+        <div class="connection-group"><span class="group-label">ON THIS DEVICE</span><div id="local-connections"></div></div>
+        <div class="connection-group"><div class="group-title"><span class="group-label">SSH CONNECTIONS</span><span class="count" id="remote-count">2</span></div><div id="remote-connections"></div></div>
+        <button class="add-host" id="add-host"><svg class="icon"><use href="#i-plus"/></svg> New connection</button>
+        <div class="sidebar-bottom">
+          <div class="local-note"><svg class="icon"><use href="#i-shield"/></svg><div><strong>Your machine. Your models.</strong><span>Inference stays on this device.</span></div></div>
+          <button class="nav-action" id="open-history"><svg class="icon"><use href="#i-history"/></svg>Command history<span class="shortcut">Ctrl R</span></button>
+          <button class="nav-action" id="open-settings"><svg class="icon"><use href="#i-settings"/></svg>Settings<span class="shortcut">Ctrl ,</span></button>
+          <button class="profile-button" id="open-model"><span class="model-avatar"><svg class="icon"><use href="#i-spark"/></svg></span><span><strong>Local intelligence</strong><small>MiniCPM5 · CPU <span class="status-dot"></span></small></span><svg class="icon muted"><use href="#i-chevron"/></svg></button>
+        </div>
+      </nav>
+
+      <main class="main">
+        <div class="tabbar"><button class="icon-button sidebar-toggle" id="toggle-sidebar" title="Toggle connections" aria-label="Toggle connections"><svg class="icon"><use href="#i-panel"/></svg></button><div class="tabs" id="tabs" role="tablist" aria-label="Terminal sessions"></div><button class="icon-button" id="new-terminal" title="New local terminal" aria-label="New local terminal"><svg class="icon"><use href="#i-plus"/></svg></button><span class="tabbar-space"></span><button class="assistant-toggle" id="toggle-assistant" aria-expanded="true"><svg class="icon"><use href="#i-spark"/></svg><span>Assistant</span></button></div>
+        <div class="session-toolbar"><div class="breadcrumb"><svg class="icon"><use href="#i-folder"/></svg><span id="session-path"></span><span class="breadcrumb-divider">/</span><strong id="project-name"></strong><span class="branch-label"><svg class="icon"><use href="#i-branch"/></svg>main</span></div><div class="session-actions"><span class="transport-pill" id="transport-label"></span><button class="icon-button" id="disconnect-session" title="Disconnect SSH session" aria-label="Disconnect SSH session"><svg class="icon"><use href="#i-disconnect"/></svg></button></div></div>
+
+        <div class="panes">
+          <section class="terminal-pane" aria-label="Terminal">
+            <div class="terminal-topline"><span><span class="status-dot" id="terminal-dot"></span><span id="terminal-identity"></span></span><span id="terminal-shell">bash · UTF-8</span></div>
+            <div class="terminal-scroll" id="terminal-scroll" tabindex="0" aria-label="Terminal output"><div id="terminal-output" role="log" aria-live="polite"></div></div>
+            <div class="terminal-bottom">
+              <div class="suggestion" id="suggestion" hidden><div class="suggestion-caption"><svg class="icon"><use href="#i-spark"/></svg>Suggested next step <span>Review before running</span><button class="icon-button" id="dismiss-suggestion" aria-label="Dismiss suggestion"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="suggestion-body"><code id="suggestion-code"></code><button id="insert-suggestion">Insert into terminal <span>↵</span></button></div></div>
+              <form class="terminal-input-row" id="terminal-form"><span class="prompt-symbol">❯</span><label class="sr-only" for="terminal-input">Terminal command (simulated)</label><input id="terminal-input" autocomplete="off" spellcheck="false" placeholder="Type a command…" aria-describedby="terminal-hint"><span class="input-mode">BASH</span></form>
+              <div class="terminal-hint" id="terminal-hint"><span><kbd>Enter</kbd> run simulation <span class="hint-divider">·</span><kbd>Ctrl R</kbd> history</span><span>Demo environment</span></div>
+            </div>
+          </section>
+
+          <aside class="assistant-pane" aria-label="AI assistant">
+            <div class="assistant-header"><div class="assistant-heading"><span class="assistant-emblem"><svg class="icon"><use href="#i-spark"/></svg></span><div><h1>A little extra shell power.</h1><p>Local intelligence, right where you work.</p></div></div><button class="icon-button" id="close-assistant" aria-label="Close assistant"><svg class="icon"><use href="#i-close"/></svg></button></div>
+            <div class="target-strip"><svg class="icon"><use href="#i-link"/></svg><span>Bound to <strong id="assistant-target"></strong></span><span class="target-local">LOCAL AI</span></div>
+            <div class="assistant-scroll" id="assistant-scroll">
+              <div class="conversation" id="conversation" aria-live="polite"></div>
+            </div>
+            <div class="assistant-composer">
+              <div class="quick-actions"><button data-prompt="Explain the last error">Explain error</button><button data-prompt="Suggest the next command">Suggest command</button></div>
+              <form id="assistant-form"><label class="sr-only" for="assistant-input">Ask the assistant</label><textarea id="assistant-input" rows="2" placeholder="Ask about this session…" required></textarea><div class="composer-footer"><span><span class="context-dot"></span>Current session context</span><button class="send-button" type="submit" aria-label="Send message"><svg class="icon"><use href="#i-arrow"/></svg></button></div></form>
+              <p class="composer-note">Suggestions aren't execution. You're in control.</p>
+            </div>
+          </aside>
+        </div>
+        <footer class="statusbar"><button id="model-status"><span class="status-dot"></span>MiniCPM5-2B <span class="status-subtle">/ CPU</span></button><span class="status-divider"></span><span id="connection-status"></span><span class="statusbar-spacer"></span><button id="approval-mode"><svg class="icon"><use href="#i-shield"/></svg>Approval: <strong id="approval-mode-label">Confirm</strong></button><span class="status-divider"></span><span class="prototype-status">PROTOTYPE</span></footer>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="connection-dialog" class="modal">
+    <form id="connection-form">
+      <div class="modal-heading"><div><span class="eyebrow">REMOTE WORKSPACE</span><h2>A new connection.</h2></div><button type="button" class="icon-button" data-close aria-label="Close connection dialog"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <p class="modal-description">Give your remote workspace a place to live. This prototype saves connections in memory only.</p>
+      <label>Connection name<input name="name" placeholder="e.g. development" required maxlength="40"></label>
+      <label>Hostname or IP<input name="host" placeholder="e.g. dev.example.com" required maxlength="120" pattern="[a-zA-Z0-9._:\-]+"></label>
+      <div class="form-grid"><label>Username<input name="user" placeholder="deploy" required maxlength="40" pattern="[a-zA-Z0-9._\-]+"></label><label>Port<input name="port" type="number" value="22" min="1" max="65535" required></label></div>
+      <div class="info-callout"><svg class="icon"><use href="#i-shield"/></svg><p>No network connection will be made. SSH agent authentication is illustrative; do not enter credentials.</p></div>
+      <div class="modal-actions"><button type="button" class="button secondary" data-close>Cancel</button><button class="button primary" type="submit">Add demo connection</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="trust-dialog" class="modal">
+    <div class="modal-heading"><div><span class="eyebrow">SIMULATED HOST VERIFICATION</span><h2>Know where you connect.</h2></div><button class="icon-button" data-close aria-label="Close host verification"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <p class="modal-description">In the real app, verify this fingerprint with your administrator before trusting a new host.</p>
+    <div class="host-details"><span>HOST</span><strong id="trust-host"></strong><span>ED25519 FINGERPRINT · DEMO ONLY</span><code>SHA256:DEMO-NOT-A-REAL-HOST-KEY</code></div>
+    <div class="info-callout"><svg class="icon"><use href="#i-link"/></svg><p id="trust-capability">Basic SSH terminal. Enhanced remote Agent support is not installed on this host.</p></div>
+    <div class="modal-actions"><button class="button secondary" data-close>Cancel</button><button class="button primary" id="trust-connect">Trust demo host & connect</button></div>
+  </dialog>
+
+  <dialog id="settings-dialog" class="modal settings-modal">
+    <div class="modal-heading"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Small details. Better flow.</h2></div><button class="icon-button" data-close aria-label="Close settings"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="setting-row"><div><strong>Appearance</strong><p>A quiet workspace, day or night.</p></div><button class="button secondary" id="theme-toggle"><svg class="icon"><use href="#i-moon"/></svg><span id="theme-label">Switch to dark</span></button></div>
+    <div class="setting-row"><div><strong>Terminal text</strong><p>Adjust the reading size.</p></div><select id="font-size" aria-label="Terminal font size"><option value="12">12 px</option><option value="13" selected>13 px</option><option value="14">14 px</option><option value="16">16 px</option></select></div>
+    <div class="setting-row"><div><strong>Approval mode</strong><p>Prototype stays in Confirm mode.</p></div><span class="plain-badge">Confirm</span></div>
+    <div class="model-card"><span class="model-avatar"><svg class="icon"><use href="#i-spark"/></svg></span><div><strong>MiniCPM5-2B · Q8_0</strong><p>CPU · simulated ready state</p></div><span class="plain-badge">Local</span></div>
+    <p class="modal-description">No model is loaded. No terminal, SSH or AI backend is connected. All changes reset on reload.</p>
+  </dialog>
+
+  <dialog id="history-dialog" class="modal history-modal">
+    <div class="modal-heading"><div><span class="eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2>Command history.</h2></div><button class="icon-button" data-close aria-label="Close history"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <p class="modal-description">Only this session. Selecting a command fills the terminal without running it.</p>
+    <label class="search-field"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" type="search" placeholder="Filter commands…" aria-label="Filter command history"></label>
+    <div id="history-list" class="history-list"></div>
+  </dialog>
+
+  <dialog id="palette-dialog" class="modal palette-modal">
+    <label class="search-field"><svg class="icon"><use href="#i-search"/></svg><input id="palette-search" type="search" placeholder="Find a connection or action…" aria-label="Find a connection or action"></label>
+    <div id="palette-results"></div><p class="palette-footer">Select an action <span><kbd>Esc</kbd> to close</span></p>
+  </dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

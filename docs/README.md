@@ -17,6 +17,7 @@
 | 文档 | 内容 |
 |---|---|
 | [审批模式](APPROVAL-MODES.md) | Confirm / Auto / YOLO、用户规则优先级与安全边界 |
+| [原生桌面终端](DESKTOP.md) | 纯 Rust 窗口、本地与 SSH 会话、真实命令建议、构建和运行边界 |
 | [输入编辑](INPUT-EDITING.md) | Emacs / Vi、改键、搜索、取消和建议采用 |
 | [历史输入与命令保存](HISTORY.md) | 历史面板、工作树范围、命令 SQLite、临时提问及 history/fc |
 | [命令与参数补全](COMPLETION.md) | 内置与脚本补全、候选语义、后台执行和资源限制 |
