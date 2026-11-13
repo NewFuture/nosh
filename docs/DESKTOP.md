@@ -101,6 +101,44 @@ SSH 断开不保证服务器上的程序停止，不代表回滚。重新连接�
 管理、自动连接恢复或图形化远程审批。默认字体不保证覆盖中日韩字形；Unicode 输入
 传输与字形覆盖是不同能力，系统字体回退尚待完善。
 
+## GPUI 本地验证入口
+
+此分支额外提供原生 `nosh-gpui`，窗口标题为 `nosh - GPUI desktop experiment`。
+它固定使用 crates.io 的 Apache-2.0 `gpui = 0.2.2`，不是 WebView，也没有复制
+Zed 的 GPL 终端模块。egui 的 `nosh-desktop` 入口保留，两个入口共用 Alacritty
+终端、ConPTY 生命周期及 OpenSSH 参数校验。CLI 的零 OSC 缓冲解析器仍独立。
+
+原生 Windows x64/MSVC：
+
+```powershell
+cargo source prepare
+cargo build -p nosh-cli -p nosh-desktop --features gpui --locked
+.\target\debug\nosh-gpui.exe --cwd 'C:\work tree'
+```
+
+使用 `+ Local` 新建真实 nosh 标签，`+ SSH` 打开包含名称、主机、用户、端口、
+身份文件及跳板机的连接表单。空白可选字段使用 OpenSSH 配置；失败保留原始输出
+与退出码。连接进程存活不代表认证成功。点击标签或 Ctrl+Tab / Ctrl+Shift+Tab
+切换；Ctrl+Shift+T 新建本地标签，Ctrl+Shift+W 请求关闭当前标签。
+窗口关闭和标签关闭均要求确认，随后回收 PTY 与本地进程。
+
+终端使用 GPUI 原生字体与绘制，支持 ANSI 颜色、备用屏幕、键盘/Unicode 输入、
+窗口缩放、滚动历史、拖动选择、Ctrl+Shift+C/V 复制粘贴及 Ctrl+加号/减号
+字体缩放（Ctrl+0 重置）。PTY 协议查询仍在 I/O 路径回复，后台标签不依赖绘制。
+SSH 表单当前为轻量输入：文字在末尾编辑，Backspace 删除，Ctrl+A 全选替换，
+Ctrl+C/V 复制粘贴，Tab 切换字段。不是完整文本编辑器。
+
+GPUI 设置单独保存在系统用户配置目录的 `nosh/desktop-gpui.json`，不覆盖 egui
+配置；保存的连接可点击重新打开。损坏配置禁用保存并报告错误。此实验尚未迁移
+egui 的独立 AI 建议面板、主题切换和连接删除按钮；AI 仍通过真实 nosh 终端显式
+调用，不把本地上下文用于 SSH。尚不支持终端鼠标协议上报、图片协议或完整
+可访问性语义。此入口只承诺本次 Windows 原生验证，其它平台尚未运行验证。
+
+```powershell
+cargo test -p nosh-desktop --features gpui --locked -- --test-threads=1
+cargo clippy -p nosh-desktop --features gpui --all-targets --locked -- -D warnings
+```
+
 ## 回归
 
 不加载真实模型、不下载模型；PTY 测试不要求创建图形窗口：

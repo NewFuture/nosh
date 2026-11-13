@@ -1,9 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod connections;
-mod suggestions;
-mod terminal;
+
+use nosh_desktop::{connections, suggestions, terminal};
 
 use clap::Parser;
 

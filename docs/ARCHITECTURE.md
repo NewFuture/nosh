@@ -16,7 +16,7 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | `nosh-shell` | brush 会话、REPL、输入编辑/历史、补全、终端与进程管理 | `nosh-platform` |
 | `nosh-core` | Agent、CommandAssist、上下文、工具、审批 UI、REPL AI 适配 | `nosh-engine`、`nosh-permissions`、`nosh-platform`、`nosh-shell` |
 | `nosh-cli` | 参数与配置、模型装配、子命令、评测观测包装器 | 上述七个 crate |
-| `nosh-desktop`（`desktop/`） | egui 原生窗口、Alacritty PTY/ConPTY 终端、OpenSSH 连接及 CLI 命令建议进程 | `nosh-platform` |
+| `nosh-desktop`（`desktop/`） | egui 原生窗口、可选 GPUI 验证入口、共享 Alacritty PTY/ConPTY 终端、OpenSSH 连接及 CLI 命令建议进程 | `nosh-platform` |
 
 [`tests/architecture.rs`](../tests/architecture.rs) 持续约束这些方向。增加生产依赖或新 crate 时，先明确职责，再同步约束和本表，不通过转成可选依赖规避边界。
 
@@ -42,7 +42,9 @@ Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：t
 
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。
 
-桌面入口独立于默认构建目标，用 `cargo build -p nosh-cli -p nosh-desktop --locked` 显式构建。它通过真实 PTY 启动 CLI 或系统 OpenSSH，不重写 shell、模型与审批；本地建议通过受限的 `nosh -s` 独立进程生成，不假装共享终端内的 cwd、环境或 Agent。图形渲染使用 eframe/WGPU，不需要 WebView、HTML/JS 或 Node。当前能力与运行方式见[桌面终端](DESKTOP.md)。
+桌面入口独立于默认构建目标，用 `cargo build -p nosh-cli -p nosh-desktop --locked` 显式构建。它通过真实 PTY 启动 CLI 或系统 OpenSSH，不重写 shell、模型与审批；本地建议通过受限的 `nosh -s` 独立进程生成，不假装共享终端内的 cwd、环境或 Agent。图形渲染使用 eframe/WGPU，可选 `gpui` feature 提供独立的原生 GPUI 验证入口，
+共用 PTY 后端的唤醒回调与协议回复路径，不需要 WebView、HTML/JS 或 Node。
+当前能力与运行方式见[桌面终端](DESKTOP.md)。
 
 shell 的 ANSI 清理使用 `vte 0.14.1` 的 `no_std`/零 OSC 缓冲，桌面完整终端使用 Alacritty 的 `vte 0.15`/`std`。两者保持独立：后者的可变 OSC 缓冲不能通过 Cargo feature 合并改变 CLI 的有界输出清理契约；工作区联合构建也必须成立。
 

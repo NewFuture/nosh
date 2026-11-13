@@ -6,7 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "nosh-gpui"
+path = "src/gpui_main.rs"
+required-features = ["gpui"]
+
+[features]
+gpui = ["dep:gpui"]
+
 [dependencies]
+gpui = { version = "=0.2.2", optional = true }
 eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 wgpu = "24"
 alacritty_terminal = "=0.25.1"
