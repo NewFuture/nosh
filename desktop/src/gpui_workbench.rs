@@ -21,12 +21,12 @@ use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 use crate::gpui_input::{Action, CloseTarget, InputState, Surface};
 use crate::gpui_terminal;
 
-const PAPER: u32 = 0xeeefeb;
+const PAPER: u32 = 0xf3f3f3;
 const INK: u32 = 0x202a35;
 const MUTED: u32 = 0x6a7582;
-const BORDER: u32 = 0xd9dfdc;
+const BORDER: u32 = 0xd6d6d6;
 const GREEN: u32 = 0x14796b;
-const BLUE: u32 = 0x465f9d;
+const BLUE: u32 = 0x0067c0;
 const RED: u32 = 0xa44242;
 
 #[derive(clap::Parser)]
@@ -112,6 +112,7 @@ pub struct Desktop {
     events: Receiver<(u64, PtyEvent)>,
     dirty: Arc<AtomicBool>,
     error: String,
+    form_error: String,
     input: InputState,
     bounds: Bounds<Pixels>,
     cell: gpui::Size<Pixels>,
@@ -119,6 +120,7 @@ pub struct Desktop {
     field_bounds: [Bounds<Pixels>; 6],
     field_layouts: [Option<ShapedLine>; 6],
     field_offsets: [Pixels; 6],
+    connections_visible: bool,
 }
 
 impl Desktop {
@@ -165,6 +167,7 @@ impl Desktop {
             events,
             dirty: Arc::new(AtomicBool::new(true)),
             error,
+            form_error: String::new(),
             input: InputState::default(),
             bounds: Bounds::default(),
             cell: size(px(9.), px(20.)),
@@ -172,6 +175,7 @@ impl Desktop {
             field_bounds: Default::default(),
             field_layouts: Default::default(),
             field_offsets: [px(0.); 6],
+            connections_visible: true,
         };
         desktop.open_local(cx);
         window.focus(&desktop.focus);
@@ -254,7 +258,7 @@ impl Desktop {
                 self.input.set_surface(Surface::Terminal);
                 self.selecting = false;
             }
-            Err(error) => self.error = format!("Cannot start terminal: {error}"),
+            Err(error) => self.report_error(format!("Cannot start terminal: {error}")),
         }
         cx.notify();
     }
@@ -291,7 +295,7 @@ impl Desktop {
                         })
                         .and_then(|path| settings.save(path));
                     if let Err(error) = result {
-                        self.error = error;
+                        self.report_error(error);
                         cx.notify();
                         return;
                     }
@@ -305,7 +309,7 @@ impl Desktop {
                 );
             }
             Err(error) => {
-                self.error = error;
+                self.report_error(error);
                 cx.notify();
             }
         }
@@ -315,6 +319,7 @@ impl Desktop {
         if !self.input.field_enabled() {
             return;
         }
+        self.form_error.clear();
         let fields = &self.input.fields;
         let port = if fields[3].text.is_empty() {
             None
@@ -322,7 +327,8 @@ impl Desktop {
             match fields[3].text.parse::<u16>() {
                 Ok(port) if port != 0 => Some(port),
                 _ => {
-                    self.error = "Port must be between 1 and 65535.".into();
+                    self.form_error = "Port must be between 1 and 65535.".into();
+                    self.input.field = 3;
                     cx.notify();
                     return;
                 }
@@ -330,7 +336,7 @@ impl Desktop {
         };
         let host = fields[1].text.trim().to_owned();
         if host.is_empty() {
-            self.error = "Enter a host or an SSH config alias.".into();
+            self.form_error = "Enter a host or an SSH config alias.".into();
             self.input.field = 1;
             cx.notify();
             return;
@@ -369,6 +375,7 @@ impl Desktop {
         self.selecting = false;
         if surface == Surface::Connection {
             self.input.field = 1;
+            self.form_error.clear();
         }
         window.focus(&self.focus);
         cx.notify();
@@ -420,6 +427,14 @@ impl Desktop {
             .unwrap_or_default()
     }
 
+    fn report_error(&mut self, error: String) {
+        if self.input.surface == Surface::Connection {
+            self.form_error = error;
+        } else {
+            self.error = error;
+        }
+    }
+
     fn write(&mut self, bytes: Vec<u8>) {
         // All keyboard, clipboard and native text paths share this final PTY gate.
         if !self.input.terminal_enabled() {
@@ -459,11 +474,16 @@ impl Desktop {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     match self.input.paste(&text, self.mode()) {
                         Ok(action) => self.action(action, window, cx),
-                        Err(error) => self.error = error,
+                        Err(error) => self.report_error(error),
                     }
                 }
             }
             Action::NewLocal => self.open_local(cx),
+            Action::NewConnection => self.show_surface(Surface::Connection, window, cx),
+            Action::ToggleConnections => {
+                self.connections_visible = !self.connections_visible;
+                cx.notify();
+            }
             Action::SwitchTab(reverse) if !self.sessions.is_empty() => {
                 self.switch_session(
                     (self.active + if reverse { self.sessions.len() - 1 } else { 1 })
@@ -481,6 +501,7 @@ impl Desktop {
             Action::ConfirmClose => self.confirm_close(window, cx),
             Action::CancelClose => self.cancel_close(window, cx),
             Action::Connect => self.connect_form(false, cx),
+            Action::SaveAndConnect => self.connect_form(true, cx),
             Action::ReturnToTerminal => self.show_surface(Surface::Terminal, window, cx),
             Action::Zoom(delta) => {
                 self.settings.font_size = if delta == 0 {
@@ -491,7 +512,7 @@ impl Desktop {
                 if let Some(path) = &self.settings_path
                     && let Err(error) = self.settings.save(path)
                 {
-                    self.error = error;
+                    self.report_error(error);
                 }
             }
         }
@@ -519,7 +540,7 @@ impl Desktop {
         match self.input.commit(range, text) {
             Ok(action) => self.action(action, window, cx),
             Err(error) => {
-                self.error = error;
+                self.report_error(error);
                 cx.notify();
             }
         }
@@ -587,158 +608,193 @@ impl Desktop {
         div()
             .id(id)
             .px_3()
-            .h(px(36.))
+            .h(px(28.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(7.))
+            .rounded(px(3.))
             .border_1()
-            .border_color(rgb(if primary { INK } else { BORDER }))
-            .bg(rgb(if primary { INK } else { 0xffffff }))
+            .border_color(rgb(if primary { BLUE } else { BORDER }))
+            .bg(rgb(if primary { BLUE } else { 0xffffff }))
             .text_color(rgb(if primary { 0xffffff } else { INK }))
-            .hover(move |style| style.bg(rgb(if primary { 0x35424f } else { 0xf2f5f2 })))
+            .hover(move |style| style.bg(rgb(if primary { 0x005aab } else { 0xe9e9e9 })))
+            .active(move |style| style.bg(rgb(if primary { 0x004e92 } else { 0xdedede })))
             .cursor_pointer()
             .child(label.into())
     }
 
     fn tag(label: impl Into<SharedString>, color: u32) -> gpui::Div {
         div()
-            .px_2()
-            .py_1()
-            .rounded(px(4.))
+            .px_1()
             .text_size(px(10.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(color))
-            .bg(rgba((color << 8) | 0x14))
             .child(label.into())
     }
 
     fn header(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
-            .h(px(72.))
+            .h(px(38.))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_3()
-            .px_6()
+            .gap_1()
+            .px_2()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .bg(rgb(0xfafbf8))
-            .child(
-                div()
-                    .size(px(34.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(9.))
-                    .bg(rgb(INK))
-                    .text_color(rgb(0x91ddc7))
-                    .text_size(px(19.))
-                    .font_family("Consolas")
-                    .child("n_"),
-            )
-            .child(
-                div()
-                    .text_size(px(23.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("nosh"),
-            )
-            .child(Self::tag("GPUI / WORKBENCH", MUTED))
-            .child(div().flex_1())
+            .bg(rgb(0xe9e9e9))
             .child(
                 Self::button(
-                    if self.input.surface == Surface::Board {
-                        "Back to terminal"
+                    if self.connections_visible {
+                        "Hide connections"
                     } else {
-                        "Session board"
+                        "Connections"
                     },
-                    "board",
+                    "connections-toggle",
                     false,
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.show_surface(
-                        if this.input.surface == Surface::Board {
-                            Surface::Terminal
-                        } else {
-                            Surface::Board
-                        },
-                        window,
-                        cx,
-                    );
+                    this.action(Action::ToggleConnections, window, cx)
                 })),
             )
-            .child(Self::button("+ New session", "new-session", true).on_click(
-                cx.listener(|this, _, window, cx| this.show_surface(Surface::Board, window, cx)),
-            ))
+            .child(self.session_tabs(cx))
+            .child(
+                Self::button("+", "new-session", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
+            )
+            .child(
+                Self::button("SSH...", "new-ssh", false).on_click(cx.listener(
+                    |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
+                )),
+            )
     }
 
-    fn board(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn connection_list(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let folder = self
             .cwd
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "Startup directory unavailable".into());
-        let mut saved = div().flex().flex_col().gap_2();
+        let mut saved = div().flex().flex_col().gap_1();
         if self.settings.connections.is_empty() {
             saved = saved.child(
                 div()
-                    .py_4()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
                     .text_color(rgb(MUTED))
-                    .child("No saved targets yet. Save a connection to find it here next time."),
+                    .child("No saved connections"),
             );
         }
         for (index, connection) in self.settings.connections.iter().enumerate() {
             let connection = connection.clone();
             saved = saved.child(
                 div()
+                    .id(("saved", index))
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .p_3()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(0xffffff))
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .hover(|style| style.bg(rgb(0xe4e4e4)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_ssh(connection.clone(), false, cx);
+                        window.focus(&this.focus);
+                    }))
                     .child(Self::tag("SSH", BLUE))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(connection.name.clone())
+                            .child(self.settings.connections[index].name.clone())
                             .child(
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(MUTED))
                                     .truncate()
-                                    .child(connection.target()),
+                                    .child(self.settings.connections[index].target()),
                             ),
-                    )
-                    .child(
-                        Self::button("Open", ("saved", index), false).on_click(cx.listener(
-                            move |this, _, _, cx| this.open_ssh(connection.clone(), false, cx),
-                        )),
                     ),
             );
         }
-        div().id("session-board").flex_1().min_h_0().overflow_y_scroll().px_6().py_4().flex().flex_col().gap_4()
-            .child(div().text_size(px(11.)).text_color(rgb(GREEN)).font_weight(gpui::FontWeight::SEMIBOLD).child("YOUR CONNECTIONS"))
-            .child(div().text_size(px(34.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Where do you want to work?"))
-            .child(div().text_color(rgb(MUTED)).child("Open a shell here, or connect to a machine you trust. Each session keeps its own process and state."))
-            .child(div().flex().gap_4()
-                .child(div().flex_1().min_w_0().p_5().rounded(px(12.)).border_1().border_color(rgb(BORDER)).bg(rgb(0xffffff)).flex().flex_col().gap_3()
-                    .child(div().text_size(px(24.)).text_color(rgb(GREEN)).font_family("Consolas").child(">_"))
-                    .child(div().text_size(px(22.)).font_weight(gpui::FontWeight::SEMIBOLD).child("This computer"))
-                    .child(div().text_color(rgb(MUTED)).child("A real nosh shell. Local files, environment and approvals stay with this session."))
-                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(format!("STARTUP DIRECTORY  {folder}")))
-                    .child(Self::button("Open local terminal", "board-local", true).on_click(cx.listener(|this, _, _, cx| this.open_local(cx)))))
-                .child(div().flex_1().min_w_0().p_5().rounded(px(12.)).border_1().border_color(rgb(BORDER)).bg(rgb(0xf8faff)).flex().flex_col().gap_3()
-                    .child(div().text_size(px(24.)).text_color(rgb(BLUE)).font_family("Consolas").child("<->"))
-                    .child(div().text_size(px(22.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Another machine"))
-                    .child(div().text_color(rgb(MUTED)).child("Use system OpenSSH, your keys and host aliases. Authentication happens in the terminal."))
-                    .child(div().text_size(px(11.)).text_color(rgb(BLUE)).child("HOST VERIFICATION ON / NO AGENT FORWARDING"))
-                    .child(Self::button("Set up SSH connection", "board-ssh", false).on_click(cx.listener(|this, _, window, cx| this.show_surface(Surface::Connection, window, cx))))))
-            .child(div().pt_2().flex().items_center().gap_2().child(div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).child("SAVED SSH TARGETS")).child(Self::tag(self.settings.connections.len().to_string(), MUTED)))
+        div()
+            .id("connection-list")
+            .w(px(208.))
+            .flex_shrink_0()
+            .h_full()
+            .overflow_y_scroll()
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PAPER))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Connections"),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("LOCAL"),
+            )
+            .child(
+                div()
+                    .id("local-connection")
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0xe4e4e4)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_local(cx);
+                        window.focus(&this.focus);
+                    }))
+                    .child(div().child("This computer"))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .truncate()
+                            .child(folder),
+                    ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_4()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("SSH"),
+            )
             .child(saved)
+            .child(div().px_3().py_2().child(
+                Self::button("New connection...", "list-new-ssh", false).on_click(cx.listener(
+                    |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
+                )),
+            ))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .p_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("Ctrl+Shift+T  Local terminal")
+                    .child(div().child("Ctrl+Shift+N  SSH connection"))
+                    .child(div().child("Ctrl+Shift+B  Connections")),
+            )
     }
 
     fn stage(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -752,23 +808,16 @@ impl Desktop {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_4()
-                .rounded(px(12.))
-                .bg(rgb(0xffffff))
+                .gap_3()
+                .bg(rgb(0x1c1e26))
+                .text_color(rgb(0xc9ccd4))
+                .child(div().text_size(px(18.)).child("No open sessions"))
+                .child(div().text_color(rgb(MUTED)).child(
+                    "Ctrl+Shift+T  New local terminal    /    Ctrl+Shift+N  Connect via SSH",
+                ))
                 .child(
-                    div()
-                        .text_size(px(28.))
-                        .child("Room for your next session."),
-                )
-                .child(
-                    div().text_color(rgb(MUTED)).child(
-                        "Open a local terminal or an SSH connection from the session board.",
-                    ),
-                )
-                .child(
-                    Self::button("Open session board", "empty-board", true).on_click(cx.listener(
-                        |this, _, window, cx| this.show_surface(Surface::Board, window, cx),
-                    )),
+                    Self::button("New local terminal", "empty-local", true)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
                 );
         };
         let identity = session.identity();
@@ -776,11 +825,9 @@ impl Desktop {
             SessionKind::Local => self
                 .cwd
                 .as_ref()
-                .map(|cwd| format!("Startup directory: {}", cwd.display()))
+                .map(|cwd| cwd.display().to_string())
                 .unwrap_or_default(),
-            SessionKind::Ssh(_) => {
-                "Remote shell / local files and AI context are not shared".into()
-            }
+            SessionKind::Ssh(_) => "OpenSSH".into(),
         };
         let status = session.status_label();
         let status_color = session.status_color();
@@ -789,7 +836,7 @@ impl Desktop {
             .id("terminal")
             .flex_1()
             .min_h_0()
-            .p_3()
+            .p_2()
             .overflow_hidden()
             .bg(rgb(0x1c1e26))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse))
@@ -851,45 +898,130 @@ impl Desktop {
                 )
                 .size_full(),
             );
-        div().flex_1().min_h_0().flex().flex_col().rounded(px(12.)).border_1().border_color(rgb(BORDER)).bg(rgb(0xffffff)).overflow_hidden()
-            .child(div().h(px(78.)).flex_shrink_0().flex().items_center().gap_3().px_5()
-                .child(Self::tag(session.kind_label(), session.accent()))
-                .child(div().flex_1().min_w_0().child(div().text_size(px(18.)).font_weight(gpui::FontWeight::SEMIBOLD).truncate().child(identity))
-                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(meta)))
-                .child(Self::button("Copy", "copy", false).on_click(cx.listener(|this, _, window, cx| this.action(Action::CopyTerminal, window, cx))))
-                .child(Self::button("Paste", "paste", false).on_click(cx.listener(|this, _, window, cx| this.action(Action::Paste, window, cx))))
-                .child(Self::button("-", "zoom-out", false).on_click(cx.listener(|this, _, window, cx| this.action(Action::Zoom(-1), window, cx))))
-                .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(format!("{} px", self.settings.font_size)))
-                .child(Self::button("+", "zoom-in", false).on_click(cx.listener(|this, _, window, cx| this.action(Action::Zoom(1), window, cx)))))
-            .when(is_exited, |stage| stage.child(div().px_5().py_2().bg(rgb(0xfcf0ec)).text_color(rgb(RED)).text_size(px(12.)).child("This process has ended. Its output is preserved; opening a target starts a new session.")))
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(PAPER))
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(Self::tag(session.kind_label(), session.accent()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .truncate()
+                            .child(format!("{identity}  |  {meta}")),
+                    )
+                    .child(Self::button("Copy", "copy", false).on_click(cx.listener(
+                        |this, _, window, cx| this.action(Action::CopyTerminal, window, cx),
+                    )))
+                    .child(
+                        Self::button("Paste", "paste", false)
+                            .when(is_exited, |button| {
+                                button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
+                            })
+                            .when(!is_exited, |button| {
+                                button.on_click(cx.listener(|this, _, window, cx| {
+                                    this.action(Action::Paste, window, cx)
+                                }))
+                            }),
+                    )
+                    .child(Self::button("-", "zoom-out", false).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.action(Action::Zoom(-1), window, cx)
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(format!("{} px", self.settings.font_size)),
+                    )
+                    .child(Self::button("+", "zoom-in", false).on_click(
+                        cx.listener(|this, _, window, cx| this.action(Action::Zoom(1), window, cx)),
+                    )),
+            )
+            .when(is_exited, |stage| {
+                stage.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .bg(rgb(0xfcf0ec))
+                        .text_color(rgb(RED))
+                        .text_size(px(12.))
+                        .child("Session ended. Output preserved."),
+                )
+            })
             .child(terminal)
-            .child(div().h(px(32.)).flex_shrink_0().flex().items_center().px_4().gap_2().bg(rgb(0x252932)).text_size(px(11.)).text_color(rgb(0xb9c3cf))
-                .child(div().size(px(6.)).rounded_full().bg(rgb(if status_color == RED { 0xe7a29a } else { 0x8dd4c0 })))
-                .child(status).child(div().flex_1())
-                .child(if self.input.terminal_enabled() { "INPUT: THIS SESSION" } else { "TERMINAL INPUT PAUSED" }))
+            .child(
+                div()
+                    .h(px(24.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .gap_2()
+                    .bg(rgb(PAPER))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(rgb(if status_color == RED {
+                                0xe7a29a
+                            } else {
+                                0x8dd4c0
+                            })),
+                    )
+                    .child(status)
+                    .child(div().flex_1())
+                    .child(if self.input.terminal_enabled() {
+                        "GPUI"
+                    } else {
+                        "Input paused"
+                    }),
+            )
     }
 
-    fn session_rail(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn session_tabs(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let mut cards = div()
-            .id("session-rail")
+            .id("session-tabs")
             .flex()
-            .gap_2()
+            .flex_1()
+            .min_w_0()
             .overflow_x_scroll()
-            .min_h_0();
+            .h_full();
         for (index, session) in self.sessions.iter().enumerate() {
             let id = session.id;
             let selected = self.active == index && self.input.surface == Surface::Terminal;
             cards = cards.child(
                 div()
                     .id(("session", id))
-                    .w(px(250.))
+                    .w(px(180.))
                     .flex_shrink_0()
-                    .px_4()
-                    .py_3()
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(rgb(if selected { INK } else { BORDER }))
-                    .bg(rgb(if selected { 0xffffff } else { 0xf6f7f3 }))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_r_1()
+                    .border_b_2()
+                    .border_color(rgb(if selected { BLUE } else { BORDER }))
+                    .bg(rgb(if selected { PAPER } else { 0xe9e9e9 }))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(0xffffff)))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -900,58 +1032,40 @@ impl Desktop {
                             .flex()
                             .gap_2()
                             .items_center()
-                            .child(Self::tag(session.kind_label(), session.accent()))
+                            .w_full()
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(rgb(session.status_color())),
+                            )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_size(px(12.))
                                     .truncate()
-                                    .child(session.title.clone()),
+                                    .child(format!("{}  {}", session.kind_label(), session.title)),
                             )
                             .child(
                                 div()
                                     .id(("close-session", id))
                                     .text_color(rgb(MUTED))
                                     .px_2()
+                                    .rounded(px(2.))
                                     .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0xdcdcdc)).text_color(rgb(INK)))
                                     .child("x")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.request_close(CloseTarget::Tab(id), window, cx);
                                     })),
                             ),
-                    )
-                    .child(
-                        div()
-                            .pt_2()
-                            .text_size(px(11.))
-                            .text_color(rgb(session.status_color()))
-                            .truncate()
-                            .child(session.status_label()),
                     ),
             );
         }
-        div()
-            .h(px(126.))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED))
-                    .child(format!("OPEN SESSIONS / {}", self.sessions.len()))
-                    .child(div().flex_1())
-                    .child(
-                        "Ctrl+Tab  Switch   /   Ctrl+Shift+T  New local   /   Ctrl+Shift+W  Close",
-                    ),
-            )
-            .child(cards)
+        cards
     }
 
     fn field(
@@ -970,7 +1084,7 @@ impl Desktop {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .child(
                 div()
                     .text_size(px(11.))
@@ -981,9 +1095,9 @@ impl Desktop {
             .child(
                 div()
                     .id(("connection-field", index))
-                    .h(px(42.))
-                    .px_3()
-                    .rounded(px(6.))
+                    .h(px(30.))
+                    .px_2()
+                    .rounded(px(3.))
                     .border_1()
                     .border_color(rgb(if focused { BLUE } else { BORDER }))
                     .bg(rgb(0xffffff))
@@ -1059,7 +1173,7 @@ impl Desktop {
                                 paint_view.update(cx, |this, cx| {
                                     let editor = &this.input.fields[index];
                                     let origin =
-                                        bounds.origin + point(-this.field_offsets[index], px(9.));
+                                        bounds.origin + point(-this.field_offsets[index], px(3.));
                                     let selection = editor.selection();
                                     if focused && !selection.is_empty() {
                                         let start = line.x_for_index(selection.start);
@@ -1114,25 +1228,126 @@ impl Desktop {
     }
 
     fn connection_drawer(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div().absolute().inset_0().flex().justify_end().bg(rgba(0x17243155)).occlude()
-            .child(div().w(px(460.)).h_full().bg(rgb(0xfafbf8)).border_l_1().border_color(rgb(BORDER)).flex().flex_col()
-                .child(div().px_6().py_5().flex().items_center().gap_3().border_b_1().border_color(rgb(BORDER))
-                    .child(Self::tag("SSH", BLUE)).child(div().flex_1().text_size(px(20.)).font_weight(gpui::FontWeight::SEMIBOLD).child("New connection"))
-                    .child(Self::button("Back", "cancel-connection", false).on_click(cx.listener(|this, _, window, cx| this.show_surface(Surface::Terminal, window, cx)))))
-                .child(div().id("connection-fields").flex_1().min_h_0().overflow_y_scroll().p_6().flex().flex_col().gap_4()
-                    .child(div().text_color(rgb(MUTED)).child("Connect with your system OpenSSH. Keys and host aliases stay in your SSH configuration."))
-                    .child(self.field(1, "HOST OR SSH ALIAS *", "example.org or my-server", cx))
-                    .child(self.field(0, "DISPLAY NAME", "Optional; defaults to the host", cx))
-                    .child(div().flex().gap_3().child(self.field(2, "USER", "From SSH config", cx)).child(self.field(3, "PORT", "From SSH config", cx)))
-                    .child(self.field(4, "IDENTITY FILE", "Optional path to a private key", cx))
-                    .child(self.field(5, "JUMP HOST", "Optional user@jump:port", cx))
-                    .child(div().p_3().rounded(px(7.)).bg(rgb(0xeef2f8)).text_size(px(11.)).text_color(rgb(BLUE))
-                        .child("Host verification is required. Passwords and key passphrases are entered only in the SSH terminal. Local AI context is not sent to the server."))
-                    .when(!self.error.is_empty(), |drawer| drawer.child(div().text_size(px(12.)).text_color(rgb(RED)).child(self.error.clone()))))
-                .child(div().p_6().border_t_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
-                    .child(Self::button("Connect", "connect", true).on_click(cx.listener(|this, _, _, cx| this.connect_form(false, cx))))
-                    .child(Self::button("Save target and connect", "save-connect", false).on_click(cx.listener(|this, _, _, cx| this.connect_form(true, cx))))
-                    .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child("Enter connects once. Escape goes back. Nothing is sent to the terminal while this form is open."))))
+        div()
+            .absolute()
+            .inset_0()
+            .p_4()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000055))
+            .occlude()
+            .child(
+                div()
+                    .w(px(480.))
+                    .h_full()
+                    .max_h(px(530.))
+                    .rounded(px(5.))
+                    .bg(rgb(PAPER))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(46.))
+                            .flex_shrink_0()
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("SSH connection"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .child("System OpenSSH"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("connection-fields")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_4()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(self.field(1, "Host or SSH alias", "Required", cx))
+                            .child(self.field(0, "Name", "Optional; defaults to host", cx))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(self.field(2, "User", "SSH config default", cx))
+                                    .child(self.field(3, "Port", "SSH config default", cx)),
+                            )
+                            .child(self.field(4, "Identity file", "Optional private key path", cx))
+                            .child(self.field(5, "Jump host", "Optional user@jump:port", cx))
+                            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                                "Host verification on. Passwords are entered in the terminal.",
+                            ))
+                            .when(!self.error.is_empty(), |drawer| {
+                                drawer.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(RED))
+                                        .child(self.error.clone()),
+                                )
+                            })
+                            .when(!self.form_error.is_empty(), |dialog| {
+                                dialog.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(RED))
+                                        .child(self.form_error.clone()),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Self::button("Cancel", "cancel-connection", false)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.show_surface(Surface::Terminal, window, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Self::button("Save & connect", "save-connect", false)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.connect_form(true, cx)
+                                            })),
+                                    )
+                                    .child(Self::button("Connect", "connect", true).on_click(
+                                        cx.listener(|this, _, _, cx| this.connect_form(false, cx)),
+                                    )),
+                            )
+                            .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                "Enter: connect   Ctrl+Enter: save & connect   Esc: cancel",
+                            )),
+                    ),
+            )
     }
 
     fn close_dialog(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1157,16 +1372,68 @@ impl Desktop {
                 )
             }
         };
-        div().absolute().inset_0().flex().items_center().justify_center().bg(rgba(0x15212c99)).occlude()
-            .child(div().w(px(480.)).p_6().rounded(px(14.)).bg(rgb(0xffffff)).border_1().border_color(rgb(BORDER)).shadow_lg().flex().flex_col().gap_4()
-                .child(Self::tag("SESSION CONTROL", RED))
-                .child(div().text_size(px(25.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
-                .child(description)
-                .child(div().p_3().rounded(px(7.)).bg(rgb(0xf4f5f1)).text_size(px(12.)).text_color(rgb(MUTED)).child("Terminal input is paused. Enter keeps the session by default. Tab selects a button; Escape always keeps it."))
-                .child(div().flex().justify_end().gap_2()
-                    .child(Self::button("Keep session", "keep-session", !prompt.confirm_selected).on_click(cx.listener(|this, _, window, cx| this.cancel_close(window, cx))))
-                    .child(Self::button(confirm, "confirm-close", prompt.confirm_selected).text_color(rgb(if prompt.confirm_selected { 0xffffff } else { RED }))
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm_close(window, cx))))))
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x15212c99))
+            .occlude()
+            .child(
+                div()
+                    .w(px(440.))
+                    .p_5()
+                    .rounded(px(5.))
+                    .bg(rgb(PAPER))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(description)
+                    .child(
+                        div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                            "Input paused. Enter / Esc: keep session. Tab: change selection.",
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Self::button(
+                                    "Keep session",
+                                    "keep-session",
+                                    !prompt.confirm_selected,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.cancel_close(window, cx)
+                                    }),
+                                ),
+                            )
+                            .child(
+                                Self::button(confirm, "confirm-close", prompt.confirm_selected)
+                                    .text_color(rgb(if prompt.confirm_selected {
+                                        0xffffff
+                                    } else {
+                                        RED
+                                    }))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_close(window, cx)
+                                    })),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -1188,8 +1455,8 @@ impl Render for Desktop {
             root =
                 root.child(
                     div()
-                        .px_6()
-                        .py_2()
+                        .px_3()
+                        .py_1()
                         .flex()
                         .gap_3()
                         .items_center()
@@ -1208,18 +1475,13 @@ impl Render for Desktop {
             div()
                 .flex_1()
                 .min_h_0()
-                .p_5()
                 .flex()
-                .flex_col()
-                .gap_4()
-                .child(if self.input.surface == Surface::Board {
-                    self.board(cx).into_any_element()
-                } else {
-                    self.stage(cx).into_any_element()
+                .when(self.connections_visible, |body| {
+                    body.child(self.connection_list(cx))
                 })
-                .child(self.session_rail(cx)),
+                .child(self.stage(cx)),
         );
-        // Even the board registers a handler so late native text commits use the same input policy.
+        // Empty workspaces also route late native text commits through the input policy.
         if self.input.surface == Surface::Board {
             let view = cx.entity();
             root = root.child(
@@ -1327,7 +1589,7 @@ impl EntityInputHandler for Desktop {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = self.input.mark(range, text) {
-            self.error = error;
+            self.report_error(error);
         }
         if self.input.field_enabled()
             && let Some(selected) = selected
@@ -1357,7 +1619,7 @@ impl EntityInputHandler for Desktop {
             let origin = self.field_bounds[index].origin
                 + point(
                     line.x_for_index(range.start) - self.field_offsets[index],
-                    px(9.),
+                    px(3.),
                 );
             Some(Bounds::new(
                 origin,

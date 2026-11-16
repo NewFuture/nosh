@@ -32,11 +32,14 @@ pub enum Action {
     CopyTerminal,
     Paste,
     NewLocal,
+    NewConnection,
+    ToggleConnections,
     SwitchTab(bool),
     RequestClose,
     ConfirmClose,
     CancelClose,
     Connect,
+    SaveAndConnect,
     ReturnToTerminal,
     Zoom(i8),
 }
@@ -247,7 +250,13 @@ impl InputState {
             let editor = &mut self.fields[self.field];
             return match key {
                 "escape" => Action::ReturnToTerminal,
-                "enter" if editor.marked.is_none() => Action::Connect,
+                "enter" if editor.marked.is_none() => {
+                    if m.control {
+                        Action::SaveAndConnect
+                    } else {
+                        Action::Connect
+                    }
+                }
                 "tab" => {
                     editor.marked = None;
                     let order = [1, 0, 2, 3, 4, 5];
@@ -301,6 +310,8 @@ impl InputState {
         if m.control && m.shift {
             match key {
                 "t" => return Action::NewLocal,
+                "n" => return Action::NewConnection,
+                "b" => return Action::ToggleConnections,
                 "w" => return Action::RequestClose,
                 "c" if self.terminal_enabled() => return Action::CopyTerminal,
                 "v" if self.terminal_enabled() => return Action::Paste,
@@ -394,7 +405,15 @@ mod tests {
         let mut state = InputState::default();
         state.mark(None, "pending IME").unwrap();
         state.begin_close(CloseTarget::Tab(42));
-        for value in ["ctrl-c", "ctrl-shift-v", "ctrl-shift-t", "a", "up"] {
+        for value in [
+            "ctrl-c",
+            "ctrl-shift-v",
+            "ctrl-shift-t",
+            "ctrl-shift-n",
+            "ctrl-shift-b",
+            "a",
+            "up",
+        ] {
             assert_eq!(state.key(&key(value), TermMode::empty()), Action::None);
         }
         assert_eq!(
@@ -441,7 +460,15 @@ mod tests {
         state.key(&key("home"), TermMode::empty());
         state.key(&key("delete"), TermMode::empty());
         assert_eq!(state.fields[0].text, "文z");
-        for value in ["ctrl-c", "ctrl-shift-t", "ctrl-tab", "up", "f1"] {
+        for value in [
+            "ctrl-c",
+            "ctrl-shift-t",
+            "ctrl-shift-n",
+            "ctrl-shift-b",
+            "ctrl-tab",
+            "up",
+            "f1",
+        ] {
             assert!(!matches!(
                 state.key(&key(value), TermMode::empty()),
                 Action::Write(_)
@@ -468,6 +495,16 @@ mod tests {
         );
         state.key(&key("shift-tab"), TermMode::empty());
         assert_eq!(state.field, 1);
+        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::Connect);
+        assert_eq!(
+            state.key(&key("ctrl-enter"), TermMode::empty()),
+            Action::SaveAndConnect
+        );
+        state.mark(None, "候").unwrap();
+        assert_eq!(
+            state.key(&key("ctrl-enter"), TermMode::empty()),
+            Action::None
+        );
     }
 
     #[test]
@@ -483,6 +520,18 @@ mod tests {
     #[test]
     fn terminal_keeps_interrupt_cursor_modes_bracketed_paste_and_native_text() {
         let mut state = InputState::default();
+        assert_eq!(
+            state.key(&key("ctrl-shift-n"), TermMode::empty()),
+            Action::NewConnection
+        );
+        assert_eq!(
+            state.key(&key("ctrl-shift-b"), TermMode::empty()),
+            Action::ToggleConnections
+        );
+        assert_eq!(
+            state.key(&key("ctrl-b"), TermMode::empty()),
+            Action::Write(vec![2])
+        );
         assert_eq!(
             state.key(&key("ctrl-c"), TermMode::empty()),
             Action::Write(vec![3])
