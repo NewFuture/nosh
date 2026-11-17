@@ -11,6 +11,22 @@ pub enum Surface {
     Terminal,
     Board,
     Connection,
+    Launcher,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorTarget {
+    Connection(usize),
+    Launcher,
+}
+
+impl EditorTarget {
+    pub fn slot(self) -> usize {
+        match self {
+            Self::Connection(index) => index,
+            Self::Launcher => 6,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +66,9 @@ pub enum Action {
     Paste,
     NewLocal,
     NewConnection,
+    OpenLauncher,
+    MoveLauncher(bool),
+    ActivateLauncher,
     ToggleConnections,
     SwitchTab(bool),
     RequestClose,
@@ -104,7 +123,7 @@ impl LineEditor {
             .unwrap_or_else(|| self.selection());
         let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if self.text.len() - range.len() + text.len() > 4096 {
-            return Err("Connection fields are limited to 4096 UTF-8 bytes.".into());
+            return Err("Text fields are limited to 4096 UTF-8 bytes.".into());
         }
         self.text.replace_range(range.clone(), &text);
         self.cursor = range.start + text.len();
@@ -170,6 +189,40 @@ impl LineEditor {
         self.anchor = self.cursor;
         self.marked = None;
     }
+
+    fn key(&mut self, event: &KeyDownEvent) -> Action {
+        let key = event.keystroke.key.as_str();
+        let m = event.keystroke.modifiers;
+        match key {
+            "a" if m.control => {
+                self.anchor = 0;
+                self.cursor = self.text.len();
+            }
+            "c" | "x" if m.control && !self.selection().is_empty() => {
+                let text = self.text[self.selection()].to_owned();
+                if key == "x" {
+                    self.delete(false);
+                }
+                return Action::Copy(text);
+            }
+            "v" if m.control => return Action::Paste,
+            "backspace" => self.delete(true),
+            "delete" => self.delete(false),
+            "left" | "right" | "home" | "end" => {
+                let offset = match key {
+                    "left" if !m.shift && !self.selection().is_empty() => self.selection().start,
+                    "right" if !m.shift && !self.selection().is_empty() => self.selection().end,
+                    "left" => self.left(),
+                    "right" => self.right(),
+                    "home" => 0,
+                    _ => self.text.len(),
+                };
+                self.move_cursor(offset, m.shift);
+            }
+            _ => {}
+        }
+        Action::None
+    }
 }
 
 #[derive(Default)]
@@ -180,6 +233,7 @@ pub struct InputState {
     pub field: usize,
     pub form_button: Option<ConnectionButton>,
     pub terminal_composition: String,
+    pub launcher: LineEditor,
 }
 
 impl InputState {
@@ -195,10 +249,43 @@ impl InputState {
         self.closing.is_none() && self.surface == Surface::Connection
     }
 
+    pub fn background_enabled(&self) -> bool {
+        self.closing.is_none() && matches!(self.surface, Surface::Terminal | Surface::Board)
+    }
+
+    pub fn active_editor(&self) -> Option<EditorTarget> {
+        if self.closing.is_some() {
+            None
+        } else if self.surface == Surface::Launcher {
+            Some(EditorTarget::Launcher)
+        } else if self.field_enabled() {
+            Some(EditorTarget::Connection(self.field))
+        } else {
+            None
+        }
+    }
+
+    pub fn editor(&self, target: EditorTarget) -> &LineEditor {
+        match target {
+            EditorTarget::Connection(index) => &self.fields[index],
+            EditorTarget::Launcher => &self.launcher,
+        }
+    }
+
+    pub fn editor_mut(&mut self, target: EditorTarget) -> &mut LineEditor {
+        match target {
+            EditorTarget::Connection(index) => &mut self.fields[index],
+            EditorTarget::Launcher => &mut self.launcher,
+        }
+    }
+
     pub fn set_surface(&mut self, surface: Surface) {
         self.cancel_composition();
         self.surface = surface;
         self.form_button = None;
+        if surface == Surface::Launcher {
+            self.launcher = LineEditor::default();
+        }
     }
 
     pub fn begin_close(&mut self, target: CloseTarget) {
@@ -211,14 +298,15 @@ impl InputState {
 
     pub fn cancel_composition(&mut self) {
         self.terminal_composition.clear();
+        self.launcher.cancel_mark();
         for field in &mut self.fields {
             field.cancel_mark();
         }
     }
 
     pub fn commit(&mut self, range: Option<Range<usize>>, text: &str) -> Result<Action, String> {
-        if self.field_enabled() {
-            self.fields[self.field].replace(range, text)?;
+        if let Some(target) = self.active_editor() {
+            self.editor_mut(target).replace(range, text)?;
         } else if self.terminal_enabled() {
             self.terminal_composition.clear();
             let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
@@ -232,8 +320,8 @@ impl InputState {
     }
 
     pub fn paste(&mut self, text: &str, mode: TermMode) -> Result<Action, String> {
-        if self.field_enabled() {
-            self.fields[self.field].replace(None, text)?;
+        if let Some(target) = self.active_editor() {
+            self.editor_mut(target).replace(None, text)?;
         } else if self.terminal_enabled() {
             return Ok(keyboard_input(
                 &egui::Event::Paste(text.into()),
@@ -246,8 +334,8 @@ impl InputState {
     }
 
     pub fn mark(&mut self, range: Option<Range<usize>>, text: &str) -> Result<(), String> {
-        if self.field_enabled() {
-            self.fields[self.field].mark(range, text)?;
+        if let Some(target) = self.active_editor() {
+            self.editor_mut(target).mark(range, text)?;
         } else if self.terminal_enabled() {
             self.terminal_composition = text.to_owned();
         }
@@ -269,13 +357,28 @@ impl InputState {
                 _ => Action::None,
             };
         }
+        if self.surface == Surface::Launcher {
+            return match key {
+                "escape" if self.launcher.marked.is_some() => {
+                    self.launcher.cancel_mark();
+                    Action::None
+                }
+                "escape" => Action::ReturnToTerminal,
+                "p" if m.control && m.shift => Action::ReturnToTerminal,
+                "enter" if self.launcher.marked.is_none() => Action::ActivateLauncher,
+                "up" | "down" | "tab" if self.launcher.marked.is_none() => {
+                    Action::MoveLauncher(key == "up" || key == "tab" && m.shift)
+                }
+                _ => self.launcher.key(event),
+            };
+        }
         if self.surface == Surface::Connection {
             if key == "escape" {
                 return Action::ReturnToTerminal;
             }
             if key == "tab" {
                 self.fields[self.field].marked = None;
-                let order = [1, 0, 2, 3, 4, 5];
+                let order = [1, 2, 3, 0, 4, 5];
                 let position = match self.form_button {
                     Some(ConnectionButton::Cancel) => 6,
                     Some(ConnectionButton::SaveAndConnect) => 7,
@@ -305,58 +408,21 @@ impl InputState {
                 };
             }
             let editor = &mut self.fields[self.field];
-            return match key {
-                "enter" if editor.marked.is_none() => {
-                    if m.control {
-                        Action::SaveAndConnect
-                    } else {
-                        Action::Connect
-                    }
+            return if key == "enter" && editor.marked.is_none() {
+                if m.control {
+                    Action::SaveAndConnect
+                } else {
+                    Action::Connect
                 }
-                "a" if m.control => {
-                    editor.anchor = 0;
-                    editor.cursor = editor.text.len();
-                    Action::None
-                }
-                "c" | "x" if m.control && !editor.selection().is_empty() => {
-                    let text = editor.text[editor.selection()].to_owned();
-                    if key == "x" {
-                        editor.delete(false);
-                    }
-                    Action::Copy(text)
-                }
-                "v" if m.control => Action::Paste,
-                "backspace" => {
-                    editor.delete(true);
-                    Action::None
-                }
-                "delete" => {
-                    editor.delete(false);
-                    Action::None
-                }
-                "left" | "right" | "home" | "end" => {
-                    let offset = match key {
-                        "left" if !m.shift && !editor.selection().is_empty() => {
-                            editor.selection().start
-                        }
-                        "right" if !m.shift && !editor.selection().is_empty() => {
-                            editor.selection().end
-                        }
-                        "left" => editor.left(),
-                        "right" => editor.right(),
-                        "home" => 0,
-                        _ => editor.text.len(),
-                    };
-                    editor.move_cursor(offset, m.shift);
-                    Action::None
-                }
-                _ => Action::None,
+            } else {
+                editor.key(event)
             };
         }
         if m.control && m.shift {
             match key {
                 "t" => return Action::NewLocal,
                 "n" => return Action::NewConnection,
+                "p" => return Action::OpenLauncher,
                 "b" => return Action::ToggleConnections,
                 "w" => return Action::RequestClose,
                 "c" if self.terminal_enabled() => return Action::CopyTerminal,
@@ -536,8 +602,8 @@ mod tests {
         state.field = 1;
         state.key(&key("tab"), TermMode::empty());
         assert_eq!(
-            state.field, 0,
-            "Tab follows the visible host/name/user/port/key/jump order"
+            state.field, 2,
+            "Tab follows destination first, then profile and access"
         );
         state.key(&key("shift-tab"), TermMode::empty());
         assert_eq!(state.field, 1);
@@ -569,7 +635,7 @@ mod tests {
         state.set_surface(Surface::Connection);
         state.field = 1;
         state.commit(None, "original-host").unwrap();
-        for field in [0, 2, 3, 4, 5] {
+        for field in [2, 3, 0, 4, 5] {
             assert_eq!(state.key(&key("tab"), TermMode::empty()), Action::None);
             assert_eq!(state.field, field);
             assert!(state.field_enabled());
@@ -681,5 +747,63 @@ mod tests {
         state.set_surface(Surface::Board);
         assert_eq!(state.commit(None, "hidden text").unwrap(), Action::None);
         assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
+    }
+
+    #[test]
+    fn launcher_search_has_its_own_editor_and_never_writes_to_the_terminal() {
+        let mut state = InputState::default();
+        state.fields[1].replace(None, "saved-host").unwrap();
+        assert_eq!(
+            state.key(&key("ctrl-shift-p"), TermMode::empty()),
+            Action::OpenLauncher
+        );
+        state.set_surface(Surface::Launcher);
+        assert!(!state.background_enabled());
+        assert!(!state.terminal_enabled());
+        assert_eq!(state.active_editor(), Some(EditorTarget::Launcher));
+        assert_eq!(state.commit(None, "中😀").unwrap(), Action::None);
+        state.commit(Some(1..3), "文").unwrap();
+        assert_eq!(state.launcher.text, "中文");
+        assert_eq!(
+            state.paste(" ssh\r\n", TermMode::BRACKETED_PASTE).unwrap(),
+            Action::None
+        );
+        assert_eq!(state.launcher.text, "中文 ssh");
+        assert_eq!(state.fields[1].text, "saved-host");
+        for value in ["ctrl-c", "ctrl-shift-t", "ctrl-shift-v", "ctrl-tab"] {
+            assert!(!matches!(
+                state.key(&key(value), TermMode::empty()),
+                Action::Write(_)
+            ));
+        }
+        assert_eq!(
+            state.key(&key("down"), TermMode::empty()),
+            Action::MoveLauncher(false)
+        );
+        assert_eq!(
+            state.key(&key("shift-tab"), TermMode::empty()),
+            Action::MoveLauncher(true)
+        );
+        state.mark(None, "候").unwrap();
+        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
+        assert_eq!(state.key(&key("down"), TermMode::empty()), Action::None);
+        assert_eq!(state.key(&key("escape"), TermMode::empty()), Action::None);
+        assert_eq!(state.launcher.text, "中文 ssh");
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ActivateLauncher
+        );
+        state.begin_close(CloseTarget::Window);
+        assert_eq!(state.active_editor(), None);
+        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
+        assert_eq!(
+            state.paste("MUST_NOT_PASTE", TermMode::empty()).unwrap(),
+            Action::None
+        );
+        assert_eq!(state.launcher.text, "中文 ssh");
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::CancelClose
+        );
     }
 }

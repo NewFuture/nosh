@@ -18,7 +18,8 @@ use gpui::{
 use nosh_desktop::connections::{self, Connection, Settings};
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
-use crate::gpui_input::{Action, CloseTarget, ConnectionButton, InputState, Surface};
+use crate::gpui_input::{Action, CloseTarget, ConnectionButton, EditorTarget, InputState, Surface};
+use crate::gpui_launcher::{LaunchAction, LaunchItem};
 use crate::gpui_terminal;
 
 const CHROME: u32 = 0x171b23;
@@ -47,6 +48,8 @@ pub struct Options {
     nosh: Option<PathBuf>,
     #[arg(long)]
     cwd: Option<PathBuf>,
+    #[arg(long, help = "Use an isolated desktop settings file")]
+    settings: Option<PathBuf>,
 }
 
 enum SessionKind {
@@ -128,9 +131,14 @@ pub struct Desktop {
     bounds: Bounds<Pixels>,
     cell: gpui::Size<Pixels>,
     selecting: bool,
-    field_bounds: [Bounds<Pixels>; 6],
-    field_layouts: [Option<ShapedLine>; 6],
-    field_offsets: [Pixels; 6],
+    field_bounds: [Bounds<Pixels>; 7],
+    field_layouts: [Option<ShapedLine>; 7],
+    field_offsets: [Pixels; 7],
+    editing_connection: Option<usize>,
+    launcher_query: String,
+    launcher_selected: usize,
+    launcher_scroll: ScrollHandle,
+    reveal_launcher: bool,
     connections_visible: Option<bool>,
     tabs_scroll: ScrollHandle,
     reveal_active_tab: bool,
@@ -141,7 +149,9 @@ pub struct Desktop {
 impl Desktop {
     pub fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (sender, events) = mpsc::channel();
-        let settings_path = dirs::config_dir().map(|p| p.join("nosh").join("desktop-gpui.json"));
+        let settings_path = options
+            .settings
+            .or_else(|| dirs::config_dir().map(|p| p.join("nosh").join("desktop-gpui.json")));
         let loaded = settings_path.as_ref().map_or_else(
             || Err("No system configuration directory. Saving is disabled.".into()),
             |p| Settings::load(p),
@@ -189,7 +199,12 @@ impl Desktop {
             selecting: false,
             field_bounds: Default::default(),
             field_layouts: Default::default(),
-            field_offsets: [px(0.); 6],
+            field_offsets: [px(0.); 7],
+            editing_connection: None,
+            launcher_query: String::new(),
+            launcher_selected: 0,
+            launcher_scroll: ScrollHandle::new(),
+            reveal_launcher: false,
             connections_visible: None,
             tabs_scroll: ScrollHandle::new(),
             reveal_active_tab: true,
@@ -306,7 +321,11 @@ impl Desktop {
             Ok(backend) => {
                 if save {
                     let mut settings = self.settings.clone();
-                    settings.connections.push(connection.clone());
+                    if let Some(index) = self.editing_connection {
+                        settings.connections[index] = connection.clone();
+                    } else {
+                        settings.connections.push(connection.clone());
+                    }
                     let result = self
                         .settings_path
                         .as_ref()
@@ -397,11 +416,187 @@ impl Desktop {
         self.input.set_surface(surface);
         self.selecting = false;
         if surface == Surface::Connection {
+            self.editing_connection = None;
+            self.input.fields = Default::default();
             self.input.field = 1;
             self.form_error.clear();
+        } else if surface == Surface::Launcher {
+            self.launcher_query.clear();
+            self.launcher_selected = 0;
+            self.reveal_launcher = true;
         }
         window.focus(&self.focus);
         cx.notify();
+    }
+
+    fn edit_connection(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input.background_enabled() {
+            return;
+        }
+        let connection = self.settings.connections[index].clone();
+        self.show_surface(Surface::Connection, window, cx);
+        self.editing_connection = Some(index);
+        let values = [
+            connection.name,
+            connection.host,
+            connection.user,
+            connection
+                .port
+                .map_or_else(String::new, |port| port.to_string()),
+            connection.identity,
+            connection.jump,
+        ];
+        for (editor, value) in self.input.fields.iter_mut().zip(values) {
+            if let Err(error) = editor.replace(None, &value) {
+                self.form_error = error;
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    fn launcher_items(&self) -> Vec<LaunchItem> {
+        let mut items = vec![
+            LaunchItem::new(
+                "New local terminal",
+                "Start nosh on this computer",
+                "Create",
+                ">_",
+                "Ctrl+Shift+T",
+                LaunchAction::Local,
+            ),
+            LaunchItem::new(
+                "New SSH connection",
+                "Review a target before connecting",
+                "Create",
+                "SSH",
+                "Ctrl+Shift+N",
+                LaunchAction::Connection,
+            ),
+        ];
+        for session in &self.sessions {
+            items.push(LaunchItem::new(
+                session.title.clone(),
+                format!("{} / {}", session.identity(), session.status_label()),
+                "Switch session",
+                session.kind_label(),
+                "",
+                LaunchAction::Session(session.id),
+            ));
+        }
+        for (index, connection) in self.settings.connections.iter().enumerate() {
+            items.push(LaunchItem::new(
+                connection.name.clone(),
+                connection.target(),
+                "Saved connections",
+                "SSH",
+                "",
+                LaunchAction::Saved(index),
+            ));
+        }
+        if let Some(session) = self.sessions.get(self.active) {
+            items.push(LaunchItem::new(
+                "Copy terminal selection",
+                "Copy only the selected terminal text",
+                "Terminal",
+                "C",
+                "Ctrl+Shift+C",
+                LaunchAction::Copy,
+            ));
+            if matches!(session.status, ProcessState::Running) {
+                items.push(LaunchItem::new(
+                    "Paste into terminal",
+                    "Uses the terminal's bracketed-paste mode",
+                    "Terminal",
+                    "V",
+                    "Ctrl+Shift+V",
+                    LaunchAction::Paste,
+                ));
+            }
+            items.push(LaunchItem::new(
+                "Close current session",
+                session.title.clone(),
+                "Terminal",
+                "\u{00d7}",
+                "Ctrl+Shift+W",
+                LaunchAction::Close(session.id),
+            ));
+        }
+        for (label, shortcut, delta) in [
+            ("Increase text size", "Ctrl++", 1),
+            ("Decrease text size", "Ctrl+-", -1),
+            ("Reset text size", "Ctrl+0", 0),
+        ] {
+            items.push(LaunchItem::new(
+                label,
+                "Zoom / terminal text size",
+                "View",
+                "Aa",
+                shortcut,
+                LaunchAction::Zoom(delta),
+            ));
+        }
+        items.push(LaunchItem::new(
+            "Toggle session navigator",
+            "Show or hide the sidebar with sessions and saved connections",
+            "View",
+            "\u{2261}",
+            "Ctrl+Shift+B",
+            LaunchAction::Sidebar,
+        ));
+        items.retain(|item| item.matches(&self.input.launcher.text));
+        items
+    }
+
+    fn activate_launcher(
+        &mut self,
+        action: LaunchAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input.surface != Surface::Launcher || self.input.closing.is_some() {
+            return;
+        }
+        self.input.set_surface(if self.sessions.is_empty() {
+            Surface::Board
+        } else {
+            Surface::Terminal
+        });
+        window.focus(&self.focus);
+        match action {
+            LaunchAction::Local => self.open_local(cx),
+            LaunchAction::Connection => self.show_surface(Surface::Connection, window, cx),
+            LaunchAction::Saved(index) => self.edit_connection(index, window, cx),
+            LaunchAction::Session(id) => {
+                if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
+                    self.switch_session(index, window, cx);
+                }
+            }
+            LaunchAction::Copy => self.action(Action::CopyTerminal, window, cx),
+            LaunchAction::Paste => self.action(Action::Paste, window, cx),
+            LaunchAction::Close(id) => self.request_close(CloseTarget::Tab(id), window, cx),
+            LaunchAction::Zoom(delta) => self.action(Action::Zoom(delta), window, cx),
+            LaunchAction::Sidebar => self.action(Action::ToggleConnections, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn sync_launcher(&mut self) {
+        if self.input.surface != Surface::Launcher {
+            return;
+        }
+        if self.launcher_query != self.input.launcher.text {
+            self.launcher_query.clone_from(&self.input.launcher.text);
+            self.launcher_selected = 0;
+            self.reveal_launcher = true;
+        }
+        let selected = self
+            .launcher_selected
+            .min(self.launcher_items().len().saturating_sub(1));
+        if selected != self.launcher_selected {
+            self.launcher_selected = selected;
+            self.reveal_launcher = true;
+        }
     }
 
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -480,6 +675,7 @@ impl Desktop {
     }
 
     fn action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_launcher();
         match action {
             Action::None => {}
             Action::Write(bytes) => self.write(bytes),
@@ -504,6 +700,20 @@ impl Desktop {
             }
             Action::NewLocal => self.open_local(cx),
             Action::NewConnection => self.show_surface(Surface::Connection, window, cx),
+            Action::OpenLauncher => self.show_surface(Surface::Launcher, window, cx),
+            Action::MoveLauncher(reverse) => {
+                let count = self.launcher_items().len();
+                if count != 0 {
+                    self.launcher_selected =
+                        (self.launcher_selected + if reverse { count - 1 } else { 1 }) % count;
+                    self.reveal_launcher = true;
+                }
+            }
+            Action::ActivateLauncher => {
+                if let Some(item) = self.launcher_items().get(self.launcher_selected) {
+                    self.activate_launcher(item.action, window, cx);
+                }
+            }
             Action::ToggleConnections => {
                 self.connections_visible = Some(!self.connections_visible(window));
                 self.reveal_active_tab = true;
@@ -527,7 +737,15 @@ impl Desktop {
             Action::CancelClose => self.cancel_close(window, cx),
             Action::Connect => self.connect_form(false, cx),
             Action::SaveAndConnect => self.connect_form(true, cx),
-            Action::ReturnToTerminal => self.show_surface(Surface::Terminal, window, cx),
+            Action::ReturnToTerminal => self.show_surface(
+                if self.sessions.is_empty() {
+                    Surface::Board
+                } else {
+                    Surface::Terminal
+                },
+                window,
+                cx,
+            ),
             Action::Zoom(delta) => {
                 self.settings.font_size = if delta == 0 {
                     14.
@@ -685,7 +903,7 @@ impl Desktop {
 
     fn toolbar_button(
         label: impl Into<SharedString>,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
     ) -> gpui::Stateful<gpui::Div> {
         Self::button(label, id, false)
             .h(px(26.))
@@ -723,7 +941,7 @@ impl Desktop {
 
     #[cfg(target_os = "windows")]
     fn caption_buttons(&self, window: &Window) -> gpui::Div {
-        let enabled = self.input.closing.is_none() && self.input.surface != Surface::Connection;
+        let enabled = self.input.background_enabled();
         let mut buttons = div().flex().h_full().flex_shrink_0();
         for (area, glyph) in [
             (gpui::WindowControlArea::Min, "\u{e921}"),
@@ -780,11 +998,9 @@ impl Desktop {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(
-                            self.input.closing.is_none()
-                                && self.input.surface != Surface::Connection,
-                            |logo| logo.window_control_area(gpui::WindowControlArea::Drag),
-                        )
+                        .when(self.input.background_enabled(), |logo| {
+                            logo.window_control_area(gpui::WindowControlArea::Drag)
+                        })
                         .child(
                             div()
                                 .size(px(26.))
@@ -827,24 +1043,22 @@ impl Desktop {
                 ))
             })
             .child(
-                Self::toolbar_button("+", "new-session")
-                    .text_size(px(17.))
-                    .w(px(28.))
-                    .px_0()
-                    .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
-            )
-            .child(
-                Self::button("SSH...", "new-ssh", false)
-                    .text_color(rgb(BLUE))
+                Self::button("+ New", "new-session", false)
+                    .text_color(rgb(GREEN))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_surface(Surface::Connection, window, cx)
+                        this.show_surface(Surface::Launcher, window, cx)
                     })),
             )
             .when(cfg!(target_os = "windows"), |header| {
-                header.child(div().w(px(32.)).h_full().flex_shrink_0().when(
-                    self.input.closing.is_none() && self.input.surface != Surface::Connection,
-                    |space| space.window_control_area(gpui::WindowControlArea::Drag),
-                ))
+                header.child(
+                    div()
+                        .w(px(32.))
+                        .h_full()
+                        .flex_shrink_0()
+                        .when(self.input.background_enabled(), |space| {
+                            space.window_control_area(gpui::WindowControlArea::Drag)
+                        }),
+                )
             })
             .map(|header| {
                 #[cfg(target_os = "windows")]
@@ -859,16 +1073,6 @@ impl Desktop {
     }
 
     fn connection_list(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let folder = self
-            .cwd
-            .as_ref()
-            .map(|path| {
-                path.file_name()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|_| "Startup directory unavailable".into());
         let mut saved = div().flex().flex_col().gap_1();
         if self.settings.connections.is_empty() {
             saved = saved.child(
@@ -877,11 +1081,10 @@ impl Desktop {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(rgb(MUTED))
-                    .child("No saved connections"),
+                    .child("Saved SSH targets appear here"),
             );
         }
         for (index, connection) in self.settings.connections.iter().enumerate() {
-            let connection = connection.clone();
             let selected = matches!(
                 self.sessions.get(self.active).map(|session| &session.kind),
                 Some(SessionKind::Ssh(target)) if target == &connection.target()
@@ -902,8 +1105,7 @@ impl Desktop {
                     .hover(|style| style.bg(rgb(HOVER)))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_ssh(connection.clone(), false, cx);
-                        window.focus(&this.focus);
+                        this.edit_connection(index, window, cx);
                     }))
                     .child(Self::tag("SSH", BLUE))
                     .child(
@@ -925,12 +1127,75 @@ impl Desktop {
                     ),
             );
         }
+        let mut sessions = div().flex().flex_col().gap_1();
+        for (index, session) in self.sessions.iter().enumerate() {
+            let id = session.id;
+            let active = index == self.active;
+            sessions = sessions.child(
+                div()
+                    .id(("navigator-session", id))
+                    .mx_2()
+                    .px_2()
+                    .py_2()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if active { rgb(0x3c5a50) } else { rgba(0) })
+                    .bg(if active { rgb(0x293d39) } else { rgba(0) })
+                    .hover(|style| style.bg(rgb(HOVER)))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.switch_session(index, window, cx);
+                    }))
+                    .child(Self::tag(
+                        if matches!(session.kind, SessionKind::Local) {
+                            ">_"
+                        } else {
+                            "SSH"
+                        },
+                        session.accent(),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(session.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .truncate()
+                                    .child(session.identity()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .size(px(5.))
+                            .rounded_full()
+                            .bg(rgb(session.status_color())),
+                    )
+                    .child(
+                        Self::toolbar_button("\u{00d7}", ("navigator-close", id))
+                            .px_1()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.request_close(CloseTarget::Tab(id), window, cx);
+                            })),
+                    ),
+            );
+        }
         div()
             .id("connection-list")
-            .w(px(208.))
+            .w(px(232.))
             .flex_shrink_0()
             .h_full()
-            .overflow_y_scroll()
             .border_r_1()
             .border_color(rgb(BORDER))
             .bg(rgb(SURFACE))
@@ -938,14 +1203,16 @@ impl Desktop {
             .flex_col()
             .child(
                 div()
-                    .h(px(38.))
+                    .h(px(48.))
                     .flex_shrink_0()
                     .px_3()
                     .flex()
                     .items_center()
+                    .justify_between()
                     .text_size(px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Connections"),
+                    .child("Workspace")
+                    .child(Self::tag(format!("{}", self.sessions.len()), MUTED)),
             )
             .child(
                 div()
@@ -954,76 +1221,59 @@ impl Desktop {
                     .pb_2()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .child("LOCAL"),
+                    .child("SESSIONS"),
             )
             .child(
                 div()
-                    .id("local-connection")
-                    .mx_2()
-                    .px_2()
-                    .py_2()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgba(0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when(
-                        matches!(
-                            self.sessions.get(self.active).map(|session| &session.kind),
-                            Some(SessionKind::Local)
+                    .id("navigator-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(sessions)
+                    .child(
+                        div().px_3().py_2().child(
+                            Self::toolbar_button("+ New session", "navigator-new")
+                                .text_color(rgb(GREEN))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.show_surface(Surface::Launcher, window, cx);
+                                })),
                         ),
-                        |row| row.bg(rgb(0x293d39)).border_color(rgb(0x3c5a50)),
                     )
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(HOVER)))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_local(cx);
-                        window.focus(&this.focus);
-                    }))
-                    .child(Self::tag(">_", GREEN))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child("This computer"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(MUTED))
-                                    .truncate()
-                                    .child(folder),
-                            ),
-                    ),
+                            .px_3()
+                            .pt_4()
+                            .pb_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child("SAVED CONNECTIONS")
+                            .child(Self::toolbar_button("+", "add-saved").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.show_surface(Surface::Connection, window, cx);
+                                },
+                            ))),
+                    )
+                    .child(saved),
             )
-            .child(
-                div()
-                    .px_3()
-                    .pt_4()
-                    .pb_2()
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child("SSH"),
-            )
-            .child(saved)
-            .child(div().px_3().py_2().child(
-                Self::toolbar_button("+ New connection", "list-new-ssh").on_click(cx.listener(
-                    |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
-                )),
-            ))
-            .child(div().flex_1())
             .child(
                 div()
                     .p_3()
                     .border_t_1()
                     .border_color(rgb(BORDER))
-                    .child(Self::shortcut("New terminal", "Ctrl+Shift+T"))
-                    .child(Self::shortcut("Connect SSH", "Ctrl+Shift+N"))
-                    .child(Self::shortcut("Toggle sidebar", "Ctrl+Shift+B")),
+                    .child(
+                        Self::toolbar_button("Quick open...", "navigator-launcher")
+                            .w_full()
+                            .justify_between()
+                            .child(Self::tag("Ctrl+Shift+P", MUTED))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_surface(Surface::Launcher, window, cx);
+                            })),
+                    )
+                    .child(Self::shortcut("New local", "Ctrl+Shift+T"))
+                    .child(Self::shortcut("New SSH", "Ctrl+Shift+N")),
             )
     }
 
@@ -1046,8 +1296,11 @@ impl Desktop {
                     "Ctrl+Shift+T  New local terminal    /    Ctrl+Shift+N  Connect via SSH",
                 ))
                 .child(
-                    Self::button("New local terminal", "empty-local", true)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
+                    Self::button("New session...", "empty-local", true).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.show_surface(Surface::Launcher, window, cx);
+                        },
+                    )),
                 );
         };
         let identity = session.identity();
@@ -1055,7 +1308,7 @@ impl Desktop {
             SessionKind::Local => self
                 .cwd
                 .as_ref()
-                .map(|cwd| cwd.display().to_string())
+                .map(|cwd| format!("Startup: {}", cwd.display()))
                 .unwrap_or_default(),
             SessionKind::Ssh(_) => "OpenSSH".into(),
         };
@@ -1138,7 +1391,7 @@ impl Desktop {
             .overflow_hidden()
             .child(
                 div()
-                    .h(px(38.))
+                    .h(px(34.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -1172,50 +1425,39 @@ impl Desktop {
                                     .child(meta),
                             ),
                     )
-                    .child(Self::toolbar_button("Copy", "copy").on_click(cx.listener(
-                        |this, _, window, cx| this.action(Action::CopyTerminal, window, cx),
-                    )))
                     .child(
-                        Self::toolbar_button("Paste", "paste")
-                            .when(is_exited, |button| {
-                                button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
-                            })
-                            .when(!is_exited, |button| {
-                                button.on_click(cx.listener(|this, _, window, cx| {
-                                    this.action(Action::Paste, window, cx)
-                                }))
+                        Self::toolbar_button("Actions...", "session-actions").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.show_surface(Surface::Launcher, window, cx);
                             }),
-                    )
-                    .child(Self::toolbar_button("-", "zoom-out").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.action(Action::Zoom(-1), window, cx)
-                        }),
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child(format!("{} px", self.settings.font_size)),
-                    )
-                    .child(Self::toolbar_button("+", "zoom-in").on_click(
-                        cx.listener(|this, _, window, cx| this.action(Action::Zoom(1), window, cx)),
-                    )),
+                        ),
+                    ),
             )
             .when(is_exited, |stage| {
                 stage.child(
                     div()
                         .px_3()
                         .py_1()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .bg(rgb(ERROR_SURFACE))
                         .text_color(rgb(RED))
                         .text_size(px(12.))
-                        .child("Session ended. Output preserved."),
+                        .child("Session ended. Output preserved.")
+                        .child(
+                            Self::toolbar_button("New session...", "exited-new").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.show_surface(Surface::Launcher, window, cx);
+                                }),
+                            ),
+                        ),
                 )
             })
             .child(terminal)
             .child(
                 div()
-                    .h(px(24.))
+                    .h(px(30.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -1229,11 +1471,24 @@ impl Desktop {
                     .child(div().size(px(6.)).rounded_full().bg(rgb(status_color)))
                     .child(status)
                     .child(div().flex_1())
-                    .child(if self.input.terminal_enabled() {
-                        "GPUI"
-                    } else {
-                        "Input paused"
-                    }),
+                    .when(!self.input.terminal_enabled(), |bar| {
+                        bar.child("Input paused")
+                    })
+                    .child(
+                        Self::toolbar_button("-", "zoom-out")
+                            .px_1()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.action(Action::Zoom(-1), window, cx);
+                            })),
+                    )
+                    .child(format!("{} px", self.settings.font_size))
+                    .child(
+                        Self::toolbar_button("+", "zoom-in")
+                            .px_1()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.action(Action::Zoom(1), window, cx);
+                            })),
+                    ),
             )
     }
 
@@ -1314,9 +1569,7 @@ impl Desktop {
             );
         }
         cards.child(div().min_w(px(32.)).flex_1().h_full().when(
-            cfg!(target_os = "windows")
-                && self.input.closing.is_none()
-                && self.input.surface != Surface::Connection,
+            cfg!(target_os = "windows") && self.input.background_enabled(),
             |space| space.window_control_area(gpui::WindowControlArea::Drag),
         ))
     }
@@ -1328,12 +1581,23 @@ impl Desktop {
         placeholder: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.text_field(EditorTarget::Connection(index), label, placeholder, cx)
+    }
+
+    fn text_field(
+        &self,
+        target: EditorTarget,
+        label: &'static str,
+        placeholder: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let index = target.slot();
         let view = cx.entity();
         let paint_view = view.clone();
         let input_view = view.clone();
-        let focused = self.input.field_enabled() && self.input.field == index;
+        let focused = self.input.active_editor() == Some(target);
         div()
-            .flex_1()
+            .w_full()
             .min_w_0()
             .flex()
             .flex_col()
@@ -1348,7 +1612,11 @@ impl Desktop {
             .child(
                 div()
                     .id(("connection-field", index))
-                    .h(px(30.))
+                    .h(px(if target == EditorTarget::Launcher {
+                        38.
+                    } else {
+                        32.
+                    }))
                     .px_2()
                     .rounded(px(6.))
                     .border_1()
@@ -1359,11 +1627,17 @@ impl Desktop {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            if !this.input.connection_enabled() {
-                                return;
+                            match target {
+                                EditorTarget::Connection(index)
+                                    if this.input.connection_enabled() =>
+                                {
+                                    this.input.field = index;
+                                    this.input.form_button = None;
+                                }
+                                EditorTarget::Launcher
+                                    if this.input.active_editor() == Some(target) => {}
+                                _ => return,
                             }
-                            this.input.field = index;
-                            this.input.form_button = None;
                             let offset = this.field_layouts[index]
                                 .as_ref()
                                 .map(|line| {
@@ -1373,7 +1647,9 @@ impl Desktop {
                                     )
                                 })
                                 .unwrap_or(0);
-                            this.input.fields[index].move_cursor(offset, event.modifiers.shift);
+                            this.input
+                                .editor_mut(target)
+                                .move_cursor(offset, event.modifiers.shift);
                             window.focus(&this.focus);
                             cx.notify();
                         }),
@@ -1383,7 +1659,7 @@ impl Desktop {
                             move |bounds, window, cx| {
                                 view.update(cx, |this, _| {
                                     this.field_bounds[index] = bounds;
-                                    let editor = &this.input.fields[index];
+                                    let editor = this.input.editor(target);
                                     let text: SharedString = if editor.text.is_empty() {
                                         placeholder.into()
                                     } else {
@@ -1425,9 +1701,12 @@ impl Desktop {
                                     );
                                 }
                                 paint_view.update(cx, |this, cx| {
-                                    let editor = &this.input.fields[index];
-                                    let origin =
-                                        bounds.origin + point(-this.field_offsets[index], px(3.));
+                                    let editor = this.input.editor(target);
+                                    let origin = bounds.origin
+                                        + point(
+                                            -this.field_offsets[index],
+                                            (bounds.size.height - px(22.)) / 2.,
+                                        );
                                     let selection = editor.selection();
                                     if focused && !selection.is_empty() {
                                         let start = line.x_for_index(selection.start);
@@ -1441,7 +1720,7 @@ impl Desktop {
                                         ));
                                     }
                                     if let Err(error) = line.paint(origin, px(22.), window, cx) {
-                                        eprintln!("nosh-gpui: draw connection field: {error:#}");
+                                        eprintln!("nosh-gpui: draw text field: {error:#}");
                                     }
                                     if focused {
                                         window.paint_quad(fill(
@@ -1506,6 +1785,188 @@ impl Desktop {
             )
     }
 
+    fn launcher(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let items = self.launcher_items();
+        let groups = items
+            .iter()
+            .enumerate()
+            .filter(|(index, item)| *index == 0 || items[*index - 1].group != item.group)
+            .count();
+        let content_height = if items.is_empty() {
+            px(252.)
+        } else {
+            px(172. + items.len() as f32 * 52. + groups as f32 * 28.)
+        };
+        let mut rows = div()
+            .id("launcher-results")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.launcher_scroll)
+            .pb_2();
+        let mut group = "";
+        for (index, item) in items.iter().enumerate() {
+            let heading = group != item.group;
+            group = item.group;
+            let selected = self.launcher_selected == index;
+            let action = item.action;
+            rows = rows.child(
+                div()
+                    .when(heading, |row| {
+                        row.child(
+                            div()
+                                .px_4()
+                                .pt_3()
+                                .pb_1()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED))
+                                .child(item.group.to_uppercase()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("launcher-item", index))
+                            .mx_2()
+                            .px_2()
+                            .h(px(52.))
+                            .rounded(px(5.))
+                            .border_l_2()
+                            .border_color(if selected { rgb(GREEN) } else { rgba(0) })
+                            .bg(if selected { rgb(HOVER) } else { rgba(0) })
+                            .hover(|style| style.bg(rgb(HOVER)))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .cursor_pointer()
+                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                if this.launcher_selected != index {
+                                    this.launcher_selected = index;
+                                    cx.notify();
+                                }
+                            }))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.activate_launcher(action, window, cx);
+                            }))
+                            .child(div().w(px(40.)).flex_shrink_0().child(Self::tag(
+                                item.glyph,
+                                if item.glyph == "SSH" { BLUE } else { GREEN },
+                            )))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .truncate()
+                                            .child(item.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(MUTED))
+                                            .truncate()
+                                            .child(item.detail.clone()),
+                                    ),
+                            )
+                            .when(!item.shortcut.is_empty(), |row| {
+                                row.child(Self::tag(item.shortcut, MUTED))
+                            }),
+                    ),
+            );
+        }
+        if items.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_4()
+                    .py_5()
+                    .text_color(rgb(MUTED))
+                    .child("No matches. Try a session name, host, or action."),
+            );
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .p_4()
+            .pt(px(72.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .bg(rgba(0x0b0f18bb))
+            .occlude()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(640.))
+                    .h(content_height
+                        .min(window.viewport_size().height - px(120.))
+                        .min(px(540.)))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .p_4()
+                            .flex_shrink_0()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                div()
+                                    .mb_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("New or switch")
+                                    .child(Self::toolbar_button("Esc", "close-launcher").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.action(Action::ReturnToTerminal, window, cx);
+                                        }),
+                                    )),
+                            )
+                            .child(self.text_field(
+                                EditorTarget::Launcher,
+                                "QUICK OPEN",
+                                "Search sessions, saved hosts, or actions...",
+                                cx,
+                            ))
+                            .when(!self.error.is_empty(), |header| {
+                                header.child(
+                                    div()
+                                        .mt_2()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(RED))
+                                        .child(self.error.clone()),
+                                )
+                            }),
+                    )
+                    .child(rows)
+                    .child(
+                        div()
+                            .h(px(32.))
+                            .flex_shrink_0()
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED))
+                            .child("Up / Down: select     Enter: open     Esc: dismiss")
+                            .child(format!(
+                                "{} result{}",
+                                items.len(),
+                                if items.len() == 1 { "" } else { "s" }
+                            )),
+                    ),
+            )
+    }
+
     fn connection_drawer(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .absolute()
@@ -1518,9 +1979,9 @@ impl Desktop {
             .occlude()
             .child(
                 div()
-                    .w(px(480.))
+                    .w(px(680.))
                     .h_full()
-                    .max_h(px(530.))
+                    .max_h(px(430.))
                     .rounded(px(8.))
                     .bg(rgb(SURFACE))
                     .border_1()
@@ -1543,7 +2004,11 @@ impl Desktop {
                                     .flex_1()
                                     .text_size(px(16.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("SSH connection"),
+                                    .child(if self.editing_connection.is_some() {
+                                        "Review saved connection"
+                                    } else {
+                                        "New SSH connection"
+                                    }),
                             )
                             .child(Self::tag("OpenSSH", BLUE)),
                     )
@@ -1557,19 +2022,30 @@ impl Desktop {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(self.field(1, "Host or SSH alias", "Required", cx))
-                            .child(self.field(0, "Name", "Optional; defaults to host", cx))
                             .child(
                                 div()
                                     .flex()
-                                    .gap_3()
-                                    .child(self.field(2, "User", "SSH config default", cx))
-                                    .child(self.field(3, "Port", "SSH config default", cx)),
+                                    .gap_5()
+                                    .child(
+                                        div().flex_1().min_w_0().flex().flex_col().gap_3()
+                                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child("Destination"))
+                                            .child(self.field(1, "Host or SSH alias", "Required", cx))
+                                            .child(div().flex().gap_3()
+                                                .child(self.field(2, "User", "SSH config", cx))
+                                                .child(self.field(3, "Port", "SSH config", cx))),
+                                    )
+                                    .child(
+                                        div().flex_1().min_w_0().flex().flex_col().gap_3()
+                                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child("Profile & access"))
+                                            .child(self.field(0, "Display name", "Defaults to host", cx))
+                                            .child(self.field(4, "Identity file", "Optional private key path", cx))
+                                            .child(self.field(5, "Jump host", "Optional user@jump:port", cx)),
+                                    ),
                             )
-                            .child(self.field(4, "Identity file", "Optional private key path", cx))
-                            .child(self.field(5, "Jump host", "Optional user@jump:port", cx))
                             .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
-                                "Host verification on. Passwords are entered in the terminal.",
+                                "Opens a separate SSH terminal. Host verification stays on; passwords are entered there.",
                             ))
                             .when(!self.error.is_empty(), |drawer| {
                                 drawer.child(
@@ -1730,6 +2206,16 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_launcher();
+        if self.input.surface == Surface::Launcher && std::mem::take(&mut self.reveal_launcher) {
+            let view = cx.entity();
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    this.launcher_scroll.scroll_to_item(this.launcher_selected);
+                    cx.notify();
+                });
+            });
+        }
         let width = window.viewport_size().width;
         let overflow = self.tabs_scroll.max_offset().width > px(0.);
         if self.viewport_width != width || self.tabs_overflow != overflow {
@@ -1808,6 +2294,9 @@ impl Render for Desktop {
         if self.input.surface == Surface::Connection {
             root = root.child(self.connection_drawer(cx));
         }
+        if self.input.surface == Surface::Launcher {
+            root = root.child(self.launcher(window, cx));
+        }
         if self.input.closing.is_some() {
             root = root.child(self.close_dialog(cx));
         }
@@ -1823,10 +2312,7 @@ impl EntityInputHandler for Desktop {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        if !self.input.field_enabled() {
-            return None;
-        }
-        let editor = &self.input.fields[self.input.field];
+        let editor = self.input.editor(self.input.active_editor()?);
         let range = editor.byte_range(range);
         *actual = Some(
             editor.text[..range.start].encode_utf16().count()
@@ -1841,8 +2327,8 @@ impl EntityInputHandler for Desktop {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        if self.input.field_enabled() {
-            let editor = &self.input.fields[self.input.field];
+        if let Some(target) = self.input.active_editor() {
+            let editor = self.input.editor(target);
             Some(UTF16Selection {
                 range: editor.utf16_selection(),
                 reversed: editor.cursor < editor.anchor,
@@ -1858,8 +2344,8 @@ impl EntityInputHandler for Desktop {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        if self.input.field_enabled() {
-            let editor = &self.input.fields[self.input.field];
+        if let Some(target) = self.input.active_editor() {
+            let editor = self.input.editor(target);
             editor.marked.as_ref().map(|range| {
                 editor.text[..range.start].encode_utf16().count()
                     ..editor.text[..range.end].encode_utf16().count()
@@ -1872,8 +2358,8 @@ impl EntityInputHandler for Desktop {
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.input.field_enabled() {
-            self.input.fields[self.input.field].marked = None;
+        if let Some(target) = self.input.active_editor() {
+            self.input.editor_mut(target).marked = None;
         }
         self.input.terminal_composition.clear();
         cx.notify();
@@ -1900,10 +2386,10 @@ impl EntityInputHandler for Desktop {
         if let Err(error) = self.input.mark(range, text) {
             self.report_error(error);
         }
-        if self.input.field_enabled()
+        if let Some(target) = self.input.active_editor()
             && let Some(selected) = selected
         {
-            let editor = &mut self.input.fields[self.input.field];
+            let editor = self.input.editor_mut(target);
             if let Some(marked) = &editor.marked {
                 let prefix = editor.text[..marked.start].encode_utf16().count();
                 let range = editor.byte_range(prefix + selected.start..prefix + selected.end);
@@ -1921,14 +2407,14 @@ impl EntityInputHandler for Desktop {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if self.input.field_enabled() {
-            let index = self.input.field;
+        if let Some(target) = self.input.active_editor() {
+            let index = target.slot();
             let line = self.field_layouts[index].as_ref()?;
-            let range = self.input.fields[index].byte_range(range);
+            let range = self.input.editor(target).byte_range(range);
             let origin = self.field_bounds[index].origin
                 + point(
                     line.x_for_index(range.start) - self.field_offsets[index],
-                    px(3.),
+                    (self.field_bounds[index].size.height - px(22.)) / 2.,
                 );
             Some(Bounds::new(
                 origin,
@@ -1959,15 +2445,13 @@ impl EntityInputHandler for Desktop {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        if !self.input.field_enabled() {
-            return None;
-        }
-        let index = self.input.field;
+        let target = self.input.active_editor()?;
+        let index = target.slot();
         let byte = self.field_layouts[index].as_ref()?.closest_index_for_x(
             pos.x - self.field_bounds[index].left() + self.field_offsets[index],
         );
         Some(
-            self.input.fields[index].text[..byte.min(self.input.fields[index].text.len())]
+            self.input.editor(target).text[..byte.min(self.input.editor(target).text.len())]
                 .encode_utf16()
                 .count(),
         )
