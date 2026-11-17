@@ -24,6 +24,23 @@ pub struct ClosePrompt {
     pub confirm_selected: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionButton {
+    Cancel,
+    SaveAndConnect,
+    Connect,
+}
+
+impl ConnectionButton {
+    pub fn action(self) -> Action {
+        match self {
+            Self::Cancel => Action::ReturnToTerminal,
+            Self::SaveAndConnect => Action::SaveAndConnect,
+            Self::Connect => Action::Connect,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Action {
     None,
@@ -161,6 +178,7 @@ pub struct InputState {
     pub closing: Option<ClosePrompt>,
     pub fields: [LineEditor; 6],
     pub field: usize,
+    pub form_button: Option<ConnectionButton>,
     pub terminal_composition: String,
 }
 
@@ -170,12 +188,17 @@ impl InputState {
     }
 
     pub fn field_enabled(&self) -> bool {
+        self.connection_enabled() && self.form_button.is_none()
+    }
+
+    pub fn connection_enabled(&self) -> bool {
         self.closing.is_none() && self.surface == Surface::Connection
     }
 
     pub fn set_surface(&mut self, surface: Surface) {
         self.cancel_composition();
         self.surface = surface;
+        self.form_button = None;
     }
 
     pub fn begin_close(&mut self, target: CloseTarget) {
@@ -247,25 +270,48 @@ impl InputState {
             };
         }
         if self.surface == Surface::Connection {
+            if key == "escape" {
+                return Action::ReturnToTerminal;
+            }
+            if key == "tab" {
+                self.fields[self.field].marked = None;
+                let order = [1, 0, 2, 3, 4, 5];
+                let position = match self.form_button {
+                    Some(ConnectionButton::Cancel) => 6,
+                    Some(ConnectionButton::SaveAndConnect) => 7,
+                    Some(ConnectionButton::Connect) => 8,
+                    None => order
+                        .iter()
+                        .position(|&index| index == self.field)
+                        .expect("connection field index"),
+                };
+                let position = (position + if m.shift { 8 } else { 1 }) % 9;
+                self.form_button = match position {
+                    6 => Some(ConnectionButton::Cancel),
+                    7 => Some(ConnectionButton::SaveAndConnect),
+                    8 => Some(ConnectionButton::Connect),
+                    _ => {
+                        self.field = order[position];
+                        None
+                    }
+                };
+                return Action::None;
+            }
+            if let Some(button) = self.form_button {
+                return match key {
+                    "enter" if m.control => Action::SaveAndConnect,
+                    "enter" | "space" | " " => button.action(),
+                    _ => Action::None,
+                };
+            }
             let editor = &mut self.fields[self.field];
             return match key {
-                "escape" => Action::ReturnToTerminal,
                 "enter" if editor.marked.is_none() => {
                     if m.control {
                         Action::SaveAndConnect
                     } else {
                         Action::Connect
                     }
-                }
-                "tab" => {
-                    editor.marked = None;
-                    let order = [1, 0, 2, 3, 4, 5];
-                    let position = order
-                        .iter()
-                        .position(|&index| index == self.field)
-                        .expect("connection field index");
-                    self.field = order[(position + if m.shift { 5 } else { 1 }) % 6];
-                    Action::None
                 }
                 "a" if m.control => {
                     editor.anchor = 0;
@@ -518,6 +564,64 @@ mod tests {
     }
 
     #[test]
+    fn connection_focus_includes_buttons_and_blocks_text_until_a_field_is_focused() {
+        let mut state = InputState::default();
+        state.set_surface(Surface::Connection);
+        state.field = 1;
+        state.commit(None, "original-host").unwrap();
+        for field in [0, 2, 3, 4, 5] {
+            assert_eq!(state.key(&key("tab"), TermMode::empty()), Action::None);
+            assert_eq!(state.field, field);
+            assert!(state.field_enabled());
+        }
+        for (button, action) in [
+            (ConnectionButton::Cancel, Action::ReturnToTerminal),
+            (ConnectionButton::SaveAndConnect, Action::SaveAndConnect),
+            (ConnectionButton::Connect, Action::Connect),
+        ] {
+            state.key(&key("tab"), TermMode::empty());
+            assert_eq!(state.form_button, Some(button));
+            assert!(!state.field_enabled());
+            assert!(state.connection_enabled());
+            assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
+            assert_eq!(
+                state.paste("MUST_NOT_PASTE", TermMode::empty()).unwrap(),
+                Action::None
+            );
+            state.mark(None, "MUST_NOT_COMPOSE").unwrap();
+            assert_eq!(state.key(&key("space"), TermMode::empty()), action);
+            assert_eq!(state.key(&key("enter"), TermMode::empty()), action);
+            assert_eq!(
+                state.key(&key("ctrl-enter"), TermMode::empty()),
+                Action::SaveAndConnect
+            );
+        }
+        assert!(state.fields[5].text.is_empty());
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.field, 1);
+        assert!(state.field_enabled());
+        assert_eq!(state.fields[1].text, "original-host");
+        for button in [
+            ConnectionButton::Connect,
+            ConnectionButton::SaveAndConnect,
+            ConnectionButton::Cancel,
+        ] {
+            state.key(&key("shift-tab"), TermMode::empty());
+            assert_eq!(state.form_button, Some(button));
+        }
+        state.key(&key("shift-tab"), TermMode::empty());
+        assert!(state.field_enabled());
+        assert_eq!(state.field, 5);
+        state.form_button = Some(ConnectionButton::Connect);
+        state.begin_close(CloseTarget::Window);
+        assert_eq!(state.key(&key("space"), TermMode::empty()), Action::None);
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::CancelClose
+        );
+    }
+
+    #[test]
     fn terminal_keeps_interrupt_cursor_modes_bracketed_paste_and_native_text() {
         let mut state = InputState::default();
         assert_eq!(
@@ -531,6 +635,14 @@ mod tests {
         assert_eq!(
             state.key(&key("ctrl-b"), TermMode::empty()),
             Action::Write(vec![2])
+        );
+        assert_eq!(
+            state.key(&key("ctrl-tab"), TermMode::empty()),
+            Action::SwitchTab(false)
+        );
+        assert_eq!(
+            state.key(&key("ctrl-shift-tab"), TermMode::empty()),
+            Action::SwitchTab(true)
         );
         assert_eq!(
             state.key(&key("ctrl-c"), TermMode::empty()),

@@ -11,14 +11,14 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{TermMode, viewport_to_point};
 use gpui::{
     Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollWheelEvent,
-    ShapedLine, SharedString, TextRun, UTF16Selection, Window, canvas, div, fill, font, point,
-    prelude::*, px, rgb, rgba, size,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle,
+    ScrollWheelEvent, ShapedLine, SharedString, TextRun, UTF16Selection, Window, canvas, div, fill,
+    font, point, prelude::*, px, rgb, rgba, size,
 };
 use nosh_desktop::connections::{self, Connection, Settings};
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
-use crate::gpui_input::{Action, CloseTarget, InputState, Surface};
+use crate::gpui_input::{Action, CloseTarget, ConnectionButton, InputState, Surface};
 use crate::gpui_terminal;
 
 const PAPER: u32 = 0xf3f3f3;
@@ -28,6 +28,12 @@ const BORDER: u32 = 0xd6d6d6;
 const GREEN: u32 = 0x14796b;
 const BLUE: u32 = 0x0067c0;
 const RED: u32 = 0xa44242;
+
+enum ButtonStyle {
+    Standard,
+    Primary,
+    Danger,
+}
 
 #[derive(clap::Parser)]
 #[command(about = "Native GPUI nosh workbench")]
@@ -120,7 +126,11 @@ pub struct Desktop {
     field_bounds: [Bounds<Pixels>; 6],
     field_layouts: [Option<ShapedLine>; 6],
     field_offsets: [Pixels; 6],
-    connections_visible: bool,
+    connections_visible: Option<bool>,
+    tabs_scroll: ScrollHandle,
+    reveal_active_tab: bool,
+    viewport_width: Pixels,
+    tabs_overflow: bool,
 }
 
 impl Desktop {
@@ -175,7 +185,11 @@ impl Desktop {
             field_bounds: Default::default(),
             field_layouts: Default::default(),
             field_offsets: [px(0.); 6],
-            connections_visible: true,
+            connections_visible: None,
+            tabs_scroll: ScrollHandle::new(),
+            reveal_active_tab: true,
+            viewport_width: px(0.),
+            tabs_overflow: false,
         };
         desktop.open_local(cx);
         window.focus(&desktop.focus);
@@ -255,6 +269,7 @@ impl Desktop {
                 });
                 self.next_id += 1;
                 self.active = self.sessions.len() - 1;
+                self.reveal_active_tab = true;
                 self.input.set_surface(Surface::Terminal);
                 self.selecting = false;
             }
@@ -316,7 +331,7 @@ impl Desktop {
     }
 
     fn connect_form(&mut self, save: bool, cx: &mut Context<Self>) {
-        if !self.input.field_enabled() {
+        if !self.input.connection_enabled() {
             return;
         }
         self.form_error.clear();
@@ -329,6 +344,7 @@ impl Desktop {
                 _ => {
                     self.form_error = "Port must be between 1 and 65535.".into();
                     self.input.field = 3;
+                    self.input.form_button = None;
                     cx.notify();
                     return;
                 }
@@ -338,6 +354,7 @@ impl Desktop {
         if host.is_empty() {
             self.form_error = "Enter a host or an SSH config alias.".into();
             self.input.field = 1;
+            self.input.form_button = None;
             cx.notify();
             return;
         }
@@ -361,6 +378,7 @@ impl Desktop {
             return;
         }
         self.active = index;
+        self.reveal_active_tab = true;
         self.input.set_surface(Surface::Terminal);
         self.selecting = false;
         window.focus(&self.focus);
@@ -403,6 +421,7 @@ impl Desktop {
                             self.active -= 1;
                         }
                         self.active = self.active.min(self.sessions.len().saturating_sub(1));
+                        self.reveal_active_tab = true;
                         if self.sessions.is_empty() {
                             self.input.set_surface(Surface::Board);
                         }
@@ -481,7 +500,8 @@ impl Desktop {
             Action::NewLocal => self.open_local(cx),
             Action::NewConnection => self.show_surface(Surface::Connection, window, cx),
             Action::ToggleConnections => {
-                self.connections_visible = !self.connections_visible;
+                self.connections_visible = Some(!self.connections_visible(window));
+                self.reveal_active_tab = true;
                 cx.notify();
             }
             Action::SwitchTab(reverse) if !self.sessions.is_empty() => {
@@ -605,6 +625,27 @@ impl Desktop {
         id: impl Into<gpui::ElementId>,
         primary: bool,
     ) -> gpui::Stateful<gpui::Div> {
+        Self::styled_button(
+            label,
+            id,
+            if primary {
+                ButtonStyle::Primary
+            } else {
+                ButtonStyle::Standard
+            },
+        )
+    }
+
+    fn styled_button(
+        label: impl Into<SharedString>,
+        id: impl Into<gpui::ElementId>,
+        style: ButtonStyle,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (background, border, foreground, hover, active) = match style {
+            ButtonStyle::Standard => (0xffffff, BORDER, INK, 0xe9e9e9, 0xdedede),
+            ButtonStyle::Primary => (BLUE, BLUE, 0xffffff, 0x005aab, 0x004e92),
+            ButtonStyle::Danger => (RED, RED, 0xffffff, 0x873434, 0x6d2929),
+        };
         div()
             .id(id)
             .px_3()
@@ -614,11 +655,11 @@ impl Desktop {
             .justify_center()
             .rounded(px(3.))
             .border_1()
-            .border_color(rgb(if primary { BLUE } else { BORDER }))
-            .bg(rgb(if primary { BLUE } else { 0xffffff }))
-            .text_color(rgb(if primary { 0xffffff } else { INK }))
-            .hover(move |style| style.bg(rgb(if primary { 0x005aab } else { 0xe9e9e9 })))
-            .active(move |style| style.bg(rgb(if primary { 0x004e92 } else { 0xdedede })))
+            .border_color(rgb(border))
+            .bg(rgb(background))
+            .text_color(rgb(foreground))
+            .hover(move |style| style.bg(rgb(hover)))
+            .active(move |style| style.bg(rgb(active)))
             .cursor_pointer()
             .child(label.into())
     }
@@ -630,6 +671,20 @@ impl Desktop {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(color))
             .child(label.into())
+    }
+
+    fn toolbar_button(
+        label: impl Into<SharedString>,
+        id: &'static str,
+    ) -> gpui::Stateful<gpui::Div> {
+        Self::button(label, id, false)
+            .border_color(rgba(0))
+            .bg(rgba(0))
+    }
+
+    fn connections_visible(&self, window: &Window) -> bool {
+        self.connections_visible
+            .unwrap_or(window.viewport_size().width >= px(1000.))
     }
 
     #[cfg(target_os = "windows")]
@@ -703,20 +758,29 @@ impl Desktop {
                 )
             })
             .child(
-                Self::button(
-                    if self.connections_visible {
-                        "Hide connections"
-                    } else {
-                        "Connections"
-                    },
-                    "connections-toggle",
-                    false,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.action(Action::ToggleConnections, window, cx)
-                })),
+                Self::toolbar_button("\u{2630}", "connections-toggle")
+                    .w(px(32.))
+                    .px_0()
+                    .when(self.connections_visible(_window), |button| {
+                        button.text_color(rgb(BLUE))
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.action(Action::ToggleConnections, window, cx)
+                    })),
             )
             .child(self.session_tabs(cx))
+            .when(self.tabs_scroll.max_offset().width > px(0.), |header| {
+                header.children([("<", "previous-tab", true), (">", "next-tab", false)].map(
+                    |(label, id, reverse)| {
+                        Self::toolbar_button(label, id)
+                            .w(px(24.))
+                            .px_0()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.action(Action::SwitchTab(reverse), window, cx)
+                            }))
+                    },
+                ))
+            })
             .child(
                 Self::button("+", "new-session", false)
                     .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
@@ -1000,11 +1064,11 @@ impl Desktop {
                             .truncate()
                             .child(format!("{identity}  |  {meta}")),
                     )
-                    .child(Self::button("Copy", "copy", false).on_click(cx.listener(
+                    .child(Self::toolbar_button("Copy", "copy").on_click(cx.listener(
                         |this, _, window, cx| this.action(Action::CopyTerminal, window, cx),
                     )))
                     .child(
-                        Self::button("Paste", "paste", false)
+                        Self::toolbar_button("Paste", "paste")
                             .when(is_exited, |button| {
                                 button.opacity(0.45).cursor(gpui::CursorStyle::Arrow)
                             })
@@ -1014,7 +1078,7 @@ impl Desktop {
                                 }))
                             }),
                     )
-                    .child(Self::button("-", "zoom-out", false).on_click(
+                    .child(Self::toolbar_button("-", "zoom-out").on_click(
                         cx.listener(|this, _, window, cx| {
                             this.action(Action::Zoom(-1), window, cx)
                         }),
@@ -1025,7 +1089,7 @@ impl Desktop {
                             .text_color(rgb(MUTED))
                             .child(format!("{} px", self.settings.font_size)),
                     )
-                    .child(Self::button("+", "zoom-in", false).on_click(
+                    .child(Self::toolbar_button("+", "zoom-in").on_click(
                         cx.listener(|this, _, window, cx| this.action(Action::Zoom(1), window, cx)),
                     )),
             )
@@ -1081,6 +1145,7 @@ impl Desktop {
             .flex_1()
             .min_w_0()
             .overflow_x_scroll()
+            .track_scroll(&self.tabs_scroll)
             .h_full();
         for (index, session) in self.sessions.iter().enumerate() {
             let id = session.id;
@@ -1186,10 +1251,11 @@ impl Desktop {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            if !this.input.field_enabled() {
+                            if !this.input.connection_enabled() {
                                 return;
                             }
                             this.input.field = index;
+                            this.input.form_button = None;
                             let offset = this.field_layouts[index]
                                 .as_ref()
                                 .map(|line| {
@@ -1307,6 +1373,31 @@ impl Desktop {
             )
     }
 
+    fn connection_button(
+        &self,
+        label: &'static str,
+        id: &'static str,
+        button: ConnectionButton,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        Self::button(label, id, button == ConnectionButton::Connect)
+            .when(self.input.form_button == Some(button), |control| {
+                control.border_2().border_color(rgb(INK))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.input.cancel_composition();
+                    this.input.form_button = Some(button);
+                    window.focus(&this.focus);
+                    cx.notify();
+                }),
+            )
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.action(button.action(), window, cx)),
+            )
+    }
+
     fn connection_drawer(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .absolute()
@@ -1407,25 +1498,34 @@ impl Desktop {
                                     .flex()
                                     .justify_end()
                                     .gap_2()
-                                    .child(
-                                        Self::button("Cancel", "cancel-connection", false)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.show_surface(Surface::Terminal, window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Self::button("Save & connect", "save-connect", false)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.connect_form(true, cx)
-                                            })),
-                                    )
-                                    .child(Self::button("Connect", "connect", true).on_click(
-                                        cx.listener(|this, _, _, cx| this.connect_form(false, cx)),
+                                    .child(self.connection_button(
+                                        "Cancel",
+                                        "cancel-connection",
+                                        ConnectionButton::Cancel,
+                                        cx,
+                                    ))
+                                    .child(self.connection_button(
+                                        "Save & connect",
+                                        "save-connect",
+                                        ConnectionButton::SaveAndConnect,
+                                        cx,
+                                    ))
+                                    .child(self.connection_button(
+                                        "Connect",
+                                        "connect",
+                                        ConnectionButton::Connect,
+                                        cx,
                                     )),
                             )
-                            .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                "Enter: connect   Ctrl+Enter: save & connect   Esc: cancel",
-                            )),
+                            .child(
+                                div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                    if self.input.form_button.is_some() {
+                                        "Enter / Space: selected button   Ctrl+Enter: save & connect   Esc: cancel"
+                                    } else {
+                                        "Enter: connect   Ctrl+Enter: save & connect   Esc: cancel"
+                                    },
+                                ),
+                            ),
                     ),
             )
     }
@@ -1479,11 +1579,9 @@ impl Desktop {
                             .child(title),
                     )
                     .child(description)
-                    .child(
-                        div().text_size(px(11.)).text_color(rgb(MUTED)).child(
-                            "Input paused. Enter / Esc: keep session. Tab: change selection.",
-                        ),
-                    )
+                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                        "Enter: activate selected button. Esc: keep session. Tab / arrows: select.",
+                    ))
                     .child(
                         div()
                             .flex()
@@ -1502,15 +1600,25 @@ impl Desktop {
                                 ),
                             )
                             .child(
-                                Self::button(confirm, "confirm-close", prompt.confirm_selected)
-                                    .text_color(rgb(if prompt.confirm_selected {
-                                        0xffffff
+                                Self::styled_button(
+                                    confirm,
+                                    "confirm-close",
+                                    if prompt.confirm_selected {
+                                        ButtonStyle::Danger
                                     } else {
-                                        RED
-                                    }))
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        ButtonStyle::Standard
+                                    },
+                                )
+                                .text_color(rgb(if prompt.confirm_selected {
+                                    0xffffff
+                                } else {
+                                    RED
+                                }))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
                                         this.confirm_close(window, cx)
-                                    })),
+                                    }),
+                                ),
                             ),
                     ),
             )
@@ -1519,6 +1627,23 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = window.viewport_size().width;
+        let overflow = self.tabs_scroll.max_offset().width > px(0.);
+        if self.viewport_width != width || self.tabs_overflow != overflow {
+            self.viewport_width = width;
+            self.tabs_overflow = overflow;
+            self.reveal_active_tab = true;
+        }
+        if std::mem::take(&mut self.reveal_active_tab) {
+            let view = cx.entity();
+            // Scroll after layout, when new or resized tab bounds are available.
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    this.tabs_scroll.scroll_to_item(this.active);
+                    cx.notify();
+                });
+            });
+        }
         let mut root = div()
             .relative()
             .flex()
@@ -1557,7 +1682,7 @@ impl Render for Desktop {
                 .flex()
                 // Root focus handling would prevent Windows' default caption actions.
                 .track_focus(&self.focus)
-                .when(self.connections_visible, |body| {
+                .when(self.connections_visible(window), |body| {
                     body.child(self.connection_list(cx))
                 })
                 .child(self.stage(cx)),
