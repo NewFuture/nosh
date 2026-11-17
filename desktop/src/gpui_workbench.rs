@@ -21,13 +21,18 @@ use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 use crate::gpui_input::{Action, CloseTarget, ConnectionButton, InputState, Surface};
 use crate::gpui_terminal;
 
-const PAPER: u32 = 0xf3f3f3;
-const INK: u32 = 0x202a35;
-const MUTED: u32 = 0x6a7582;
-const BORDER: u32 = 0xd6d6d6;
-const GREEN: u32 = 0x14796b;
-const BLUE: u32 = 0x0067c0;
-const RED: u32 = 0xa44242;
+const CHROME: u32 = 0x171b23;
+const SURFACE: u32 = 0x222730;
+const RAISED: u32 = 0x2a303b;
+const INPUT: u32 = 0x1a1e27;
+const HOVER: u32 = 0x303947;
+const INK: u32 = 0xe8ecf1;
+const MUTED: u32 = 0xa1adbc;
+const BORDER: u32 = 0x353d49;
+const GREEN: u32 = 0x84d8bd;
+const BLUE: u32 = 0x91b8ee;
+const RED: u32 = 0xffa4ae;
+const ERROR_SURFACE: u32 = 0x3c2730;
 
 enum ButtonStyle {
     Standard,
@@ -642,9 +647,9 @@ impl Desktop {
         style: ButtonStyle,
     ) -> gpui::Stateful<gpui::Div> {
         let (background, border, foreground, hover, active) = match style {
-            ButtonStyle::Standard => (0xffffff, BORDER, INK, 0xe9e9e9, 0xdedede),
-            ButtonStyle::Primary => (BLUE, BLUE, 0xffffff, 0x005aab, 0x004e92),
-            ButtonStyle::Danger => (RED, RED, 0xffffff, 0x873434, 0x6d2929),
+            ButtonStyle::Standard => (RAISED, BORDER, INK, HOVER, 0x394655),
+            ButtonStyle::Primary => (GREEN, GREEN, CHROME, 0x9be4ce, 0x6cc5a9),
+            ButtonStyle::Danger => (0xb94858, 0xb94858, 0xffffff, 0xce5b6b, 0xa63a49),
         };
         div()
             .id(id)
@@ -653,7 +658,7 @@ impl Desktop {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
+            .rounded(px(6.))
             .border_1()
             .border_color(rgb(border))
             .bg(rgb(background))
@@ -667,6 +672,11 @@ impl Desktop {
     fn tag(label: impl Into<SharedString>, color: u32) -> gpui::Div {
         div()
             .px_1()
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .bg(rgba((color << 8) | 0x18))
             .text_size(px(10.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(color))
@@ -678,8 +688,32 @@ impl Desktop {
         id: &'static str,
     ) -> gpui::Stateful<gpui::Div> {
         Self::button(label, id, false)
+            .h(px(26.))
+            .px_2()
+            .text_size(px(12.))
+            .text_color(rgb(MUTED))
             .border_color(rgba(0))
             .bg(rgba(0))
+    }
+
+    fn shortcut(label: &'static str, keys: &'static str) -> gpui::Div {
+        div()
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(11.))
+            .text_color(rgb(MUTED))
+            .child(label)
+            .child(
+                div()
+                    .px_1()
+                    .rounded(px(3.))
+                    .bg(rgb(INPUT))
+                    .font_family("Consolas")
+                    .text_size(px(10.))
+                    .child(keys),
+            )
     }
 
     fn connections_visible(&self, window: &Window) -> bool {
@@ -716,7 +750,7 @@ impl Desktop {
                     .when(enabled, |button| {
                         button.window_control_area(area).hover(move |style| {
                             style
-                                .bg(rgb(if close { 0xc42b1c } else { 0xdcdcdc }))
+                                .bg(rgb(if close { 0xc42b1c } else { HOVER }))
                                 .text_color(rgb(if close { 0xffffff } else { INK }))
                         })
                     })
@@ -728,7 +762,7 @@ impl Desktop {
 
     fn header(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         div()
-            .h(px(38.))
+            .h(px(40.))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -736,7 +770,7 @@ impl Desktop {
             .pl_2()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .bg(rgb(0xe9e9e9))
+            .bg(rgb(CHROME))
             .when(cfg!(target_os = "windows"), |header| {
                 header.child(
                     div()
@@ -746,23 +780,34 @@ impl Desktop {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .font_family("Consolas")
-                        .text_size(px(13.))
-                        .text_color(rgb(GREEN))
                         .when(
                             self.input.closing.is_none()
                                 && self.input.surface != Surface::Connection,
                             |logo| logo.window_control_area(gpui::WindowControlArea::Drag),
                         )
-                        .child("n_"),
+                        .child(
+                            div()
+                                .size(px(26.))
+                                .rounded(px(6.))
+                                .bg(rgb(GREEN))
+                                .text_color(rgb(CHROME))
+                                .font_family("Consolas")
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_size(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("n_"),
+                        ),
                 )
             })
             .child(
                 Self::toolbar_button("\u{2630}", "connections-toggle")
                     .w(px(32.))
                     .px_0()
+                    .text_size(px(16.))
                     .when(self.connections_visible(_window), |button| {
-                        button.text_color(rgb(BLUE))
+                        button.text_color(rgb(GREEN)).bg(rgba((GREEN << 8) | 0x18))
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.action(Action::ToggleConnections, window, cx)
@@ -782,13 +827,18 @@ impl Desktop {
                 ))
             })
             .child(
-                Self::button("+", "new-session", false)
+                Self::toolbar_button("+", "new-session")
+                    .text_size(px(17.))
+                    .w(px(28.))
+                    .px_0()
                     .on_click(cx.listener(|this, _, _, cx| this.open_local(cx))),
             )
             .child(
-                Self::button("SSH...", "new-ssh", false).on_click(cx.listener(
-                    |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
-                )),
+                Self::button("SSH...", "new-ssh", false)
+                    .text_color(rgb(BLUE))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_surface(Surface::Connection, window, cx)
+                    })),
             )
             .when(cfg!(target_os = "windows"), |header| {
                 header.child(div().w(px(32.)).h_full().flex_shrink_0().when(
@@ -812,7 +862,12 @@ impl Desktop {
         let folder = self
             .cwd
             .as_ref()
-            .map(|path| path.display().to_string())
+            .map(|path| {
+                path.file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_else(|_| "Startup directory unavailable".into());
         let mut saved = div().flex().flex_col().gap_1();
         if self.settings.connections.is_empty() {
@@ -827,15 +882,24 @@ impl Desktop {
         }
         for (index, connection) in self.settings.connections.iter().enumerate() {
             let connection = connection.clone();
+            let selected = matches!(
+                self.sessions.get(self.active).map(|session| &session.kind),
+                Some(SessionKind::Ssh(target)) if target == &connection.target()
+            );
             saved = saved.child(
                 div()
                     .id(("saved", index))
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_3()
+                    .mx_2()
+                    .px_2()
                     .py_2()
-                    .hover(|style| style.bg(rgb(0xe4e4e4)))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if selected { rgb(BORDER) } else { rgba(0) })
+                    .bg(if selected { rgb(RAISED) } else { rgba(0) })
+                    .hover(|style| style.bg(rgb(HOVER)))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_ssh(connection.clone(), false, cx);
@@ -846,7 +910,11 @@ impl Desktop {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(self.settings.connections[index].name.clone())
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(self.settings.connections[index].name.clone()),
+                            )
                             .child(
                                 div()
                                     .text_size(px(12.))
@@ -865,24 +933,25 @@ impl Desktop {
             .overflow_y_scroll()
             .border_r_1()
             .border_color(rgb(BORDER))
-            .bg(rgb(PAPER))
+            .bg(rgb(SURFACE))
             .flex()
             .flex_col()
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(38.))
                     .flex_shrink_0()
                     .px_3()
                     .flex()
                     .items_center()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Connections"),
             )
             .child(
                 div()
                     .px_3()
-                    .py_1()
+                    .pt_3()
+                    .pb_2()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
                     .child("LOCAL"),
@@ -890,35 +959,59 @@ impl Desktop {
             .child(
                 div()
                     .id("local-connection")
-                    .px_3()
+                    .mx_2()
+                    .px_2()
                     .py_2()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgba(0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(
+                        matches!(
+                            self.sessions.get(self.active).map(|session| &session.kind),
+                            Some(SessionKind::Local)
+                        ),
+                        |row| row.bg(rgb(0x293d39)).border_color(rgb(0x3c5a50)),
+                    )
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0xe4e4e4)))
+                    .hover(|style| style.bg(rgb(HOVER)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_local(cx);
                         window.focus(&this.focus);
                     }))
-                    .child(div().child("This computer"))
+                    .child(Self::tag(">_", GREEN))
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .truncate()
-                            .child(folder),
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("This computer"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .truncate()
+                                    .child(folder),
+                            ),
                     ),
             )
             .child(
                 div()
                     .px_3()
                     .pt_4()
-                    .pb_1()
+                    .pb_2()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
                     .child("SSH"),
             )
             .child(saved)
             .child(div().px_3().py_2().child(
-                Self::button("New connection...", "list-new-ssh", false).on_click(cx.listener(
+                Self::toolbar_button("+ New connection", "list-new-ssh").on_click(cx.listener(
                     |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
                 )),
             ))
@@ -928,11 +1021,9 @@ impl Desktop {
                     .p_3()
                     .border_t_1()
                     .border_color(rgb(BORDER))
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child("Ctrl+Shift+T  Local terminal")
-                    .child(div().child("Ctrl+Shift+N  SSH connection"))
-                    .child(div().child("Ctrl+Shift+B  Connections")),
+                    .child(Self::shortcut("New terminal", "Ctrl+Shift+T"))
+                    .child(Self::shortcut("Connect SSH", "Ctrl+Shift+N"))
+                    .child(Self::shortcut("Toggle sidebar", "Ctrl+Shift+B")),
             )
     }
 
@@ -1043,11 +1134,11 @@ impl Desktop {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(PAPER))
+            .bg(rgb(SURFACE))
             .overflow_hidden()
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(38.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -1060,9 +1151,26 @@ impl Desktop {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .text_size(px(12.))
-                            .truncate()
-                            .child(format!("{identity}  |  {meta}")),
+                            .child(
+                                div()
+                                    .max_w(px(220.))
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(identity),
+                            )
+                            .child(div().text_color(rgb(MUTED)).child("/"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(MUTED))
+                                    .child(meta),
+                            ),
                     )
                     .child(Self::toolbar_button("Copy", "copy").on_click(cx.listener(
                         |this, _, window, cx| this.action(Action::CopyTerminal, window, cx),
@@ -1098,7 +1206,7 @@ impl Desktop {
                     div()
                         .px_3()
                         .py_1()
-                        .bg(rgb(0xfcf0ec))
+                        .bg(rgb(ERROR_SURFACE))
                         .text_color(rgb(RED))
                         .text_size(px(12.))
                         .child("Session ended. Output preserved."),
@@ -1113,21 +1221,12 @@ impl Desktop {
                     .items_center()
                     .px_3()
                     .gap_2()
-                    .bg(rgb(PAPER))
+                    .bg(rgb(CHROME))
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(rgb(if status_color == RED {
-                                0xe7a29a
-                            } else {
-                                0x8dd4c0
-                            })),
-                    )
+                    .child(div().size(px(6.)).rounded_full().bg(rgb(status_color)))
                     .child(status)
                     .child(div().flex_1())
                     .child(if self.input.terminal_enabled() {
@@ -1156,14 +1255,16 @@ impl Desktop {
                     .w(px(180.))
                     .flex_shrink_0()
                     .px_2()
+                    .mt(px(4.))
+                    .rounded_t(px(6.))
                     .flex()
                     .items_center()
-                    .border_r_1()
                     .border_b_2()
-                    .border_color(rgb(if selected { BLUE } else { BORDER }))
-                    .bg(rgb(if selected { PAPER } else { 0xe9e9e9 }))
+                    .border_color(if selected { rgb(GREEN) } else { rgba(0) })
+                    .bg(rgb(if selected { 0x2b343e } else { CHROME }))
+                    .text_color(rgb(if selected { INK } else { MUTED }))
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0xffffff)))
+                    .hover(move |s| s.bg(rgb(if selected { 0x2b343e } else { HOVER })))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.switch_session(index, window, cx)
                     }))
@@ -1180,23 +1281,30 @@ impl Desktop {
                                     .rounded_full()
                                     .bg(rgb(session.status_color())),
                             )
+                            .child(Self::tag(
+                                match session.kind {
+                                    SessionKind::Local => ">_",
+                                    SessionKind::Ssh(_) => "SSH",
+                                },
+                                session.accent(),
+                            ))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(12.))
                                     .truncate()
-                                    .child(format!("{}  {}", session.kind_label(), session.title)),
+                                    .child(session.title.clone()),
                             )
                             .child(
                                 div()
                                     .id(("close-session", id))
                                     .text_color(rgb(MUTED))
                                     .px_2()
-                                    .rounded(px(2.))
+                                    .rounded(px(4.))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0xdcdcdc)).text_color(rgb(INK)))
-                                    .child("x")
+                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(INK)))
+                                    .child("\u{00d7}")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.request_close(CloseTarget::Tab(id), window, cx);
@@ -1242,10 +1350,10 @@ impl Desktop {
                     .id(("connection-field", index))
                     .h(px(30.))
                     .px_2()
-                    .rounded(px(3.))
+                    .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(if focused { BLUE } else { BORDER }))
-                    .bg(rgb(0xffffff))
+                    .border_color(rgb(if focused { GREEN } else { BORDER }))
+                    .bg(rgb(INPUT))
                     .overflow_hidden()
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -1288,7 +1396,7 @@ impl Desktop {
                                             len: text.len(),
                                             font: font("Segoe UI"),
                                             color: rgb(if editor.text.is_empty() {
-                                                0x8b949f
+                                                MUTED
                                             } else {
                                                 INK
                                             })
@@ -1329,7 +1437,7 @@ impl Desktop {
                                                 origin + point(start, px(0.)),
                                                 size(end - start, px(22.)),
                                             ),
-                                            rgb(0xdde8fa),
+                                            rgb(0x35564f),
                                         ));
                                     }
                                     if let Err(error) = line.paint(origin, px(22.), window, cx) {
@@ -1345,7 +1453,7 @@ impl Desktop {
                                                     ),
                                                 size(px(1.5), px(22.)),
                                             ),
-                                            rgb(BLUE),
+                                            rgb(GREEN),
                                         ));
                                         if let Some(marked) = &editor.marked {
                                             window.paint_quad(fill(
@@ -1361,7 +1469,7 @@ impl Desktop {
                                                         px(1.),
                                                     ),
                                                 ),
-                                                rgb(BLUE),
+                                                rgb(GREEN),
                                             ));
                                         }
                                     }
@@ -1406,15 +1514,15 @@ impl Desktop {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000055))
+            .bg(rgba(0x0b0f18bb))
             .occlude()
             .child(
                 div()
                     .w(px(480.))
                     .h_full()
                     .max_h(px(530.))
-                    .rounded(px(5.))
-                    .bg(rgb(PAPER))
+                    .rounded(px(8.))
+                    .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .shadow_lg()
@@ -1437,12 +1545,7 @@ impl Desktop {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("SSH connection"),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(MUTED))
-                                    .child("System OpenSSH"),
-                            ),
+                            .child(Self::tag("OpenSSH", BLUE)),
                     )
                     .child(
                         div()
@@ -1558,14 +1661,14 @@ impl Desktop {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x15212c99))
+            .bg(rgba(0x0b0f18bb))
             .occlude()
             .child(
                 div()
                     .w(px(440.))
                     .p_5()
-                    .rounded(px(5.))
-                    .bg(rgb(PAPER))
+                    .rounded(px(8.))
+                    .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .shadow_lg()
@@ -1649,7 +1752,7 @@ impl Render for Desktop {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(PAPER))
+            .bg(rgb(SURFACE))
             .text_color(rgb(INK))
             .font_family("Segoe UI")
             .text_size(px(13.))
@@ -1664,7 +1767,7 @@ impl Render for Desktop {
                         .flex()
                         .gap_3()
                         .items_center()
-                        .bg(rgb(0xf8e8e3))
+                        .bg(rgb(ERROR_SURFACE))
                         .text_color(rgb(RED))
                         .child(div().flex_1().child(self.error.clone()))
                         .child(Self::button("Dismiss", "dismiss-error", false).on_click(

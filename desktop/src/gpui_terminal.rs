@@ -56,7 +56,7 @@ pub fn paint(
                 cell_size.height * row as f32,
             );
         let bg = if content.selection.is_some_and(|s| s.contains(cell.point)) {
-            egui::Color32::from_rgb(73, 65, 103)
+            egui::Color32::from_rgb(46, 75, 70)
         } else {
             terminal_color(
                 if cell.flags.contains(Flags::INVERSE) {
@@ -139,7 +139,7 @@ pub fn paint(
                 origin + point(px(0.), cell_size.height - px(2.)),
                 size(cell_size.width, px(2.)),
             ),
-            rgb(0x8dd4c0),
+            rgb(0x84d8bd),
         ));
     }
     Ok(())
