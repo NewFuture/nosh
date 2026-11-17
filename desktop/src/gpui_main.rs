@@ -20,6 +20,7 @@ fn main() {
                 window_min_size: Some(size(px(800.), px(540.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("nosh - GPUI Workbench".into()),
+                    appears_transparent: cfg!(target_os = "windows"),
                     ..Default::default()
                 }),
                 ..Default::default()

@@ -632,17 +632,76 @@ impl Desktop {
             .child(label.into())
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> gpui::Div {
+    #[cfg(target_os = "windows")]
+    fn caption_buttons(&self, window: &Window) -> gpui::Div {
+        let enabled = self.input.closing.is_none() && self.input.surface != Surface::Connection;
+        let mut buttons = div().flex().h_full().flex_shrink_0();
+        for (area, glyph) in [
+            (gpui::WindowControlArea::Min, "\u{e921}"),
+            (
+                gpui::WindowControlArea::Max,
+                if window.is_maximized() {
+                    "\u{e923}"
+                } else {
+                    "\u{e922}"
+                },
+            ),
+            (gpui::WindowControlArea::Close, "\u{e8bb}"),
+        ] {
+            let close = area == gpui::WindowControlArea::Close;
+            buttons = buttons.child(
+                div()
+                    .w(px(46.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_family("Segoe MDL2 Assets")
+                    .text_size(px(10.))
+                    .when(enabled, |button| {
+                        button.window_control_area(area).hover(move |style| {
+                            style
+                                .bg(rgb(if close { 0xc42b1c } else { 0xdcdcdc }))
+                                .text_color(rgb(if close { 0xffffff } else { INK }))
+                        })
+                    })
+                    .child(glyph),
+            );
+        }
+        buttons
+    }
+
+    fn header(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .h(px(38.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
-            .px_2()
+            .pl_2()
             .border_b_1()
             .border_color(rgb(BORDER))
             .bg(rgb(0xe9e9e9))
+            .when(cfg!(target_os = "windows"), |header| {
+                header.child(
+                    div()
+                        .w(px(32.))
+                        .h_full()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family("Consolas")
+                        .text_size(px(13.))
+                        .text_color(rgb(GREEN))
+                        .when(
+                            self.input.closing.is_none()
+                                && self.input.surface != Surface::Connection,
+                            |logo| logo.window_control_area(gpui::WindowControlArea::Drag),
+                        )
+                        .child("n_"),
+                )
+            })
             .child(
                 Self::button(
                     if self.connections_visible {
@@ -667,6 +726,22 @@ impl Desktop {
                     |this, _, window, cx| this.show_surface(Surface::Connection, window, cx),
                 )),
             )
+            .when(cfg!(target_os = "windows"), |header| {
+                header.child(div().w(px(32.)).h_full().flex_shrink_0().when(
+                    self.input.closing.is_none() && self.input.surface != Surface::Connection,
+                    |space| space.window_control_area(gpui::WindowControlArea::Drag),
+                ))
+            })
+            .map(|header| {
+                #[cfg(target_os = "windows")]
+                {
+                    header.child(self.caption_buttons(_window))
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    header.pr_2()
+                }
+            })
     }
 
     fn connection_list(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -1065,7 +1140,12 @@ impl Desktop {
                     ),
             );
         }
-        cards
+        cards.child(div().min_w(px(32.)).flex_1().h_full().when(
+            cfg!(target_os = "windows")
+                && self.input.closing.is_none()
+                && self.input.surface != Surface::Connection,
+            |space| space.window_control_area(gpui::WindowControlArea::Drag),
+        ))
     }
 
     fn field(
@@ -1438,7 +1518,7 @@ impl Desktop {
 }
 
 impl Render for Desktop {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = div()
             .relative()
             .flex()
@@ -1448,9 +1528,8 @@ impl Render for Desktop {
             .text_color(rgb(INK))
             .font_family("Segoe UI")
             .text_size(px(13.))
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
-            .child(self.header(cx));
+            .child(self.header(window, cx));
         if !self.error.is_empty() && self.input.surface != Surface::Connection {
             root =
                 root.child(
@@ -1476,6 +1555,8 @@ impl Render for Desktop {
                 .flex_1()
                 .min_h_0()
                 .flex()
+                // Root focus handling would prevent Windows' default caption actions.
+                .track_focus(&self.focus)
                 .when(self.connections_visible, |body| {
                     body.child(self.connection_list(cx))
                 })

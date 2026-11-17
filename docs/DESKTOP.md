@@ -116,9 +116,13 @@ cargo build -p nosh-cli -p nosh-desktop --features gpui --locked
 .\target\debug\nosh-gpui.exe --cwd 'C:\work tree'
 ```
 
-工作台采用紧凑桌面工具布局：系统标题栏、顶部会话标签、单行工具栏、可折叠
+工作台采用紧凑桌面工具布局：顶部会话标签、单行工具栏、可折叠
 连接列表和底部状态栏，终端不再放在留白卡片中。界面使用 Segoe UI；
 标签、按钮、列表与对话框由 GPUI 自绘，不是 Windows 系统控件。
+Windows 将会话标签与标题栏合并为一行，右侧提供最小化、最大化/还原和关闭按钮，
+通过 GPUI 的系统命中区域交给 Windows 处理。标签间空白、`n_` 标识和窗口按钮左侧
+空白可拖动窗口，双击空白最大化/还原；标签本身仍只切换会话。关闭仍经过安全确认，
+连接或关闭对话框打开时不激活背后的标题栏控件。其它平台保留系统标题栏。
 标签显示本地/SSH 类型、名称和进程状态色点；点击标签或
 Ctrl+Tab / Ctrl+Shift+Tab 切换，切换不重启进程。
 `+` / Ctrl+Shift+T 新建本地会话，`SSH...` / Ctrl+Shift+N 新建 SSH 连接，
