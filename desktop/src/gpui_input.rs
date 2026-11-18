@@ -12,12 +12,16 @@ pub enum Surface {
     Board,
     Connection,
     Launcher,
+    SessionMenu,
+    Rename,
+    Library,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorTarget {
     Connection(usize),
     Launcher,
+    Rename,
 }
 
 impl EditorTarget {
@@ -25,6 +29,7 @@ impl EditorTarget {
         match self {
             Self::Connection(index) => index,
             Self::Launcher => 6,
+            Self::Rename => 7,
         }
     }
 }
@@ -33,6 +38,7 @@ impl EditorTarget {
 pub enum CloseTarget {
     Tab(u64),
     Window,
+    Connection(usize),
 }
 
 pub struct ClosePrompt {
@@ -43,21 +49,27 @@ pub struct ClosePrompt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionButton {
     Cancel,
-    SaveAndConnect,
+    Save,
     Connect,
+    Advanced,
+    Browse,
+    Delete,
 }
 
 impl ConnectionButton {
     pub fn action(self) -> Action {
         match self {
             Self::Cancel => Action::ReturnToTerminal,
-            Self::SaveAndConnect => Action::SaveAndConnect,
+            Self::Save => Action::SaveConnection,
             Self::Connect => Action::Connect,
+            Self::Advanced => Action::ToggleAdvanced,
+            Self::Browse => Action::BrowseIdentity,
+            Self::Delete => Action::DeleteConnection,
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     None,
     Write(Vec<u8>),
@@ -76,6 +88,19 @@ pub enum Action {
     CancelClose,
     Connect,
     SaveAndConnect,
+    SaveConnection,
+    ToggleAdvanced,
+    BrowseIdentity,
+    DeleteConnection,
+    ToggleLibraryFocus,
+    MoveLibrary(bool),
+    ConnectLibrary,
+    EditLibrary,
+    OpenSessionMenu,
+    MoveMenu(bool),
+    ActivateMenu,
+    RenameSession,
+    ApplyRename,
     ReturnToTerminal,
     Zoom(i8),
 }
@@ -234,6 +259,10 @@ pub struct InputState {
     pub form_button: Option<ConnectionButton>,
     pub terminal_composition: String,
     pub launcher: LineEditor,
+    pub rename: LineEditor,
+    pub rename_focus: usize,
+    pub advanced: bool,
+    pub editing: bool,
 }
 
 impl InputState {
@@ -250,7 +279,11 @@ impl InputState {
     }
 
     pub fn background_enabled(&self) -> bool {
-        self.closing.is_none() && matches!(self.surface, Surface::Terminal | Surface::Board)
+        self.closing.is_none()
+            && matches!(
+                self.surface,
+                Surface::Terminal | Surface::Board | Surface::Library
+            )
     }
 
     pub fn active_editor(&self) -> Option<EditorTarget> {
@@ -258,6 +291,8 @@ impl InputState {
             None
         } else if self.surface == Surface::Launcher {
             Some(EditorTarget::Launcher)
+        } else if self.surface == Surface::Rename && self.rename_focus == 0 {
+            Some(EditorTarget::Rename)
         } else if self.field_enabled() {
             Some(EditorTarget::Connection(self.field))
         } else {
@@ -269,6 +304,7 @@ impl InputState {
         match target {
             EditorTarget::Connection(index) => &self.fields[index],
             EditorTarget::Launcher => &self.launcher,
+            EditorTarget::Rename => &self.rename,
         }
     }
 
@@ -276,6 +312,7 @@ impl InputState {
         match target {
             EditorTarget::Connection(index) => &mut self.fields[index],
             EditorTarget::Launcher => &mut self.launcher,
+            EditorTarget::Rename => &mut self.rename,
         }
     }
 
@@ -283,6 +320,7 @@ impl InputState {
         self.cancel_composition();
         self.surface = surface;
         self.form_button = None;
+        self.rename_focus = 0;
         if surface == Surface::Launcher {
             self.launcher = LineEditor::default();
         }
@@ -299,6 +337,7 @@ impl InputState {
     pub fn cancel_composition(&mut self) {
         self.terminal_composition.clear();
         self.launcher.cancel_mark();
+        self.rename.cancel_mark();
         for field in &mut self.fields {
             field.cancel_mark();
         }
@@ -357,6 +396,33 @@ impl InputState {
                 _ => Action::None,
             };
         }
+        if self.surface == Surface::SessionMenu {
+            return match key {
+                "escape" => Action::ReturnToTerminal,
+                "up" | "down" | "tab" => Action::MoveMenu(key == "up" || key == "tab" && m.shift),
+                "enter" | "space" | " " => Action::ActivateMenu,
+                _ => Action::None,
+            };
+        }
+        if self.surface == Surface::Rename {
+            return match key {
+                "escape" if self.rename.marked.is_some() => {
+                    self.rename.cancel_mark();
+                    Action::None
+                }
+                "escape" => Action::ReturnToTerminal,
+                "tab" => {
+                    self.rename.marked = None;
+                    self.rename_focus = (self.rename_focus + if m.shift { 2 } else { 1 }) % 3;
+                    Action::None
+                }
+                "enter" | "space" | " " if self.rename_focus == 1 => Action::ReturnToTerminal,
+                "enter" | "space" | " " if self.rename_focus == 2 => Action::ApplyRename,
+                "enter" if self.rename.marked.is_none() => Action::ApplyRename,
+                _ if self.rename_focus == 0 => self.rename.key(event),
+                _ => Action::None,
+            };
+        }
         if self.surface == Surface::Launcher {
             return match key {
                 "escape" if self.launcher.marked.is_some() => {
@@ -378,26 +444,26 @@ impl InputState {
             }
             if key == "tab" {
                 self.fields[self.field].marked = None;
-                let order = [1, 2, 3, 0, 4, 5];
-                let position = match self.form_button {
-                    Some(ConnectionButton::Cancel) => 6,
-                    Some(ConnectionButton::SaveAndConnect) => 7,
-                    Some(ConnectionButton::Connect) => 8,
-                    None => order
-                        .iter()
-                        .position(|&index| index == self.field)
-                        .expect("connection field index"),
-                };
-                let position = (position + if m.shift { 8 } else { 1 }) % 9;
-                self.form_button = match position {
-                    6 => Some(ConnectionButton::Cancel),
-                    7 => Some(ConnectionButton::SaveAndConnect),
-                    8 => Some(ConnectionButton::Connect),
-                    _ => {
-                        self.field = order[position];
-                        None
-                    }
-                };
+                let mut order = vec![Ok(1), Ok(2), Ok(3), Ok(0), Err(ConnectionButton::Advanced)];
+                if self.advanced {
+                    order.extend([Ok(4), Err(ConnectionButton::Browse), Ok(5)]);
+                }
+                if self.editing {
+                    order.push(Err(ConnectionButton::Delete));
+                }
+                order.extend([
+                    Err(ConnectionButton::Cancel),
+                    Err(ConnectionButton::Save),
+                    Err(ConnectionButton::Connect),
+                ]);
+                let current = self.form_button.map_or(Ok(self.field), Err);
+                let position = order.iter().position(|&item| item == current).unwrap_or(0);
+                let next =
+                    order[(position + if m.shift { order.len() - 1 } else { 1 }) % order.len()];
+                self.form_button = next.err();
+                if let Ok(field) = next {
+                    self.field = field;
+                }
                 return Action::None;
             }
             if let Some(button) = self.form_button {
@@ -432,6 +498,27 @@ impl InputState {
         }
         if m.control && key == "tab" {
             return Action::SwitchTab(m.shift);
+        }
+        if key == "f6" {
+            return Action::ToggleLibraryFocus;
+        }
+        if self.surface == Surface::Library {
+            return match key {
+                "escape" => Action::ReturnToTerminal,
+                "up" | "down" | "tab" => {
+                    Action::MoveLibrary(key == "up" || key == "tab" && m.shift)
+                }
+                "enter" => Action::ConnectLibrary,
+                "f2" => Action::EditLibrary,
+                "delete" => Action::DeleteConnection,
+                _ => Action::None,
+            };
+        }
+        if key == "f2" {
+            return Action::RenameSession;
+        }
+        if key == "f10" && m.shift {
+            return Action::OpenSessionMenu;
         }
         if m.control && matches!(key, "+" | "=" | "-" | "0") {
             return Action::Zoom(match key {
@@ -587,6 +674,7 @@ mod tests {
             ));
         }
         state.field = 0;
+        state.form_button = None;
         state.commit(Some(0..1), "😀").unwrap();
         assert_eq!(state.fields[0].text, "😀z");
         state.mark(Some(0..2), "候").unwrap();
@@ -635,14 +723,33 @@ mod tests {
         state.set_surface(Surface::Connection);
         state.field = 1;
         state.commit(None, "original-host").unwrap();
-        for field in [2, 3, 0, 4, 5] {
+        for field in [2, 3, 0] {
             assert_eq!(state.key(&key("tab"), TermMode::empty()), Action::None);
             assert_eq!(state.field, field);
             assert!(state.field_enabled());
         }
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.form_button, Some(ConnectionButton::Advanced));
+        assert_eq!(
+            state.key(&key("space"), TermMode::empty()),
+            Action::ToggleAdvanced
+        );
+        state.advanced = true;
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.field, 4);
+        assert!(state.field_enabled());
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.form_button, Some(ConnectionButton::Browse));
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::BrowseIdentity
+        );
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.field, 5);
+        assert!(state.field_enabled());
         for (button, action) in [
             (ConnectionButton::Cancel, Action::ReturnToTerminal),
-            (ConnectionButton::SaveAndConnect, Action::SaveAndConnect),
+            (ConnectionButton::Save, Action::SaveConnection),
             (ConnectionButton::Connect, Action::Connect),
         ] {
             state.key(&key("tab"), TermMode::empty());
@@ -669,7 +776,7 @@ mod tests {
         assert_eq!(state.fields[1].text, "original-host");
         for button in [
             ConnectionButton::Connect,
-            ConnectionButton::SaveAndConnect,
+            ConnectionButton::Save,
             ConnectionButton::Cancel,
         ] {
             state.key(&key("shift-tab"), TermMode::empty());
@@ -804,6 +911,117 @@ mod tests {
         assert_eq!(
             state.key(&key("enter"), TermMode::empty()),
             Action::CancelClose
+        );
+    }
+
+    #[test]
+    fn menus_library_and_rename_isolate_native_input_and_restore_explicit_actions() {
+        let mut state = InputState::default();
+        for surface in [Surface::SessionMenu, Surface::Library] {
+            state.set_surface(surface);
+            assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
+            assert_eq!(
+                state
+                    .paste("echo MUST_NOT_RUN\r", TermMode::BRACKETED_PASTE)
+                    .unwrap(),
+                Action::None
+            );
+            state.mark(None, "candidate").unwrap();
+            assert!(state.terminal_composition.is_empty());
+        }
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ConnectLibrary
+        );
+        assert_eq!(
+            state.key(&key("f2"), TermMode::empty()),
+            Action::EditLibrary
+        );
+        assert_eq!(
+            state.key(&key("delete"), TermMode::empty()),
+            Action::DeleteConnection
+        );
+        assert_eq!(
+            state.key(&key("f6"), TermMode::empty()),
+            Action::ToggleLibraryFocus
+        );
+        state.set_surface(Surface::SessionMenu);
+        assert_eq!(
+            state.key(&key("down"), TermMode::empty()),
+            Action::MoveMenu(false)
+        );
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ActivateMenu
+        );
+
+        state.set_surface(Surface::Rename);
+        state.commit(None, "中😀").unwrap();
+        state.commit(Some(1..3), "文").unwrap();
+        assert_eq!(state.rename.text, "中文");
+        state.mark(None, "candidate").unwrap();
+        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
+        state.key(&key("escape"), TermMode::empty());
+        assert_eq!(state.rename.text, "中文");
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ApplyRename
+        );
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ReturnToTerminal
+        );
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(
+            state.key(&key("space"), TermMode::empty()),
+            Action::ApplyRename
+        );
+        state.begin_close(CloseTarget::Window);
+        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
+        assert_eq!(state.rename.text, "中文");
+    }
+
+    #[test]
+    fn collapsed_connection_fields_are_skipped_and_save_is_network_independent() {
+        let mut state = InputState::default();
+        state.set_surface(Surface::Connection);
+        state.field = 1;
+        state.fields[4].replace(None, "existing-key").unwrap();
+        for field in [2, 3, 0] {
+            state.key(&key("tab"), TermMode::empty());
+            assert_eq!(state.field, field);
+        }
+        for button in [
+            ConnectionButton::Advanced,
+            ConnectionButton::Cancel,
+            ConnectionButton::Save,
+        ] {
+            state.key(&key("tab"), TermMode::empty());
+            assert_eq!(state.form_button, Some(button));
+        }
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::SaveConnection
+        );
+        assert_eq!(
+            state.fields[4].text, "existing-key",
+            "collapsing access options must not discard them"
+        );
+        state.editing = true;
+        state.form_button = Some(ConnectionButton::Advanced);
+        state.key(&key("tab"), TermMode::empty());
+        assert_eq!(state.form_button, Some(ConnectionButton::Delete));
+        state.begin_close(CloseTarget::Connection(3));
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::CancelClose
+        );
+        state.key(&key("right"), TermMode::empty());
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ConfirmClose
         );
     }
 }

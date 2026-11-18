@@ -9,6 +9,7 @@ pub enum LaunchAction {
     Zoom(i8),
     Sidebar,
     Close(u64),
+    Rename(u64),
 }
 
 pub struct LaunchItem {
