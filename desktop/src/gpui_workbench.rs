@@ -18,8 +18,11 @@ use gpui::{
 use nosh_desktop::connections::{self, Connection, Settings};
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
-use crate::gpui_input::{Action, CloseTarget, ConnectionButton, EditorTarget, InputState, Surface};
+use crate::gpui_input::{
+    Action, CloseTarget, ConnectionButton, EditorTarget, InputState, PasteReview, Surface,
+};
 use crate::gpui_launcher::{LaunchAction, LaunchItem};
+use crate::gpui_search::OutputSearch;
 use crate::gpui_terminal;
 
 const CHROME: u32 = 0x171b23;
@@ -54,7 +57,7 @@ pub struct Options {
 
 enum SessionKind {
     Local,
-    Ssh(String),
+    Ssh(Connection),
 }
 
 enum ProcessState {
@@ -80,6 +83,7 @@ struct Session {
     status: ProcessState,
     backend: TerminalBackend,
     error: String,
+    search: OutputSearch,
 }
 
 impl Session {
@@ -100,7 +104,7 @@ impl Session {
     fn identity(&self) -> String {
         match &self.kind {
             SessionKind::Local => "This computer".into(),
-            SessionKind::Ssh(target) => target.clone(),
+            SessionKind::Ssh(connection) => connection.target(),
         }
     }
 
@@ -144,15 +148,18 @@ pub struct Desktop {
     bounds: Bounds<Pixels>,
     cell: gpui::Size<Pixels>,
     selecting: bool,
-    field_bounds: [Bounds<Pixels>; 8],
-    field_layouts: [Option<ShapedLine>; 8],
-    field_offsets: [Pixels; 8],
+    field_bounds: [Bounds<Pixels>; 9],
+    field_layouts: [Option<ShapedLine>; 9],
+    field_offsets: [Pixels; 9],
     editing_connection: Option<usize>,
     connection_revision: u64,
     rename_target: Option<u64>,
     rename_error: String,
     menu_selected: usize,
     actions_bounds: Bounds<Pixels>,
+    menu_target: Option<u64>,
+    menu_position: Option<Point<Pixels>>,
+    menu_is_tab: bool,
     library_selected: usize,
     library_scroll: ScrollHandle,
     reveal_library: bool,
@@ -222,13 +229,16 @@ impl Desktop {
             selecting: false,
             field_bounds: Default::default(),
             field_layouts: Default::default(),
-            field_offsets: [px(0.); 8],
+            field_offsets: [px(0.); 9],
             editing_connection: None,
             connection_revision: 0,
             rename_target: None,
             rename_error: String::new(),
             menu_selected: 0,
             actions_bounds: Bounds::default(),
+            menu_target: None,
+            menu_position: None,
+            menu_is_tab: false,
             library_selected: 0,
             library_scroll: ScrollHandle::new(),
             reveal_library: false,
@@ -286,6 +296,15 @@ impl Desktop {
                 _ => {}
             }
         }
+        if self.input.pasting.as_ref().is_some_and(|paste| {
+            !self
+                .sessions
+                .iter()
+                .any(|s| s.id == paste.target && s.status.is_running())
+        }) {
+            self.input.pasting = None;
+            self.notice = "Paste cancelled: its target session ended. Nothing was sent.".into();
+        }
     }
 
     fn open(
@@ -295,7 +314,7 @@ impl Desktop {
         settings: BackendSettings,
         cx: &mut Context<Self>,
     ) {
-        if self.input.closing.is_some() {
+        if self.input.closing.is_some() || self.input.pasting.is_some() {
             return;
         }
         let dirty = self.dirty.clone();
@@ -316,6 +335,7 @@ impl Desktop {
                     status: ProcessState::Running,
                     backend,
                     error: String::new(),
+                    search: OutputSearch::default(),
                 });
                 self.next_id += 1;
                 self.active = self.sessions.len() - 1;
@@ -356,7 +376,7 @@ impl Desktop {
                 }
                 self.open(
                     connection.name.clone(),
-                    SessionKind::Ssh(connection.target()),
+                    SessionKind::Ssh(connection),
                     backend,
                     cx,
                 );
@@ -451,20 +471,26 @@ impl Desktop {
     }
 
     fn switch_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.input.closing.is_some() || index >= self.sessions.len() {
+        if self.input.closing.is_some()
+            || self.input.pasting.is_some()
+            || index >= self.sessions.len()
+        {
             return;
         }
         self.active = index;
         self.notice.clear();
         self.reveal_active_tab = true;
         self.input.set_surface(Surface::Terminal);
+        if self.sessions[index].search.open {
+            self.focus_find();
+        }
         self.selecting = false;
         window.focus(&self.focus);
         cx.notify();
     }
 
     fn show_surface(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
-        if self.input.closing.is_some() {
+        if self.input.closing.is_some() || self.input.pasting.is_some() {
             return;
         }
         self.input.set_surface(surface);
@@ -485,6 +511,9 @@ impl Desktop {
             self.reveal_launcher = true;
         } else if surface == Surface::SessionMenu {
             self.menu_selected = 0;
+            self.menu_target = self.sessions.get(self.active).map(|s| s.id);
+            self.menu_position = None;
+            self.menu_is_tab = false;
         }
         window.focus(&self.focus);
         cx.notify();
@@ -639,6 +668,14 @@ impl Desktop {
         }
         if let Some(session) = self.sessions.get(self.active) {
             items.push(LaunchItem::new(
+                "Find in terminal output",
+                "Literal search in this session's screen and recent scrollback",
+                "Terminal",
+                "F",
+                "Ctrl+Shift+F",
+                LaunchAction::Find,
+            ));
+            items.push(LaunchItem::new(
                 "Copy terminal selection",
                 "Copy only the selected terminal text",
                 "Terminal",
@@ -729,6 +766,7 @@ impl Desktop {
             LaunchAction::Close(id) => self.request_close(CloseTarget::Tab(id), window, cx),
             LaunchAction::Zoom(delta) => self.action(Action::Zoom(delta), window, cx),
             LaunchAction::Sidebar => self.action(Action::ToggleConnections, window, cx),
+            LaunchAction::Find => self.action(Action::OpenFind, window, cx),
         }
         cx.notify();
     }
@@ -793,6 +831,11 @@ impl Desktop {
                     self.reveal_active_tab = true;
                     if self.sessions.is_empty() {
                         self.input.set_surface(Surface::Board);
+                    } else {
+                        self.input.set_surface(Surface::Terminal);
+                        if self.sessions[self.active].search.open {
+                            self.focus_find();
+                        }
                     }
                 }
                 window.focus(&self.focus);
@@ -833,6 +876,91 @@ impl Desktop {
             .unwrap_or_default()
     }
 
+    fn focus_find(&mut self) {
+        let Some(session) = self.sessions.get_mut(self.active) else {
+            return;
+        };
+        session.search.open = true;
+        let query = session.search.query.clone();
+        self.input.set_surface(Surface::Find);
+        self.input.find = Default::default();
+        if let Err(error) = self.input.find.replace(None, &query) {
+            session.search.error = error;
+        }
+        self.input.find.anchor = 0;
+    }
+
+    fn sync_find(&mut self) {
+        if self.input.surface == Surface::Find
+            && self.input.find.marked.is_none()
+            && let Some(session) = self.sessions.get_mut(self.active)
+        {
+            session.search.set_query(&self.input.find.text);
+        }
+    }
+
+    fn review_paste(&mut self, text: String) {
+        if !self.input.terminal_enabled() {
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(self.active) else {
+            return;
+        };
+        if !session.status.is_running() {
+            session.error = "This session has ended. Nothing was pasted.".into();
+            return;
+        }
+        match PasteReview::new(session.id, text) {
+            Err(error) => session.error = error,
+            Ok(review) if review.needs_confirmation() => {
+                self.input.cancel_composition();
+                self.input.pasting = Some(review);
+                self.selecting = false;
+            }
+            Ok(review) => self.send_paste(review),
+        }
+    }
+
+    fn send_paste(&mut self, review: PasteReview) {
+        if !self.input.terminal_enabled() {
+            return;
+        }
+        let Some(session) = self.sessions.get(self.active) else {
+            return;
+        };
+        if !review.allows_target(session.id, session.status.is_running()) {
+            self.notice =
+                "Paste cancelled: its target is no longer active and running. Nothing was sent."
+                    .into();
+            return;
+        }
+        let mode = *session.backend.model().lock().mode();
+        if let Some(bytes) = nosh_desktop::terminal::keyboard_input(
+            &eframe::egui::Event::Paste(review.text),
+            mode,
+            eframe::egui::Modifiers::NONE,
+        ) {
+            self.write(bytes);
+        }
+    }
+
+    fn open_context_menu(
+        &mut self,
+        id: u64,
+        position: Point<Pixels>,
+        tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input.background_enabled() {
+            return;
+        }
+        self.show_surface(Surface::SessionMenu, window, cx);
+        self.menu_target = Some(id);
+        self.menu_position = Some(position);
+        self.menu_is_tab = tab;
+    }
+
     fn report_error(&mut self, error: String) {
         if self.input.surface == Surface::Connection {
             self.form_error = error;
@@ -865,9 +993,28 @@ impl Desktop {
     }
 
     fn session_actions(&self) -> Vec<(&'static str, &'static str, Option<Action>)> {
-        let Some(session) = self.sessions.get(self.active) else {
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|s| Some(s.id) == self.menu_target)
+        else {
             return Vec::new();
         };
+        if self.menu_is_tab {
+            return vec![
+                (
+                    "Activate session",
+                    "",
+                    Some(Action::ActivateTab(session.id)),
+                ),
+                ("Rename session", "F2", Some(Action::RenameTab(session.id))),
+                (
+                    "Close session",
+                    "Ctrl+Shift+W",
+                    Some(Action::CloseTab(session.id)),
+                ),
+            ];
+        }
         let has_selection = session
             .backend
             .model()
@@ -875,7 +1022,9 @@ impl Desktop {
             .selection_to_string()
             .is_some();
         vec![
-            ("Rename session", "F2", Some(Action::RenameSession)),
+            ("Find in terminal", "Ctrl+Shift+F", Some(Action::OpenFind)),
+            ("Session details", "", Some(Action::SessionDetails)),
+            ("Rename session", "F2", Some(Action::RenameTab(session.id))),
             (
                 "Copy selection",
                 "Ctrl+Shift+C",
@@ -886,7 +1035,11 @@ impl Desktop {
                 "Ctrl+Shift+V",
                 session.status.is_running().then_some(Action::Paste),
             ),
-            ("Close session", "Ctrl+Shift+W", Some(Action::RequestClose)),
+            (
+                "Close session",
+                "Ctrl+Shift+W",
+                Some(Action::CloseTab(session.id)),
+            ),
         ]
     }
 
@@ -912,6 +1065,44 @@ impl Desktop {
                         Ok(action) => self.action(action, window, cx),
                         Err(error) => self.report_error(error),
                     }
+                }
+            }
+            Action::PasteText(text) => self.review_paste(text),
+            Action::ConfirmPaste => {
+                if let Some(review) = self.input.pasting.take() {
+                    self.send_paste(review);
+                    window.focus(&self.focus);
+                }
+            }
+            Action::CancelPaste => {
+                self.input.pasting = None;
+                window.focus(&self.focus);
+            }
+            Action::OpenFind => {
+                self.focus_find();
+                window.focus(&self.focus);
+            }
+            Action::CloseFind => {
+                if let Some(session) = self.sessions.get_mut(self.active) {
+                    session.search.open = false;
+                }
+                self.input.set_surface(Surface::Terminal);
+                window.focus(&self.focus);
+            }
+            Action::MoveFind(reverse) => {
+                self.sync_find();
+                if let Some(session) = self.sessions.get_mut(self.active) {
+                    session
+                        .search
+                        .navigate(&mut session.backend.model().lock(), reverse);
+                }
+            }
+            Action::SessionDetails => self.show_surface(Surface::Details, window, cx),
+            Action::RenameTab(id) => self.begin_rename(id, window, cx),
+            Action::CloseTab(id) => self.request_close(CloseTarget::Tab(id), window, cx),
+            Action::ActivateTab(id) => {
+                if let Some(index) = self.sessions.iter().position(|s| s.id == id) {
+                    self.switch_session(index, window, cx);
                 }
             }
             Action::NewLocal => self.open_local(cx),
@@ -1043,12 +1234,14 @@ impl Desktop {
                 }
             }
         }
+        self.sync_find();
         cx.notify();
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let action = self.input.key(event, self.mode());
         let handled = self.input.closing.is_some()
+            || self.input.pasting.is_some()
             || self.input.surface != Surface::Terminal
             || action != Action::None;
         self.action(action, window, cx);
@@ -1074,6 +1267,9 @@ impl Desktop {
     }
 
     fn mouse(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.surface == Surface::Find && self.input.background_enabled() {
+            self.input.set_surface(Surface::Terminal);
+        }
         if !self.input.terminal_enabled() {
             return;
         }
@@ -1521,25 +1717,27 @@ impl Desktop {
                 );
         };
         let identity = session.identity();
-        let meta = match session.kind {
-            SessionKind::Local => self
-                .cwd
-                .as_ref()
-                .map(|cwd| format!("Startup: {}", cwd.display()))
-                .unwrap_or_default(),
-            SessionKind::Ssh(_) => "OpenSSH".into(),
-        };
         let status = session.status_label();
         let status_color = session.status_color();
         let is_exited = !matches!(session.status, ProcessState::Running);
         let terminal = div()
             .id("terminal")
+            .relative()
             .flex_1()
             .min_h_0()
             .p_2()
             .overflow_hidden()
             .bg(rgb(0x1c1e26))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if let Some(session) = this.sessions.get(this.active) {
+                        this.open_context_menu(session.id, event.position, false, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if this.selecting {
                     this.select(event.position, false);
@@ -1580,24 +1778,32 @@ impl Desktop {
                             cx,
                         );
                         paint_view.update(cx, |this, cx| {
-                            if let Some(session) = this.sessions.get_mut(this.active)
-                                && let Err(error) = gpui_terminal::paint(
+                            if let Some(session) = this.sessions.get_mut(this.active) {
+                                match gpui_terminal::paint(
                                     &session.backend,
                                     bounds,
                                     this.cell,
                                     this.settings.font_size,
+                                    &mut session.search,
                                     window,
                                     cx,
-                                )
-                            {
-                                session.error = format!("Draw terminal: {error:#}");
-                                cx.notify();
+                                ) {
+                                    Ok(true) => window.request_animation_frame(),
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        session.error = format!("Draw terminal: {error:#}");
+                                        cx.notify();
+                                    }
+                                }
                             }
                         });
                     },
                 )
                 .size_full(),
-            );
+            )
+            .when(session.search.open, |terminal| {
+                terminal.child(self.find_bar(cx))
+            });
         div()
             .flex_1()
             .min_w_0()
@@ -1627,21 +1833,23 @@ impl Desktop {
                             .text_size(px(12.))
                             .child(
                                 div()
-                                    .max_w(px(220.))
-                                    .truncate()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(identity),
-                            )
-                            .child(div().text_color(rgb(MUTED)).child("/"))
-                            .child(
-                                div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(rgb(MUTED))
-                                    .child(meta),
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(identity),
                             ),
                     )
+                    .child(Self::toolbar_button("Details", "session-details").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.action(Action::SessionDetails, window, cx)
+                        }),
+                    ))
+                    .child(Self::toolbar_button("Find", "terminal-find").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.action(Action::OpenFind, window, cx)
+                        }),
+                    ))
                     .child(
                         Self::toolbar_button("Actions...", "session-actions")
                             .relative()
@@ -1784,8 +1992,15 @@ impl Desktop {
                     .cursor_pointer()
                     .hover(move |s| s.bg(rgb(if selected { 0x2b343e } else { HOVER })))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.switch_session(index, window, cx)
+                        this.action(Action::ActivateTab(id), window, cx)
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_context_menu(id, event.position, true, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
                     .child(
                         div()
                             .flex()
@@ -1867,13 +2082,15 @@ impl Desktop {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED))
-                    .child(label),
-            )
+            .when(target != EditorTarget::Find, |field| {
+                field.child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(MUTED))
+                        .child(label),
+                )
+            })
             .child(
                 div()
                     .id(("connection-field", index))
@@ -1912,6 +2129,17 @@ impl Desktop {
                                         && this.input.closing.is_none() =>
                                 {
                                     this.input.rename_focus = 0;
+                                }
+                                EditorTarget::Find
+                                    if this
+                                        .sessions
+                                        .get(this.active)
+                                        .is_some_and(|s| s.search.open)
+                                        && this.input.closing.is_none()
+                                        && this.input.pasting.is_none() =>
+                                {
+                                    this.input.set_surface(Surface::Find);
+                                    this.input.find_focus = 0;
                                 }
                                 _ => return,
                             }
@@ -2252,11 +2480,222 @@ impl Desktop {
             )
     }
 
-    fn session_menu(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn find_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let search = &self.sessions[self.active].search;
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .w_full()
+            .max_w(px(520.))
+            .p_2()
+            .rounded_bl(px(6.))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(self.text_field(
+                        EditorTarget::Find,
+                        "",
+                        "Find in terminal / Ctrl+Shift+F",
+                        cx,
+                    )))
+                    .children(
+                        [
+                            ("Prev", "find-prev", Action::MoveFind(true), 1),
+                            ("Next", "find-next", Action::MoveFind(false), 2),
+                            ("Esc", "find-close", Action::CloseFind, 3),
+                        ]
+                        .into_iter()
+                        .map(|(label, id, action, focus)| {
+                            Self::toolbar_button(label, id)
+                                .border_color(rgb(
+                                    if self.input.surface == Surface::Find
+                                        && self.input.find_focus == focus
+                                    {
+                                        GREEN
+                                    } else {
+                                        BORDER
+                                    },
+                                ))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.action(action.clone(), window, cx);
+                                }))
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .flex()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(if search.error.is_empty() { MUTED } else { RED }))
+                            .child(search.label()),
+                    )
+                    .child(if search.limited {
+                        format!("Recent {} rows / bounded", search.rows)
+                    } else {
+                        "Enter: next / Shift+Enter: prev".into()
+                    }),
+            )
+    }
+
+    fn paste_dialog(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let review = self
+            .input
+            .pasting
+            .as_ref()
+            .expect("paste dialog requires a pending paste");
+        let target = self.sessions.iter().find(|s| s.id == review.target);
+        let identity = target.map_or_else(
+            || "Session no longer available".into(),
+            |s| format!("{} / {} / {}", s.title, s.kind_label(), s.identity()),
+        );
+        div().absolute().inset_0().p_4().flex().items_center().justify_center()
+            .bg(rgba(0x0b0f18bb)).occlude()
+            .child(div().w_full().max_w(px(640.)).p_4().rounded(px(8.))
+                .border_1().border_color(rgb(BORDER)).bg(rgb(SURFACE)).shadow_lg()
+                .flex().flex_col().gap_3()
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Review terminal paste"))
+                .child(div().h(px(22.)).flex_shrink_0().text_color(rgb(BLUE)).truncate().child(identity))
+                .child(div().flex_shrink_0().text_size(px(12.)).text_color(rgb(MUTED))
+                    .child(format!("{} lines / {} UTF-8 bytes / processed only on this computer", review.lines, review.text.len())))
+                .child(div().id("paste-preview").h(px(140.)).flex_shrink_0().overflow_y_scroll()
+                    .p_3().rounded(px(4.)).bg(rgb(INPUT)).font_family("Consolas")
+                    .text_size(px(12.)).child(review.preview()))
+                .child(div().flex_shrink_0().text_size(px(12.)).text_color(rgb(MUTED))
+                    .child("Newlines may execute commands in the receiving program, even with bracketed paste. No extra Enter is added."))
+                .child(div().flex_shrink_0().text_size(px(12.)).text_color(rgb(MUTED))
+                    .child("Enter: selected button / Escape: cancel"))
+                .child(div().flex_shrink_0().flex().justify_end().gap_2()
+                    .child(Self::button("Cancel", "paste-cancel", false)
+                        .border_color(rgb(if !review.confirm_selected { GREEN } else { BORDER }))
+                        .on_click(cx.listener(|this, _, window, cx| this.action(Action::CancelPaste, window, cx))))
+                    .child(Self::styled_button("Paste to this session", "paste-confirm",
+                        if review.confirm_selected { ButtonStyle::Danger } else { ButtonStyle::Standard })
+                        .on_click(cx.listener(|this, _, window, cx| this.action(Action::ConfirmPaste, window, cx))))))
+    }
+
+    fn details_dialog(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(session) = self.sessions.get(self.active) else {
+            return div();
+        };
+        let mut details = vec![
+            ("Session", session.title.clone()),
+            (
+                "Target",
+                format!("{} / {}", session.kind_label(), session.identity()),
+            ),
+            ("Process", session.status_label()),
+        ];
+        match &session.kind {
+            SessionKind::Local => details.push((
+                "Startup directory (not live cwd)",
+                self.cwd
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            )),
+            SessionKind::Ssh(connection) => {
+                details.push((
+                    "Identity file",
+                    if connection.identity.is_empty() {
+                        "OpenSSH configuration".into()
+                    } else {
+                        connection.identity.clone()
+                    },
+                ));
+                details.push((
+                    "Jump host",
+                    if connection.jump.is_empty() {
+                        "OpenSSH configuration".into()
+                    } else {
+                        connection.jump.clone()
+                    },
+                ));
+                details.push((
+                    "Remote directory",
+                    "Unknown; raw terminal output is not treated as metadata.".into(),
+                ));
+            }
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .p_4()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x0b0f18bb))
+            .occlude()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(600.))
+                    .p_4()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Session details"),
+                    )
+                    .children(details.into_iter().map(|(label, value)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(label))
+                            .child(div().child(value))
+                    }))
+                    .child(div().flex().justify_end().child(
+                        Self::button("Done / Esc", "details-close", true).on_click(cx.listener(
+                            |this, _, window, cx| this.action(Action::ReturnToTerminal, window, cx),
+                        )),
+                    )),
+            )
+    }
+
+    fn session_menu(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let items = self.session_actions();
+        let position = self.menu_position.unwrap_or(point(
+            self.actions_bounds.right() - px(300.),
+            self.actions_bounds.bottom() + px(2.),
+        ));
+        let position = point(
+            position
+                .x
+                .min(window.viewport_size().width - px(300.))
+                .max(px(0.)),
+            position
+                .y
+                .min(window.viewport_size().height - px(40. + 36. * items.len() as f32))
+                .max(px(0.)),
+        );
         let mut menu = div()
             .absolute()
-            .top(self.actions_bounds.bottom() + px(2.))
-            .left((self.actions_bounds.right() - px(300.)).max(px(0.)))
+            .top(position.y)
+            .left(position.x)
             .w(px(300.))
             .p_1()
             .rounded(px(8.))
@@ -2264,8 +2703,25 @@ impl Desktop {
             .border_color(rgb(BORDER))
             .bg(rgb(SURFACE))
             .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for (index, (label, shortcut, action)) in self.session_actions().into_iter().enumerate() {
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(
+                        self.sessions
+                            .iter()
+                            .find(|s| Some(s.id) == self.menu_target)
+                            .map(|s| s.title.clone())
+                            .unwrap_or_default(),
+                    ),
+            );
+        for (index, (label, shortcut, action)) in items.into_iter().enumerate() {
             let enabled = action.is_some();
             menu = menu.child(
                 div()
@@ -2791,10 +3247,16 @@ impl Render for Desktop {
             root = root.child(self.launcher(window, cx));
         }
         if self.input.surface == Surface::SessionMenu {
-            root = root.child(self.session_menu(cx));
+            root = root.child(self.session_menu(window, cx));
         }
         if self.input.surface == Surface::Rename {
             root = root.child(self.rename_dialog(cx));
+        }
+        if self.input.surface == Surface::Details {
+            root = root.child(self.details_dialog(cx));
+        }
+        if self.input.pasting.is_some() {
+            root = root.child(self.paste_dialog(cx));
         }
         if self.input.closing.is_some() {
             root = root.child(self.close_dialog(cx));

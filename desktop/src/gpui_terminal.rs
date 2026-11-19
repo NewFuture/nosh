@@ -1,3 +1,4 @@
+use crate::gpui_search::OutputSearch;
 use alacritty_terminal::term::cell::Flags;
 use eframe::egui;
 use gpui::{App, Bounds, Hsla, Pixels, TextRun, Window, fill, font, point, px, rgb, size};
@@ -37,11 +38,13 @@ pub fn paint(
     bounds: Bounds<Pixels>,
     cell_size: gpui::Size<Pixels>,
     font_size: f32,
+    search: &mut OutputSearch,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::Result<()> {
+) -> gpui::Result<bool> {
     window.paint_quad(fill(bounds, rgb(0x1c1e26)));
-    let term = backend.model().lock();
+    let mut term = backend.model().lock();
+    let search_changed = search.open && search.refresh(&mut term);
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
     // Backgrounds precede glyphs so wide characters are not covered by spacer cells.
@@ -57,6 +60,12 @@ pub fn paint(
             );
         let bg = if content.selection.is_some_and(|s| s.contains(cell.point)) {
             egui::Color32::from_rgb(46, 75, 70)
+        } else if let Some(selected) = search.open.then(|| search.highlight(cell.point)).flatten() {
+            egui::Color32::from_rgb(
+                if selected { 105 } else { 55 },
+                if selected { 83 } else { 65 },
+                if selected { 35 } else { 84 },
+            )
         } else {
             terminal_color(
                 if cell.flags.contains(Flags::INVERSE) {
@@ -142,5 +151,5 @@ pub fn paint(
             rgb(0x84d8bd),
         ));
     }
-    Ok(())
+    Ok(search_changed)
 }

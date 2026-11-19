@@ -2,6 +2,7 @@
 
 mod gpui_input;
 mod gpui_launcher;
+mod gpui_search;
 mod gpui_terminal;
 mod gpui_workbench;
 

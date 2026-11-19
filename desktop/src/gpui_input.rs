@@ -15,6 +15,8 @@ pub enum Surface {
     SessionMenu,
     Rename,
     Library,
+    Find,
+    Details,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,7 @@ pub enum EditorTarget {
     Connection(usize),
     Launcher,
     Rename,
+    Find,
 }
 
 impl EditorTarget {
@@ -30,6 +33,7 @@ impl EditorTarget {
             Self::Connection(index) => index,
             Self::Launcher => 6,
             Self::Rename => 7,
+            Self::Find => 8,
         }
     }
 }
@@ -44,6 +48,77 @@ pub enum CloseTarget {
 pub struct ClosePrompt {
     pub target: CloseTarget,
     pub confirm_selected: bool,
+}
+
+pub const MAX_PASTE_BYTES: usize = 1024 * 1024;
+const QUICK_PASTE_BYTES: usize = 1024;
+
+pub struct PasteReview {
+    pub target: u64,
+    pub text: String,
+    pub lines: usize,
+    pub confirm_selected: bool,
+}
+
+impl PasteReview {
+    pub fn new(target: u64, text: String) -> Result<Self, String> {
+        if text.len() > MAX_PASTE_BYTES {
+            return Err("Paste exceeds the 1 MiB limit. Nothing was sent.".into());
+        }
+        let mut lines = 1;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                lines += 1;
+            } else if ch == '\n' {
+                lines += 1;
+            }
+        }
+        Ok(Self {
+            target,
+            text,
+            lines,
+            confirm_selected: false,
+        })
+    }
+
+    pub fn needs_confirmation(&self) -> bool {
+        self.text.len() > QUICK_PASTE_BYTES
+            || self.text.chars().any(|ch| ch.is_control() && ch != '\t')
+    }
+
+    pub fn preview(&self) -> String {
+        let mut preview = String::new();
+        let mut consumed = 0;
+        let mut lines = 1;
+        for ch in self.text.chars().take(2000) {
+            if lines > 10 {
+                break;
+            }
+            consumed += ch.len_utf8();
+            match ch {
+                '\r' => preview.push_str("\\r"),
+                '\n' => {
+                    preview.push('\n');
+                    lines += 1;
+                }
+                '\t' => preview.push_str("\\t"),
+                ch if ch.is_control() => preview.extend(ch.escape_default()),
+                ch => preview.push(ch),
+            }
+        }
+        if consumed < self.text.len() {
+            preview.push_str("\n[Preview clipped; confirmation sends the full clipboard text.]");
+        }
+        preview
+    }
+
+    pub fn allows_target(&self, id: u64, running: bool) -> bool {
+        self.target == id && running
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +151,16 @@ pub enum Action {
     Copy(String),
     CopyTerminal,
     Paste,
+    PasteText(String),
+    ConfirmPaste,
+    CancelPaste,
+    OpenFind,
+    CloseFind,
+    MoveFind(bool),
+    SessionDetails,
+    RenameTab(u64),
+    CloseTab(u64),
+    ActivateTab(u64),
     NewLocal,
     NewConnection,
     OpenLauncher,
@@ -254,6 +339,7 @@ impl LineEditor {
 pub struct InputState {
     pub surface: Surface,
     pub closing: Option<ClosePrompt>,
+    pub pasting: Option<PasteReview>,
     pub fields: [LineEditor; 6],
     pub field: usize,
     pub form_button: Option<ConnectionButton>,
@@ -263,11 +349,13 @@ pub struct InputState {
     pub rename_focus: usize,
     pub advanced: bool,
     pub editing: bool,
+    pub find: LineEditor,
+    pub find_focus: usize,
 }
 
 impl InputState {
     pub fn terminal_enabled(&self) -> bool {
-        self.closing.is_none() && self.surface == Surface::Terminal
+        self.closing.is_none() && self.pasting.is_none() && self.surface == Surface::Terminal
     }
 
     pub fn field_enabled(&self) -> bool {
@@ -275,20 +363,23 @@ impl InputState {
     }
 
     pub fn connection_enabled(&self) -> bool {
-        self.closing.is_none() && self.surface == Surface::Connection
+        self.closing.is_none() && self.pasting.is_none() && self.surface == Surface::Connection
     }
 
     pub fn background_enabled(&self) -> bool {
         self.closing.is_none()
+            && self.pasting.is_none()
             && matches!(
                 self.surface,
-                Surface::Terminal | Surface::Board | Surface::Library
+                Surface::Terminal | Surface::Board | Surface::Library | Surface::Find
             )
     }
 
     pub fn active_editor(&self) -> Option<EditorTarget> {
-        if self.closing.is_some() {
+        if self.closing.is_some() || self.pasting.is_some() {
             None
+        } else if self.surface == Surface::Find && self.find_focus == 0 {
+            Some(EditorTarget::Find)
         } else if self.surface == Surface::Launcher {
             Some(EditorTarget::Launcher)
         } else if self.surface == Surface::Rename && self.rename_focus == 0 {
@@ -305,6 +396,7 @@ impl InputState {
             EditorTarget::Connection(index) => &self.fields[index],
             EditorTarget::Launcher => &self.launcher,
             EditorTarget::Rename => &self.rename,
+            EditorTarget::Find => &self.find,
         }
     }
 
@@ -313,6 +405,7 @@ impl InputState {
             EditorTarget::Connection(index) => &mut self.fields[index],
             EditorTarget::Launcher => &mut self.launcher,
             EditorTarget::Rename => &mut self.rename,
+            EditorTarget::Find => &mut self.find,
         }
     }
 
@@ -321,6 +414,7 @@ impl InputState {
         self.surface = surface;
         self.form_button = None;
         self.rename_focus = 0;
+        self.find_focus = 0;
         if surface == Surface::Launcher {
             self.launcher = LineEditor::default();
         }
@@ -328,6 +422,7 @@ impl InputState {
 
     pub fn begin_close(&mut self, target: CloseTarget) {
         self.cancel_composition();
+        self.pasting = None;
         self.closing = Some(ClosePrompt {
             target,
             confirm_selected: false,
@@ -338,6 +433,7 @@ impl InputState {
         self.terminal_composition.clear();
         self.launcher.cancel_mark();
         self.rename.cancel_mark();
+        self.find.cancel_mark();
         for field in &mut self.fields {
             field.cancel_mark();
         }
@@ -348,6 +444,14 @@ impl InputState {
             self.editor_mut(target).replace(range, text)?;
         } else if self.terminal_enabled() {
             self.terminal_composition.clear();
+            if text.len() > QUICK_PASTE_BYTES
+                || text.chars().any(|ch| ch.is_control() && ch != '\t')
+            {
+                if text.len() > MAX_PASTE_BYTES {
+                    return Err("Paste exceeds the 1 MiB limit. Nothing was sent.".into());
+                }
+                return Ok(Action::PasteText(text.to_owned()));
+            }
             let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
             return Ok(if text.is_empty() {
                 Action::None
@@ -358,16 +462,14 @@ impl InputState {
         Ok(Action::None)
     }
 
-    pub fn paste(&mut self, text: &str, mode: TermMode) -> Result<Action, String> {
+    pub fn paste(&mut self, text: &str, _mode: TermMode) -> Result<Action, String> {
         if let Some(target) = self.active_editor() {
             self.editor_mut(target).replace(None, text)?;
         } else if self.terminal_enabled() {
-            return Ok(keyboard_input(
-                &egui::Event::Paste(text.into()),
-                mode,
-                egui::Modifiers::NONE,
-            )
-            .map_or(Action::None, Action::Write));
+            if text.len() > MAX_PASTE_BYTES {
+                return Err("Paste exceeds the 1 MiB limit. Nothing was sent.".into());
+            }
+            return Ok(Action::PasteText(text.to_owned()));
         }
         Ok(Action::None)
     }
@@ -389,10 +491,28 @@ impl InputState {
                 "escape" => Action::CancelClose,
                 "enter" if prompt.confirm_selected => Action::ConfirmClose,
                 "enter" => Action::CancelClose,
-                "tab" | "left" | "right" => {
+                "tab" | "left" | "right" if !m.control && !m.alt && !m.platform => {
                     prompt.confirm_selected = !prompt.confirm_selected;
                     Action::None
                 }
+                _ => Action::None,
+            };
+        }
+        if let Some(prompt) = &mut self.pasting {
+            return match key {
+                "escape" => Action::CancelPaste,
+                "enter" if prompt.confirm_selected => Action::ConfirmPaste,
+                "enter" => Action::CancelPaste,
+                "tab" | "left" | "right" if !m.control && !m.alt && !m.platform => {
+                    prompt.confirm_selected = !prompt.confirm_selected;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        if self.surface == Surface::Details {
+            return match key {
+                "escape" | "enter" => Action::ReturnToTerminal,
                 _ => Action::None,
             };
         }
@@ -484,11 +604,18 @@ impl InputState {
                 editor.key(event)
             };
         }
+        if self.surface == Surface::Find && self.find.marked.is_some() {
+            if key == "escape" {
+                self.find.cancel_mark();
+            }
+            return self.find.key(event);
+        }
         if m.control && m.shift {
             match key {
                 "t" => return Action::NewLocal,
                 "n" => return Action::NewConnection,
                 "p" => return Action::OpenLauncher,
+                "f" => return Action::OpenFind,
                 "b" => return Action::ToggleConnections,
                 "w" => return Action::RequestClose,
                 "c" if self.terminal_enabled() => return Action::CopyTerminal,
@@ -498,6 +625,26 @@ impl InputState {
         }
         if m.control && key == "tab" {
             return Action::SwitchTab(m.shift);
+        }
+        if self.surface == Surface::Find {
+            return match key {
+                "escape" if self.find.marked.is_some() => {
+                    self.find.cancel_mark();
+                    Action::None
+                }
+                "escape" => Action::CloseFind,
+                "tab" => {
+                    self.find.marked = None;
+                    self.find_focus = (self.find_focus + if m.shift { 3 } else { 1 }) % 4;
+                    Action::None
+                }
+                "enter" | "space" | " " if self.find_focus == 3 => Action::CloseFind,
+                "enter" | "space" | " " if self.find_focus == 1 => Action::MoveFind(true),
+                "enter" | "space" | " " if self.find_focus == 2 => Action::MoveFind(false),
+                "enter" if self.find.marked.is_none() => Action::MoveFind(m.shift),
+                _ if self.find_focus == 0 => self.find.key(event),
+                _ => Action::None,
+            };
         }
         if key == "f6" {
             return Action::ToggleLibraryFocus;
@@ -519,6 +666,9 @@ impl InputState {
         }
         if key == "f10" && m.shift {
             return Action::OpenSessionMenu;
+        }
+        if key == "insert" && m.shift && self.terminal_enabled() {
+            return Action::Paste;
         }
         if m.control && matches!(key, "+" | "=" | "-" | "0") {
             return Action::Zoom(match key {
@@ -597,6 +747,140 @@ mod tests {
             keystroke: gpui::Keystroke::parse(value).unwrap(),
             is_held: false,
         }
+    }
+
+    #[test]
+    fn terminal_paste_review_has_explicit_boundaries_and_stable_target() {
+        let quick = PasteReview::new(42, "x".repeat(1024)).unwrap();
+        assert!(!quick.needs_confirmation());
+        let large = PasteReview::new(42, "x".repeat(1025)).unwrap();
+        assert!(large.needs_confirmation());
+        for text in [
+            "one\n",
+            "one\r",
+            "one\r\ntwo",
+            "one\ntwo",
+            "\u{1b}[201~",
+            "\u{03}",
+        ] {
+            let review = PasteReview::new(42, text.into()).unwrap();
+            assert!(review.needs_confirmation(), "{text:?}");
+            assert!(review.allows_target(42, true));
+            assert!(!review.allows_target(43, true));
+            assert!(!review.allows_target(42, false));
+        }
+        assert_eq!(PasteReview::new(42, "a\r\nb\rc\n".into()).unwrap().lines, 4);
+        let review = PasteReview::new(42, "中".repeat(MAX_PASTE_BYTES / 3)).unwrap();
+        assert!(review.preview().len() < 9000);
+        assert!(PasteReview::new(42, "x".repeat(MAX_PASTE_BYTES)).is_ok());
+        assert!(PasteReview::new(42, "x".repeat(MAX_PASTE_BYTES + 1)).is_err());
+        assert!(
+            PasteReview::new(42, "\x1bhello".into())
+                .unwrap()
+                .preview()
+                .contains("\\u{1b}")
+        );
+    }
+
+    #[test]
+    fn pending_paste_is_cancel_by_default_and_blocks_all_other_inputs() {
+        let mut state = InputState {
+            pasting: Some(PasteReview::new(42, "echo one\necho two".into()).unwrap()),
+            ..Default::default()
+        };
+        assert!(!state.background_enabled());
+        assert!(!state.terminal_enabled());
+        assert_eq!(state.active_editor(), None);
+        for value in [
+            "ctrl-tab",
+            "ctrl-shift-v",
+            "ctrl-shift-t",
+            "ctrl-shift-f",
+            "up",
+            "ctrl-c",
+        ] {
+            assert_eq!(state.key(&key(value), TermMode::empty()), Action::None);
+        }
+        assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
+        assert_eq!(
+            state.paste("OTHER", TermMode::BRACKETED_PASTE).unwrap(),
+            Action::None
+        );
+        state.mark(None, "候補").unwrap();
+        assert!(state.terminal_composition.is_empty());
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::CancelPaste
+        );
+        state.key(&key("right"), TermMode::empty());
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::ConfirmPaste
+        );
+        assert_eq!(
+            state.key(&key("escape"), TermMode::empty()),
+            Action::CancelPaste
+        );
+        state.begin_close(CloseTarget::Window);
+        assert!(
+            state.pasting.is_none(),
+            "closing must discard rather than defer a paste"
+        );
+    }
+
+    #[test]
+    fn find_editor_navigation_and_ime_are_isolated_from_shell_and_other_editors() {
+        let mut state = InputState::default();
+        assert_eq!(
+            state.key(&key("ctrl-shift-f"), TermMode::empty()),
+            Action::OpenFind
+        );
+        state.set_surface(Surface::Find);
+        assert!(state.background_enabled());
+        state.commit(None, "中😀").unwrap();
+        state.commit(Some(1..3), "文").unwrap();
+        assert_eq!(state.find.text, "中文");
+        assert_eq!(
+            state.paste("needle", TermMode::empty()).unwrap(),
+            Action::None
+        );
+        assert_eq!(state.find.text, "中文needle");
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::MoveFind(false)
+        );
+        assert_eq!(
+            state.key(&key("shift-enter"), TermMode::empty()),
+            Action::MoveFind(true)
+        );
+        state.mark(None, "候").unwrap();
+        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
+        assert_eq!(state.key(&key("ctrl-tab"), TermMode::empty()), Action::None);
+        state.key(&key("escape"), TermMode::empty());
+        assert_eq!(
+            state.key(&key("ctrl-tab"), TermMode::empty()),
+            Action::SwitchTab(false)
+        );
+        for expected in [
+            Action::MoveFind(true),
+            Action::MoveFind(false),
+            Action::CloseFind,
+        ] {
+            state.key(&key("tab"), TermMode::empty());
+            assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
+            assert_eq!(state.key(&key("enter"), TermMode::empty()), expected);
+        }
+        assert_eq!(
+            state.key(&key("escape"), TermMode::empty()),
+            Action::CloseFind
+        );
+        assert!(state.launcher.text.is_empty());
+        assert!(state.fields.iter().all(|field| field.text.is_empty()));
+        state.set_surface(Surface::Terminal);
+        assert_eq!(
+            state.key(&key("shift-insert"), TermMode::empty()),
+            Action::Paste
+        );
     }
 
     #[test]
@@ -840,7 +1124,10 @@ mod tests {
             Action::CancelClose
         );
         state.closing = None;
-        assert_eq!(state.commit(None, "\r\n\x1b").unwrap(), Action::None);
+        assert_eq!(
+            state.commit(None, "\r\n\x1b").unwrap(),
+            Action::PasteText("\r\n\x1b".into())
+        );
         assert_eq!(
             state.key(&key("enter"), TermMode::empty()),
             Action::Write(b"\r".to_vec())
@@ -849,7 +1136,7 @@ mod tests {
             state
                 .paste("echo one\necho two", TermMode::BRACKETED_PASTE)
                 .unwrap(),
-            Action::Write(b"\x1b[200~echo one\necho two\x1b[201~".to_vec())
+            Action::PasteText("echo one\necho two".into())
         );
         state.set_surface(Surface::Board);
         assert_eq!(state.commit(None, "hidden text").unwrap(), Action::None);

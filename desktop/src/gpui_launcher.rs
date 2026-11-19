@@ -10,6 +10,7 @@ pub enum LaunchAction {
     Sidebar,
     Close(u64),
     Rename(u64),
+    Find,
 }
 
 pub struct LaunchItem {
