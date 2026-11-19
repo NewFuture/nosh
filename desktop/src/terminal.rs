@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
@@ -34,10 +35,14 @@ pub struct EventProxy {
     wake: Arc<dyn Fn() + Send + Sync>,
     channel: Arc<OnceLock<EventLoopSender>>,
     size: Arc<FairMutex<WindowSize>>,
+    content_revision: Arc<AtomicU64>,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: PtyEvent) {
+        if matches!(event, PtyEvent::Wakeup) {
+            self.content_revision.fetch_add(1, Ordering::Release);
+        }
         if let Some(bytes) = TerminalBackend::protocol_response(&event, *self.size.lock()) {
             let result = self
                 .channel
@@ -79,6 +84,7 @@ pub struct TerminalBackend {
     worker: Option<PtyWorker>,
     size: WindowSize,
     reply_size: Arc<FairMutex<WindowSize>>,
+    content_revision: Arc<AtomicU64>,
 }
 
 impl TerminalBackend {
@@ -110,12 +116,14 @@ impl TerminalBackend {
         };
         let reply_size = Arc::new(FairMutex::new(size));
         let reply_channel = Arc::new(OnceLock::new());
+        let content_revision = Arc::new(AtomicU64::new(0));
         let proxy = EventProxy {
             id,
             sender,
             wake,
             channel: reply_channel.clone(),
             size: reply_size.clone(),
+            content_revision: content_revision.clone(),
         };
         // Alacritty's Windows backend joins its command line verbatim.
         #[cfg(windows)]
@@ -152,6 +160,7 @@ impl TerminalBackend {
             worker,
             size,
             reply_size,
+            content_revision,
         })
     }
 
@@ -188,10 +197,12 @@ impl TerminalBackend {
                     .send(Msg::Resize(size))
                     .map_err(io::Error::other)?;
             }
-            self.term.lock().resize(TermSize::new(
+            let mut term = self.term.lock();
+            term.resize(TermSize::new(
                 size.num_cols as usize,
                 size.num_lines as usize,
             ));
+            self.content_revision.fetch_add(1, Ordering::Release);
             self.size = size;
             *self.reply_size.lock() = size;
         }
@@ -200,6 +211,12 @@ impl TerminalBackend {
 
     pub fn reply(&self, event: PtyEvent) -> io::Result<()> {
         Self::protocol_response(&event, self.size).map_or(Ok(()), |bytes| self.write(bytes))
+    }
+
+    /// Monotonic PTY update/layout publication; reading it never consumes an update.
+    /// Read while holding the model lock when caching grid-derived data.
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision.load(Ordering::Acquire)
     }
 
     #[cfg(feature = "gpui")]
@@ -652,6 +669,7 @@ mod tests {
         )
         .unwrap();
         terminal.resize(100, 30, 8, 18).unwrap();
+        let revision = terminal.content_revision();
         let command = if cfg!(windows) {
             "@echo off\rset FIRST=DESKTOP_\recho %FIRST%ROUNDTRIP\r"
         } else {
@@ -659,6 +677,7 @@ mod tests {
         };
         terminal.write(command.as_bytes().to_vec()).unwrap();
         wait_for(&terminal, &events, "DESKTOP_ROUNDTRIP");
+        assert!(terminal.content_revision() > revision);
         assert!(wakes.load(std::sync::atomic::Ordering::Relaxed) > 0);
         terminal.write(b"exit 7\r".to_vec()).unwrap();
         let start = Instant::now();

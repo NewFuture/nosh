@@ -1092,9 +1092,11 @@ impl Desktop {
             Action::MoveFind(reverse) => {
                 self.sync_find();
                 if let Some(session) = self.sessions.get_mut(self.active) {
-                    session
-                        .search
-                        .navigate(&mut session.backend.model().lock(), reverse);
+                    session.search.navigate(
+                        &mut session.backend.model().lock(),
+                        session.backend.content_revision(),
+                        reverse,
+                    );
                 }
             }
             Action::SessionDetails => self.show_surface(Surface::Details, window, cx),
@@ -1543,7 +1545,7 @@ impl Desktop {
                 |space| space.window_control_area(gpui::WindowControlArea::Drag),
             ))
             .child(
-                Self::toolbar_button("Search...", "command-search")
+                Self::toolbar_button("Quick open", "command-search")
                     .flex_shrink_0()
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.show_surface(Surface::Launcher, window, cx);
@@ -1670,7 +1672,7 @@ impl Desktop {
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .child(
-                        Self::toolbar_button("Search commands...", "navigator-launcher")
+                        Self::toolbar_button("Quick open...", "navigator-launcher")
                             .w_full()
                             .justify_between()
                             .child(Self::tag("Ctrl+Shift+P", MUTED))
@@ -1779,6 +1781,8 @@ impl Desktop {
                         );
                         paint_view.update(cx, |this, cx| {
                             if let Some(session) = this.sessions.get_mut(this.active) {
+                                session.search.editing = this.input.surface == Surface::Find
+                                    && this.input.find_focus == 0;
                                 match gpui_terminal::paint(
                                     &session.backend,
                                     bounds,
@@ -1845,11 +1849,11 @@ impl Desktop {
                             this.action(Action::SessionDetails, window, cx)
                         }),
                     ))
-                    .child(Self::toolbar_button("Find", "terminal-find").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.action(Action::OpenFind, window, cx)
-                        }),
-                    ))
+                    .child(
+                        Self::toolbar_button("Find output", "terminal-find").on_click(cx.listener(
+                            |this, _, window, cx| this.action(Action::OpenFind, window, cx),
+                        )),
+                    )
                     .child(
                         Self::toolbar_button("Actions...", "session-actions")
                             .relative()
@@ -2434,7 +2438,7 @@ impl Desktop {
                                     .items_center()
                                     .justify_between()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Search commands & sessions")
+                                    .child("Quick open")
                                     .child(Self::toolbar_button("Esc", "close-launcher").on_click(
                                         cx.listener(|this, _, window, cx| {
                                             this.action(Action::ReturnToTerminal, window, cx);
@@ -2505,7 +2509,7 @@ impl Desktop {
                     .child(div().flex_1().min_w_0().child(self.text_field(
                         EditorTarget::Find,
                         "",
-                        "Find in terminal / Ctrl+Shift+F",
+                        "Find output / screen + history",
                         cx,
                     )))
                     .children(
@@ -2550,7 +2554,7 @@ impl Desktop {
                     .child(if search.limited {
                         format!("Recent {} rows / bounded", search.rows)
                     } else {
-                        "Enter: next / Shift+Enter: prev".into()
+                        "Screen + history / literal".into()
                     }),
             )
     }

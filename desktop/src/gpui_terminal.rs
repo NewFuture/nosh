@@ -44,7 +44,7 @@ pub fn paint(
 ) -> gpui::Result<bool> {
     window.paint_quad(fill(bounds, rgb(0x1c1e26)));
     let mut term = backend.model().lock();
-    let search_changed = search.open && search.refresh(&mut term);
+    let search_changed = search.open && search.refresh(&mut term, backend.content_revision());
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
     // Backgrounds precede glyphs so wide characters are not covered by spacer cells.
