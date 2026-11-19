@@ -5215,6 +5215,7 @@ dependencies = [
  "eframe",
  "gpui",
  "libc",
+ "nosh-cli",
  "nosh-platform",
  "serde",
  "serde_json",

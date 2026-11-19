@@ -13,6 +13,7 @@ use gpui::{
 use gpui_workbench::{Desktop, Options};
 
 fn main() {
+    nosh_cli::dispatch_embedded();
     let options = Options::parse();
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);

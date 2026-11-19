@@ -12,7 +12,7 @@ path = "src/gpui_main.rs"
 required-features = ["gpui"]
 
 [features]
-gpui = ["dep:gpui"]
+gpui = ["dep:gpui", "dep:nosh-cli", "dep:windows-sys"]
 
 [dependencies]
 gpui = { version = "=0.2.2", optional = true }
@@ -20,6 +20,7 @@ eframe = { version = "=0.31.1", default-features = false, features = ["default_f
 wgpu = "24"
 alacritty_terminal = "=0.25.1"
 nosh-platform.workspace = true
+nosh-cli = { path = "../crates/nosh-cli", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
@@ -29,6 +30,9 @@ clap.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys.workspace = true

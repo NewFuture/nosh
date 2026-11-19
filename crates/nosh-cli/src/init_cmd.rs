@@ -22,7 +22,9 @@ pub fn run(shell: Shell, options: &GlobalOpts) -> i32 {
             return 2;
         }
     };
-    let command = match command(executable.as_os_str(), options) {
+    let embedded =
+        std::env::args_os().nth(1).as_deref() == Some(OsStr::new(crate::EMBEDDED_SHELL_FLAG));
+    let command = match command(executable.as_os_str(), options, embedded) {
         Ok(command) => command,
         Err(error) => {
             eprintln!("nosh init: cannot resolve model path: {error}");
@@ -39,7 +41,7 @@ pub fn run(shell: Shell, options: &GlobalOpts) -> i32 {
     0
 }
 
-fn command(executable: &OsStr, options: &GlobalOpts) -> std::io::Result<String> {
+fn command(executable: &OsStr, options: &GlobalOpts, embedded: bool) -> std::io::Result<String> {
     let model_path = options
         .model_path
         .as_ref()
@@ -47,6 +49,9 @@ fn command(executable: &OsStr, options: &GlobalOpts) -> std::io::Result<String> 
         .transpose()?
         .map(std::path::PathBuf::into_os_string);
     let mut arguments = vec![executable.to_owned()];
+    if embedded {
+        arguments.push(crate::EMBEDDED_SHELL_FLAG.into());
+    }
     for (enabled, flag) in [
         (options.offline, "--offline"),
         (options.no_download, "--no-download"),
@@ -142,6 +147,13 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn embedded_integration_preserves_the_shell_dispatch_prefix() {
+        let cli = crate::Cli::parse_from(["nosh", "--safe", "init", "bash"]);
+        let text = command(OsStr::new("desktop.exe"), &cli.global, true).unwrap();
+        assert!(text.starts_with("builtin command $'desktop.exe' $'--__nosh_shell' "));
+    }
+
+    #[test]
     fn init_word_in_task_text_does_not_dispatch_a_subcommand() {
         for mode in ["-s", "-a", "-l", "-i", "-e", "-x", "-u", "-eux", "--json"] {
             let cli = crate::Cli::parse_modes_from(["nosh", mode, "init"]).unwrap();
@@ -176,7 +188,7 @@ mod tests {
             "init",
             "bash",
         ]);
-        let text = command(OsStr::new("/a'b/nosh"), &cli.global).unwrap();
+        let text = command(OsStr::new("/a'b/nosh"), &cli.global, false).unwrap();
         assert!(text.starts_with("builtin command $'/a\\'b/nosh' "));
         let model_path = std::path::absolute("a'b/model.gguf").unwrap();
         assert!(text.contains(&quote(model_path.as_os_str())));
@@ -193,7 +205,7 @@ mod tests {
         assert!(text.ends_with("$'-s' $'--' \"$1\""));
         let cli = crate::Cli::parse_from(["nosh", "init", "bash"]);
         assert_eq!(
-            command(OsStr::new("nosh"), &cli.global).unwrap(),
+            command(OsStr::new("nosh"), &cli.global, false).unwrap(),
             "builtin command $'nosh' $'-s' $'--' \"$1\"",
         );
     }

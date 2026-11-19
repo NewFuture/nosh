@@ -112,9 +112,54 @@ Zed 的 GPL 终端模块。egui 的 `nosh-desktop` 入口保留，两个入口�
 
 ```powershell
 cargo source prepare
-cargo build -p nosh-cli -p nosh-desktop --features gpui --locked
+cargo build -p nosh-desktop --features gpui --bin nosh-gpui --locked
 .\target\debug\nosh-gpui.exe --cwd 'C:\work tree'
 ```
+
+GPUI 默认内置同一份 nosh 代码：只复制 `nosh-gpui.exe` 即可创建本地会话，
+不需要旁置或 PATH 中的 `nosh.exe`，也不把另一个程序嵌入后解压。
+每个本地 PTY 仍是独立进程：桌面以自己的绝对路径和私有 shell 参数启动自身，
+在解析桌面选项、创建 GPUI 窗口或线程之前进入原 CLI。补全、输入辅助等 worker
+也由同一个 exe 直接分发，不会再次打开 GUI。CLI 参数、退出码、审批与模型装配
+沿用普通 CLI；内部模式不是向桌面进程输入命令的控制接口。
+
+Windows 的 GUI-subsystem 程序不能直接获得 ConPTY 控制台，因此本地启动适配层
+先使用 `GetSystemDirectoryW` 定位系统 `cmd.exe`，仅运行固定 bootstrap 并等待
+同一桌面 exe 的内置 shell；每个本地会话多一个轻量等待进程。不查 PATH/COMSPEC，
+禁用 AutoRun，不生成脚本或解压二级 exe。bootstrap 只含固定参数，exe 路径通过
+延迟展开作为数据传递，不把终端输入、工作目录或用户命令拼进 cmd 脚本。
+内置 shell 附加该已有控制台、保留有效重定向并恢复正常 Ctrl+C 策略；
+不会调用 `AllocConsole` 打开额外控制台窗口。用户命令仍全部由 nosh/brush 执行，
+结束码经等待进程返回，关闭 PTY 回收所属 shell，shell 再回收自己的有界 worker。
+其它平台直接 self-exec，无此 cmd 等待层。该单文件折中不是其它终端的通用发布架构。
+
+`--nosh <路径>` 优先于 `NOSH_BIN`，均为显式外部 CLI 覆盖；无覆盖才使用内置模式。
+无效覆盖会报错，不回退；覆盖指向当前桌面 exe 时仍使用内置分发参数。
+只有 egui 入口沿用前文的“旁置/PATH CLI”查找规则。
+终端中的 `nosh` 命令名不会自动安装到 PATH；若需调用内置 CLI 的其它子命令，
+可使用桌面 exe 的完整路径加 `--__nosh_shell`，或另行安装普通 CLI。
+`init bash` 生成的建议命令保留自身路径及内部模式参数。
+
+单个 release 产物：
+
+```powershell
+cargo source prepare
+cargo build --release -p nosh-desktop --features gpui --bin nosh-gpui --locked
+.\target\release\nosh-gpui.exe
+```
+
+“单 exe”不是完全静态分发：Windows/UCRT、VC 运行库及系统图形 DLL 仍由系统提供，
+本地会话还依赖系统 `cmd.exe`，SSH 仍调用系统 `ssh.exe`；
+模型权重、tokenizer、用户配置和数据均不嵌入 exe。
+默认会话继续使用 `--offline --no-download`，没有安装模型也能使用普通 shell；
+本次整合不下载模型、不改变系统 OpenSSH 策略。
+`desktop/tests/embedded_shell.rs` 将唯一 exe 复制到独立目录、清空 PATH、隔离
+`NOSH_HOME`，覆盖重定向/退出码、内部 worker 分发、真实多会话 PTY、文件补全、
+中文、Ctrl+C，以及精确 shell/锚点/worker PID 的回收。Windows exe 测试名包含
+空格、中文、`%`、`!`、`&`、`^` 和括号，并以无效 COMSPEC、预设 ERRORLEVEL
+验证系统路径和退出码不被这些环境设置替代。
+设置 `NOSH_GPUI_TEST_BINARY` 为 release 的绝对路径后可用同一回归验证 Windows
+GUI subsystem 的实际产物，而不以 debug 控制台程序的行为替代。
 
 工作台采用会话优先的桌面布局：顶部会话标签、目标信息栏、可折叠
 连接库和底部状态栏。标签是活动会话的主导航，侧栏只放保存的 SSH 目标，

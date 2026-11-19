@@ -599,6 +599,9 @@ fn palette(index: usize) -> Color32 {
 
 #[cfg(windows)]
 fn quote_windows(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|ch| ch == '"' || ch.is_whitespace()) {
+        return value.to_owned();
+    }
     let mut quoted = String::from("\"");
     let mut slashes = 0;
     for ch in value.chars() {

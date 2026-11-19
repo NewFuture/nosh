@@ -16,6 +16,7 @@ use gpui::{
     font, point, prelude::*, px, rgb, rgba, size,
 };
 use nosh_desktop::connections::{self, Connection, Settings};
+use nosh_desktop::local_shell::LocalShell;
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
 use crate::gpui_input::{
@@ -130,7 +131,7 @@ impl Session {
 
 pub struct Desktop {
     focus: FocusHandle,
-    nosh: Result<PathBuf, String>,
+    nosh: Result<LocalShell, String>,
     cwd: Result<PathBuf, String>,
     settings: Settings,
     settings_path: Option<PathBuf>,
@@ -209,7 +210,7 @@ impl Desktop {
             .map_err(|error| format!("Cannot open startup directory: {error}"));
         let mut desktop = Self {
             focus: cx.focus_handle(),
-            nosh: connections::find_nosh(options.nosh),
+            nosh: LocalShell::resolve(options.nosh),
             cwd,
             settings,
             settings_path,
@@ -350,12 +351,18 @@ impl Desktop {
 
     fn open_local(&mut self, cx: &mut Context<Self>) {
         match (&self.nosh, &self.cwd) {
-            (Ok(nosh), Ok(cwd)) => self.open(
-                format!("Local {}", self.next_id),
-                SessionKind::Local,
-                connections::local_backend(nosh, cwd),
-                cx,
-            ),
+            (Ok(nosh), Ok(cwd)) => match nosh.backend(cwd) {
+                Ok(backend) => self.open(
+                    format!("Local {}", self.next_id),
+                    SessionKind::Local,
+                    backend,
+                    cx,
+                ),
+                Err(error) => {
+                    self.report_error(error);
+                    cx.notify();
+                }
+            },
             (Err(error), _) | (_, Err(error)) => {
                 self.error = error.clone();
                 cx.notify();
