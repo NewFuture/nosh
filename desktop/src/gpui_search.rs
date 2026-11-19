@@ -16,6 +16,7 @@ pub struct OutputSearch {
     pub rows: usize,
     pub limited: bool,
     pub more_matches: bool,
+    pub bar_at_bottom: bool,
     regex: Option<RegexSearch>,
     matches: Vec<Match>,
     reveal: bool,
@@ -57,9 +58,14 @@ impl OutputSearch {
         term: &mut Term<T>,
     ) -> bool {
         let Some(regex) = &mut self.regex else {
-            return false;
+            return std::mem::take(&mut self.bar_at_bottom);
         };
-        let previous_scope = (self.rows, self.limited, self.more_matches);
+        let previous_scope = (
+            self.rows,
+            self.limited,
+            self.more_matches,
+            self.bar_at_bottom,
+        );
         let rows = term.total_lines().min((MAX_CELLS / term.columns()).max(1));
         self.rows = rows;
         self.limited = rows < term.total_lines();
@@ -81,7 +87,22 @@ impl OutputSearch {
         {
             term.scroll_to_point(*self.matches[index].start());
         }
-        changed || previous_scope != (self.rows, self.limited, self.more_matches)
+        self.bar_at_bottom = self
+            .selected
+            .and_then(|index| self.matches.get(index))
+            .is_some_and(|found| {
+                let middle = (i64::from(found.start().line.0) + i64::from(found.end().line.0)) / 2
+                    + term.grid().display_offset() as i64;
+                (0..term.screen_lines() as i64 / 2).contains(&middle)
+            });
+        changed
+            || previous_scope
+                != (
+                    self.rows,
+                    self.limited,
+                    self.more_matches,
+                    self.bar_at_bottom,
+                )
     }
 
     pub fn navigate<T: alacritty_terminal::event::EventListener>(
@@ -184,6 +205,26 @@ mod tests {
         assert_eq!(search.matches.len(), 1);
         search.navigate(&mut term, true);
         assert_eq!(search.selected, Some(0));
+    }
+
+    #[test]
+    fn keeps_find_controls_away_from_the_selected_match() {
+        let mut term = terminal(16, 12, &format!("needle\r\n{}needle", "row\r\n".repeat(8)));
+        let mut search = OutputSearch::default();
+        search.set_query("needle");
+        search.refresh(&mut term);
+        assert!(!search.bar_at_bottom);
+        search.navigate(&mut term, true);
+        assert!(search.refresh(&mut term));
+        assert!(search.bar_at_bottom);
+        search.navigate(&mut term, false);
+        assert!(search.refresh(&mut term));
+        assert!(!search.bar_at_bottom);
+        search.navigate(&mut term, true);
+        search.refresh(&mut term);
+        search.set_query("");
+        assert!(search.refresh(&mut term));
+        assert!(!search.bar_at_bottom);
     }
 
     #[test]

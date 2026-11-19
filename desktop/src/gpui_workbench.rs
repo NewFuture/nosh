@@ -2484,7 +2484,8 @@ impl Desktop {
         let search = &self.sessions[self.active].search;
         div()
             .absolute()
-            .top_0()
+            .when(search.bar_at_bottom, |bar| bar.bottom_0())
+            .when(!search.bar_at_bottom, |bar| bar.top_0())
             .right_0()
             .w_full()
             .max_w(px(520.))
