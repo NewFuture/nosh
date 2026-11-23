@@ -1,17 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaunchAction {
-    Local,
-    Connection,
-    Session(u64),
-    Saved(usize),
-    Copy,
-    Paste,
-    Zoom(i8),
-    Sidebar,
-    Close(u64),
-    Rename(u64),
-    Find,
-}
+use crate::gpui_input::Action;
 
 pub struct LaunchItem {
     pub title: String,
@@ -19,7 +6,7 @@ pub struct LaunchItem {
     pub group: &'static str,
     pub glyph: &'static str,
     pub shortcut: &'static str,
-    pub action: LaunchAction,
+    pub action: Action,
 }
 
 impl LaunchItem {
@@ -29,7 +16,7 @@ impl LaunchItem {
         group: &'static str,
         glyph: &'static str,
         shortcut: &'static str,
-        action: LaunchAction,
+        action: Action,
     ) -> Self {
         Self {
             title: title.into(),
@@ -65,12 +52,12 @@ mod tests {
             "Saved connections",
             "SSH",
             "",
-            LaunchAction::Saved(3),
+            Action::ConnectSaved(3),
         );
         assert!(item.matches("  DEV 2222 "));
         assert!(item.matches("saved 中"));
         assert!(item.matches("SSH 2222"));
         assert!(!item.matches("dev production"));
-        assert_eq!(item.action, LaunchAction::Saved(3));
+        assert_eq!(item.action, Action::ConnectSaved(3));
     }
 }

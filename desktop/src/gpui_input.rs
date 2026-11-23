@@ -86,8 +86,7 @@ impl PasteReview {
     }
 
     pub fn needs_confirmation(&self) -> bool {
-        self.text.len() > QUICK_PASTE_BYTES
-            || self.text.chars().any(|ch| ch.is_control() && ch != '\t')
+        needs_paste_confirmation(&self.text)
     }
 
     pub fn preview(&self) -> String {
@@ -180,6 +179,7 @@ pub enum Action {
     ToggleLibraryFocus,
     MoveLibrary(bool),
     ConnectLibrary,
+    ConnectSaved(usize),
     EditLibrary,
     OpenSessionMenu,
     MoveMenu(bool),
@@ -204,9 +204,12 @@ impl LineEditor {
     }
 
     pub fn utf16_selection(&self) -> Range<usize> {
-        let selection = self.selection();
-        self.text[..selection.start].encode_utf16().count()
-            ..self.text[..selection.end].encode_utf16().count()
+        self.utf16_range(self.selection())
+    }
+
+    pub fn utf16_range(&self, range: Range<usize>) -> Range<usize> {
+        self.text[..range.start].encode_utf16().count()
+            ..self.text[..range.end].encode_utf16().count()
     }
 
     fn byte_offset(&self, utf16: usize) -> usize {
@@ -444,9 +447,7 @@ impl InputState {
             self.editor_mut(target).replace(range, text)?;
         } else if self.terminal_enabled() {
             self.terminal_composition.clear();
-            if text.len() > QUICK_PASTE_BYTES
-                || text.chars().any(|ch| ch.is_control() && ch != '\t')
-            {
+            if needs_paste_confirmation(text) {
                 if text.len() > MAX_PASTE_BYTES {
                     return Err("Paste exceeds the 1 MiB limit. Nothing was sent.".into());
                 }
@@ -462,7 +463,7 @@ impl InputState {
         Ok(Action::None)
     }
 
-    pub fn paste(&mut self, text: &str, _mode: TermMode) -> Result<Action, String> {
+    pub fn paste(&mut self, text: &str) -> Result<Action, String> {
         if let Some(target) = self.active_editor() {
             self.editor_mut(target).replace(None, text)?;
         } else if self.terminal_enabled() {
@@ -487,28 +488,20 @@ impl InputState {
         let key = event.keystroke.key.as_str();
         let m = event.keystroke.modifiers;
         if let Some(prompt) = &mut self.closing {
-            return match key {
-                "escape" => Action::CancelClose,
-                "enter" if prompt.confirm_selected => Action::ConfirmClose,
-                "enter" => Action::CancelClose,
-                "tab" | "left" | "right" if !m.control && !m.alt && !m.platform => {
-                    prompt.confirm_selected = !prompt.confirm_selected;
-                    Action::None
-                }
-                _ => Action::None,
-            };
+            return confirmation_key(
+                event,
+                &mut prompt.confirm_selected,
+                Action::ConfirmClose,
+                Action::CancelClose,
+            );
         }
         if let Some(prompt) = &mut self.pasting {
-            return match key {
-                "escape" => Action::CancelPaste,
-                "enter" if prompt.confirm_selected => Action::ConfirmPaste,
-                "enter" => Action::CancelPaste,
-                "tab" | "left" | "right" if !m.control && !m.alt && !m.platform => {
-                    prompt.confirm_selected = !prompt.confirm_selected;
-                    Action::None
-                }
-                _ => Action::None,
-            };
+            return confirmation_key(
+                event,
+                &mut prompt.confirm_selected,
+                Action::ConfirmPaste,
+                Action::CancelPaste,
+            );
         }
         if self.surface == Surface::Details {
             return match key {
@@ -628,10 +621,6 @@ impl InputState {
         }
         if self.surface == Surface::Find {
             return match key {
-                "escape" if self.find.marked.is_some() => {
-                    self.find.cancel_mark();
-                    Action::None
-                }
                 "escape" => Action::CloseFind,
                 "tab" => {
                     self.find.marked = None;
@@ -684,6 +673,29 @@ impl InputState {
         } else {
             Action::None
         }
+    }
+}
+
+fn needs_paste_confirmation(text: &str) -> bool {
+    text.len() > QUICK_PASTE_BYTES || text.chars().any(|ch| ch.is_control() && ch != '\t')
+}
+
+fn confirmation_key(
+    event: &KeyDownEvent,
+    selected: &mut bool,
+    confirm: Action,
+    cancel: Action,
+) -> Action {
+    let modifiers = event.keystroke.modifiers;
+    match event.keystroke.key.as_str() {
+        "escape" => cancel,
+        "enter" if *selected => confirm,
+        "enter" => cancel,
+        "tab" | "left" | "right" if !modifiers.control && !modifiers.alt && !modifiers.platform => {
+            *selected = !*selected;
+            Action::None
+        }
+        _ => Action::None,
     }
 }
 
@@ -802,10 +814,7 @@ mod tests {
             assert_eq!(state.key(&key(value), TermMode::empty()), Action::None);
         }
         assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
-        assert_eq!(
-            state.paste("OTHER", TermMode::BRACKETED_PASTE).unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste("OTHER").unwrap(), Action::None);
         state.mark(None, "候補").unwrap();
         assert!(state.terminal_composition.is_empty());
         assert_eq!(
@@ -840,10 +849,7 @@ mod tests {
         state.commit(None, "中😀").unwrap();
         state.commit(Some(1..3), "文").unwrap();
         assert_eq!(state.find.text, "中文");
-        assert_eq!(
-            state.paste("needle", TermMode::empty()).unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste("needle").unwrap(), Action::None);
         assert_eq!(state.find.text, "中文needle");
         assert_eq!(
             state.key(&key("enter"), TermMode::empty()),
@@ -899,12 +905,7 @@ mod tests {
         ] {
             assert_eq!(state.key(&key(value), TermMode::empty()), Action::None);
         }
-        assert_eq!(
-            state
-                .paste("echo MUST_NOT_RUN\r", TermMode::BRACKETED_PASTE)
-                .unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste("echo MUST_NOT_RUN\r").unwrap(), Action::None);
         assert_eq!(
             state.commit(None, "echo MUST_NOT_RUN\r").unwrap(),
             Action::None
@@ -966,10 +967,7 @@ mod tests {
         state.commit(None, "中").unwrap();
         assert_eq!(state.fields[0].text, "中z");
         assert!(state.fields[0].marked.is_none());
-        assert_eq!(
-            state.paste("X\r\n", TermMode::empty()).unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste("X\r\n").unwrap(), Action::None);
         assert_eq!(state.fields[0].text, "中Xz");
         state.field = 1;
         state.key(&key("tab"), TermMode::empty());
@@ -1041,10 +1039,7 @@ mod tests {
             assert!(!state.field_enabled());
             assert!(state.connection_enabled());
             assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
-            assert_eq!(
-                state.paste("MUST_NOT_PASTE", TermMode::empty()).unwrap(),
-                Action::None
-            );
+            assert_eq!(state.paste("MUST_NOT_PASTE").unwrap(), Action::None);
             state.mark(None, "MUST_NOT_COMPOSE").unwrap();
             assert_eq!(state.key(&key("space"), TermMode::empty()), action);
             assert_eq!(state.key(&key("enter"), TermMode::empty()), action);
@@ -1133,9 +1128,7 @@ mod tests {
             Action::Write(b"\r".to_vec())
         );
         assert_eq!(
-            state
-                .paste("echo one\necho two", TermMode::BRACKETED_PASTE)
-                .unwrap(),
+            state.paste("echo one\necho two").unwrap(),
             Action::PasteText("echo one\necho two".into())
         );
         state.set_surface(Surface::Board);
@@ -1158,10 +1151,7 @@ mod tests {
         assert_eq!(state.commit(None, "中😀").unwrap(), Action::None);
         state.commit(Some(1..3), "文").unwrap();
         assert_eq!(state.launcher.text, "中文");
-        assert_eq!(
-            state.paste(" ssh\r\n", TermMode::BRACKETED_PASTE).unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste(" ssh\r\n").unwrap(), Action::None);
         assert_eq!(state.launcher.text, "中文 ssh");
         assert_eq!(state.fields[1].text, "saved-host");
         for value in ["ctrl-c", "ctrl-shift-t", "ctrl-shift-v", "ctrl-tab"] {
@@ -1190,10 +1180,7 @@ mod tests {
         state.begin_close(CloseTarget::Window);
         assert_eq!(state.active_editor(), None);
         assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
-        assert_eq!(
-            state.paste("MUST_NOT_PASTE", TermMode::empty()).unwrap(),
-            Action::None
-        );
+        assert_eq!(state.paste("MUST_NOT_PASTE").unwrap(), Action::None);
         assert_eq!(state.launcher.text, "中文 ssh");
         assert_eq!(
             state.key(&key("enter"), TermMode::empty()),
@@ -1207,12 +1194,7 @@ mod tests {
         for surface in [Surface::SessionMenu, Surface::Library] {
             state.set_surface(surface);
             assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
-            assert_eq!(
-                state
-                    .paste("echo MUST_NOT_RUN\r", TermMode::BRACKETED_PASTE)
-                    .unwrap(),
-                Action::None
-            );
+            assert_eq!(state.paste("echo MUST_NOT_RUN\r").unwrap(), Action::None);
             state.mark(None, "candidate").unwrap();
             assert!(state.terminal_composition.is_empty());
         }

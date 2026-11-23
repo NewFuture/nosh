@@ -1,6 +1,6 @@
 #![cfg(feature = "gpui")]
 
-use nosh_desktop::local_shell::LocalShell;
+use nosh_desktop::local_shell;
 use nosh_desktop::terminal::{PtyEvent, TerminalBackend};
 use std::io::Read;
 use std::path::PathBuf;
@@ -49,9 +49,7 @@ impl Bundle {
     fn terminal(&self, id: u64) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
         let home = self.home.path().join(id.to_string());
         std::fs::create_dir(&home).unwrap();
-        let mut settings = LocalShell::Bundled(self.executable.clone())
-            .backend(self.cwd.path())
-            .unwrap();
+        let mut settings = local_shell::backend(&self.executable, self.cwd.path()).unwrap();
         settings.env.extend([
             ("NOSH_HOME".into(), home.to_string_lossy().into_owned()),
             ("NOSH_DISABLE_AI".into(), "1".into()),

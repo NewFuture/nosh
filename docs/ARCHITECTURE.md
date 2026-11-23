@@ -55,6 +55,8 @@ Windows 的 `desktop/src/local_shell/windows.rs` 封装系统 cmd 固定 bootstr
 GUI shell 子进程附加父控制台、补齐缺失标准句柄并保留重定向，恢复 Ctrl+C 策略，
 不以 `AllocConsole` 创建额外控制台；cmd 不解释用户终端命令。
 普通 CLI 不依赖 GPUI 或其它桌面组件，egui 入口继续使用外部 CLI。
+GPUI 的快捷键、Quick open 和就地菜单共用 `gpui_input::Action` 分发；
+模态确认共用键盘规则，对话框共用遮罩与面板样式，不各自维护平行实现。
 当前能力与运行方式见[桌面终端](DESKTOP.md)。
 
 shell 的 ANSI 清理使用 `vte 0.14.1` 的 `no_std`/零 OSC 缓冲，桌面完整终端使用 Alacritty 的 `vte 0.15`/`std`。两者保持独立：后者的可变 OSC 缓冲不能通过 Cargo feature 合并改变 CLI 的有界输出清理契约；工作区联合构建也必须成立。

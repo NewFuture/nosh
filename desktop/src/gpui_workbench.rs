@@ -16,13 +16,13 @@ use gpui::{
     font, point, prelude::*, px, rgb, rgba, size,
 };
 use nosh_desktop::connections::{self, Connection, Settings};
-use nosh_desktop::local_shell::LocalShell;
+use nosh_desktop::local_shell;
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
 use crate::gpui_input::{
     Action, CloseTarget, ConnectionButton, EditorTarget, InputState, PasteReview, Surface,
 };
-use crate::gpui_launcher::{LaunchAction, LaunchItem};
+use crate::gpui_launcher::LaunchItem;
 use crate::gpui_search::OutputSearch;
 use crate::gpui_terminal;
 
@@ -129,7 +129,7 @@ impl Session {
 
 pub struct Desktop {
     focus: FocusHandle,
-    nosh: Result<LocalShell, String>,
+    executable: Result<PathBuf, String>,
     cwd: Result<PathBuf, String>,
     settings: Settings,
     settings_path: Option<PathBuf>,
@@ -208,7 +208,7 @@ impl Desktop {
             .map_err(|error| format!("Cannot open startup directory: {error}"));
         let mut desktop = Self {
             focus: cx.focus_handle(),
-            nosh: LocalShell::resolve(),
+            executable: std::env::current_exe().map_err(|error| error.to_string()),
             cwd,
             settings,
             settings_path,
@@ -348,8 +348,8 @@ impl Desktop {
     }
 
     fn open_local(&mut self, cx: &mut Context<Self>) {
-        match (&self.nosh, &self.cwd) {
-            (Ok(nosh), Ok(cwd)) => match nosh.backend(cwd) {
+        match (&self.executable, &self.cwd) {
+            (Ok(executable), Ok(cwd)) => match local_shell::backend(executable, cwd) {
                 Ok(backend) => self.open(
                     format!("Local {}", self.next_id),
                     SessionKind::Local,
@@ -462,11 +462,7 @@ impl Desktop {
             Ok(connection) => match self.save_connection(&connection) {
                 Ok(()) => {
                     self.notice = format!("Saved {}. No connection was started.", connection.name);
-                    self.input.set_surface(if self.sessions.is_empty() {
-                        Surface::Board
-                    } else {
-                        Surface::Terminal
-                    });
+                    self.input.set_surface(self.workspace_surface());
                 }
                 Err(error) => self.form_error = error,
             },
@@ -492,6 +488,14 @@ impl Desktop {
         self.selecting = false;
         window.focus(&self.focus);
         cx.notify();
+    }
+
+    fn workspace_surface(&self) -> Surface {
+        if self.sessions.is_empty() {
+            Surface::Board
+        } else {
+            Surface::Terminal
+        }
     }
 
     fn show_surface(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
@@ -640,7 +644,7 @@ impl Desktop {
                 "Create",
                 ">_",
                 "Ctrl+Shift+T",
-                LaunchAction::Local,
+                Action::NewLocal,
             ),
             LaunchItem::new(
                 "New SSH connection",
@@ -648,7 +652,7 @@ impl Desktop {
                 "Create",
                 "SSH",
                 "Ctrl+Shift+N",
-                LaunchAction::Connection,
+                Action::NewConnection,
             ),
         ];
         for session in &self.sessions {
@@ -658,7 +662,7 @@ impl Desktop {
                 "Switch session",
                 session.kind_label(),
                 "",
-                LaunchAction::Session(session.id),
+                Action::ActivateTab(session.id),
             ));
         }
         for (index, connection) in self.settings.connections.iter().enumerate() {
@@ -668,7 +672,7 @@ impl Desktop {
                 "Saved connections",
                 "SSH",
                 "",
-                LaunchAction::Saved(index),
+                Action::ConnectSaved(index),
             ));
         }
         if let Some(session) = self.sessions.get(self.active) {
@@ -678,7 +682,7 @@ impl Desktop {
                 "Terminal",
                 "F",
                 "Ctrl+Shift+F",
-                LaunchAction::Find,
+                Action::OpenFind,
             ));
             items.push(LaunchItem::new(
                 "Copy terminal selection",
@@ -686,7 +690,7 @@ impl Desktop {
                 "Terminal",
                 "C",
                 "Ctrl+Shift+C",
-                LaunchAction::Copy,
+                Action::CopyTerminal,
             ));
             if matches!(session.status, ProcessState::Running) {
                 items.push(LaunchItem::new(
@@ -695,7 +699,7 @@ impl Desktop {
                     "Terminal",
                     "V",
                     "Ctrl+Shift+V",
-                    LaunchAction::Paste,
+                    Action::Paste,
                 ));
             }
             items.push(LaunchItem::new(
@@ -704,7 +708,7 @@ impl Desktop {
                 "Terminal",
                 "Aa",
                 "F2",
-                LaunchAction::Rename(session.id),
+                Action::RenameTab(session.id),
             ));
             items.push(LaunchItem::new(
                 "Close current session",
@@ -712,7 +716,7 @@ impl Desktop {
                 "Terminal",
                 "\u{00d7}",
                 "Ctrl+Shift+W",
-                LaunchAction::Close(session.id),
+                Action::CloseTab(session.id),
             ));
         }
         for (label, shortcut, delta) in [
@@ -726,7 +730,7 @@ impl Desktop {
                 "View",
                 "Aa",
                 shortcut,
-                LaunchAction::Zoom(delta),
+                Action::Zoom(delta),
             ));
         }
         items.push(LaunchItem::new(
@@ -735,45 +739,19 @@ impl Desktop {
             "View",
             "\u{2261}",
             "Ctrl+Shift+B",
-            LaunchAction::Sidebar,
+            Action::ToggleConnections,
         ));
         items.retain(|item| item.matches(&self.input.launcher.text));
         items
     }
 
-    fn activate_launcher(
-        &mut self,
-        action: LaunchAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn activate_launcher(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.surface != Surface::Launcher || self.input.closing.is_some() {
             return;
         }
-        self.input.set_surface(if self.sessions.is_empty() {
-            Surface::Board
-        } else {
-            Surface::Terminal
-        });
+        self.input.set_surface(self.workspace_surface());
         window.focus(&self.focus);
-        match action {
-            LaunchAction::Local => self.open_local(cx),
-            LaunchAction::Connection => self.show_surface(Surface::Connection, window, cx),
-            LaunchAction::Saved(index) => self.connect_saved(index, cx),
-            LaunchAction::Rename(id) => self.begin_rename(id, window, cx),
-            LaunchAction::Session(id) => {
-                if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
-                    self.switch_session(index, window, cx);
-                }
-            }
-            LaunchAction::Copy => self.action(Action::CopyTerminal, window, cx),
-            LaunchAction::Paste => self.action(Action::Paste, window, cx),
-            LaunchAction::Close(id) => self.request_close(CloseTarget::Tab(id), window, cx),
-            LaunchAction::Zoom(delta) => self.action(Action::Zoom(delta), window, cx),
-            LaunchAction::Sidebar => self.action(Action::ToggleConnections, window, cx),
-            LaunchAction::Find => self.action(Action::OpenFind, window, cx),
-        }
-        cx.notify();
+        self.action(action, window, cx);
     }
 
     fn sync_launcher(&mut self) {
@@ -1066,7 +1044,7 @@ impl Desktop {
             }
             Action::Paste => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    match self.input.paste(&text, self.mode()) {
+                    match self.input.paste(&text) {
                         Ok(action) => self.action(action, window, cx),
                         Err(error) => self.report_error(error),
                     }
@@ -1161,6 +1139,7 @@ impl Desktop {
                 }
             }
             Action::ConnectLibrary => self.connect_saved(self.library_selected, cx),
+            Action::ConnectSaved(index) => self.connect_saved(index, cx),
             Action::EditLibrary => self.edit_connection(self.library_selected, window, cx),
             Action::ToggleAdvanced => self.input.advanced = !self.input.advanced,
             Action::BrowseIdentity => self.browse_identity(cx),
@@ -1185,17 +1164,13 @@ impl Desktop {
             }
             Action::ActivateLauncher => {
                 if let Some(item) = self.launcher_items().get(self.launcher_selected) {
-                    self.activate_launcher(item.action, window, cx);
+                    self.activate_launcher(item.action.clone(), window, cx);
                 }
             }
             Action::ToggleConnections => {
                 self.connections_visible = Some(!self.connections_visible(window));
                 if self.input.surface == Surface::Library {
-                    self.input.set_surface(if self.sessions.is_empty() {
-                        Surface::Board
-                    } else {
-                        Surface::Terminal
-                    });
+                    self.input.set_surface(self.workspace_surface());
                 }
                 self.reveal_active_tab = true;
                 cx.notify();
@@ -1219,15 +1194,7 @@ impl Desktop {
             Action::Connect => self.submit_connection(true, false, cx),
             Action::SaveAndConnect => self.submit_connection(true, true, cx),
             Action::SaveConnection => self.submit_connection(false, true, cx),
-            Action::ReturnToTerminal => self.show_surface(
-                if self.sessions.is_empty() {
-                    Surface::Board
-                } else {
-                    Surface::Terminal
-                },
-                window,
-                cx,
-            ),
+            Action::ReturnToTerminal => self.show_surface(self.workspace_surface(), window, cx),
             Action::Zoom(delta) => {
                 self.settings.font_size = if delta == 0 {
                     14.
@@ -1385,6 +1352,28 @@ impl Desktop {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(color))
             .child(label.into())
+    }
+
+    fn modal_overlay() -> gpui::Div {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x0b0f18bb))
+            .occlude()
+    }
+
+    fn dialog_panel() -> gpui::Div {
+        div()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .flex()
+            .flex_col()
     }
 
     fn toolbar_button(
@@ -2331,7 +2320,7 @@ impl Desktop {
             let heading = group != item.group;
             group = item.group;
             let selected = self.launcher_selected == index;
-            let action = item.action;
+            let action = item.action.clone();
             rows = rows.child(
                 div()
                     .when(heading, |row| {
@@ -2367,7 +2356,7 @@ impl Desktop {
                                 }
                             }))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.activate_launcher(action, window, cx);
+                                this.activate_launcher(action.clone(), window, cx);
                             }))
                             .child(div().w(px(40.)).flex_shrink_0().child(Self::tag(
                                 item.glyph,
@@ -2406,30 +2395,18 @@ impl Desktop {
                     .child("No matches. Try a session name, host, or action."),
             );
         }
-        div()
-            .absolute()
-            .inset_0()
+        Self::modal_overlay()
             .p_4()
             .pt(px(72.))
-            .flex()
             .flex_col()
-            .items_center()
-            .bg(rgba(0x0b0f18bb))
-            .occlude()
+            .justify_start()
             .child(
-                div()
+                Self::dialog_panel()
                     .w_full()
                     .max_w(px(640.))
                     .h(content_height
                         .min(window.viewport_size().height - px(120.))
                         .min(px(540.)))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
                     .child(
                         div()
                             .p_4()
@@ -2575,11 +2552,8 @@ impl Desktop {
             || "Session no longer available".into(),
             |s| format!("{} / {} / {}", s.title, s.kind_label(), s.identity()),
         );
-        div().absolute().inset_0().p_4().flex().items_center().justify_center()
-            .bg(rgba(0x0b0f18bb)).occlude()
-            .child(div().w_full().max_w(px(640.)).p_4().rounded(px(8.))
-                .border_1().border_color(rgb(BORDER)).bg(rgb(SURFACE)).shadow_lg()
-                .flex().flex_col().gap_3()
+        Self::modal_overlay().p_4()
+            .child(Self::dialog_panel().w_full().max_w(px(640.)).p_4().gap_3()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Review terminal paste"))
                 .child(div().h(px(22.)).flex_shrink_0().text_color(rgb(BLUE)).truncate().child(identity))
                 .child(div().flex_shrink_0().text_size(px(12.)).text_color(rgb(MUTED))
@@ -2643,47 +2617,31 @@ impl Desktop {
                 ));
             }
         }
-        div()
-            .absolute()
-            .inset_0()
-            .p_4()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x0b0f18bb))
-            .occlude()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(600.))
-                    .p_4()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Session details"),
-                    )
-                    .children(details.into_iter().map(|(label, value)| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(label))
-                            .child(div().child(value))
-                    }))
-                    .child(div().flex().justify_end().child(
-                        Self::button("Done / Esc", "details-close", true).on_click(cx.listener(
-                            |this, _, window, cx| this.action(Action::ReturnToTerminal, window, cx),
-                        )),
+        Self::modal_overlay().p_4().child(
+            Self::dialog_panel()
+                .w_full()
+                .max_w(px(600.))
+                .p_4()
+                .gap_3()
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Session details"),
+                )
+                .children(details.into_iter().map(|(label, value)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(label))
+                        .child(div().child(value))
+                }))
+                .child(div().flex().justify_end().child(
+                    Self::button("Done / Esc", "details-close", true).on_click(cx.listener(
+                        |this, _, window, cx| this.action(Action::ReturnToTerminal, window, cx),
                     )),
-            )
+                )),
+        )
     }
 
     fn session_menu(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
@@ -2783,97 +2741,67 @@ impl Desktop {
     }
 
     fn rename_dialog(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div()
-            .absolute()
-            .inset_0()
-            .p_4()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x0b0f18bb))
-            .occlude()
-            .child(
-                div()
-                    .w(px(440.))
-                    .p_5()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(17.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Rename session"),
-                    )
-                    .child(self.text_field(
-                        EditorTarget::Rename,
-                        "Session name",
-                        "Example: Build / logs",
-                        cx,
-                    ))
-                    .when(!self.rename_error.is_empty(), |dialog| {
-                        dialog.child(div().text_color(rgb(RED)).child(self.rename_error.clone()))
-                    })
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("Changes this tab only, not a saved connection."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Self::button("Cancel", "cancel-rename", false)
-                                    .when(self.input.rename_focus == 1, |b| {
-                                        b.border_2().border_color(rgb(INK))
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.action(Action::ReturnToTerminal, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Self::button("Rename", "apply-rename", true)
-                                    .when(self.input.rename_focus == 2, |b| {
-                                        b.border_2().border_color(rgb(INK))
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.action(Action::ApplyRename, window, cx);
-                                    })),
-                            ),
-                    ),
-            )
+        Self::modal_overlay().p_4().child(
+            Self::dialog_panel()
+                .w(px(440.))
+                .p_5()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Rename session"),
+                )
+                .child(self.text_field(
+                    EditorTarget::Rename,
+                    "Session name",
+                    "Example: Build / logs",
+                    cx,
+                ))
+                .when(!self.rename_error.is_empty(), |dialog| {
+                    dialog.child(div().text_color(rgb(RED)).child(self.rename_error.clone()))
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child("Changes this tab only, not a saved connection."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Self::button("Cancel", "cancel-rename", false)
+                                .when(self.input.rename_focus == 1, |b| {
+                                    b.border_2().border_color(rgb(INK))
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.action(Action::ReturnToTerminal, window, cx);
+                                })),
+                        )
+                        .child(
+                            Self::button("Rename", "apply-rename", true)
+                                .when(self.input.rename_focus == 2, |b| {
+                                    b.border_2().border_color(rgb(INK))
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.action(Action::ApplyRename, window, cx);
+                                })),
+                        ),
+                ),
+        )
     }
 
     fn connection_drawer(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div()
-            .absolute()
-            .inset_0()
+        Self::modal_overlay()
             .p_4()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x0b0f18bb))
-            .occlude()
             .child(
-                div()
+                Self::dialog_panel()
                     .w(px(680.))
                     .h_full()
                     .max_h(px(if self.input.advanced { 530. } else { 410. }))
-                    .rounded(px(8.))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
                     .child(
                         div()
                             .h(px(46.))
@@ -3045,83 +2973,64 @@ impl Desktop {
                 "Remove target",
             ),
         };
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x0b0f18bb))
-            .occlude()
-            .child(
-                div()
-                    .w(px(440.))
-                    .p_5()
-                    .rounded(px(8.))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(17.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(title),
-                    )
-                    .child(description)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child("Enter: selected button. Esc: cancel. Tab / arrows: select."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Self::button(
-                                    if matches!(prompt.target, CloseTarget::Connection(_)) {
-                                        "Keep target"
-                                    } else {
-                                        "Keep session"
-                                    },
-                                    "keep-session",
-                                    !prompt.confirm_selected,
-                                )
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.cancel_close(window, cx)
-                                    }),
-                                ),
-                            )
-                            .child(
-                                Self::styled_button(
-                                    confirm,
-                                    "confirm-close",
-                                    if prompt.confirm_selected {
-                                        ButtonStyle::Danger
-                                    } else {
-                                        ButtonStyle::Standard
-                                    },
-                                )
-                                .text_color(rgb(if prompt.confirm_selected {
-                                    0xffffff
+        Self::modal_overlay().child(
+            Self::dialog_panel()
+                .w(px(440.))
+                .p_5()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(description)
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(MUTED))
+                        .child("Enter: selected button. Esc: cancel. Tab / arrows: select."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Self::button(
+                                if matches!(prompt.target, CloseTarget::Connection(_)) {
+                                    "Keep target"
                                 } else {
-                                    RED
-                                }))
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.confirm_close(window, cx)
-                                    }),
-                                ),
+                                    "Keep session"
+                                },
+                                "keep-session",
+                                !prompt.confirm_selected,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_close(window, cx)),
                             ),
-                    ),
-            )
+                        )
+                        .child(
+                            Self::styled_button(
+                                confirm,
+                                "confirm-close",
+                                if prompt.confirm_selected {
+                                    ButtonStyle::Danger
+                                } else {
+                                    ButtonStyle::Standard
+                                },
+                            )
+                            .text_color(rgb(if prompt.confirm_selected {
+                                0xffffff
+                            } else {
+                                RED
+                            }))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_close(window, cx)),
+                            ),
+                        ),
+                ),
+        )
     }
 }
 
@@ -3250,21 +3159,14 @@ impl Render for Desktop {
                 .size(px(0.)),
             );
         }
-        if self.input.surface == Surface::Connection {
-            root = root.child(self.connection_drawer(cx));
-        }
-        if self.input.surface == Surface::Launcher {
-            root = root.child(self.launcher(window, cx));
-        }
-        if self.input.surface == Surface::SessionMenu {
-            root = root.child(self.session_menu(window, cx));
-        }
-        if self.input.surface == Surface::Rename {
-            root = root.child(self.rename_dialog(cx));
-        }
-        if self.input.surface == Surface::Details {
-            root = root.child(self.details_dialog(cx));
-        }
+        root = match self.input.surface {
+            Surface::Connection => root.child(self.connection_drawer(cx)),
+            Surface::Launcher => root.child(self.launcher(window, cx)),
+            Surface::SessionMenu => root.child(self.session_menu(window, cx)),
+            Surface::Rename => root.child(self.rename_dialog(cx)),
+            Surface::Details => root.child(self.details_dialog(cx)),
+            _ => root,
+        };
         if self.input.pasting.is_some() {
             root = root.child(self.paste_dialog(cx));
         }
@@ -3285,10 +3187,7 @@ impl EntityInputHandler for Desktop {
     ) -> Option<String> {
         let editor = self.input.editor(self.input.active_editor()?);
         let range = editor.byte_range(range);
-        *actual = Some(
-            editor.text[..range.start].encode_utf16().count()
-                ..editor.text[..range.end].encode_utf16().count(),
-        );
+        *actual = Some(editor.utf16_range(range.clone()));
         Some(editor.text[range].to_owned())
     }
 
@@ -3317,10 +3216,7 @@ impl EntityInputHandler for Desktop {
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
         if let Some(target) = self.input.active_editor() {
             let editor = self.input.editor(target);
-            editor.marked.as_ref().map(|range| {
-                editor.text[..range.start].encode_utf16().count()
-                    ..editor.text[..range.end].encode_utf16().count()
-            })
+            editor.marked.clone().map(|range| editor.utf16_range(range))
         } else if self.input.terminal_enabled() && !self.input.terminal_composition.is_empty() {
             Some(0..self.input.terminal_composition.encode_utf16().count())
         } else {
