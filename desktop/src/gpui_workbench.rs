@@ -49,8 +49,6 @@ enum ButtonStyle {
 #[command(about = "Native GPUI nosh workbench")]
 pub struct Options {
     #[arg(long)]
-    nosh: Option<PathBuf>,
-    #[arg(long)]
     cwd: Option<PathBuf>,
     #[arg(long, help = "Use an isolated desktop settings file")]
     settings: Option<PathBuf>,
@@ -210,7 +208,7 @@ impl Desktop {
             .map_err(|error| format!("Cannot open startup directory: {error}"));
         let mut desktop = Self {
             focus: cx.focus_handle(),
-            nosh: LocalShell::resolve(options.nosh),
+            nosh: LocalShell::resolve(),
             cwd,
             settings,
             settings_path,

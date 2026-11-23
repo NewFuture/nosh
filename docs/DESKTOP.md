@@ -116,7 +116,7 @@ cargo build -p nosh-desktop --features gpui --bin nosh-gpui --locked
 .\target\debug\nosh-gpui.exe --cwd 'C:\work tree'
 ```
 
-GPUI 默认内置同一份 nosh 代码：只复制 `nosh-gpui.exe` 即可创建本地会话，
+GPUI 始终使用内置的同一份 nosh 代码：只复制 `nosh-gpui.exe` 即可创建本地会话，
 不需要旁置或 PATH 中的 `nosh.exe`，也不把另一个程序嵌入后解压。
 每个本地 PTY 仍是独立进程：桌面以自己的绝对路径和私有 shell 参数启动自身，
 在解析桌面选项、创建 GPUI 窗口或线程之前进入原 CLI。补全、输入辅助等 worker
@@ -133,9 +133,8 @@ Windows 的 GUI-subsystem 程序不能直接获得 ConPTY 控制台，因此本�
 结束码经等待进程返回，关闭 PTY 回收所属 shell，shell 再回收自己的有界 worker。
 其它平台直接 self-exec，无此 cmd 等待层。该单文件折中不是其它终端的通用发布架构。
 
-`--nosh <路径>` 优先于 `NOSH_BIN`，均为显式外部 CLI 覆盖；无覆盖才使用内置模式。
-无效覆盖会报错，不回退；覆盖指向当前桌面 exe 时仍使用内置分发参数。
-只有 egui 入口沿用前文的“旁置/PATH CLI”查找规则。
+GPUI 不提供 `--nosh` 外部 CLI 覆盖，也不读取 `NOSH_BIN` 来选择本地 shell。
+只有 egui 入口保留这些覆盖选项及前文的“旁置/PATH CLI”查找规则。
 终端中的 `nosh` 命令名不会自动安装到 PATH；若需调用内置 CLI 的其它子命令，
 可使用桌面 exe 的完整路径加 `--__nosh_shell`，或另行安装普通 CLI。
 `init bash` 生成的建议命令保留自身路径及内部模式参数。

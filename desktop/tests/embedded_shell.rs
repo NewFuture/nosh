@@ -107,6 +107,23 @@ fn output(mut command: Command) -> (i32, String, String) {
     (status.code().unwrap(), out, err)
 }
 
+#[test]
+fn desktop_rejects_external_shell_override() {
+    let bundle = Bundle::new();
+    let mut help = bundle.command();
+    help.env("NOSH_BIN", "must-not-run.exe").arg("--help");
+    let (code, stdout, stderr) = output(help);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("--nosh"));
+    assert!(stdout.contains("--cwd"));
+
+    let mut override_command = bundle.command();
+    override_command.args(["--nosh", "must-not-run.exe"]);
+    let (code, _, stderr) = output(override_command);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("unexpected argument '--nosh'"), "{stderr}");
+}
+
 fn screen_text(terminal: &TerminalBackend) -> String {
     terminal
         .model()
