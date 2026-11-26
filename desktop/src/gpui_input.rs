@@ -11,19 +11,12 @@ pub enum Surface {
     Terminal,
     Board,
     Connection,
-    Launcher,
-    SessionMenu,
-    Rename,
-    Library,
     Find,
-    Details,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorTarget {
     Connection(usize),
-    Launcher,
-    Rename,
     Find,
 }
 
@@ -31,9 +24,7 @@ impl EditorTarget {
     pub fn slot(self) -> usize {
         match self {
             Self::Connection(index) => index,
-            Self::Launcher => 6,
-            Self::Rename => 7,
-            Self::Find => 8,
+            Self::Find => 6,
         }
     }
 }
@@ -156,15 +147,9 @@ pub enum Action {
     OpenFind,
     CloseFind,
     MoveFind(bool),
-    SessionDetails,
-    RenameTab(u64),
-    CloseTab(u64),
     ActivateTab(u64),
     NewLocal,
     NewConnection,
-    OpenLauncher,
-    MoveLauncher(bool),
-    ActivateLauncher,
     ToggleConnections,
     SwitchTab(bool),
     RequestClose,
@@ -176,16 +161,6 @@ pub enum Action {
     ToggleAdvanced,
     BrowseIdentity,
     DeleteConnection,
-    ToggleLibraryFocus,
-    MoveLibrary(bool),
-    ConnectLibrary,
-    ConnectSaved(usize),
-    EditLibrary,
-    OpenSessionMenu,
-    MoveMenu(bool),
-    ActivateMenu,
-    RenameSession,
-    ApplyRename,
     ReturnToTerminal,
     Zoom(i8),
 }
@@ -347,9 +322,6 @@ pub struct InputState {
     pub field: usize,
     pub form_button: Option<ConnectionButton>,
     pub terminal_composition: String,
-    pub launcher: LineEditor,
-    pub rename: LineEditor,
-    pub rename_focus: usize,
     pub advanced: bool,
     pub editing: bool,
     pub find: LineEditor,
@@ -374,7 +346,7 @@ impl InputState {
             && self.pasting.is_none()
             && matches!(
                 self.surface,
-                Surface::Terminal | Surface::Board | Surface::Library | Surface::Find
+                Surface::Terminal | Surface::Board | Surface::Find
             )
     }
 
@@ -383,10 +355,6 @@ impl InputState {
             None
         } else if self.surface == Surface::Find && self.find_focus == 0 {
             Some(EditorTarget::Find)
-        } else if self.surface == Surface::Launcher {
-            Some(EditorTarget::Launcher)
-        } else if self.surface == Surface::Rename && self.rename_focus == 0 {
-            Some(EditorTarget::Rename)
         } else if self.field_enabled() {
             Some(EditorTarget::Connection(self.field))
         } else {
@@ -397,8 +365,6 @@ impl InputState {
     pub fn editor(&self, target: EditorTarget) -> &LineEditor {
         match target {
             EditorTarget::Connection(index) => &self.fields[index],
-            EditorTarget::Launcher => &self.launcher,
-            EditorTarget::Rename => &self.rename,
             EditorTarget::Find => &self.find,
         }
     }
@@ -406,8 +372,6 @@ impl InputState {
     pub fn editor_mut(&mut self, target: EditorTarget) -> &mut LineEditor {
         match target {
             EditorTarget::Connection(index) => &mut self.fields[index],
-            EditorTarget::Launcher => &mut self.launcher,
-            EditorTarget::Rename => &mut self.rename,
             EditorTarget::Find => &mut self.find,
         }
     }
@@ -416,11 +380,7 @@ impl InputState {
         self.cancel_composition();
         self.surface = surface;
         self.form_button = None;
-        self.rename_focus = 0;
         self.find_focus = 0;
-        if surface == Surface::Launcher {
-            self.launcher = LineEditor::default();
-        }
     }
 
     pub fn begin_close(&mut self, target: CloseTarget) {
@@ -434,8 +394,6 @@ impl InputState {
 
     pub fn cancel_composition(&mut self) {
         self.terminal_composition.clear();
-        self.launcher.cancel_mark();
-        self.rename.cancel_mark();
         self.find.cancel_mark();
         for field in &mut self.fields {
             field.cancel_mark();
@@ -503,54 +461,6 @@ impl InputState {
                 Action::CancelPaste,
             );
         }
-        if self.surface == Surface::Details {
-            return match key {
-                "escape" | "enter" => Action::ReturnToTerminal,
-                _ => Action::None,
-            };
-        }
-        if self.surface == Surface::SessionMenu {
-            return match key {
-                "escape" => Action::ReturnToTerminal,
-                "up" | "down" | "tab" => Action::MoveMenu(key == "up" || key == "tab" && m.shift),
-                "enter" | "space" | " " => Action::ActivateMenu,
-                _ => Action::None,
-            };
-        }
-        if self.surface == Surface::Rename {
-            return match key {
-                "escape" if self.rename.marked.is_some() => {
-                    self.rename.cancel_mark();
-                    Action::None
-                }
-                "escape" => Action::ReturnToTerminal,
-                "tab" => {
-                    self.rename.marked = None;
-                    self.rename_focus = (self.rename_focus + if m.shift { 2 } else { 1 }) % 3;
-                    Action::None
-                }
-                "enter" | "space" | " " if self.rename_focus == 1 => Action::ReturnToTerminal,
-                "enter" | "space" | " " if self.rename_focus == 2 => Action::ApplyRename,
-                "enter" if self.rename.marked.is_none() => Action::ApplyRename,
-                _ if self.rename_focus == 0 => self.rename.key(event),
-                _ => Action::None,
-            };
-        }
-        if self.surface == Surface::Launcher {
-            return match key {
-                "escape" if self.launcher.marked.is_some() => {
-                    self.launcher.cancel_mark();
-                    Action::None
-                }
-                "escape" => Action::ReturnToTerminal,
-                "p" if m.control && m.shift => Action::ReturnToTerminal,
-                "enter" if self.launcher.marked.is_none() => Action::ActivateLauncher,
-                "up" | "down" | "tab" if self.launcher.marked.is_none() => {
-                    Action::MoveLauncher(key == "up" || key == "tab" && m.shift)
-                }
-                _ => self.launcher.key(event),
-            };
-        }
         if self.surface == Surface::Connection {
             if key == "escape" {
                 return Action::ReturnToTerminal;
@@ -607,7 +517,6 @@ impl InputState {
             match key {
                 "t" => return Action::NewLocal,
                 "n" => return Action::NewConnection,
-                "p" => return Action::OpenLauncher,
                 "f" => return Action::OpenFind,
                 "b" => return Action::ToggleConnections,
                 "w" => return Action::RequestClose,
@@ -634,27 +543,6 @@ impl InputState {
                 _ if self.find_focus == 0 => self.find.key(event),
                 _ => Action::None,
             };
-        }
-        if key == "f6" {
-            return Action::ToggleLibraryFocus;
-        }
-        if self.surface == Surface::Library {
-            return match key {
-                "escape" => Action::ReturnToTerminal,
-                "up" | "down" | "tab" => {
-                    Action::MoveLibrary(key == "up" || key == "tab" && m.shift)
-                }
-                "enter" => Action::ConnectLibrary,
-                "f2" => Action::EditLibrary,
-                "delete" => Action::DeleteConnection,
-                _ => Action::None,
-            };
-        }
-        if key == "f2" {
-            return Action::RenameSession;
-        }
-        if key == "f10" && m.shift {
-            return Action::OpenSessionMenu;
         }
         if key == "insert" && m.shift && self.terminal_enabled() {
             return Action::Paste;
@@ -880,7 +768,6 @@ mod tests {
             state.key(&key("escape"), TermMode::empty()),
             Action::CloseFind
         );
-        assert!(state.launcher.text.is_empty());
         assert!(state.fields.iter().all(|field| field.text.is_empty()));
         state.set_surface(Surface::Terminal);
         assert_eq!(
@@ -1134,122 +1021,6 @@ mod tests {
         state.set_surface(Surface::Board);
         assert_eq!(state.commit(None, "hidden text").unwrap(), Action::None);
         assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
-    }
-
-    #[test]
-    fn launcher_search_has_its_own_editor_and_never_writes_to_the_terminal() {
-        let mut state = InputState::default();
-        state.fields[1].replace(None, "saved-host").unwrap();
-        assert_eq!(
-            state.key(&key("ctrl-shift-p"), TermMode::empty()),
-            Action::OpenLauncher
-        );
-        state.set_surface(Surface::Launcher);
-        assert!(!state.background_enabled());
-        assert!(!state.terminal_enabled());
-        assert_eq!(state.active_editor(), Some(EditorTarget::Launcher));
-        assert_eq!(state.commit(None, "中😀").unwrap(), Action::None);
-        state.commit(Some(1..3), "文").unwrap();
-        assert_eq!(state.launcher.text, "中文");
-        assert_eq!(state.paste(" ssh\r\n").unwrap(), Action::None);
-        assert_eq!(state.launcher.text, "中文 ssh");
-        assert_eq!(state.fields[1].text, "saved-host");
-        for value in ["ctrl-c", "ctrl-shift-t", "ctrl-shift-v", "ctrl-tab"] {
-            assert!(!matches!(
-                state.key(&key(value), TermMode::empty()),
-                Action::Write(_)
-            ));
-        }
-        assert_eq!(
-            state.key(&key("down"), TermMode::empty()),
-            Action::MoveLauncher(false)
-        );
-        assert_eq!(
-            state.key(&key("shift-tab"), TermMode::empty()),
-            Action::MoveLauncher(true)
-        );
-        state.mark(None, "候").unwrap();
-        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
-        assert_eq!(state.key(&key("down"), TermMode::empty()), Action::None);
-        assert_eq!(state.key(&key("escape"), TermMode::empty()), Action::None);
-        assert_eq!(state.launcher.text, "中文 ssh");
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::ActivateLauncher
-        );
-        state.begin_close(CloseTarget::Window);
-        assert_eq!(state.active_editor(), None);
-        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
-        assert_eq!(state.paste("MUST_NOT_PASTE").unwrap(), Action::None);
-        assert_eq!(state.launcher.text, "中文 ssh");
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::CancelClose
-        );
-    }
-
-    #[test]
-    fn menus_library_and_rename_isolate_native_input_and_restore_explicit_actions() {
-        let mut state = InputState::default();
-        for surface in [Surface::SessionMenu, Surface::Library] {
-            state.set_surface(surface);
-            assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
-            assert_eq!(state.paste("echo MUST_NOT_RUN\r").unwrap(), Action::None);
-            state.mark(None, "candidate").unwrap();
-            assert!(state.terminal_composition.is_empty());
-        }
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::ConnectLibrary
-        );
-        assert_eq!(
-            state.key(&key("f2"), TermMode::empty()),
-            Action::EditLibrary
-        );
-        assert_eq!(
-            state.key(&key("delete"), TermMode::empty()),
-            Action::DeleteConnection
-        );
-        assert_eq!(
-            state.key(&key("f6"), TermMode::empty()),
-            Action::ToggleLibraryFocus
-        );
-        state.set_surface(Surface::SessionMenu);
-        assert_eq!(
-            state.key(&key("down"), TermMode::empty()),
-            Action::MoveMenu(false)
-        );
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::ActivateMenu
-        );
-
-        state.set_surface(Surface::Rename);
-        state.commit(None, "中😀").unwrap();
-        state.commit(Some(1..3), "文").unwrap();
-        assert_eq!(state.rename.text, "中文");
-        state.mark(None, "candidate").unwrap();
-        assert_eq!(state.key(&key("enter"), TermMode::empty()), Action::None);
-        state.key(&key("escape"), TermMode::empty());
-        assert_eq!(state.rename.text, "中文");
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::ApplyRename
-        );
-        state.key(&key("tab"), TermMode::empty());
-        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
-        assert_eq!(
-            state.key(&key("enter"), TermMode::empty()),
-            Action::ReturnToTerminal
-        );
-        state.key(&key("tab"), TermMode::empty());
-        assert_eq!(
-            state.key(&key("space"), TermMode::empty()),
-            Action::ApplyRename
-        );
-        state.begin_close(CloseTarget::Window);
-        assert_eq!(state.commit(None, "MUST_NOT_EDIT").unwrap(), Action::None);
-        assert_eq!(state.rename.text, "中文");
     }
 
     #[test]

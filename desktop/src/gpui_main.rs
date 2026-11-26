@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gpui_input;
-mod gpui_launcher;
 mod gpui_search;
 mod gpui_terminal;
 mod gpui_workbench;
