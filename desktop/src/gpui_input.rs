@@ -15,6 +15,21 @@ pub enum Surface {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionChoice {
+    Local,
+    Ssh,
+}
+
+impl SessionChoice {
+    pub fn action(self) -> Action {
+        match self {
+            Self::Local => Action::NewLocal,
+            Self::Ssh => Action::NewConnection,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorTarget {
     Connection(usize),
     Find,
@@ -148,6 +163,8 @@ pub enum Action {
     CloseFind,
     MoveFind(bool),
     ActivateTab(u64),
+    OpenSessionMenu,
+    CloseSessionMenu,
     NewLocal,
     NewConnection,
     ToggleConnections,
@@ -318,6 +335,7 @@ pub struct InputState {
     pub surface: Surface,
     pub closing: Option<ClosePrompt>,
     pub pasting: Option<PasteReview>,
+    pub new_session: Option<SessionChoice>,
     pub fields: [LineEditor; 6],
     pub field: usize,
     pub form_button: Option<ConnectionButton>,
@@ -330,7 +348,10 @@ pub struct InputState {
 
 impl InputState {
     pub fn terminal_enabled(&self) -> bool {
-        self.closing.is_none() && self.pasting.is_none() && self.surface == Surface::Terminal
+        self.closing.is_none()
+            && self.pasting.is_none()
+            && self.new_session.is_none()
+            && self.surface == Surface::Terminal
     }
 
     pub fn field_enabled(&self) -> bool {
@@ -338,12 +359,16 @@ impl InputState {
     }
 
     pub fn connection_enabled(&self) -> bool {
-        self.closing.is_none() && self.pasting.is_none() && self.surface == Surface::Connection
+        self.closing.is_none()
+            && self.pasting.is_none()
+            && self.new_session.is_none()
+            && self.surface == Surface::Connection
     }
 
     pub fn background_enabled(&self) -> bool {
         self.closing.is_none()
             && self.pasting.is_none()
+            && self.new_session.is_none()
             && matches!(
                 self.surface,
                 Surface::Terminal | Surface::Board | Surface::Find
@@ -351,7 +376,7 @@ impl InputState {
     }
 
     pub fn active_editor(&self) -> Option<EditorTarget> {
-        if self.closing.is_some() || self.pasting.is_some() {
+        if self.closing.is_some() || self.pasting.is_some() || self.new_session.is_some() {
             None
         } else if self.surface == Surface::Find && self.find_focus == 0 {
             Some(EditorTarget::Find)
@@ -378,6 +403,7 @@ impl InputState {
 
     pub fn set_surface(&mut self, surface: Surface) {
         self.cancel_composition();
+        self.new_session = None;
         self.surface = surface;
         self.form_button = None;
         self.find_focus = 0;
@@ -386,6 +412,7 @@ impl InputState {
     pub fn begin_close(&mut self, target: CloseTarget) {
         self.cancel_composition();
         self.pasting = None;
+        self.new_session = None;
         self.closing = Some(ClosePrompt {
             target,
             confirm_selected: false,
@@ -460,6 +487,22 @@ impl InputState {
                 Action::ConfirmPaste,
                 Action::CancelPaste,
             );
+        }
+        if let Some(choice) = &mut self.new_session {
+            return match key {
+                "escape" => Action::CloseSessionMenu,
+                "enter" | "space" | " " => choice.action(),
+                "up" | "down" | "tab" => {
+                    *choice = match choice {
+                        SessionChoice::Local => SessionChoice::Ssh,
+                        SessionChoice::Ssh => SessionChoice::Local,
+                    };
+                    Action::None
+                }
+                "t" if m.control && m.shift => Action::NewLocal,
+                "n" if m.control && m.shift => Action::NewConnection,
+                _ => Action::None,
+            };
         }
         if self.surface == Surface::Connection {
             if key == "escape" {
@@ -646,6 +689,74 @@ mod tests {
         KeyDownEvent {
             keystroke: gpui::Keystroke::parse(value).unwrap(),
             is_held: false,
+        }
+    }
+
+    #[test]
+    fn new_session_menu_routes_choices_and_preserves_direct_shortcuts() {
+        let mut state = InputState {
+            new_session: Some(SessionChoice::Local),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::NewLocal
+        );
+        for (value, expected) in [
+            ("down", Action::NewConnection),
+            ("up", Action::NewLocal),
+            ("tab", Action::NewConnection),
+            ("shift-tab", Action::NewLocal),
+        ] {
+            state.key(&key(value), TermMode::empty());
+            assert_eq!(state.key(&key("enter"), TermMode::empty()), expected);
+        }
+        state.key(&key("down"), TermMode::empty());
+        assert_eq!(
+            state.key(&key("enter"), TermMode::empty()),
+            Action::NewConnection
+        );
+        assert_eq!(
+            state.key(&key("ctrl-shift-t"), TermMode::empty()),
+            Action::NewLocal
+        );
+        assert_eq!(
+            state.key(&key("ctrl-shift-n"), TermMode::empty()),
+            Action::NewConnection
+        );
+        assert_eq!(
+            state.key(&key("escape"), TermMode::empty()),
+            Action::CloseSessionMenu
+        );
+        state.set_surface(Surface::Connection);
+        assert!(state.new_session.is_none());
+    }
+
+    #[test]
+    fn new_session_menu_blocks_terminal_and_find_text_paste_and_ime() {
+        for surface in [Surface::Terminal, Surface::Find, Surface::Board] {
+            let mut state = InputState {
+                surface,
+                new_session: Some(SessionChoice::Local),
+                ..Default::default()
+            };
+            assert!(!state.terminal_enabled());
+            assert!(!state.background_enabled());
+            assert_eq!(state.active_editor(), None);
+            assert_eq!(state.commit(None, "MUST_NOT_RUN").unwrap(), Action::None);
+            assert_eq!(state.paste("echo unsafe\n").unwrap(), Action::None);
+            state.mark(None, "候補").unwrap();
+            assert!(state.terminal_composition.is_empty());
+            assert!(state.find.text.is_empty());
+            for value in ["ctrl-shift-v", "ctrl-tab", "ctrl-c", "shift-insert", "f"] {
+                assert_eq!(state.key(&key(value), TermMode::empty()), Action::None);
+            }
+            assert_eq!(
+                state.key(&key("escape"), TermMode::empty()),
+                Action::CloseSessionMenu
+            );
+            state.new_session = None;
+            assert_eq!(state.surface, surface);
         }
     }
 

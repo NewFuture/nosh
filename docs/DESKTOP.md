@@ -166,7 +166,10 @@ Windows 合并标题栏与标签，新建按钮紧邻标签；最小化、最大
 拖动区域使用 GPUI 的系统命中区域。连接或确认对话框打开时不激活背后的控件。
 其它平台保留系统标题栏。
 
-`+ Local` / Ctrl+Shift+T 新建本地终端，`SSH...` / Ctrl+Shift+N 打开连接表单。
+标签旁的 `+` 打开新建菜单，选择 `Local terminal` 新建本地终端，
+选择 `SSH connection...` 打开连接表单。上下键或 Tab 切换菜单项，Enter 确认，
+Escape 或点击菜单外取消；菜单打开时文本、粘贴和 IME 不会写入终端或查找框。
+Ctrl+Shift+T 仍直接新建本地终端，Ctrl+Shift+N 仍直接打开 SSH 表单。
 点击标签或 Ctrl+Tab / Ctrl+Shift+Tab 切换，不重启进程；标签自动滚入视野，
 溢出时可横向滚动或使用前后按钮。标签关闭按钮 / Ctrl+Shift+W 请求关闭会话。
 目标栏的 `Find output`、`Copy`、`Paste` 直接操作当前终端，退出会话禁用 Paste。

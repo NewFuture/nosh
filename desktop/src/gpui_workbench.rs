@@ -20,7 +20,8 @@ use nosh_desktop::local_shell;
 use nosh_desktop::terminal::{BackendSettings, PtyEvent, TerminalBackend};
 
 use crate::gpui_input::{
-    Action, CloseTarget, ConnectionButton, EditorTarget, InputState, PasteReview, Surface,
+    Action, CloseTarget, ConnectionButton, EditorTarget, InputState, PasteReview, SessionChoice,
+    Surface,
 };
 use crate::gpui_search::OutputSearch;
 use crate::gpui_terminal;
@@ -156,6 +157,7 @@ pub struct Desktop {
     reveal_active_tab: bool,
     viewport_width: Pixels,
     tabs_overflow: bool,
+    new_session_bounds: Bounds<Pixels>,
 }
 
 impl Desktop {
@@ -221,6 +223,7 @@ impl Desktop {
             reveal_active_tab: true,
             viewport_width: px(0.),
             tabs_overflow: false,
+            new_session_bounds: Bounds::default(),
         };
         desktop.open_local(cx);
         window.focus(&desktop.focus);
@@ -804,7 +807,23 @@ impl Desktop {
                     self.switch_session(index, window, cx);
                 }
             }
-            Action::NewLocal => self.open_local(cx),
+            Action::OpenSessionMenu => {
+                if self.input.background_enabled() {
+                    self.input.cancel_composition();
+                    self.input.new_session = Some(SessionChoice::Local);
+                    self.selecting = false;
+                    window.focus(&self.focus);
+                }
+            }
+            Action::CloseSessionMenu => {
+                self.input.new_session = None;
+                window.focus(&self.focus);
+            }
+            Action::NewLocal => {
+                self.input.new_session = None;
+                self.open_local(cx);
+                window.focus(&self.focus);
+            }
             Action::NewConnection => self.show_surface(Surface::Connection, window, cx),
             Action::ToggleAdvanced => self.input.advanced = !self.input.advanced,
             Action::BrowseIdentity => self.browse_identity(cx),
@@ -859,6 +878,7 @@ impl Desktop {
         let action = self.input.key(event, self.mode());
         let handled = self.input.closing.is_some()
             || self.input.pasting.is_some()
+            || self.input.new_session.is_some()
             || self.input.surface != Surface::Terminal
             || action != Action::None;
         self.action(action, window, cx);
@@ -1078,6 +1098,7 @@ impl Desktop {
     }
 
     fn header(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let view = cx.entity();
         div()
             .h(px(40.))
             .flex_shrink_0()
@@ -1142,20 +1163,25 @@ impl Desktop {
                 ))
             })
             .child(
-                Self::button("+ Local", "new-session", false)
+                Self::toolbar_button("+", "new-session")
+                    .relative()
+                    .w(px(32.))
+                    .px_0()
+                    .text_size(px(20.))
                     .text_color(rgb(GREEN))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.action(Action::NewLocal, window, cx)
-                        }),
-                    ),
-            )
-            .child(
-                Self::toolbar_button("SSH...", "new-ssh")
-                    .text_color(rgb(BLUE))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_surface(Surface::Connection, window, cx);
-                    })),
+                        this.action(Action::OpenSessionMenu, window, cx);
+                    }))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, (), _, cx| {
+                                view.update(cx, |this, _| this.new_session_bounds = bounds);
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
             )
             .child(div().flex_1().min_w(px(32.)).h_full().when(
                 cfg!(target_os = "windows") && self.input.background_enabled(),
@@ -1171,6 +1197,83 @@ impl Desktop {
                     header.pr_2()
                 }
             })
+    }
+
+    fn new_session_menu(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let left = self
+            .new_session_bounds
+            .left()
+            .min(window.viewport_size().width - px(288.))
+            .max(px(8.));
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.action(Action::CloseSessionMenu, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.action(Action::CloseSessionMenu, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                Self::dialog_panel()
+                    .absolute()
+                    .left(left)
+                    .top(self.new_session_bounds.bottom() + px(6.))
+                    .w(px(280.))
+                    .p_1()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(
+                        [
+                            (SessionChoice::Local, "Local terminal", "Ctrl+Shift+T"),
+                            (SessionChoice::Ssh, "SSH connection...", "Ctrl+Shift+N"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (choice, label, shortcut))| {
+                            div()
+                                .id(("new-session-choice", index))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_3()
+                                .h(px(36.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .when(self.input.new_session == Some(choice), |item| {
+                                    item.bg(rgb(HOVER))
+                                })
+                                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                    if this.input.new_session.is_some()
+                                        && this.input.new_session != Some(choice)
+                                    {
+                                        this.input.new_session = Some(choice);
+                                        cx.notify();
+                                    }
+                                }))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.action(choice.action(), window, cx);
+                                }))
+                                .child(label)
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(MUTED))
+                                        .child(shortcut),
+                                )
+                        }),
+                    ),
+            )
     }
 
     fn connection_list(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -2303,6 +2406,9 @@ impl Render for Desktop {
         }
         if self.input.surface == Surface::Connection {
             root = root.child(self.connection_drawer(cx));
+        }
+        if self.input.new_session.is_some() {
+            root = root.child(self.new_session_menu(window, cx));
         }
         if self.input.pasting.is_some() {
             root = root.child(self.paste_dialog(cx));
