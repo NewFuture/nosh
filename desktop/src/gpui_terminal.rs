@@ -81,7 +81,7 @@ pub fn paint(
     for cell in content.display_iter {
         let row = cell.point.line.0 + offset;
         if row < 0
-            || cell.c == ' '
+            || (cell.c == ' ' && !cell.flags.contains(Flags::UNDERLINE))
             || cell.flags.intersects(
                 Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN,
             )

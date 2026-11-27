@@ -624,10 +624,10 @@ impl Desktop {
                     settings.connections.remove(index);
                     match self.persist_settings(settings) {
                         Ok(()) => {
+                            self.action(Action::ReturnToTerminal, window, cx);
                             self.notice = format!(
                                 "Removed {name} from the library. Open sessions were not changed."
                             );
-                            self.action(Action::ReturnToTerminal, window, cx);
                         }
                         Err(error) => self.report_error(error),
                     }

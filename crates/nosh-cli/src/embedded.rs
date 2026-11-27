@@ -41,7 +41,7 @@ pub fn dispatch_embedded() {
 #[cfg(windows)]
 fn console_stdio() -> std::io::Result<Vec<std::fs::File>> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Console::{
         ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleProcessList, GetStdHandle,
         STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler, SetStdHandle,
@@ -51,12 +51,16 @@ fn console_stdio() -> std::io::Result<Vec<std::fs::File>> {
     let valid = |handle: windows_sys::Win32::Foundation::HANDLE| {
         !handle.is_null() && handle != INVALID_HANDLE_VALUE
     };
-    if inherited.iter().any(|handle| !valid(*handle)) {
-        let mut pid = 0;
-        if unsafe { GetConsoleProcessList(&mut pid, 1) } == 0
-            && unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0
-        {
-            return Err(std::io::Error::last_os_error());
+    let mut pid = 0;
+    if unsafe { GetConsoleProcessList(&mut pid, 1) } == 0 {
+        if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+            let error = std::io::Error::last_os_error();
+            // A fully redirected command can run without a parent console.
+            if error.raw_os_error() != Some(ERROR_INVALID_HANDLE as i32)
+                || inherited.iter().any(|handle| !valid(*handle))
+            {
+                return Err(error);
+            }
         }
         // Attaching can initialize standard handles; retain explicit redirections.
         for (stream, handle) in streams.into_iter().zip(inherited) {
@@ -98,6 +102,65 @@ fn console_stdio() -> std::io::Result<Vec<std::fs::File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn redirected_handles_do_not_skip_parent_console_attachment() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use windows_sys::Win32::System::Console::{
+            FreeConsole, GetConsoleProcessList, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE,
+        };
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
+        const MODE: &str = "NOSH_CONSOLE_STDIO_TEST";
+        const TEST: &str =
+            "embedded::tests::redirected_handles_do_not_skip_parent_console_attachment";
+        let mode = std::env::var(MODE).unwrap_or_default();
+        if mode == "attached-parent" || mode == "detached-parent" {
+            let mut pid = 0;
+            assert_ne!(unsafe { GetConsoleProcessList(&mut pid, 1) }, 0);
+            if mode == "detached-parent" {
+                assert_ne!(unsafe { FreeConsole() }, 0);
+            }
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, mode.replace("parent", "child"))
+                .creation_flags(DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        if mode == "attached-child" || mode == "detached-child" {
+            let streams = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+            let inherited = streams.map(|stream| unsafe { GetStdHandle(stream) });
+            let mut pid = 0;
+            assert_eq!(unsafe { GetConsoleProcessList(&mut pid, 1) }, 0);
+            let _handles = console_stdio().unwrap();
+            assert_eq!(
+                streams.map(|stream| unsafe { GetStdHandle(stream) }),
+                inherited,
+                "console attachment must preserve all inherited redirections"
+            );
+            assert_eq!(
+                unsafe { GetConsoleProcessList(&mut pid, 1) } != 0,
+                mode == "attached-child"
+            );
+            return;
+        }
+        for mode in ["attached-parent", "detached-parent"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, mode)
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{mode}: {output:?}");
+        }
+    }
 
     #[test]
     fn only_first_argument_can_enter_a_process_role() {

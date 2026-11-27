@@ -128,7 +128,8 @@ Windows 的 GUI-subsystem 程序不能直接获得 ConPTY 控制台，因此本�
 同一桌面 exe 的内置 shell；每个本地会话多一个轻量等待进程。不查 PATH/COMSPEC，
 禁用 AutoRun，不生成脚本或解压二级 exe。bootstrap 只含固定参数，exe 路径通过
 延迟展开作为数据传递，不把终端输入、工作目录或用户命令拼进 cmd 脚本。
-内置 shell 附加该已有控制台、保留有效重定向并恢复正常 Ctrl+C 策略；
+内置 shell 即使已有完整重定向句柄也会附加父控制台，保留重定向并恢复正常 Ctrl+C 策略；
+没有父控制台时仍允许标准输入、输出和错误全部重定向的非交互命令运行。
 不会调用 `AllocConsole` 打开额外控制台窗口。用户命令仍全部由 nosh/brush 执行，
 结束码经等待进程返回，关闭 PTY 回收所属 shell，shell 再回收自己的有界 worker。
 其它平台直接 self-exec，无此 cmd 等待层。该单文件折中不是其它终端的通用发布架构。
