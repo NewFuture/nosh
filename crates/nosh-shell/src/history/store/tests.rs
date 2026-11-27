@@ -3,6 +3,90 @@ use brush_core::history::Observer;
 use nosh_platform::tr;
 use std::time::Instant;
 
+#[cfg(unix)]
+#[path = "../../../../nosh-cli/tests/support/terminal.rs"]
+mod terminal;
+
+#[cfg(unix)]
+#[test]
+fn error_notice_preserves_raw_input_and_the_active_history_search() {
+    use reedline::{ColumnarMenu, DefaultPrompt, MenuBuilder, Reedline, Signal};
+
+    const BARRIER: &str = "NOSH_HISTORY_NOTICE_PROBE";
+    if let Some(barrier) = std::env::var_os(BARRIER) {
+        let store = Store::new(None, None, None);
+        store.record("MEMORY_HISTORY_OK", Kind::Command);
+        store.sync().unwrap();
+        let mut editor = Reedline::create()
+            .with_ansi_colors(false)
+            .with_history_panel(
+                Box::new(crate::history::Panel::new(store.clone())),
+                ColumnarMenu::default().with_name("history_menu"),
+            );
+        store.repaint(editor.repaint_signal());
+        let reporter = store.clone();
+        let mut reported = false;
+        editor = editor.with_idle_callback(Box::new(move || {
+            if !reported && Path::new(&barrier).exists() {
+                reporter.report("delayed history failure".into());
+                reported = true;
+            }
+        }));
+        let prompt = DefaultPrompt::new(
+            reedline::DefaultPromptSegment::Basic("notice-probe".into()),
+            reedline::DefaultPromptSegment::Empty,
+        );
+        assert!(matches!(
+            editor.read_line(&prompt).unwrap(),
+            Signal::HostCommand(command) if command == crate::history::NOTICE
+        ));
+        let raw_retained = crossterm::terminal::is_raw_mode_enabled().unwrap();
+        let errors = store.take_errors();
+        editor.prepare_external_output();
+        eprintln!("\r\nNOTICE_DELIVERED raw={raw_retained} {errors:?}");
+        assert!(
+            raw_retained,
+            "a history notice must not leave raw input mode"
+        );
+        assert_eq!(errors, ["delayed history failure"]);
+        assert!(matches!(
+            editor.read_line(&prompt).unwrap(),
+            Signal::Success(command) if command == "MEMORY_HISTORY_OK"
+        ));
+        println!("HISTORY_SEARCH_RETAINED");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let barrier = root.path().join("report");
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "history::store::tests::error_notice_preserves_raw_input_and_the_active_history_search",
+            "--nocapture",
+        ])
+        .env(BARRIER, &barrier)
+        .env("NOSH_LANG", "en")
+        .env("TERM", "xterm-256color");
+    let mut terminal = terminal::Terminal::new(command, 24, 100);
+    terminal.wait_for("notice-probe");
+    terminal.send(b"\x12MEMORY");
+    terminal.wait_for("MEMORY_HISTORY_OK");
+    std::fs::write(&barrier, []).unwrap();
+    terminal.wait_for("NOTICE_DELIVERED raw=true");
+    terminal.send(b"\r\r");
+    terminal.wait_for("HISTORY_SEARCH_RETAINED");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = terminal.poll() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "history probe did not exit");
+    }
+}
+
 fn query(store: &Store, text: &str, worktree: Option<String>) -> Page {
     page(
         store,

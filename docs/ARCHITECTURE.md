@@ -15,8 +15,8 @@ CLI 是装配入口；业务核心依赖引擎契约，不依赖具体推理或�
 | `nosh-llm` | Candle 模型、分词、模板、采样、对话 token 日志、KV、设备选择 | `nosh-engine` |
 | `nosh-shell` | brush 会话、REPL、输入编辑/历史、补全、终端与进程管理 | `nosh-platform` |
 | `nosh-core` | Agent、CommandAssist、上下文、工具、审批 UI、REPL AI 适配 | `nosh-engine`、`nosh-permissions`、`nosh-platform`、`nosh-shell` |
-| `nosh-cli` | 参数与配置、模型装配、子命令、评测观测包装器 | 上述七个 crate |
-| `nosh-desktop`（`desktop/`） | egui 原生窗口、Alacritty PTY/ConPTY 终端、OpenSSH 连接及 CLI 命令建议进程 | `nosh-platform` |
+| `nosh-cli` | 参数与配置、模型装配、子命令、评测观测包装器及可复用进程入口 | 上述七个 crate |
+| `nosh-desktop`（`desktop/`） | egui 原生窗口、可选 GPUI 验证入口、共享 Alacritty PTY/ConPTY 终端、OpenSSH 连接及 CLI 命令建议进程 | `nosh-platform`、`nosh-cli`（仅 GPUI 装配） |
 
 [`tests/architecture.rs`](../tests/architecture.rs) 持续约束这些方向。增加生产依赖或新 crate 时，先明确职责，再同步约束和本表，不通过转成可选依赖规避边界。
 
@@ -42,7 +42,22 @@ Agent 与 CommandAssist 使用 `Usage::add_step` 汇总成功返回的步骤：t
 
 `nosh-platform` 只承载已有的共享宿主能力。模型校验规则留在 hub，提示符布局和 ANSI 内容清理留在 shell，审批与工具权限留在 core / permissions；不要把业务逻辑堆入公共 crate。
 
-桌面入口独立于默认构建目标，用 `cargo build -p nosh-cli -p nosh-desktop --locked` 显式构建。它通过真实 PTY 启动 CLI 或系统 OpenSSH，不重写 shell、模型与审批；本地建议通过受限的 `nosh -s` 独立进程生成，不假装共享终端内的 cwd、环境或 Agent。图形渲染使用 eframe/WGPU，不需要 WebView、HTML/JS 或 Node。当前能力与运行方式见[桌面终端](DESKTOP.md)。
+桌面入口独立于默认构建目标，用 `cargo build -p nosh-cli -p nosh-desktop --locked` 显式构建。它通过真实 PTY 启动 CLI 或系统 OpenSSH，不重写 shell、模型与审批；本地建议通过受限的 `nosh -s` 独立进程生成，不假装共享终端内的 cwd、环境或 Agent。图形渲染使用 eframe/WGPU，可选 `gpui` feature 提供独立的原生 GPUI 验证入口，
+共用 PTY 后端的唤醒回调与协议回复路径，不需要 WebView、HTML/JS 或 Node。
+`nosh-cli/src/lib.rs` 提供普通 CLI 进程入口；`main.rs` 只调用该入口。
+GPUI 可选地链接同一装配库，以自身路径和私有 `--__nosh_shell` 参数启动本地 PTY，
+在图形初始化前分发到 CLI；`--__nosh_input_worker` 同样直接进入有界 worker。
+这些入口只用于新进程，不在已经启动 UI/运行时线程的进程内执行 shell。
+worker 全局 allocator 仍由 CLI 库安装；预算仅在 worker 进程中启用。
+Windows 的 `desktop/src/local_shell/windows.rs` 封装系统 cmd 固定 bootstrap，
+只建立已有 ConPTY 控制台锚点并等待同一 exe 的 shell 模式。通用终端后端仍只处理
+程序、参数、环境、cwd 和正常 Windows argv 引用，不承载 CLI/模型业务。
+GUI shell 子进程附加父控制台、补齐缺失标准句柄并保留重定向，恢复 Ctrl+C 策略，
+不以 `AllocConsole` 创建额外控制台；cmd 不解释用户终端命令。
+普通 CLI 不依赖 GPUI 或其它桌面组件，egui 入口继续使用外部 CLI。
+GPUI 的直接按钮和快捷键共用 `gpui_input::Action` 分发；
+模态确认共用键盘规则，对话框共用遮罩与面板样式，不各自维护平行实现。
+当前能力与运行方式见[桌面终端](DESKTOP.md)。
 
 shell 的 ANSI 清理使用 `vte 0.14.1` 的 `no_std`/零 OSC 缓冲，桌面完整终端使用 Alacritty 的 `vte 0.15`/`std`。两者保持独立：后者的可变 OSC 缓冲不能通过 Cargo feature 合并改变 CLI 的有界输出清理契约；工作区联合构建也必须成立。
 

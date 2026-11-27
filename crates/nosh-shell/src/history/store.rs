@@ -416,7 +416,7 @@ impl Inner {
         let has_errors = !lock(&self.model).errors.is_empty();
         if let Some(signal) = &*lock(&self.repaint) {
             if has_errors {
-                signal.request_host_command(super::NOTICE.into());
+                signal.request_context_update(super::NOTICE.into());
             } else {
                 signal.request_repaint();
             }

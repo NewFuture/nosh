@@ -9,7 +9,7 @@ fn production_dependencies_follow_the_architecture() {
         ("nosh-engine", &[]),
         ("nosh-platform", &[]),
         ("nosh-permissions", &[]),
-        ("nosh-desktop", &["nosh-platform"]),
+        ("nosh-desktop", &["nosh-platform", "nosh-cli"]),
         ("nosh-hub", &["nosh-platform"]),
         ("nosh-llm", &["nosh-engine"]),
         ("nosh-shell", &["nosh-platform"]),
